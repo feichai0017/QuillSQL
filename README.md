@@ -1,5 +1,10 @@
-# sqldb-rs
-Rust 实现的 SQL 数据库系统，教学使用
+# QuillSQL
+
+<div align="center">
+  <img src="/public/cover.svg" alt="QuillSQL Cover" width="800"/>
+</div>
+
+Rust 实现的 SQL 数据库系统
 
 ## 支持的 SQL 语法
 
