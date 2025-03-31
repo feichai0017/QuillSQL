@@ -1,7 +1,7 @@
 # QuillSQL
 
 <div align="center">
-  <img src="/public/cover.svg" alt="QuillSQL Cover" width="800"/>
+  <img src="/public/rust-db.png" alt="QuillSQL Cover" width="500"/>
 </div>
 
 Rust 实现的 SQL 数据库系统
