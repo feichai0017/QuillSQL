@@ -14,70 +14,70 @@ use super::{
 
 mod planner;
 
-// 执行节点
+// execution node
 #[derive(Debug, PartialEq)]
 pub enum Node {
-    // 创建表
+    // create table
     CreateTable {
         schema: Table,
     },
 
-    // 删除表
+    // drop table
     DropTable {
         name: String,
     },
 
-    // 插入数据
+    // insert data
     Insert {
         table_name: String,
         columns: Vec<String>,
         values: Vec<Vec<Expression>>,
     },
 
-    // 扫描节点
+    // scan node
     Scan {
         table_name: String,
         filter: Option<Expression>,
     },
 
-    // 更新节点
+    // update node
     Update {
         table_name: String,
         source: Box<Node>,
         columns: BTreeMap<String, Expression>,
     },
 
-    // 删除节点
+    // delete node
     Delete {
         table_name: String,
         source: Box<Node>,
     },
 
-    // 排序节点
+    // order node
     Order {
         source: Box<Node>,
         order_by: Vec<(String, OrderDirection)>,
     },
 
-    // Limit 节点
+    // limit node
     Limit {
         source: Box<Node>,
         limit: usize,
     },
 
-    // Offset 节点
+    // offset node
     Offset {
         source: Box<Node>,
         offset: usize,
     },
 
-    // 投影节点
+    // projection node
     Projection {
         source: Box<Node>,
         exprs: Vec<(Expression, Option<String>)>,
     },
 
-    // 嵌套循环 Join 节点
+    // nested loop join node
     NestedLoopJoin {
         left: Box<Node>,
         right: Box<Node>,
@@ -85,7 +85,7 @@ pub enum Node {
         outer: bool,
     },
 
-    // 哈希 Join 节点
+    // hash join node
     HashJoin {
         left: Box<Node>,
         right: Box<Node>,
@@ -93,27 +93,27 @@ pub enum Node {
         outer: bool,
     },
 
-    // Agg 聚集节点
+    // aggregate node
     Aggregate {
         source: Box<Node>,
         exprs: Vec<(Expression, Option<String>)>,
         group_by: Option<Expression>,
     },
 
-    // 过滤节点
+    // filter node
     Filter {
         source: Box<Node>,
         predicate: Expression,
     },
 
-    // 索引查询节点
+    // index scan node
     IndexScan {
         table_name: String,
         field: String,
         value: Value,
     },
 
-    // 主键查询节点
+    // primary key scan node
     PrimaryKeyScan {
         table_name: String,
         value: Value,
@@ -294,7 +294,7 @@ impl Node {
 }
 
 #[derive(Debug, PartialEq)]
-// 执行计划定义，底层是不同类型执行节点
+// execution plan
 pub struct Plan(pub Node);
 
 impl Plan {

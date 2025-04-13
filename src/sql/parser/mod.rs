@@ -10,7 +10,7 @@ use super::types::DataType;
 pub mod ast;
 mod lexer;
 
-// 解析器定义
+// parser definition
 pub struct Parser<'a> {
     lexer: Peekable<Lexer<'a>>,
 }
@@ -22,12 +22,12 @@ impl<'a> Parser<'a> {
         }
     }
 
-    // 解析，获取到抽象语法树
+    // parse, get the abstract syntax tree
     pub fn parse(&mut self) -> Result<ast::Statement> {
         let stmt = self.parse_statement()?;
-        // 期望 sql 语句的最后有个分号
+        // expect a semicolon at the end of the sql statement
         self.next_expect(Token::Semicolon)?;
-        // 分号之后不能有其他的符号
+        // no other symbols after the semicolon
         if let Some(token) = self.peek()? {
             return Err(Error::Parse(format!("[Parser] Unexpected token {}", token)));
         }
@@ -35,7 +35,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_statement(&mut self) -> Result<ast::Statement> {
-        // 查看第一个 Token 类型
+        // check the type of the first token
         match self.peek()? {
             Some(Token::Keyword(Keyword::Create)) => self.parse_ddl(),
             Some(Token::Keyword(Keyword::Drop)) => self.parse_ddl(),
@@ -52,7 +52,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    // 解析 DDL 类型
+    // parse DDL type
     fn parse_ddl(&mut self) -> Result<ast::Statement> {
         match self.next()? {
             Token::Keyword(Keyword::Create) => self.parse_ddl_create_table(),
@@ -61,7 +61,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    // 解析 Select 语句
+    // parse Select statement
     fn parse_select(&mut self) -> Result<ast::Statement> {
         Ok(ast::Statement::Select {
             select: self.parse_select_clause()?,
@@ -90,15 +90,15 @@ impl<'a> Parser<'a> {
         })
     }
 
-    // 解析 Insert 语句
+    // parse Insert statement
     fn parse_insert(&mut self) -> Result<ast::Statement> {
         self.next_expect(Token::Keyword(Keyword::Insert))?;
         self.next_expect(Token::Keyword(Keyword::Into))?;
 
-        // 表名
+        // table name
         let table_name = self.next_ident()?;
 
-        // 查看是否给指定的列进行 insert
+        // check if the insert is specified columns
         let columns = if self.next_if_token(Token::OpenParen).is_some() {
             let mut cols = Vec::new();
             loop {
@@ -116,7 +116,7 @@ impl<'a> Parser<'a> {
             None
         };
 
-        // 解析 value 信息
+        // parse value information
         self.next_expect(Token::Keyword(Keyword::Values))?;
         // insert into tbl(a, b, c) values (1, 2, 3),(4, 5, 6);
         let mut values = Vec::new();
@@ -146,19 +146,19 @@ impl<'a> Parser<'a> {
         })
     }
 
-    // 解析 Create Table 语句
+    // parse Create Table statement
     fn parse_ddl_create_table(&mut self) -> Result<ast::Statement> {
         self.next_expect(Token::Keyword(Keyword::Table))?;
-        // 期望是 Table 名
+        // expect the table name
         let table_name = self.next_ident()?;
-        // 表名之后应该是括号
+        // table name should be followed by a parenthesis
         self.next_expect(Token::OpenParen)?;
 
-        // 解析列信息
+        // parse column information
         let mut columns = Vec::new();
         loop {
             columns.push(self.parse_ddl_column()?);
-            // 如果没有逗号，列解析完成，跳出
+            // if there is no comma, column parsing is complete, break
             if self.next_if_token(Token::Comma).is_none() {
                 break;
             }
@@ -171,7 +171,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    // 解析列信息
+    // parse column information
     fn parse_ddl_column(&mut self) -> Result<ast::Column> {
         let mut column = Column {
             name: self.next_ident()?,
@@ -194,7 +194,7 @@ impl<'a> Parser<'a> {
             index: false,
         };
 
-        // 解析列的默认值，以及是否可以为空
+        // parse the default value and whether it can be null
         while let Some(Token::Keyword(keyword)) = self.next_if_keyword() {
             match keyword {
                 Keyword::Null => column.nullable = Some(true),
@@ -215,7 +215,7 @@ impl<'a> Parser<'a> {
         Ok(column)
     }
 
-    // 解析 Drop Table 语句
+    // parse Drop Table statement
     fn parse_ddl_drop_table(&mut self) -> Result<ast::Statement> {
         self.next_expect(Token::Keyword(Keyword::Table))?;
         Ok(ast::Statement::DropTable {
@@ -223,10 +223,10 @@ impl<'a> Parser<'a> {
         })
     }
 
-    // 解析 Update 语句
+    // parse Update statement
     fn parse_update(&mut self) -> Result<ast::Statement> {
         self.next_expect(Token::Keyword(Keyword::Update))?;
-        // 表名
+        // table name
         let table_name = self.next_ident()?;
         self.next_expect(Token::Keyword(Keyword::Set))?;
 
@@ -242,7 +242,7 @@ impl<'a> Parser<'a> {
                 )));
             }
             columns.insert(col, value);
-            // 如果没有逗号，列解析完成，跳出
+            // if there is no comma, column parsing is complete, break
             if self.next_if_token(Token::Comma).is_none() {
                 break;
             }
@@ -255,11 +255,11 @@ impl<'a> Parser<'a> {
         })
     }
 
-    // 解析 Delete 语句
+    // parse Delete statement
     fn parse_delete(&mut self) -> Result<ast::Statement> {
         self.next_expect(Token::Keyword(Keyword::Delete))?;
         self.next_expect(Token::Keyword(Keyword::From))?;
-        // 表名
+        // table name
         let table_name = self.next_ident()?;
 
         Ok(ast::Statement::Delete {
@@ -268,7 +268,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    // 解析事务语句
+    // parse transaction statement
     fn parse_transaction(&mut self) -> Result<ast::Statement> {
         Ok(match self.next()? {
             Token::Keyword(Keyword::Begin) => ast::Statement::Begin,
@@ -278,7 +278,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    // 解析 explain 语句
+    // parse explain statement
     fn parse_explain(&mut self) -> Result<ast::Statement> {
         self.next_expect(Token::Keyword(Keyword::Explain))?;
         if let Some(Token::Keyword(Keyword::Explain)) = self.peek()? {
@@ -456,27 +456,27 @@ impl<'a> Parser<'a> {
         })
     }
 
-    // 解析表达式
+    // parse expression
     fn parse_expression(&mut self) -> Result<ast::Expression> {
         Ok(match self.next()? {
             Token::Ident(ident) => {
-                // 函数
+                // function
                 // count(col_name)
                 if self.next_if_token(Token::OpenParen).is_some() {
                     let col_name = self.next_ident()?;
                     self.next_expect(Token::CloseParen)?;
                     ast::Expression::Function(ident, col_name)
                 } else {
-                    // 列名
+                    // column name
                     ast::Expression::Field(ident)
                 }
             }
             Token::Number(n) => {
                 if n.chars().all(|c| c.is_ascii_digit()) {
-                    // 整数
+                    // integer
                     ast::Consts::Integer(n.parse()?).into()
                 } else {
-                    // 浮点数
+                    // float
                     ast::Consts::Float(n.parse()?).into()
                 }
             }
@@ -498,7 +498,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    // 计算数学表达式
+    // compute math expression
     // 5 + 2 + 1
     // 5 + 2 * 1
     fn compute_math_operator(&mut self, min_prec: i32) -> Result<Expression> {

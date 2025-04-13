@@ -5,7 +5,7 @@ use crate::{
     sql::types::{DataType, Value},
 };
 
-// Abstract Syntax Tree 抽象语法树定义
+// Abstract Syntax Tree
 #[derive(Debug, PartialEq)]
 pub enum Statement {
     CreateTable {
@@ -53,7 +53,7 @@ pub enum OrderDirection {
     Desc,
 }
 
-// 列定义
+// column define
 #[derive(Debug, PartialEq)]
 pub struct Column {
     pub name: String,
@@ -86,7 +86,7 @@ pub enum JoinType {
     Right,
 }
 
-// 表达式定义，目前只有常量和列名
+// statement define
 #[derive(Debug, PartialEq, Clone)]
 pub enum Expression {
     Field(String),

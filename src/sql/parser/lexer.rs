@@ -6,40 +6,40 @@ use super::ast::{Consts, Expression};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
-    // 关键字
+    // defined keywords
     Keyword(Keyword),
-    // 其他类型的字符串Token，比如表名、列名
+    // other types of string tokens, such as table names and column names
     Ident(String),
-    // 字符串类型的数据
+    // string type data
     String(String),
-    // 数值类型，比如整数和浮点数
+    // numeric type, such as integers and floating-point numbers
     Number(String),
-    // 左括号 (
+    // left parenthesis (
     OpenParen,
-    // 右括号 )
+    // right parenthesis )
     CloseParen,
-    // 逗号 ,
+    // comma ,
     Comma,
-    // 分号 ;
+    // semicolon ;
     Semicolon,
-    // 星号 & 乘号 *
+    // asterisk & multiplication sign *
     Asterisk,
-    // 加号 +
+    // plus sign +
     Plus,
-    // 减号 -
+    // minus sign -
     Minus,
-    // 斜杠 & 除号 /
+    // slash & division sign /
     Slash,
-    // 等号 =
+    // equal sign =
     Equal,
-    // 大于
+    // greater than >
     GreaterThan,
-    // 小于
+    // less than <
     LessThan,
 }
 
 impl Token {
-    // 判断是不是运算符
+    // check if it is an operator
     pub fn is_operator(&self) -> bool {
         match self {
             Token::Plus | Token::Minus | Token::Asterisk | Token::Slash => true,
@@ -47,7 +47,7 @@ impl Token {
         }
     }
 
-    // 获取运算符的优先级
+    // get the precedence of the operator
     pub fn precedence(&self) -> i32 {
         match self {
             Token::Plus | Token::Minus => 1,
@@ -56,7 +56,7 @@ impl Token {
         }
     }
 
-    // 根据运算符进行计算
+    // compute the expression based on the operator
     pub fn compute_expr(&self, l: Expression, r: Expression) -> Result<Expression> {
         let val = match (l, r) {
             (Expression::Consts(c1), Expression::Consts(c2)) => match (c1, c2) {
@@ -276,14 +276,14 @@ impl Display for Keyword {
     }
 }
 
-// 词法分析 Lexer 定义
-// 目前支持的 SQL 语法
+// define the Lexer struct
+// currently supported SQL syntax
 // see README.md
 pub struct Lexer<'a> {
     iter: Peekable<Chars<'a>>,
 }
 
-// 自定义迭代器，返回 Token
+// custom iterator, return Token
 impl<'a> Iterator for Lexer<'a> {
     type Item = Result<Token>;
 
@@ -306,19 +306,19 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    // 消除空白字符
+    // erase whitespace
     // eg. selct *       from        t;
     fn erase_whitespace(&mut self) {
         self.next_while(|c| c.is_whitespace());
     }
 
-    // 如果满足条件，则跳转到下一个字符，并返回该字符
+    // if the condition is met, skip to the next character and return the character
     fn next_if<F: Fn(char) -> bool>(&mut self, predicate: F) -> Option<char> {
         self.iter.peek().filter(|&c| predicate(*c))?;
         self.iter.next()
     }
 
-    // 判断当前字符是否满足条件，如果是的话就跳转到下一个字符
+    // check if the current character satisfies the condition, if so, skip to the next character
     fn next_while<F: Fn(char) -> bool>(&mut self, predicate: F) -> Option<String> {
         let mut value = String::new();
         while let Some(c) = self.next_if(&predicate) {
@@ -328,30 +328,30 @@ impl<'a> Lexer<'a> {
         Some(value).filter(|v| !v.is_empty())
     }
 
-    // 只有是 Token 类型，才跳转到下一个，并返回 Token
+    // only if it is a Token type, skip to the next character and return the Token
     fn next_if_token<F: Fn(char) -> Option<Token>>(&mut self, predicate: F) -> Option<Token> {
         let token = self.iter.peek().and_then(|c| predicate(*c))?;
         self.iter.next();
         Some(token)
     }
 
-    // 扫描拿到下一个 Token
+    // scan the next Token
     fn scan(&mut self) -> Result<Option<Token>> {
-        // 消除字符串中的空白字符部分
+        // erase whitespace
         self.erase_whitespace();
-        // 根据第一个字符判断
+        // based on the first character, determine the type of the Token
         match self.iter.peek() {
-            Some('\'') => self.scan_string(), // 扫描字符串
-            Some(c) if c.is_ascii_digit() => Ok(self.scan_number()), // 扫描数字
-            Some(c) if c.is_alphabetic() => Ok(self.scan_ident()), // 扫描 Ident 类型
-            Some(_) => Ok(self.scan_symbol()), // 扫描符号
+            Some('\'') => self.scan_string(), // scan string
+            Some(c) if c.is_ascii_digit() => Ok(self.scan_number()), // scan number
+            Some(c) if c.is_alphabetic() => Ok(self.scan_ident()), // scan Ident type
+            Some(_) => Ok(self.scan_symbol()), // scan symbol
             None => Ok(None),
         }
     }
 
-    // 扫描字符串
+    // scan string
     fn scan_string(&mut self) -> Result<Option<Token>> {
-        // 判断是否是单引号开头
+        // check if it is a single quote
         if self.next_if(|c| c == '\'').is_none() {
             return Ok(None);
         }
@@ -368,14 +368,14 @@ impl<'a> Lexer<'a> {
         Ok(Some(Token::String(val)))
     }
 
-    // 扫描数字
+    // scan number
     fn scan_number(&mut self) -> Option<Token> {
-        // 先扫描一部分
+        // scan part of the number
         let mut num = self.next_while(|c| c.is_ascii_digit())?;
-        // 如果中间有小数点，说明是浮点数
+        // if there is a decimal point, it is a floating-point number
         if let Some(sep) = self.next_if(|c| c == '.') {
             num.push(sep);
-            // 扫描小数点之后的部分
+            // scan the part after the decimal point
             while let Some(c) = self.next_if(|c| c.is_ascii_digit()) {
                 num.push(c);
             }
@@ -384,7 +384,7 @@ impl<'a> Lexer<'a> {
         Some(Token::Number(num))
     }
 
-    // 扫描 Ident 类型，例如表名、列名等，也有可能是关键字，true / false
+    // scan Ident type, such as table names, column names, etc., also possible keywords, true / false
     fn scan_ident(&mut self) -> Option<Token> {
         let mut value = self.next_if(|c| c.is_alphabetic())?.to_string();
         while let Some(c) = self.next_if(|c| c.is_alphanumeric() || c == '_') {
@@ -394,7 +394,7 @@ impl<'a> Lexer<'a> {
         Some(Keyword::from_str(&value).map_or(Token::Ident(value.to_lowercase()), Token::Keyword))
     }
 
-    // 扫描符号
+    // scan symbol
     fn scan_symbol(&mut self) -> Option<Token> {
         self.next_if_token(|c| match c {
             '*' => Some(Token::Asterisk),
