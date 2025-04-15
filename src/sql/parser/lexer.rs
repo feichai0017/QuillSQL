@@ -2,17 +2,15 @@ use std::{fmt::Display, iter::Peekable, str::Chars};
 
 use crate::error::{Error, Result};
 
-use super::ast::{Consts, Expression};
-
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
-    // defined keywords
+    // keyword
     Keyword(Keyword),
-    // other types of string tokens, such as table names and column names
+    // other type of string token, like table name, column name
     Ident(String),
     // string type data
     String(String),
-    // numeric type, such as integers and floating-point numbers
+    // numeric type, like integer and float
     Number(String),
     // left parenthesis (
     OpenParen,
@@ -22,72 +20,14 @@ pub enum Token {
     Comma,
     // semicolon ;
     Semicolon,
-    // asterisk & multiplication sign *
+    // asterisk *
     Asterisk,
-    // plus sign +
+    // plus +
     Plus,
-    // minus sign -
+    // minus -
     Minus,
-    // slash & division sign /
+    // slash /
     Slash,
-    // equal sign =
-    Equal,
-    // greater than >
-    GreaterThan,
-    // less than <
-    LessThan,
-}
-
-impl Token {
-    // check if it is an operator
-    pub fn is_operator(&self) -> bool {
-        match self {
-            Token::Plus | Token::Minus | Token::Asterisk | Token::Slash => true,
-            _ => false,
-        }
-    }
-
-    // get the precedence of the operator
-    pub fn precedence(&self) -> i32 {
-        match self {
-            Token::Plus | Token::Minus => 1,
-            Token::Asterisk | Token::Slash => 2,
-            _ => 0,
-        }
-    }
-
-    // compute the expression based on the operator
-    pub fn compute_expr(&self, l: Expression, r: Expression) -> Result<Expression> {
-        let val = match (l, r) {
-            (Expression::Consts(c1), Expression::Consts(c2)) => match (c1, c2) {
-                (super::ast::Consts::Integer(l), super::ast::Consts::Integer(r)) => {
-                    self.compute(l as f64, r as f64)?
-                }
-                (super::ast::Consts::Integer(l), super::ast::Consts::Float(r)) => {
-                    self.compute(l as f64, r)?
-                }
-                (super::ast::Consts::Float(l), super::ast::Consts::Integer(r)) => {
-                    self.compute(l, r as f64)?
-                }
-                (super::ast::Consts::Float(l), super::ast::Consts::Float(r)) => {
-                    self.compute(l, r)?
-                }
-                _ => return Err(Error::Parse("cannot compute the expresssion".into())),
-            },
-            _ => return Err(Error::Parse("cannot compute the expresssion".into())),
-        };
-        Ok(Expression::Consts(Consts::Float(val)))
-    }
-
-    fn compute(&self, l: f64, r: f64) -> Result<f64> {
-        Ok(match self {
-            Token::Asterisk => l * r,
-            Token::Plus => l + r,
-            Token::Minus => l - r,
-            Token::Slash => l / r,
-            _ => return Err(Error::Parse("cannot compute the expresssion".into())),
-        })
-    }
 }
 
 impl Display for Token {
@@ -105,9 +45,6 @@ impl Display for Token {
             Token::Plus => "+",
             Token::Minus => "-",
             Token::Slash => "/",
-            Token::Equal => "=",
-            Token::GreaterThan => ">",
-            Token::LessThan => "<",
         })
     }
 }
@@ -137,30 +74,6 @@ pub enum Keyword {
     Null,
     Primary,
     Key,
-    Update,
-    Set,
-    Where,
-    Delete,
-    Order,
-    By,
-    Asc,
-    Desc,
-    Limit,
-    Offset,
-    As,
-    Cross,
-    Join,
-    Left,
-    Right,
-    On,
-    Group,
-    Having,
-    Begin,
-    Commit,
-    Rollback,
-    Index,
-    Explain,
-    Drop,
 }
 
 impl Keyword {
@@ -189,30 +102,6 @@ impl Keyword {
             "NULL" => Keyword::Null,
             "PRIMARY" => Keyword::Primary,
             "KEY" => Keyword::Key,
-            "UPDATE" => Keyword::Update,
-            "SET" => Keyword::Set,
-            "WHERE" => Keyword::Where,
-            "DELETE" => Keyword::Delete,
-            "ORDER" => Keyword::Order,
-            "BY" => Keyword::By,
-            "ASC" => Keyword::Asc,
-            "DESC" => Keyword::Desc,
-            "LIMIT" => Keyword::Limit,
-            "OFFSET" => Keyword::Offset,
-            "AS" => Keyword::As,
-            "CROSS" => Keyword::Cross,
-            "JOIN" => Keyword::Join,
-            "LEFT" => Keyword::Left,
-            "RIGHT" => Keyword::Right,
-            "ON" => Keyword::On,
-            "GROUP" => Keyword::Group,
-            "HAVING" => Keyword::Having,
-            "BEGIN" => Keyword::Begin,
-            "COMMIT" => Keyword::Commit,
-            "ROLLBACK" => Keyword::Rollback,
-            "INDEX" => Keyword::Index,
-            "EXPLAIN" => Keyword::Explain,
-            "DROP" => Keyword::Drop,
             _ => return None,
         })
     }
@@ -242,30 +131,6 @@ impl Keyword {
             Keyword::Null => "NULL",
             Keyword::Primary => "PRIMARY",
             Keyword::Key => "KEY",
-            Keyword::Update => "UPDATE",
-            Keyword::Set => "SET",
-            Keyword::Where => "WHERE",
-            Keyword::Delete => "DELETE",
-            Keyword::Order => "ORDER",
-            Keyword::By => "BY",
-            Keyword::Asc => "ASC",
-            Keyword::Desc => "DESC",
-            Keyword::Limit => "LIMIT",
-            Keyword::Offset => "OFFSET",
-            Keyword::As => "AS",
-            Keyword::Cross => "CROSS",
-            Keyword::Join => "JOIN",
-            Keyword::Left => "LEFT",
-            Keyword::Right => "RIGHT",
-            Keyword::On => "ON",
-            Keyword::Group => "GROUP",
-            Keyword::Having => "HAVING",
-            Keyword::Begin => "BEGIN",
-            Keyword::Commit => "COMMIT",
-            Keyword::Rollback => "ROLLBACK",
-            Keyword::Index => "INDEX",
-            Keyword::Explain => "EXPLAIN",
-            Keyword::Drop => "DROP",
         }
     }
 }
@@ -276,14 +141,38 @@ impl Display for Keyword {
     }
 }
 
-// define the Lexer struct
-// currently supported SQL syntax
-// see README.md
+// 词法分析 Lexer 定义
+// 目前支持的 SQL 语法
+
+// 1. Create Table
+// -------------------------------------
+// CREATE TABLE table_name (
+//     [ column_name data_type [ column_constraint [...] ] ]
+//     [, ... ]
+//    );
+//
+//    where data_type is:
+//     - BOOLEAN(BOOL): true | false
+//     - FLOAT(DOUBLE)
+//     - INTEGER(INT)
+//     - STRING(TEXT, VARCHAR)
+//
+//    where column_constraint is:
+//    [ NOT NULL | NULL | DEFAULT expr ]
+//
+// 2. Insert Into
+// -------------------------------------
+// INSERT INTO table_name
+// [ ( column_name [, ...] ) ]
+// values ( expr [, ...] );
+// 3. Select * From
+// -------------------------------------
+// SELECT * FROM table_name;
 pub struct Lexer<'a> {
     iter: Peekable<Chars<'a>>,
 }
 
-// custom iterator, return Token
+// 自定义迭代器，返回 Token
 impl<'a> Iterator for Lexer<'a> {
     type Item = Result<Token>;
 
@@ -306,19 +195,19 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    // erase whitespace
+    // 消除空白字符
     // eg. selct *       from        t;
     fn erase_whitespace(&mut self) {
         self.next_while(|c| c.is_whitespace());
     }
 
-    // if the condition is met, skip to the next character and return the character
+    // 如果满足条件，则跳转到下一个字符，并返回该字符
     fn next_if<F: Fn(char) -> bool>(&mut self, predicate: F) -> Option<char> {
         self.iter.peek().filter(|&c| predicate(*c))?;
         self.iter.next()
     }
 
-    // check if the current character satisfies the condition, if so, skip to the next character
+    // 判断当前字符是否满足条件，如果是的话就跳转到下一个字符
     fn next_while<F: Fn(char) -> bool>(&mut self, predicate: F) -> Option<String> {
         let mut value = String::new();
         while let Some(c) = self.next_if(&predicate) {
@@ -328,30 +217,30 @@ impl<'a> Lexer<'a> {
         Some(value).filter(|v| !v.is_empty())
     }
 
-    // only if it is a Token type, skip to the next character and return the Token
+    // 只有是 Token 类型，才跳转到下一个，并返回 Token
     fn next_if_token<F: Fn(char) -> Option<Token>>(&mut self, predicate: F) -> Option<Token> {
         let token = self.iter.peek().and_then(|c| predicate(*c))?;
         self.iter.next();
         Some(token)
     }
 
-    // scan the next Token
+    // 扫描拿到下一个 Token
     fn scan(&mut self) -> Result<Option<Token>> {
-        // erase whitespace
+        // 消除字符串中的空白字符部分
         self.erase_whitespace();
-        // based on the first character, determine the type of the Token
+        // 根据第一个字符判断
         match self.iter.peek() {
-            Some('\'') => self.scan_string(), // scan string
-            Some(c) if c.is_ascii_digit() => Ok(self.scan_number()), // scan number
-            Some(c) if c.is_alphabetic() => Ok(self.scan_ident()), // scan Ident type
-            Some(_) => Ok(self.scan_symbol()), // scan symbol
+            Some('\'') => self.scan_string(), // 扫描字符串
+            Some(c) if c.is_ascii_digit() => Ok(self.scan_number()), // 扫描数字
+            Some(c) if c.is_alphabetic() => Ok(self.scan_ident()), // 扫描 Ident 类型
+            Some(_) => Ok(self.scan_symbol()), // 扫描符号
             None => Ok(None),
         }
     }
 
-    // scan string
+    // 扫描字符串
     fn scan_string(&mut self) -> Result<Option<Token>> {
-        // check if it is a single quote
+        // 判断是否是单引号开头
         if self.next_if(|c| c == '\'').is_none() {
             return Ok(None);
         }
@@ -368,14 +257,14 @@ impl<'a> Lexer<'a> {
         Ok(Some(Token::String(val)))
     }
 
-    // scan number
+    // 扫描数字
     fn scan_number(&mut self) -> Option<Token> {
-        // scan part of the number
+        // 先扫描一部分
         let mut num = self.next_while(|c| c.is_ascii_digit())?;
-        // if there is a decimal point, it is a floating-point number
+        // 如果中间有小数点，说明是浮点数
         if let Some(sep) = self.next_if(|c| c == '.') {
             num.push(sep);
-            // scan the part after the decimal point
+            // 扫描小数点之后的部分
             while let Some(c) = self.next_if(|c| c.is_ascii_digit()) {
                 num.push(c);
             }
@@ -384,7 +273,7 @@ impl<'a> Lexer<'a> {
         Some(Token::Number(num))
     }
 
-    // scan Ident type, such as table names, column names, etc., also possible keywords, true / false
+    // 扫描 Ident 类型，例如表名、列名等，也有可能是关键字，true / false
     fn scan_ident(&mut self) -> Option<Token> {
         let mut value = self.next_if(|c| c.is_alphabetic())?.to_string();
         while let Some(c) = self.next_if(|c| c.is_alphanumeric() || c == '_') {
@@ -394,7 +283,7 @@ impl<'a> Lexer<'a> {
         Some(Keyword::from_str(&value).map_or(Token::Ident(value.to_lowercase()), Token::Keyword))
     }
 
-    // scan symbol
+    // 扫描符号
     fn scan_symbol(&mut self) -> Option<Token> {
         self.next_if_token(|c| match c {
             '*' => Some(Token::Asterisk),
@@ -405,9 +294,6 @@ impl<'a> Lexer<'a> {
             '+' => Some(Token::Plus),
             '-' => Some(Token::Minus),
             '/' => Some(Token::Slash),
-            '=' => Some(Token::Equal),
-            '>' => Some(Token::GreaterThan),
-            '<' => Some(Token::LessThan),
             _ => None,
         })
     }
