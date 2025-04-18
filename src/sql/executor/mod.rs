@@ -22,6 +22,7 @@ impl<T: Transaction> dyn Executor<T> {
     }
 }
 
+#[derive(Debug, PartialEq)]
 pub enum ResultSet {
     CreateTable {
         table_name: String,

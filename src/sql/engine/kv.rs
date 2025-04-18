@@ -1,7 +1,7 @@
 use crate::{storage::{self, engine::Engine as StorageEngine}, error::{Result, Error}};
 use super::{Engine, Transaction};
 use crate::sql::schema::Table;
-use crate::sql::types::Row;
+use crate::sql::types::{Row, Value};
 use serde::{Serialize, Deserialize};
 pub struct KVEngine<E: StorageEngine> {
     pub kv: storage::mvcc::Mvcc<E>,
@@ -62,11 +62,24 @@ impl<E: StorageEngine> Transaction for KVTransaction<E> {
                 _ => {}
             }
         }
+
+        let id = Key::Row(table_name.clone(), row[0].clone());
+        let value = bincode::serialize(&row)?;
+        self.txn.set(bincode::serialize(&id)?, value)?;
+
         Ok(())
     }
 
-    fn scan_table(&self, table: String) -> Result<Vec<Row>> {
-        todo!()
+    fn scan_table(&self, table_name: String) -> Result<Vec<Row>> {
+        let prefix = KeyPrefix::Row(table_name);
+        let results = self.txn.scan_prefix(bincode::serialize(&prefix)?)?;
+
+        let mut rows = Vec::new();
+        for result in results {
+            let row: Row = bincode::deserialize(&result.value)?;
+            rows.push(row);
+        }
+        Ok(rows)
     }
 
     fn create_table(&mut self, table: Table) -> Result<()> {
@@ -79,7 +92,8 @@ impl<E: StorageEngine> Transaction for KVTransaction<E> {
         
         let key = Key::Table(table.name.clone());
         let value = bincode::serialize(&table)?;
-        self.txn.set(bincode::serialize(&key)?, value);
+        self.txn.set(bincode::serialize(&key)?, value)?;
+
         Ok(())
     }
 
@@ -98,5 +112,32 @@ impl<E: StorageEngine> Transaction for KVTransaction<E> {
 #[derive(Debug, Serialize, Deserialize)]
 enum Key {
     Table(String),
-    Row(String, String),
+    Row(String, Value),
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+enum KeyPrefix {
+    Table,
+    Row(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{error::Result, sql::engine::Engine, storage::memory::MemoryEngine};
+    use super::KVEngine;
+
+    #[test]
+    fn test_create_table() -> Result<()> {
+        let kvengine = KVEngine::new(MemoryEngine::new());
+        let mut session = kvengine.session()?;
+
+        session.execute("create table t1 (a int, b text, c integer);")?;
+        session.execute("insert into t1 values (1, 'foo', 1);")?;
+
+        let v1 = session.execute("select * from t1;")?;
+
+        println!("{:?}", v1);
+        
+        Ok(())
+    }
 }
