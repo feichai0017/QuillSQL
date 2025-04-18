@@ -49,7 +49,7 @@ impl<E: Engine> MvccTransaction<E> {
     }
 
     pub fn get(&self, key: Vec<u8>) -> Result<Option<Vec<u8>>> {
-        let engine = self.engine.lock()?;
+        let mut engine = self.engine.lock()?;
         engine.get(key)
     }
 

@@ -7,7 +7,7 @@ pub trait Engine {
 
     fn set(&mut self, key: Vec<u8>, value: Vec<u8>) -> Result<()>;
 
-    fn get(&self, key: Vec<u8>) -> Result<Option<Vec<u8>>>;
+    fn get(&mut self, key: Vec<u8>) -> Result<Option<Vec<u8>>>;
 
     fn delete(&mut self, key: Vec<u8>) -> Result<()>;
 
