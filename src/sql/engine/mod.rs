@@ -1,4 +1,4 @@
-use crate::error::Result;
+use crate::error::{Error, Result};
 
 use crate::sql::schema::Table;
 use crate::sql::types::Row;
@@ -26,13 +26,18 @@ pub trait Transaction {
 
     fn rollback(&self) -> Result<()>;
 
-    fn create_row(&mut self, table: String, row: Row) -> Result<()>;
+    fn create_row(&mut self, table_name: String, row: Row) -> Result<()>;
 
-    fn scan_table(&self, table: String) -> Result<Vec<Row>>;
+    fn scan_table(&self, table_name: String) -> Result<Vec<Row>>;
 
     fn create_table(&mut self, table: Table) -> Result<()>;
 
     fn get_table(&self, table_name: String) -> Result<Option<Table>>;
+
+    fn must_get_table(&self, table_name: String) -> Result<Table> {
+        self.get_table(table_name.clone())?
+            .ok_or(Error::Internal(format!("Table {} not found", table_name)))
+    }
 }
 
 pub struct Session<E: Engine> {

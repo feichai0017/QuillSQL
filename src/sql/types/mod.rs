@@ -1,6 +1,7 @@
 use super::parser::ast::{Consts, Expression};
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub enum DataType {
     Boolean,
     Integer,
@@ -8,7 +9,7 @@ pub enum DataType {
     String,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug,Clone, PartialEq, Serialize, Deserialize)]
 pub enum Value {
     Null,
     Boolean(bool),
@@ -25,6 +26,16 @@ impl Value {
             Expression::Consts(Consts::Integer(i)) => Self::Integer(i),
             Expression::Consts(Consts::Float(f)) => Self::Float(f),
             Expression::Consts(Consts::String(s)) => Self::String(s),
+        }
+    }
+
+    pub fn datatype(&self) -> Option<DataType> {
+        match self {
+            Self::Null => None,
+            Self::Boolean(_) => Some(DataType::Boolean),
+            Self::Integer(_) => Some(DataType::Integer),
+            Self::Float(_) => Some(DataType::Float),
+            Self::String(_) => Some(DataType::String),
         }
     }
 }
