@@ -2,7 +2,7 @@ use futures::SinkExt;
 use sqldb_rs::error::Result;
 use sqldb_rs::sql;
 use sqldb_rs::sql::engine::kv::KVEngine;
-use sqldb_rs::storage::disk::DiskEngine;
+use sqldb_rs::storage::bitcask::BitcaskEngine;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_stream::StreamExt;
 use tokio_util::codec::{Framed, LinesCodec};
@@ -104,7 +104,7 @@ async fn main() -> Result<()> {
 
     // 初始化 DB
     let p = PathBuf::from(DB_PATH);
-    let kvengine = KVEngine::new(DiskEngine::new(p.clone())?);
+    let kvengine = KVEngine::new(BitcaskEngine::new(p.clone())?);
     let shared_engine = Arc::new(Mutex::new(kvengine));
 
     loop {

@@ -319,13 +319,13 @@ mod tests {
             },
             plan::{Node, Plan},
         },
-        storage::disk::DiskEngine,
+        storage::bitcask::BitcaskEngine,
     };
 
     #[test]
     fn test_plan_create_table() -> Result<()> {
         let p = tempfile::tempdir()?.into_path().join("sqldb-log");
-        let kvengine = KVEngine::new(DiskEngine::new(p.clone())?);
+        let kvengine = KVEngine::new(BitcaskEngine::new(p.clone())?);
         let mut txn = kvengine.begin()?;
 
         let sql1 = "
@@ -358,7 +358,7 @@ mod tests {
     #[test]
     fn test_plan_insert() -> Result<()> {
         let p = tempfile::tempdir()?.into_path().join("sqldb-log");
-        let kvengine = KVEngine::new(DiskEngine::new(p.clone())?);
+        let kvengine = KVEngine::new(BitcaskEngine::new(p.clone())?);
         let mut txn = kvengine.begin()?;
 
         let sql1 = "insert into tbl1 values (1, 2, 3, 'a', true);";
@@ -409,7 +409,7 @@ mod tests {
     #[test]
     fn test_plan_select() -> Result<()> {
         let p = tempfile::tempdir()?.into_path().join("sqldb-log");
-        let kvengine = KVEngine::new(DiskEngine::new(p.clone())?);
+        let kvengine = KVEngine::new(BitcaskEngine::new(p.clone())?);
         let mut txn = kvengine.begin()?;
 
         let sql = "select * from tbl1;";

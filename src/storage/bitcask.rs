@@ -14,12 +14,12 @@ pub type KeyDir = BTreeMap<Vec<u8>, (u64, u32)>;
 const LOG_HEADER_SIZE: u32 = 8;
 
 // 磁盘存储引擎定义
-pub struct DiskEngine {
+pub struct BitcaskEngine {
     keydir: KeyDir,
     log: Log,
 }
 
-impl DiskEngine {
+impl BitcaskEngine {
     pub fn new(file_path: PathBuf) -> Result<Self> {
         let mut log = Log::new(file_path)?;
         // 从 log 中去恢复的 keydir
@@ -64,8 +64,8 @@ impl DiskEngine {
     }
 }
 
-impl super::engine::Engine for DiskEngine {
-    type EngineIterator<'a> = DiskEngineIterator<'a>;
+impl super::engine::Engine for BitcaskEngine {
+    type EngineIterator<'a> = BitcaskEngineIterator<'a>;
 
     fn set(&mut self, key: Vec<u8>, value: Vec<u8>) -> Result<()> {
         // 先写日志
@@ -97,19 +97,19 @@ impl super::engine::Engine for DiskEngine {
     }
 
     fn scan(&mut self, range: impl std::ops::RangeBounds<Vec<u8>>) -> Self::EngineIterator<'_> {
-        DiskEngineIterator {
+        BitcaskEngineIterator {
             inner: self.keydir.range(range),
             log: &mut self.log,
         }
     }
 }
 
-pub struct DiskEngineIterator<'a> {
+pub struct BitcaskEngineIterator<'a> {
     inner: btree_map::Range<'a, Vec<u8>, (u64, u32)>,
     log: &'a mut Log,
 }
 
-impl<'a> DiskEngineIterator<'a> {
+impl<'a> BitcaskEngineIterator<'a> {
     fn map(&mut self, item: (&Vec<u8>, &(u64, u32))) -> <Self as Iterator>::Item {
         let (k, (offset, val_size)) = item;
         let value = self.log.read_value(*offset, *val_size)?;
@@ -117,9 +117,9 @@ impl<'a> DiskEngineIterator<'a> {
     }
 }
 
-impl<'a> super::engine::EngineIterator for DiskEngineIterator<'a> {}
+impl<'a> super::engine::EngineIterator for BitcaskEngineIterator<'a> {}
 
-impl<'a> Iterator for DiskEngineIterator<'a> {
+impl<'a> Iterator for BitcaskEngineIterator<'a> {
     type Item = Result<(Vec<u8>, Vec<u8>)>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -127,7 +127,7 @@ impl<'a> Iterator for DiskEngineIterator<'a> {
     }
 }
 
-impl<'a> DoubleEndedIterator for DiskEngineIterator<'a> {
+impl<'a> DoubleEndedIterator for BitcaskEngineIterator<'a> {
     fn next_back(&mut self) -> Option<Self::Item> {
         self.inner.next_back().map(|item| self.map(item))
     }
@@ -246,13 +246,13 @@ impl Log {
 mod tets {
     use crate::{
         error::Result,
-        storage::{disk::DiskEngine, engine::Engine},
+        storage::{bitcask::BitcaskEngine, engine::Engine},
     };
     use std::path::PathBuf;
 
     #[test]
     fn test_disk_engine_compact() -> Result<()> {
-        let mut eng = DiskEngine::new(PathBuf::from("/tmp/sqldb/sqldb-log"))?;
+        let mut eng = BitcaskEngine::new(PathBuf::from("/tmp/sqldb/sqldb-log"))?;
         // 写一些数据
         eng.set(b"key1".to_vec(), b"value".to_vec())?;
         eng.set(b"key2".to_vec(), b"value".to_vec())?;
@@ -279,7 +279,7 @@ mod tets {
         );
         drop(eng);
 
-        let mut eng2 = DiskEngine::new_compact(PathBuf::from("/tmp/sqldb/sqldb-log"))?;
+        let mut eng2 = BitcaskEngine::new_compact(PathBuf::from("/tmp/sqldb/sqldb-log"))?;
         let iter2 = eng2.scan(..);
         let v2 = iter2.collect::<Result<Vec<_>>>()?;
         assert_eq!(

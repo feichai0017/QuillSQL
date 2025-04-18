@@ -334,7 +334,7 @@ mod tests {
             executor::ResultSet,
             types::{Row, Value},
         },
-        storage::disk::DiskEngine,
+        storage::bitcask::BitcaskEngine,
     };
 
     fn setup_table<E: StorageEngine + 'static>(s: &mut Session<KVEngine<E>>) -> Result<()> {
@@ -411,7 +411,7 @@ mod tests {
     #[test]
     fn test_create_table() -> Result<()> {
         let p = tempfile::tempdir()?.into_path().join("sqldb-log");
-        let kvengine = KVEngine::new(DiskEngine::new(p.clone())?);
+        let kvengine = KVEngine::new(BitcaskEngine::new(p.clone())?);
         let mut s = kvengine.session()?;
         setup_table(&mut s)?;
         std::fs::remove_dir_all(p.parent().unwrap())?;
@@ -421,7 +421,7 @@ mod tests {
     #[test]
     fn test_insert() -> Result<()> {
         let p = tempfile::tempdir()?.into_path().join("sqldb-log");
-        let kvengine = KVEngine::new(DiskEngine::new(p.clone())?);
+        let kvengine = KVEngine::new(BitcaskEngine::new(p.clone())?);
         let mut s = kvengine.session()?;
         setup_table(&mut s)?;
 
@@ -501,7 +501,7 @@ mod tests {
     #[test]
     fn test_update() -> Result<()> {
         let p = tempfile::tempdir()?.into_path().join("sqldb-log");
-        let kvengine = KVEngine::new(DiskEngine::new(p.clone())?);
+        let kvengine = KVEngine::new(BitcaskEngine::new(p.clone())?);
         let mut s = kvengine.session()?;
         setup_table(&mut s)?;
 
@@ -569,7 +569,7 @@ mod tests {
     #[test]
     fn test_delete() -> Result<()> {
         let p = tempfile::tempdir()?.into_path().join("sqldb-log");
-        let kvengine = KVEngine::new(DiskEngine::new(p.clone())?);
+        let kvengine = KVEngine::new(BitcaskEngine::new(p.clone())?);
         let mut s = kvengine.session()?;
         setup_table(&mut s)?;
 
@@ -645,7 +645,7 @@ mod tests {
     #[test]
     fn test_sort() -> Result<()> {
         let p = tempfile::tempdir()?.into_path().join("sqldb-log");
-        let kvengine = KVEngine::new(DiskEngine::new(p.clone())?);
+        let kvengine = KVEngine::new(BitcaskEngine::new(p.clone())?);
         let mut s = kvengine.session()?;
         setup_table(&mut s)?;
 
@@ -671,7 +671,7 @@ mod tests {
     #[test]
     fn test_cross_join() -> Result<()> {
         let p = tempfile::tempdir()?.into_path().join("sqldb-log");
-        let kvengine = KVEngine::new(DiskEngine::new(p.clone())?);
+        let kvengine = KVEngine::new(BitcaskEngine::new(p.clone())?);
         let mut s = kvengine.session()?;
         s.execute("create table t1 (a int primary key);")?;
         s.execute("create table t2 (b int primary key);")?;
@@ -699,7 +699,7 @@ mod tests {
     #[test]
     fn test_join() -> Result<()> {
         let p = tempfile::tempdir()?.into_path().join("sqldb-log");
-        let kvengine = KVEngine::new(DiskEngine::new(p.clone())?);
+        let kvengine = KVEngine::new(BitcaskEngine::new(p.clone())?);
         let mut s = kvengine.session()?;
         s.execute("create table t1 (a int primary key);")?;
         s.execute("create table t2 (b int primary key);")?;
@@ -727,7 +727,7 @@ mod tests {
     #[test]
     fn test_agg() -> Result<()> {
         let p = tempfile::tempdir()?.into_path().join("sqldb-log");
-        let kvengine = KVEngine::new(DiskEngine::new(p.clone())?);
+        let kvengine = KVEngine::new(BitcaskEngine::new(p.clone())?);
         let mut s = kvengine.session()?;
         s.execute("create table t1 (a int primary key, b text, c float);")?;
 
@@ -780,7 +780,7 @@ mod tests {
     #[test]
     fn test_group_by() -> Result<()> {
         let p = tempfile::tempdir()?.into_path().join("sqldb-log");
-        let kvengine = KVEngine::new(DiskEngine::new(p.clone())?);
+        let kvengine = KVEngine::new(BitcaskEngine::new(p.clone())?);
         let mut s = kvengine.session()?;
         s.execute("create table t1 (a int primary key, b text, c float);")?;
 
@@ -834,7 +834,7 @@ mod tests {
     #[test]
     fn test_filter() -> Result<()> {
         let p = tempfile::tempdir()?.into_path().join("sqldb-log");
-        let kvengine = KVEngine::new(DiskEngine::new(p.clone())?);
+        let kvengine = KVEngine::new(BitcaskEngine::new(p.clone())?);
         let mut s = kvengine.session()?;
         s.execute("create table t1 (a int primary key, b text, c float, d bool);")?;
 
@@ -868,7 +868,7 @@ mod tests {
     #[test]
     fn test_index() -> Result<()> {
         let p = tempfile::tempdir()?.into_path().join("sqldb-log");
-        let kvengine = KVEngine::new(DiskEngine::new(p.clone())?);
+        let kvengine = KVEngine::new(BitcaskEngine::new(p.clone())?);
         let mut s = kvengine.session()?;
         s.execute("create table t (a int primary key, b text index, c float index, d bool);")?;
         s.execute("insert into t values (1, 'a', 1.1, true);")?;
@@ -894,7 +894,7 @@ mod tests {
     #[test]
     fn test_primary_key_scan() -> Result<()> {
         let p = tempfile::tempdir()?.into_path().join("sqldb-log");
-        let kvengine = KVEngine::new(DiskEngine::new(p.clone())?);
+        let kvengine = KVEngine::new(BitcaskEngine::new(p.clone())?);
         let mut s = kvengine.session()?;
         s.execute("create table t (a int primary key, b text index, c float index, d bool);")?;
         s.execute("insert into t values (1, 'a', 1.1, true);")?;
@@ -916,7 +916,7 @@ mod tests {
     #[test]
     fn test_hash_join() -> Result<()> {
         let p = tempfile::tempdir()?.into_path().join("sqldb-log");
-        let kvengine = KVEngine::new(DiskEngine::new(p.clone())?);
+        let kvengine = KVEngine::new(BitcaskEngine::new(p.clone())?);
         let mut s = kvengine.session()?;
         s.execute("create table t1 (a int primary key);")?;
         s.execute("create table t2 (b int primary key);")?;

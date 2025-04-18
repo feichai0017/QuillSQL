@@ -348,7 +348,7 @@ pub struct ScanResult {
 mod tests {
     use crate::{
         error::Result,
-        storage::{disk::DiskEngine, engine::Engine, memory::MemoryEngine},
+        storage::{bitcask::BitcaskEngine, engine::Engine, memory::MemoryEngine},
     };
 
     use super::Mvcc;
@@ -377,7 +377,7 @@ mod tests {
         get(MemoryEngine::new())?;
 
         let p = tempfile::tempdir()?.into_path().join("sqldb-log");
-        get(DiskEngine::new(p.clone())?)?;
+        get(BitcaskEngine::new(p.clone())?)?;
         std::fs::remove_dir_all(p.parent().unwrap())?;
         Ok(())
     }
@@ -413,7 +413,7 @@ mod tests {
         get_isolation(MemoryEngine::new())?;
 
         let p = tempfile::tempdir()?.into_path().join("sqldb-log");
-        get_isolation(DiskEngine::new(p.clone())?)?;
+        get_isolation(BitcaskEngine::new(p.clone())?)?;
         std::fs::remove_dir_all(p.parent().unwrap())?;
         Ok(())
     }
@@ -485,7 +485,7 @@ mod tests {
     fn test_scan_prefix() -> Result<()> {
         scan_prefix(MemoryEngine::new())?;
         let p = tempfile::tempdir()?.into_path().join("sqldb-log");
-        scan_prefix(DiskEngine::new(p.clone())?)?;
+        scan_prefix(BitcaskEngine::new(p.clone())?)?;
         std::fs::remove_dir_all(p.parent().unwrap())?;
         Ok(())
     }
@@ -566,7 +566,7 @@ mod tests {
     fn test_scan_isolation() -> Result<()> {
         scan_isolation(MemoryEngine::new())?;
         let p = tempfile::tempdir()?.into_path().join("sqldb-log");
-        scan_isolation(DiskEngine::new(p.clone())?)?;
+        scan_isolation(BitcaskEngine::new(p.clone())?)?;
         std::fs::remove_dir_all(p.parent().unwrap())?;
         Ok(())
     }
@@ -607,7 +607,7 @@ mod tests {
     fn test_set() -> Result<()> {
         set(MemoryEngine::new())?;
         let p = tempfile::tempdir()?.into_path().join("sqldb-log");
-        set(DiskEngine::new(p.clone())?)?;
+        set(BitcaskEngine::new(p.clone())?)?;
         std::fs::remove_dir_all(p.parent().unwrap())?;
         Ok(())
     }
@@ -651,7 +651,7 @@ mod tests {
     fn test_set_conflict() -> Result<()> {
         set_conflict(MemoryEngine::new())?;
         let p = tempfile::tempdir()?.into_path().join("sqldb-log");
-        set_conflict(DiskEngine::new(p.clone())?)?;
+        set_conflict(BitcaskEngine::new(p.clone())?)?;
         std::fs::remove_dir_all(p.parent().unwrap())?;
         Ok(())
     }
@@ -692,7 +692,7 @@ mod tests {
     fn test_delete() -> Result<()> {
         delete(MemoryEngine::new())?;
         let p = tempfile::tempdir()?.into_path().join("sqldb-log");
-        delete(DiskEngine::new(p.clone())?)?;
+        delete(BitcaskEngine::new(p.clone())?)?;
         std::fs::remove_dir_all(p.parent().unwrap())?;
         Ok(())
     }
@@ -726,7 +726,7 @@ mod tests {
     fn test_delete_conflict() -> Result<()> {
         delete_conflict(MemoryEngine::new())?;
         let p = tempfile::tempdir()?.into_path().join("sqldb-log");
-        delete_conflict(DiskEngine::new(p.clone())?)?;
+        delete_conflict(BitcaskEngine::new(p.clone())?)?;
         std::fs::remove_dir_all(p.parent().unwrap())?;
         Ok(())
     }
@@ -753,7 +753,7 @@ mod tests {
     fn test_dirty_read() -> Result<()> {
         dirty_read(MemoryEngine::new())?;
         let p = tempfile::tempdir()?.into_path().join("sqldb-log");
-        dirty_read(DiskEngine::new(p.clone())?)?;
+        dirty_read(BitcaskEngine::new(p.clone())?)?;
         std::fs::remove_dir_all(p.parent().unwrap())?;
         Ok(())
     }
@@ -782,7 +782,7 @@ mod tests {
     fn test_unrepeatable_read() -> Result<()> {
         unrepeatable_read(MemoryEngine::new())?;
         let p = tempfile::tempdir()?.into_path().join("sqldb-log");
-        unrepeatable_read(DiskEngine::new(p.clone())?)?;
+        unrepeatable_read(BitcaskEngine::new(p.clone())?)?;
         std::fs::remove_dir_all(p.parent().unwrap())?;
         Ok(())
     }
@@ -847,7 +847,7 @@ mod tests {
     fn test_phantom_read() -> Result<()> {
         phantom_read(MemoryEngine::new())?;
         let p = tempfile::tempdir()?.into_path().join("sqldb-log");
-        phantom_read(DiskEngine::new(p.clone())?)?;
+        phantom_read(BitcaskEngine::new(p.clone())?)?;
         std::fs::remove_dir_all(p.parent().unwrap())?;
         Ok(())
     }
@@ -879,7 +879,7 @@ mod tests {
     fn test_rollback() -> Result<()> {
         rollback(MemoryEngine::new())?;
         let p = tempfile::tempdir()?.into_path().join("sqldb-log");
-        rollback(DiskEngine::new(p.clone())?)?;
+        rollback(BitcaskEngine::new(p.clone())?)?;
         std::fs::remove_dir_all(p.parent().unwrap())?;
         Ok(())
     }
