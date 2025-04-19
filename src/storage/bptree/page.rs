@@ -14,6 +14,7 @@ pub struct Value(pub usize);
 
 /// Page is a wrapper for a single page of memory
 /// providing some helpful helpers for quick access.
+#[derive(Debug, Clone)]
 pub struct Page {
     data: Box<[u8; PAGE_SIZE]>,
 }
