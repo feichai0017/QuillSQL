@@ -11,6 +11,17 @@ pub enum Error {
     Parse(String),
     Internal(String),
     WriteConflict,
+    KeyNotFound,
+    KeyAlreadyExists,
+    UnexpectedError,
+    KeyOverflowError,
+    ValueOverflowError,
+    TryFromSliceError(&'static str),
+    UTF8Error,
+    NodeTooLarge,
+    Io(String),
+    Bincode(String),
+    NotImplemented(String),
 }
 
 impl From<std::num::ParseIntError> for Error {
@@ -39,7 +50,7 @@ impl From<Box<ErrorKind>> for Error {
 
 impl From<std::io::Error> for Error {
     fn from(value: std::io::Error) -> Self {
-        Error::Internal(value.to_string())
+        Error::Io(value.to_string())
     }
 }
 
@@ -50,8 +61,8 @@ impl From<TryFromSliceError> for Error {
 }
 
 impl From<FromUtf8Error> for Error {
-    fn from(value: FromUtf8Error) -> Self {
-        Error::Internal(value.to_string())
+    fn from(_value: FromUtf8Error) -> Self {
+        Error::UTF8Error
     }
 }
 
@@ -75,6 +86,17 @@ impl Display for Error {
             Error::Parse(err) => write!(f, "parse error {}", err),
             Error::Internal(err) => write!(f, "internal error {}", err),
             Error::WriteConflict => write!(f, "write conflict, try transaction"),
+            Error::KeyNotFound => write!(f, "key not found"),
+            Error::KeyAlreadyExists => write!(f, "key already exists"),
+            Error::UnexpectedError => write!(f, "unexpected error"),
+            Error::KeyOverflowError => write!(f, "key overflow error"),
+            Error::ValueOverflowError => write!(f, "value overflow error"),
+            Error::TryFromSliceError(err) => write!(f, "try from slice error {}", err),
+            Error::UTF8Error => write!(f, "utf8 error"),
+            Error::NodeTooLarge => write!(f, "node data too large to fit in a single page"),
+            Error::Io(err) => write!(f, "IO Error: {}", err),
+            Error::Bincode(err) => write!(f, "Serialization/Deserialization error: {}", err),
+            Error::NotImplemented(feature) => write!(f, "Feature not implemented: {}", feature),
         }
     }
 }
