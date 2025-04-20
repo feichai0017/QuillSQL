@@ -1,10 +1,112 @@
 use std::fmt::Display;
+use std::sync::Arc;
 
+use derive_with::With;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 
 use super::types::{DataType, Row, Value};
+
+pub type SchemaRef = Arc<Schema>;
+pub type ColumnRef = Arc<Column>;
+
+/// Represents the schema of a row (potentially intermediate result) during query processing.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct Schema {
+    pub columns: Vec<ColumnRef>,
+}
+
+
+impl Schema {
+    /// Creates a new Schema from a vector of owned Columns.
+    pub fn new(columns: Vec<Column>) -> Self {
+        Self {
+            columns: columns.into_iter().map(Arc::new).collect(),
+        }
+    }
+
+    /// Creates a new Schema from a vector of ColumnRefs.
+    /// Performs basic validation for duplicate column names (within the same relation if specified).
+    pub fn new_with_refs(columns: Vec<ColumnRef>) -> Self {
+        // Basic validation: check for duplicate unqualified names for now
+        // A more robust check would consider the `relation` field.
+        for i in 0..columns.len() {
+            for j in i + 1..columns.len() {
+                if columns[i].name == columns[j].name {
+                    // In a real system, might error or handle qualified names differently
+                    println!(
+                        "WARN: Duplicate column name '{}' found in Schema construction.",
+                        columns[i].name
+                    );
+                }
+            }
+        }
+        Self { columns }
+    }
+
+    /// Creates an empty Schema.
+    pub fn empty() -> Self {
+        Self { columns: vec![] }
+    }
+
+    /// Returns the number of columns in the schema.
+    pub fn column_count(&self) -> usize {
+        self.columns.len()
+    }
+
+    /// Finds the index of a column by its unqualified name.
+    /// Returns an error if not found or if the name is ambiguous (present multiple times).
+    pub fn index_of(&self, name: &str) -> Result<usize> {
+        let mut found_index = None;
+        let mut duplicate = false;
+        for (idx, col) in self.columns.iter().enumerate() {
+            if col.name == name {
+                if found_index.is_some() {
+                    duplicate = true;
+                    break; // Found a duplicate
+                }
+                found_index = Some(idx);
+            }
+        }
+        if duplicate {
+            Err(Error::Internal(format!("Ambiguous column name: {}", name)))
+        } else {
+            found_index.ok_or_else(|| Error::Internal(format!("Column not found: {}", name)))
+        }
+    }
+
+    pub fn try_merge(schemas: impl IntoIterator<Item = Self>) -> Result<Self> {
+        let mut columns = Vec::new();
+        for schema in schemas {
+            columns.extend(schema.columns);
+        }
+        Ok(Self::new_with_refs(columns))
+    }
+
+    pub fn project(&self, indices: &[usize]) -> Result<Self> {
+        let new_columns = indices
+            .iter()
+            .map(|i| self.column_with_index(*i))
+            .collect::<Result<Vec<ColumnRef>>>()?;
+        Ok(Schema::new_with_refs(new_columns))
+    }
+
+    pub fn column_with_name(&self, name: &str) -> Result<ColumnRef> {
+        let index = self.index_of(name)?;
+        Ok(self.columns[index].clone())
+    }
+
+
+     /// Gets a column reference by index.
+     pub fn column_with_index(&self, index: usize) -> Result<ColumnRef> {
+          self.columns
+              .get(index)
+              .cloned()
+              .ok_or_else(|| Error::Internal(format!("Index out of bounds: {}", index)))
+     }
+
+}
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub struct Table {
@@ -97,7 +199,7 @@ impl Display for Table {
     }
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, With)]
 pub struct Column {
     pub name: String,
     pub datatype: DataType,
@@ -106,6 +208,20 @@ pub struct Column {
     pub primary_key: bool,
     pub index: bool,
 }
+
+impl Column {
+    pub fn new(name: String, datatype: DataType, nullable: bool, default: Option<Value>, primary_key: bool, index: bool) -> Self {
+        Self { name, datatype, nullable, default, primary_key, index }
+    }
+}
+
+impl PartialEq for Column {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name && self.datatype == other.datatype
+    }
+}
+
+impl Eq for Column {}
 
 impl Display for Column {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
