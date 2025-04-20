@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use super::parser::ast::{Consts, Expression};
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 pub enum DataType {
     Boolean,
     Integer,

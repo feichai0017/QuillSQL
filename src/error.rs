@@ -22,6 +22,8 @@ pub enum Error {
     Io(String),
     Bincode(String),
     NotImplemented(String),
+    PageLayout(String),
+    PageFull(String),
 }
 
 impl From<std::num::ParseIntError> for Error {
@@ -97,6 +99,8 @@ impl Display for Error {
             Error::Io(err) => write!(f, "IO Error: {}", err),
             Error::Bincode(err) => write!(f, "Serialization/Deserialization error: {}", err),
             Error::NotImplemented(feature) => write!(f, "Feature not implemented: {}", feature),
+            Error::PageLayout(err) => write!(f, "Page Layout Error: {}", err),
+            Error::PageFull(err) => write!(f, "Page Full Error: {}", err),
         }
     }
 }
