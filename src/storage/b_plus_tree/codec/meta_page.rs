@@ -1,6 +1,6 @@
+use crate::error::Result;
 use crate::storage::b_plus_tree::codec::{CommonCodec, DecodedData};
 use crate::storage::b_plus_tree::page::meta_page::MetaPage;
-use crate::error::Result;
 
 pub struct MetaPageCodec;
 
