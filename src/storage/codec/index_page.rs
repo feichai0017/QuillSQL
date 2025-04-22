@@ -1,6 +1,6 @@
 use crate::error::{Error, Result};
 use crate::storage::b_plus_tree::buffer_pool_manager::PAGE_SIZE;
-use crate::storage::b_plus_tree::codec::{CommonCodec, DecodedData, RidCodec};
+use crate::storage::codec::{common::CommonCodec, table_page::RidCodec, DecodedData};
 use crate::storage::b_plus_tree::comparator::default_comparator;
 use crate::storage::b_plus_tree::page::index_page::{
     BPlusTreeInternalPage, BPlusTreeInternalPageHeader, BPlusTreeLeafPage, BPlusTreeLeafPageHeader,
@@ -261,7 +261,7 @@ impl BPlusTreeInternalPageHeaderCodec {
 
 #[cfg(test)]
 mod tests {
-    use crate::storage::b_plus_tree::codec::index_page::BPlusTreePageCodec;
+    use crate::storage::codec::index_page::BPlusTreePageCodec;
     use crate::storage::b_plus_tree::page::index_page::{
         BPlusTreeInternalPage, BPlusTreeLeafPage, BPlusTreePage,
     };

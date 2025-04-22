@@ -1,7 +1,7 @@
 use comfy_table::Cell;
 use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
-use crate::error::Result;
+use crate::error::{Error, Result};
 
 use crate::storage::b_plus_tree::page::index_page::BPlusTreePage;
 use crate::storage::b_plus_tree::{buffer_pool_manager::PAGE_SIZE, b_plus_tree_index::BPlusTreeIndex};
@@ -13,7 +13,7 @@ pub fn page_bytes_to_array(bytes: &[u8]) -> [u8; PAGE_SIZE] {
 }
 
 
-pub(crate) fn pretty_format_index_tree(index: &BPlusTreeIndex) -> Result<String> {
+pub fn pretty_format_index_tree(index: &BPlusTreeIndex) -> Result<String> {
     let mut display = String::new();
 
     if index.is_empty() {
@@ -108,4 +108,23 @@ pub(crate) fn pretty_format_index_tree(index: &BPlusTreeIndex) -> Result<String>
         level_index += 1;
         curr_queue = next_queue;
     }
+}
+
+pub fn time() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos()
+}
+
+pub fn extract_id_from_filename(
+    entry: &std::path::PathBuf,
+) -> Result<u128> {
+    entry
+        .extension()
+        .ok_or_else(|| Error::Internal(format!("Missing extension (ie. not in format: data.<id>)")))?
+        .to_str()
+        .unwrap()
+        .parse()
+        .map_err(Into::into) 
 }

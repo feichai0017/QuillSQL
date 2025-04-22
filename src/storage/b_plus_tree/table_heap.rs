@@ -1,7 +1,7 @@
 use crate::error::Result;
 use crate::storage::b_plus_tree::buffer_pool_manager::BufferPoolManager;
 use crate::storage::b_plus_tree::buffer_pool_manager::{AtomicPageId, INVALID_PAGE_ID};
-use crate::storage::b_plus_tree::codec::TablePageCodec;
+use crate::storage::codec::table_page::TablePageCodec;
 use crate::storage::b_plus_tree::page::table_page::{RecordId, TablePage, TupleMeta};
 use crate::utils::util::page_bytes_to_array;
 use std::collections::Bound;

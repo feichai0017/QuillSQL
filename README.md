@@ -4,9 +4,34 @@
   <img src="/public/rust-db.png" alt="QuillSQL Cover" width="500"/>
 </div>
 
-Rust 实现的 SQL 数据库系统
+A SQL database system implemented in Rust
 
-## supported SQL syntax
+## System Architecture
+
+QuillSQL is a relational database system implemented in Rust, supporting standard SQL syntax and transaction processing. The system adopts a modular design, primarily comprising three main modules: SQL parser, query execution engine, and storage engine.
+
+### Storage Engines
+
+QuillSQL supports three storage engines, allowing you to choose the most suitable one for different scenarios:
+
+1. **Memory Engine**
+   - All data stored in memory
+   - Suitable for temporary data and testing scenarios
+   - Data not preserved after restart
+
+2. **Bitcask Engine**
+   - Log-structured key-value storage
+   - High write performance, low read latency
+   - Supports persistent storage
+   - Utilizes LRU-K caching strategy to optimize read performance
+
+3. **B+ Tree Engine**
+   - Classic database index structure
+   - Supports range queries and sorting
+   - Implements buffer pool management
+   - Suitable for scenarios requiring complex queries
+
+## Supported SQL Syntax
 
 ### 1. Create/Drop Table
 create table:
@@ -82,7 +107,7 @@ DELETE FROM table_name
 ```
 where condition is: `column_name = expr`
 
-### 5. Show Table
+### 6. Show Table
 ```sql
 SHOW TABLES;
 ```
@@ -91,7 +116,7 @@ SHOW TABLES;
 SHOW TABLE `table_name`;
 ```
 
-### 6. Transaction
+### 7. Transaction
 
 ```
 BEGIN;
@@ -101,7 +126,25 @@ COMMIT;
 ROLLBACK;
 ```
 
-## 7. Explain
+## 8. Explain
 ```
 explain sql;
 ```
+
+## Getting Started
+
+```bash
+# Start the database server
+cargo run --bin sqldb-server
+
+# Start the command-line client
+cargo run --bin sqldb-cli
+```
+
+## Acknowledgements and References
+
+QuillSQL's design and implementation reference the following excellent projects and courses:
+
+- [Bitcask](https://github.com/dragonquest/bitcask) - High-performance Bitcask key-value storage implemented in Rust
+- [BustubX](https://github.com/systemxlabs/bustubx) - Educational relational database system implemented in Rust
+- [CMU 15-445/645 Database Systems](https://15445.courses.cs.cmu.edu/) - Carnegie Mellon University's database systems course

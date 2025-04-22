@@ -1,6 +1,6 @@
 use crate::error::{Error, Result};
 use crate::storage::b_plus_tree::buffer_pool_manager::{PageId, INVALID_PAGE_ID, PAGE_SIZE};
-use crate::storage::b_plus_tree::codec::{TablePageHeaderCodec, TablePageHeaderTupleInfoCodec};
+use crate::storage::codec::table_page::{TablePageHeaderCodec, TablePageHeaderTupleInfoCodec};
 use derive_new;
 use std::sync::LazyLock;
 use crate::storage::mvcc::TransactionId;

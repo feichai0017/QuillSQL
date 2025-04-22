@@ -1,5 +1,6 @@
 use crate::storage::b_plus_tree::buffer_pool_manager::PAGE_SIZE;
-use crate::storage::b_plus_tree::codec::{CommonCodec, DecodedData};
+use crate::storage::codec::common::CommonCodec;
+use crate::storage::codec::DecodedData;
 use crate::storage::b_plus_tree::page::freelist_page::FreelistPage;
 use crate::storage::b_plus_tree::page::freelist_page::FreelistPageHeader;
 use crate::error::Result;
@@ -73,7 +74,7 @@ impl FreelistPageCodec {
 #[cfg(test)]
 mod tests {
     use crate::storage::b_plus_tree::page::freelist_page::FREELIST_PAGE_MAX_SIZE;
-    use crate::storage::b_plus_tree::codec::FreelistPageCodec;
+    use crate::storage::codec::freelist_page::FreelistPageCodec;
     use crate::storage::b_plus_tree::page::freelist_page::FreelistPage;
     use crate::storage::b_plus_tree::page::freelist_page::FreelistPageHeader;
 

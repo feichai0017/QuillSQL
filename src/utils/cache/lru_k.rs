@@ -175,7 +175,6 @@ impl LRUKReplacer {
             current_timestamp: 0,
         }
     }
-
 }
 
 #[cfg(test)]

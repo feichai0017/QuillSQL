@@ -1,6 +1,6 @@
 use crate::error::{Error, Result};
 use crate::sql::types::{DataType, Value};
-use crate::storage::b_plus_tree::codec::{CommonCodec, DecodedData};
+use crate::storage::codec::{common::CommonCodec, DecodedData};
 
 pub struct ScalarValueCodec;
 
@@ -55,7 +55,7 @@ impl ScalarValueCodec {
                     )));
                 }
 
-                let (value, offset) = CommonCodec::decode_string(&left_bytes[0..length as usize])?;
+                let (value, _) = CommonCodec::decode_string(&left_bytes[0..length as usize])?;
                 let total_consumed = 2 + length as usize;
 
                 Ok((Value::String(value), total_consumed))

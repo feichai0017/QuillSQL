@@ -11,7 +11,7 @@ use std::{
 use crate::error::{Error, Result};
 
 use crate::storage::b_plus_tree::buffer_pool_manager::{PageId, PAGE_SIZE, INVALID_PAGE_ID};
-use crate::storage::b_plus_tree::codec::{FreelistPageCodec, MetaPageCodec};
+use crate::storage::codec::{freelist_page::FreelistPageCodec, meta_page::MetaPageCodec};
 use crate::storage::b_plus_tree::page::freelist_page::FreelistPage;
 use crate::storage::b_plus_tree::page::meta_page::MetaPage;
 use crate::storage::b_plus_tree::page::meta_page::META_PAGE_SIZE;
@@ -242,7 +242,7 @@ impl DiskManager {
 #[cfg(test)]
 mod tests {
     use crate::storage::b_plus_tree::buffer_pool_manager::PAGE_SIZE;
-    use crate::storage::b_plus_tree::codec::MetaPageCodec;
+    use crate::storage::codec::meta_page::MetaPageCodec;
     use crate::storage::b_plus_tree::page::meta_page::EMPTY_META_PAGE;
     use tempfile::TempDir;
 

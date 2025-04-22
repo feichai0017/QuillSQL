@@ -7,9 +7,7 @@ use std::sync::Arc;
 use crate::storage::b_plus_tree::buffer_pool_manager::{
     AtomicPageId, PageId, PageRef, INVALID_PAGE_ID,
 };
-use crate::storage::b_plus_tree::codec::{
-    BPlusTreeInternalPageCodec, BPlusTreeLeafPageCodec, BPlusTreePageCodec,
-};
+use crate::storage::codec::index_page::{BPlusTreeInternalPageCodec, BPlusTreeLeafPageCodec, BPlusTreePageCodec};
 use crate::storage::b_plus_tree::page::index_page::{InternalKV, LeafKV};
 use crate::utils::util::page_bytes_to_array;
 use crate::{

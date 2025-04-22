@@ -1,5 +1,5 @@
 use crate::error::Result;
-use crate::storage::b_plus_tree::codec::{CommonCodec, DecodedData};
+use crate::storage::codec::{common::CommonCodec, DecodedData};
 use crate::storage::b_plus_tree::page::meta_page::MetaPage;
 
 pub struct MetaPageCodec;
@@ -64,7 +64,7 @@ impl MetaPageCodec {
 
 #[cfg(test)]
 mod tests {
-    use crate::storage::b_plus_tree::codec::meta_page::MetaPageCodec;
+    use crate::storage::codec::meta_page::MetaPageCodec;
     use crate::storage::b_plus_tree::page::meta_page::MetaPage;
 
     #[test]

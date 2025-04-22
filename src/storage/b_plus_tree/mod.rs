@@ -1,6 +1,5 @@
 pub mod b_plus_tree_index;
 pub mod buffer_pool_manager;
-pub mod codec;
 pub mod comparator;
 pub mod disk;
 pub mod page;

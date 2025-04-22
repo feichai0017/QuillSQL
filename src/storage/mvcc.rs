@@ -10,7 +10,7 @@ use crate::error::{Error, Result};
 
 use super::{
     engine::Engine,
-    keycode::{deserialize_key, serialize_key},
+    codec::common::{deserialize_key, serialize_key},
 };
 
 pub type TransactionId = u64;

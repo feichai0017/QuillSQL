@@ -1,6 +1,6 @@
 use crate::error::{Error, Result};
 use crate::storage::b_plus_tree::buffer_pool_manager::PAGE_SIZE;
-use crate::storage::b_plus_tree::codec::{CommonCodec, DecodedData};
+use crate::storage::codec::{common::CommonCodec, DecodedData};
 use crate::storage::b_plus_tree::page::table_page::{
     RecordId, TablePage, TablePageHeader, TupleInfo, TupleMeta,
 };
@@ -148,8 +148,8 @@ impl RidCodec {
 #[cfg(test)]
 mod tests {
     use crate::storage::b_plus_tree::buffer_pool_manager::INVALID_PAGE_ID;
-    use crate::storage::b_plus_tree::codec::table_page::TablePageHeaderCodec;
-    use crate::storage::b_plus_tree::codec::TablePageCodec;
+    use crate::storage::codec::table_page::TablePageHeaderCodec;
+    use crate::storage::codec::table_page::TablePageCodec;
     use crate::storage::b_plus_tree::page::table_page::{TablePage, TupleMeta};
 
     #[test]

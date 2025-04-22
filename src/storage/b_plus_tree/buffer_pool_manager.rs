@@ -1,6 +1,7 @@
 use crate::error::{Error, Result};
-use crate::storage::b_plus_tree::codec::{
-    BPlusTreeInternalPageCodec, BPlusTreeLeafPageCodec, BPlusTreePageCodec, TablePageCodec,
+use crate::storage::codec::{
+    index_page::{BPlusTreeInternalPageCodec, BPlusTreeLeafPageCodec, BPlusTreePageCodec},
+    table_page::TablePageCodec,
 };
 use crate::storage::b_plus_tree::disk::disk_scheduler::DiskScheduler;
 use crate::storage::b_plus_tree::page::index_page::{

@@ -9,7 +9,7 @@ use crate::{
         schema::Table,
         types::{Row, Value},
     },
-    storage::{self, engine::Engine as StorageEngine, keycode::serialize_key},
+    storage::{self, engine::Engine as StorageEngine, codec::common::serialize_key},
 };
 
 use super::{Engine, Transaction};
