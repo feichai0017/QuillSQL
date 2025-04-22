@@ -13,7 +13,7 @@ use super::{
     keycode::{deserialize_key, serialize_key},
 };
 
-pub type Version = u64;
+pub type TransactionId = u64;
 
 pub struct Mvcc<E: Engine> {
     engine: Arc<Mutex<E>>,
@@ -47,13 +47,13 @@ pub struct MvccTransaction<E: Engine> {
 // 事务状态
 pub struct TransactionState {
     // 当前事务的版本号
-    pub version: Version,
+    pub version: TransactionId,
     // 当前活跃事务版本列表
-    pub active_versions: HashSet<Version>,
+    pub active_versions: HashSet<TransactionId>,
 }
 
 impl TransactionState {
-    fn is_visible(&self, version: Version) -> bool {
+    fn is_visible(&self, version: TransactionId) -> bool {
         if self.active_versions.contains(&version) {
             return false;
         } else {
@@ -65,9 +65,9 @@ impl TransactionState {
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub enum MvccKey {
     NextVersion,
-    TxnAcvtive(Version),
-    TxnWrite(Version, #[serde(with = "serde_bytes")] Vec<u8>),
-    Version(#[serde(with = "serde_bytes")] Vec<u8>, Version),
+    TxnAcvtive(TransactionId),
+    TxnWrite(TransactionId, #[serde(with = "serde_bytes")] Vec<u8>),
+    Version(#[serde(with = "serde_bytes")] Vec<u8>, TransactionId),
 }
 
 // NextVersion 0
@@ -88,7 +88,7 @@ impl MvccKey {
 pub enum MvccKeyPrefix {
     NextVersion,
     TxnAcvtive,
-    TxnWrite(Version),
+    TxnWrite(TransactionId),
     Version(#[serde(with = "serde_bytes")] Vec<u8>),
 }
 
@@ -318,7 +318,7 @@ impl<E: Engine> MvccTransaction<E> {
     }
 
     // 扫描获取当前活跃事务列表
-    fn scan_active(engine: &mut MutexGuard<E>) -> Result<HashSet<Version>> {
+    fn scan_active(engine: &mut MutexGuard<E>) -> Result<HashSet<TransactionId>> {
         let mut active_versions = HashSet::new();
         let mut iter = engine.scan_prefix(MvccKeyPrefix::TxnAcvtive.encode()?);
         while let Some((key, _)) = iter.next().transpose()? {

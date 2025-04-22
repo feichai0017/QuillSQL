@@ -6,7 +6,7 @@
 
 Rust 实现的 SQL 数据库系统
 
-## 支持的 SQL 语法
+## supported SQL syntax
 
 ### 1. Create/Drop Table
 create table:

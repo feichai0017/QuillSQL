@@ -8,6 +8,7 @@ use crate::storage::b_plus_tree::page::index_page::{
 };
 use crate::storage::b_plus_tree::page::table_page::TablePage;
 use crate::utils::cache::lru_k::LRUKReplacer;
+use crate::utils::cache::Replacer;
 use bytes::{Bytes, BytesMut};
 use dashmap::DashMap;
 use derive_with::With;
@@ -178,7 +179,7 @@ impl BufferPoolManager {
 
         Ok(Self {
             pool,
-            replacer: Arc::new(RwLock::new(LRUKReplacer::new(pool_size, k))),
+            replacer: Arc::new(RwLock::new(LRUKReplacer::with_k(pool_size, k))),
             disk_scheduler,
             page_table: Arc::new(DashMap::new()),
             free_list: Arc::new(RwLock::new(free_list)),
@@ -597,6 +598,7 @@ mod tests {
     use crate::storage::b_plus_tree::buffer_pool_manager::BufferPoolManager;
     use crate::storage::b_plus_tree::disk::disk_manager::DiskManager;
     use crate::storage::b_plus_tree::disk::disk_scheduler::DiskScheduler;
+    use crate::utils::cache::Replacer;
     use std::sync::Arc;
     use tempfile::TempDir;
 

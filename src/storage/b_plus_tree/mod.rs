@@ -9,7 +9,7 @@ pub mod table_heap;
 use std::marker::PhantomData;
 use std::ops::RangeBounds;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 
 use crate::error::{Error, Result};
 use crate::storage::b_plus_tree::b_plus_tree_index::KeyComparator;
@@ -25,7 +25,7 @@ use b_plus_tree_index::default_comparator;
 /// B+树存储引擎，实现Engine trait
 pub struct BPlusTreeEngine {
     // Index mapping Key -> RecordId
-    index: Mutex<Arc<BPlusTreeIndex>>,
+    index: RwLock<Arc<BPlusTreeIndex>>,
     comparator: KeyComparator,
     // Heap managing RecordId -> Vec<u8> (data)
     table_heap: Arc<TableHeap>,
@@ -53,7 +53,7 @@ impl BPlusTreeEngine {
         ));
 
         Ok(Self {
-            index: Mutex::new(index),
+            index: RwLock::new(index),
             comparator: default_comparator,
             table_heap,  // Store Arc<TableHeap>
         })
@@ -83,11 +83,11 @@ impl Engine for BPlusTreeEngine {
         // 2. Lock the index
         let index_guard = self
             .index
-            .lock()
+            .write()
             .map_err(|e| Error::Internal(e.to_string()))?;
 
         // 3. Insert the (key, record_id) into the B+Tree index
-        index_guard.insert(key, record_id)?;
+        index_guard.insert(&key, record_id)?;
 
         Ok(())
     }
@@ -95,7 +95,7 @@ impl Engine for BPlusTreeEngine {
     fn get(&mut self, key: Vec<u8>) -> Result<Option<Vec<u8>>> {
         let index_guard = self
             .index
-            .lock()
+            .read()
             .map_err(|e| Error::Internal(e.to_string()))?;
 
         match index_guard.get(&key)? {
@@ -119,7 +119,7 @@ impl Engine for BPlusTreeEngine {
     fn delete(&mut self, key: Vec<u8>) -> Result<()> {
         let index_guard = self
             .index
-            .lock()
+            .write()
             .map_err(|e| Error::Internal(e.to_string()))?;
 
         // 1. Find the RecordId associated with the key
@@ -179,7 +179,7 @@ impl Engine for BPlusTreeEngine {
         let end_bound = range.end_bound().cloned();
 
         // 创建B+树迭代器
-        let index_arc = match self.index.lock() {
+        let index_arc = match self.index.read() {
             Ok(index) => index.clone(),
             Err(_) => {
                 // Fallback/Error handling: Create a temporary index instance
