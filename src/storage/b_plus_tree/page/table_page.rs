@@ -3,8 +3,7 @@ use crate::storage::b_plus_tree::buffer_pool_manager::{PageId, INVALID_PAGE_ID, 
 use crate::storage::b_plus_tree::codec::{TablePageHeaderCodec, TablePageHeaderTupleInfoCodec};
 use derive_new;
 use std::sync::LazyLock;
-
-pub type TransactionId = u64;
+use crate::storage::mvcc::TransactionId;
 
 pub static EMPTY_TUPLE_META: TupleMeta = TupleMeta {
     insert_txn_id: 0,
@@ -220,13 +219,18 @@ impl TablePage {
     }
 
     pub fn get_next_rid(&self, rid: &RecordId) -> Option<RecordId> {
-        // TODO 忽略删除的tuple
-        let tuple_id = rid.slot_num;
-        if tuple_id + 1 >= self.header.num_tuples as u32 {
-            return None;
+        let mut tuple_id = rid.slot_num;
+        
+        // Find next non-deleted tuple
+        while tuple_id + 1 < self.header.num_tuples as u32 {
+            tuple_id += 1;
+            let meta = self.header.tuple_infos[tuple_id as usize].meta;
+            if !meta.is_deleted {
+                return Some(RecordId::new(rid.page_id, tuple_id));
+            }
         }
 
-        Some(RecordId::new(rid.page_id, tuple_id + 1))
+        None
     }
 }
 

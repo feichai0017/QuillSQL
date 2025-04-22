@@ -1,6 +1,6 @@
+use crate::error::{Error, Result};
 use crate::storage::b_plus_tree::buffer_pool_manager::{PageId, INVALID_PAGE_ID};
 use crate::storage::b_plus_tree::codec::MetaPageCodec;
-use crate::error::{Error, Result};
 use std::sync::LazyLock;
 
 pub static EMPTY_META_PAGE: MetaPage = MetaPage {

@@ -68,14 +68,14 @@ impl BPlusTreeIndex {
         self.root_page_id.load(Ordering::SeqCst) == INVALID_PAGE_ID
     }
 
-    pub fn insert(&self, key: Vec<u8>, rid: RecordId) -> Result<()> {
+    pub fn insert(&self, key: &[u8], rid: RecordId) -> Result<()> {
         if self.is_empty() {
-            self.start_new_tree(&key, rid)?;
+            self.start_new_tree(key, rid)?;
             return Ok(());
         }
         let mut context = Context::new(self.root_page_id.load(Ordering::SeqCst));
         // 找到leaf page
-        let Some(leaf_page) = self.find_leaf_page(&key, &mut context)? else {
+        let Some(leaf_page) = self.find_leaf_page(key, &mut context)? else {
             return Err(Error::Internal(
                 "Cannot find leaf page to insert".to_string(),
             ));
@@ -138,7 +138,7 @@ impl BPlusTreeIndex {
         Ok(())
     }
 
-    pub fn delete(&self, key: &Vec<u8>) -> Result<()> {
+    pub fn delete(&self, key: &[u8]) -> Result<()> {
         if self.is_empty() {
             return Ok(());
         }
@@ -206,7 +206,7 @@ impl BPlusTreeIndex {
         Ok(())
     }
 
-    fn start_new_tree(&self, key: &Vec<u8>, rid: RecordId) -> Result<()> {
+    fn start_new_tree(&self, key: &[u8], rid: RecordId) -> Result<()> {
         let new_page = self.buffer_pool.new_page()?;
         let new_page_id = new_page.read().page_id;
 
@@ -226,7 +226,7 @@ impl BPlusTreeIndex {
     }
 
     // 找到叶子节点上对应的Value
-    pub fn get(&self, key: &Vec<u8>) -> Result<Option<RecordId>> {
+    pub fn get(&self, key: &[u8]) -> Result<Option<RecordId>> {
         if self.is_empty() {
             return Ok(None);
         }
@@ -241,7 +241,7 @@ impl BPlusTreeIndex {
         Ok(result)
     }
 
-    fn find_leaf_page(&self, key: &Vec<u8>, context: &mut Context) -> Result<Option<PageRef>> {
+    fn find_leaf_page(&self, key: &[u8], context: &mut Context) -> Result<Option<PageRef>> {
         if self.is_empty() {
             return Ok(None);
         }
@@ -717,37 +717,37 @@ mod tests {
         let index = BPlusTreeIndex::new(default_comparator, buffer_pool, 4, 4);
 
         index
-            .insert(create_test_key(1), RecordId::new(1, 1))
+            .insert(&create_test_key(1), RecordId::new(1, 1))
             .unwrap();
         index
-            .insert(create_test_key(2), RecordId::new(2, 2))
+            .insert(&create_test_key(2), RecordId::new(2, 2))
             .unwrap();
         index
-            .insert(create_test_key(3), RecordId::new(3, 3))
+            .insert(&create_test_key(3), RecordId::new(3, 3))
             .unwrap();
         index
-            .insert(create_test_key(4), RecordId::new(4, 4))
+            .insert(&create_test_key(4), RecordId::new(4, 4))
             .unwrap();
         index
-            .insert(create_test_key(5), RecordId::new(5, 5))
+            .insert(&create_test_key(5), RecordId::new(5, 5))
             .unwrap();
         index
-            .insert(create_test_key(6), RecordId::new(6, 6))
+            .insert(&create_test_key(6), RecordId::new(6, 6))
             .unwrap();
         index
-            .insert(create_test_key(7), RecordId::new(7, 7))
+            .insert(&create_test_key(7), RecordId::new(7, 7))
             .unwrap();
         index
-            .insert(create_test_key(8), RecordId::new(8, 8))
+            .insert(&create_test_key(8), RecordId::new(8, 8))
             .unwrap();
         index
-            .insert(create_test_key(9), RecordId::new(9, 9))
+            .insert(&create_test_key(9), RecordId::new(9, 9))
             .unwrap();
         index
-            .insert(create_test_key(10), RecordId::new(10, 10))
+            .insert(&create_test_key(10), RecordId::new(10, 10))
             .unwrap();
         index
-            .insert(create_test_key(11), RecordId::new(11, 11))
+            .insert(&create_test_key(11), RecordId::new(11, 11))
             .unwrap();
 
         index

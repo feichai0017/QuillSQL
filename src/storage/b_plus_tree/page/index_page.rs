@@ -128,15 +128,32 @@ impl BPlusTreeInternalPage {
         (self.comparator)(a, b)
     }
 
-    // TODO 可以通过二分查找来插入
+    // Insert key-value pair using binary search to find insertion position
     pub fn insert(&mut self, key: Vec<u8>, page_id: PageId) {
-        self.array.push((key, page_id));
+        // Skip first empty key if exists
+        let start_idx = if self.array.is_empty() { 0 } else { 1 };
+        let mut pos = start_idx;
+        
+        // Binary search to find insertion position
+        let mut left = start_idx;
+        let mut right = self.array.len();
+        
+        while left < right {
+            let mid = (left + right) / 2;
+            match self.compare_keys(&key, &self.array[mid].0) {
+                Ordering::Less => right = mid,
+                Ordering::Greater => left = mid + 1,
+                Ordering::Equal => {
+                    pos = mid;
+                    break;
+                }
+            }
+            pos = left;
+        }
+
+        // Insert at found position
+        self.array.insert(pos, (key, page_id));
         self.header.current_size += 1;
-        // 跳过第一个空key
-        let null_kv = self.array.remove(0);
-        let cmp = self.comparator;
-        self.array.sort_by(|a, b| cmp(a.0.as_slice(), b.0.as_slice()));
-        self.array.insert(0, null_kv);
     }
     pub fn batch_insert(&mut self, kvs: Vec<InternalKV>) {
         let kvs_len = kvs.len();
@@ -243,7 +260,7 @@ impl BPlusTreeInternalPage {
     }
 
     // 查找key对应的page_id
-    pub fn look_up(&self, key: &Vec<u8>) -> PageId {
+    pub fn look_up(&self, key: &[u8]) -> PageId {
         // 第一个key为空，所以从1开始
         let mut start = 1;
         if self.header.current_size == 0 {
@@ -345,12 +362,29 @@ impl BPlusTreeLeafPage {
         (self.comparator)(a, b)
     }
 
-    // TODO 可以通过二分查找来插入
-    pub fn insert(&mut self, key: &Vec<u8>, rid: RecordId) {
-        self.array.push((key.clone(), rid));
+    // Insert key-value pair using binary search to find insertion position
+    pub fn insert(&mut self, key: &[u8], rid: RecordId) {
+        let mut pos = 0;
+        let mut left = 0;
+        let mut right = self.array.len();
+
+        // Binary search to find insertion position
+        while left < right {
+            let mid = (left + right) / 2;
+            match self.compare_keys(key, &self.array[mid].0) {
+                Ordering::Less => right = mid,
+                Ordering::Greater => left = mid + 1,
+                Ordering::Equal => {
+                    pos = mid;
+                    break;
+                }
+            }
+            pos = left;
+        }
+
+        // Insert at found position
+        self.array.insert(pos, (key.to_vec(), rid));
         self.header.current_size += 1;
-        let cmp = self.comparator;
-        self.array.sort_by(|a, b| cmp(a.0.as_slice(), b.0.as_slice()));
     }
 
     pub fn batch_insert(&mut self, kvs: Vec<LeafKV>) {
@@ -376,8 +410,8 @@ impl BPlusTreeLeafPage {
         new_array
     }
 
-    pub fn delete(&mut self, key: &Vec<u8>) {
-        let key_index = self.key_index(key.clone());
+    pub fn delete(&mut self, key: &[u8]) {
+        let key_index = self.key_index(key.to_vec());
         if let Some(index) = key_index {
             self.array.remove(index);
             self.header.current_size -= 1;
@@ -385,8 +419,8 @@ impl BPlusTreeLeafPage {
     }
 
     // 查找key对应的rid
-    pub fn look_up(&self, key: &Vec<u8>) -> Option<RecordId> {
-        let key_index = self.key_index(key.clone());
+    pub fn look_up(&self, key: &[u8]) -> Option<RecordId> {
+        let key_index = self.key_index(key.to_vec());
         key_index.map(|index| self.array[index].1)
     }
 
