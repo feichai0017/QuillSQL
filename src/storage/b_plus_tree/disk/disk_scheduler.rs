@@ -1,6 +1,6 @@
 use super::disk_manager::DiskManager;
-use crate::error::{Error, Result};
-use crate::storage::b_plus_tree::buffer_pool_manager::PageId;
+use crate::buffer::PageId;
+use crate::error::{QuillSQLError, QuillSQLResult};
 use bytes::{Bytes, BytesMut};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
@@ -16,13 +16,13 @@ pub enum DiskResponse {
     Read { data: BytesMut },
     Write,
     Allocate { page_id: PageId },
-    Error(Error),
+    Error(QuillSQLError),
 }
 
 // Type alias for the sender part of the result channel
-pub type DiskCommandResultSender<T> = Sender<Result<T>>;
+pub type DiskCommandResultSender<T> = Sender<QuillSQLResult<T>>;
 // Type alias for the receiver part of the result channel
-pub type DiskCommandResultReceiver<T> = Receiver<Result<T>>;
+pub type DiskCommandResultReceiver<T> = Receiver<QuillSQLResult<T>>;
 
 // Commands sent from BufferPoolManager to the DiskScheduler task
 #[derive(Debug)]
@@ -37,7 +37,7 @@ pub enum DiskRequest {
         result_sender: DiskCommandResultSender<()>,
     },
     AllocatePage {
-        result_sender: Sender<Result<PageId>>,
+        result_sender: Sender<QuillSQLResult<PageId>>,
     },
     DeallocatePage {
         page_id: PageId,
@@ -134,14 +134,14 @@ impl DiskScheduler {
 
     // --- Public methods to send requests ---
 
-    pub fn schedule_read(&self, page_id: PageId) -> Result<DiskCommandResultReceiver<BytesMut>> {
+    pub fn schedule_read(&self, page_id: PageId) -> QuillSQLResult<DiskCommandResultReceiver<BytesMut>> {
         let (tx, rx) = mpsc::channel();
         self.request_sender
             .send(DiskRequest::ReadPage {
                 page_id,
                 result_sender: tx,
             })
-            .map_err(|e| Error::Internal(format!("Failed to send Read request: {}", e)))?;
+            .map_err(|e| QuillSQLError::Internal(format!("Failed to send Read request: {}", e)))?;
         Ok(rx)
     }
 
@@ -149,7 +149,7 @@ impl DiskScheduler {
         &self,
         page_id: PageId,
         data: Bytes,
-    ) -> Result<DiskCommandResultReceiver<()>> {
+    ) -> QuillSQLResult<DiskCommandResultReceiver<()>> {
         let (tx, rx) = mpsc::channel();
         self.request_sender
             .send(DiskRequest::WritePage {
@@ -157,26 +157,26 @@ impl DiskScheduler {
                 data,
                 result_sender: tx,
             })
-            .map_err(|e| Error::Internal(format!("Failed to send Write request: {}", e)))?;
+            .map_err(|e| QuillSQLError::Internal(format!("Failed to send Write request: {}", e)))?;
         Ok(rx)
     }
 
-    pub fn schedule_allocate(&self) -> Result<Receiver<Result<PageId>>> {
+    pub fn schedule_allocate(&self) -> QuillSQLResult<Receiver<QuillSQLResult<PageId>>> {
         let (tx, rx) = mpsc::channel();
         self.request_sender
             .send(DiskRequest::AllocatePage { result_sender: tx })
-            .map_err(|e| Error::Internal(format!("Failed to send Allocate request: {}", e)))?;
+            .map_err(|e| QuillSQLError::Internal(format!("Failed to send Allocate request: {}", e)))?;
         Ok(rx)
     }
 
-    pub fn schedule_deallocate(&self, page_id: PageId) -> Result<DiskCommandResultReceiver<()>> {
+    pub fn schedule_deallocate(&self, page_id: PageId) -> QuillSQLResult<DiskCommandResultReceiver<()>> {
         let (tx, rx) = mpsc::channel();
         self.request_sender
             .send(DiskRequest::DeallocatePage {
                 page_id,
                 result_sender: tx,
             })
-            .map_err(|e| Error::Internal(format!("Failed to send Deallocate request: {}", e)))?;
+            .map_err(|e| QuillSQLError::Internal(format!("Failed to send Deallocate request: {}", e)))?;
         Ok(rx)
     }
 }
@@ -206,8 +206,8 @@ impl Drop for DiskScheduler {
 mod tests {
     use super::DiskManager;
     use super::*;
-    use crate::error::Result;
-    use crate::storage::b_plus_tree::buffer_pool_manager::PAGE_SIZE;
+    use crate::error::QuillSQLResult;
+    use crate::buffer::PAGE_SIZE;
     use bytes::{Bytes, BytesMut};
     use std::sync::Arc;
     use std::thread;
@@ -238,14 +238,14 @@ mod tests {
     }
 
     #[test]
-    fn test_scheduler_allocate_write_read() -> Result<()> {
+    fn test_scheduler_allocate_write_read() -> QuillSQLResult<()> {
         let (_temp_dir, scheduler, _dm) = create_test_scheduler();
 
         // 分配页面
         let rx_alloc = scheduler.schedule_allocate()?;
         let page_id = rx_alloc
             .recv()
-            .map_err(|e| Error::Internal(format!("RecvError: {}", e)))??;
+            .map_err(|e| QuillSQLError::Internal(format!("RecvError: {}", e)))??;
 
         // 写入测试数据
         let content = "Hello DiskScheduler!";
@@ -253,38 +253,38 @@ mod tests {
         let rx_write = scheduler.schedule_write(page_id, data_bytes)?;
         rx_write
             .recv()
-            .map_err(|e| Error::Internal(format!("RecvError: {}", e)))??;
+            .map_err(|e| QuillSQLError::Internal(format!("RecvError: {}", e)))??;
 
         // 读取并验证数据
         let rx_read = scheduler.schedule_read(page_id)?;
         let read_result = rx_read
             .recv()
-            .map_err(|e| Error::Internal(format!("RecvError: {}", e)))??;
+            .map_err(|e| QuillSQLError::Internal(format!("RecvError: {}", e)))??;
         assert_eq!(read_page_content(&read_result), content);
 
         Ok(())
     }
 
     #[test]
-    fn test_scheduler_deallocate() -> Result<()> {
+    fn test_scheduler_deallocate() -> QuillSQLResult<()> {
         let (_temp_dir, scheduler, dm) = create_test_scheduler();
 
         // 分配页面并写入数据
         let page_id = scheduler
             .schedule_allocate()?
             .recv()
-            .map_err(|e| Error::Internal(format!("RecvError: {}", e)))??;
+            .map_err(|e| QuillSQLError::Internal(format!("RecvError: {}", e)))??;
 
         scheduler
             .schedule_write(page_id, create_dummy_page_bytes("Test Data"))?
             .recv()
-            .map_err(|e| Error::Internal(format!("RecvError: {}", e)))??;
+            .map_err(|e| QuillSQLError::Internal(format!("RecvError: {}", e)))??;
 
         // 释放页面
         let rx_dealloc = scheduler.schedule_deallocate(page_id)?;
         rx_dealloc
             .recv()
-            .map_err(|e| Error::Internal(format!("RecvError: {}", e)))??;
+            .map_err(|e| QuillSQLError::Internal(format!("RecvError: {}", e)))??;
 
         // 验证页面内容已清零
         let data_after_dealloc = dm.read_page(page_id)?;
@@ -294,19 +294,19 @@ mod tests {
     }
 
     #[test]
-    fn test_concurrent_operations() -> Result<()> {
+    fn test_concurrent_operations() -> QuillSQLResult<()> {
         let (_temp_dir, scheduler, _dm) = create_test_scheduler();
 
         // 创建测试页面
         let page_id = scheduler
             .schedule_allocate()?
             .recv()
-            .map_err(|e| Error::Internal(format!("RecvError: {}", e)))??;
+            .map_err(|e| QuillSQLError::Internal(format!("RecvError: {}", e)))??;
 
         scheduler
             .schedule_write(page_id, create_dummy_page_bytes("Concurrent Test"))?
             .recv()
-            .map_err(|e| Error::Internal(format!("RecvError: {}", e)))??;
+            .map_err(|e| QuillSQLError::Internal(format!("RecvError: {}", e)))??;
 
         // 启动多个并发读取线程
         let mut handles = vec![];
@@ -339,7 +339,7 @@ mod tests {
     }
 
     #[test]
-    fn test_mixed_operations() -> Result<()> {
+    fn test_mixed_operations() -> QuillSQLResult<()> {
         let (_temp_dir, scheduler, _dm) = create_test_scheduler();
 
         // 分配多个页面
@@ -350,7 +350,7 @@ mod tests {
             let page_id = scheduler
                 .schedule_allocate()?
                 .recv()
-                .map_err(|e| Error::Internal(format!("RecvError: {}", e)))??;
+                .map_err(|e| QuillSQLError::Internal(format!("RecvError: {}", e)))??;
             page_ids.push(page_id);
         }
 
@@ -362,13 +362,13 @@ mod tests {
             scheduler
                 .schedule_write(page_id, create_dummy_page_bytes(&content))?
                 .recv()
-                .map_err(|e| Error::Internal(format!("RecvError: {}", e)))??;
+                .map_err(|e| QuillSQLError::Internal(format!("RecvError: {}", e)))??;
 
             // 读取并验证
             let read_data = scheduler
                 .schedule_read(page_id)?
                 .recv()
-                .map_err(|e| Error::Internal(format!("RecvError: {}", e)))??;
+                .map_err(|e| QuillSQLError::Internal(format!("RecvError: {}", e)))??;
 
             assert_eq!(read_page_content(&read_data), content);
         }
@@ -378,14 +378,14 @@ mod tests {
             scheduler
                 .schedule_deallocate(page_id)?
                 .recv()
-                .map_err(|e| Error::Internal(format!("RecvError: {}", e)))??;
+                .map_err(|e| QuillSQLError::Internal(format!("RecvError: {}", e)))??;
         }
 
         Ok(())
     }
 
     #[test]
-    fn test_scheduler_shutdown() -> Result<()> {
+    fn test_scheduler_shutdown() -> QuillSQLResult<()> {
         let (_temp_dir, scheduler, _dm) = create_test_scheduler();
         let scheduler_arc = scheduler;
 
@@ -416,14 +416,14 @@ mod tests {
     }
 
     #[test]
-    fn test_large_data_transfer() -> Result<()> {
+    fn test_large_data_transfer() -> QuillSQLResult<()> {
         let (_temp_dir, scheduler, _dm) = create_test_scheduler();
 
         // 分配页面
         let page_id = scheduler
             .schedule_allocate()?
             .recv()
-            .map_err(|e| Error::Internal(format!("RecvError: {}", e)))??;
+            .map_err(|e| QuillSQLError::Internal(format!("RecvError: {}", e)))??;
 
         // 创建一个接近页面大小限制的大数据
         let large_string = "X".repeat(PAGE_SIZE - 100);
@@ -433,13 +433,13 @@ mod tests {
         scheduler
             .schedule_write(page_id, large_data)?
             .recv()
-            .map_err(|e| Error::Internal(format!("RecvError: {}", e)))??;
+            .map_err(|e| QuillSQLError::Internal(format!("RecvError: {}", e)))??;
 
         // 读取并验证大数据
         let read_result = scheduler
             .schedule_read(page_id)?
             .recv()
-            .map_err(|e| Error::Internal(format!("RecvError: {}", e)))??;
+            .map_err(|e| QuillSQLError::Internal(format!("RecvError: {}", e)))??;
 
         // 验证数据长度，避免完整字符串比较
         let read_content = read_page_content(&read_result);

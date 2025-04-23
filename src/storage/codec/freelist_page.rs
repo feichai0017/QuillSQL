@@ -1,9 +1,7 @@
-use crate::storage::b_plus_tree::buffer_pool_manager::PAGE_SIZE;
-use crate::storage::codec::common::CommonCodec;
-use crate::storage::codec::DecodedData;
-use crate::storage::b_plus_tree::page::freelist_page::FreelistPage;
-use crate::storage::b_plus_tree::page::freelist_page::FreelistPageHeader;
-use crate::error::Result;
+use crate::buffer::PAGE_SIZE;
+use crate::storage::codec::{CommonCodec, DecodedData};
+use crate::storage::b_plus_tree::page::{FreelistPage, FreelistPageHeader};
+use crate::error::QuillSQLResult;
 
 pub struct FreelistPageHeaderCodec;
 
@@ -16,7 +14,7 @@ impl FreelistPageHeaderCodec {
         bytes
     }
 
-    pub fn decode(bytes: &[u8]) -> Result<DecodedData<FreelistPageHeader>> {
+    pub fn decode(bytes: &[u8]) -> QuillSQLResult<DecodedData<FreelistPageHeader>> {
         let mut left_bytes = bytes;
 
         let (next_page_id, offset) = CommonCodec::decode_u32(left_bytes)?;
@@ -54,7 +52,7 @@ impl FreelistPageCodec {
         bytes
     }
 
-    pub fn decode(bytes: &[u8]) -> Result<DecodedData<FreelistPage>> {
+    pub fn decode(bytes: &[u8]) -> QuillSQLResult<DecodedData<FreelistPage>> {
         let mut left_bytes = bytes;
 
         let (header, offset) = FreelistPageHeaderCodec::decode(left_bytes)?;
@@ -73,10 +71,8 @@ impl FreelistPageCodec {
 
 #[cfg(test)]
 mod tests {
-    use crate::storage::b_plus_tree::page::freelist_page::FREELIST_PAGE_MAX_SIZE;
-    use crate::storage::codec::freelist_page::FreelistPageCodec;
-    use crate::storage::b_plus_tree::page::freelist_page::FreelistPage;
-    use crate::storage::b_plus_tree::page::freelist_page::FreelistPageHeader;
+    use crate::storage::codec::FreelistPageCodec;
+    use crate::storage::b_plus_tree::page::{FreelistPage, FreelistPageHeader, FREELIST_PAGE_MAX_SIZE};
 
     #[test]
     fn freelist_page_codec() {

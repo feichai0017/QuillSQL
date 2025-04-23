@@ -1,6 +1,6 @@
-use crate::error::{Error, Result};
-use crate::storage::b_plus_tree::buffer_pool_manager::{PageId, INVALID_PAGE_ID};
-use crate::storage::codec::meta_page::MetaPageCodec;
+use crate::buffer::{PageId, INVALID_PAGE_ID};
+use crate::storage::codec::MetaPageCodec;
+use crate::error::{QuillSQLError, QuillSQLResult};
 use std::sync::LazyLock;
 
 pub static EMPTY_META_PAGE: MetaPage = MetaPage {
@@ -28,20 +28,20 @@ pub struct MetaPage {
 }
 
 impl MetaPage {
-    pub fn try_new() -> Result<Self> {
+    pub fn try_new() -> QuillSQLResult<Self> {
         let version_str = env!("CARGO_PKG_VERSION");
         let version_arr = version_str.split('.').collect::<Vec<&str>>();
         if version_arr.len() < 2 {
-            return Err(Error::Internal(format!(
+            return Err(QuillSQLError::Storage(format!(
                 "Package version is not xx.xx {}",
                 version_str
             )));
         }
         let major_version = version_arr[0].parse::<u32>().map_err(|_| {
-            Error::Internal(format!("Failed to parse major version {}", version_arr[0]))
+            QuillSQLError::Storage(format!("Failed to parse major version {}", version_arr[0]))
         })?;
         let minor_version = version_arr[1].parse::<u32>().map_err(|_| {
-            Error::Internal(format!("Failed to parse minor version {}", version_arr[1]))
+            QuillSQLError::Storage(format!("Failed to parse minor version {}", version_arr[1]))
         })?;
 
         Ok(Self {

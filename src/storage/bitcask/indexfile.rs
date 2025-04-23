@@ -5,7 +5,7 @@ use std::io::Write;
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::{Error, Result};
+use crate::error::{QuillSQLError, QuillSQLResult};
 #[derive(Debug)]
 pub struct IndexFile {
     pub id: u128,
@@ -16,7 +16,7 @@ pub struct IndexFile {
 }
 
 impl IndexFile {
-    pub fn create(path: &std::path::Path, is_readonly: bool) -> Result<IndexFile> {
+    pub fn create(path: &std::path::Path, is_readonly: bool) -> QuillSQLResult<IndexFile> {
         let indexfile = if is_readonly {
             OpenOptions::new().read(true).open(&path)?
         } else {
@@ -50,7 +50,7 @@ impl IndexFile {
         file_id: u128,
         offset: u64,
         timestamp: u128,
-    ) -> Result<u64> {
+    ) -> QuillSQLResult<u64> {
         let entry = IndexEntry {
             key: key.to_vec(),
             file_id,
@@ -64,14 +64,14 @@ impl IndexFile {
 
         let written = self.file.write(&encoded);
         if let Err(err_msg) = written {
-            return Err(Error::Internal(err_msg.to_string()));
+            return Err(QuillSQLError::Storage(err_msg.to_string()));
         }
 
         Ok(offset)
     }
 
     #[allow(dead_code)]
-    pub fn read(&mut self, offset: u64) -> Result<IndexEntry> {
+    pub fn read(&mut self, offset: u64) -> QuillSQLResult<IndexEntry> {
         self.file.seek(SeekFrom::Start(offset))?;
 
         let decoded: IndexEntry = bincode::deserialize_from(&self.file)?;

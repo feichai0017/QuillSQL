@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::error::{Error, Result};
+use crate::error::{QuillSQLError, QuillSQLResult};
 
 #[derive(Debug, Clone, Copy)]
 pub struct KeyDirEntry {
@@ -25,7 +25,7 @@ impl KeyDir {
         file_id: u128,
         offset: u64,
         timestamp: u128,
-    ) -> Result<()> {
+    ) -> QuillSQLResult<()> {
         log::trace!(
             "set key={} ts={} offset={} file_id={}",
             std::str::from_utf8(key).unwrap(),
@@ -48,18 +48,18 @@ impl KeyDir {
     }
 
     // TODO this should probably return a reference to the KeyDirEntry
-    pub fn get(&self, key: &[u8]) -> Result<KeyDirEntry> {
+    pub fn get(&self, key: &[u8]) -> QuillSQLResult<KeyDirEntry> {
         // TODO this can just be an ok_or_else
         if !self.entries.contains_key(key) {
             let key_str = format!("key not found: {}", std::str::from_utf8(key).unwrap());
-            return Err(Error::Internal(key_str));
+            return Err(QuillSQLError::Storage(key_str));
         }
         let entry = self.entries.get(key).cloned().unwrap();
         Ok(entry)
     }
 
     // TODO this result is never made
-    pub fn remove(&mut self, key: &[u8]) -> Result<()> {
+    pub fn remove(&mut self, key: &[u8]) -> QuillSQLResult<()> {
         self.entries.remove(&key.to_vec());
         Ok(())
     }

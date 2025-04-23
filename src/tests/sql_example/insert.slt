@@ -1,0 +1,39 @@
+statement ok
+create table t1 (
+    a tinyint,
+    b smallint,
+    c integer,
+    d bigint,
+    e tinyint unsigned,
+    f smallint unsigned,
+    g integer unsigned,
+    h bigint unsigned,
+    i float,
+    j varchar
+)
+
+statement ok
+insert into t1 values
+    (1, 2, 3, 4, 5, 6, 7, 8, 1.1, 'a'),
+    (NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)
+
+query
+select * from t1
+----
+1 2 3 4 5 6 7 8 1.1 a
+NULL NULL NULL NULL NULL NULL NULL NULL NULL NULL
+
+
+statement ok
+create table t2 (
+    a tinyint,
+    b integer default 1,
+)
+
+statement ok
+insert into t2(a) values (1)
+
+query
+select * from t2
+----
+1 1

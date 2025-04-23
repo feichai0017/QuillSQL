@@ -1,0 +1,46 @@
+use std::sync::Arc;
+
+use crate::catalog::SchemaRef;
+use crate::expression::{Expr, ExprTrait};
+use crate::{
+    execution::{ExecutionContext, VolcanoExecutor},
+    storage::tuple::Tuple,
+    error::QuillSQLResult,
+};
+
+use super::PhysicalPlan;
+
+#[derive(derive_new::new, Debug)]
+pub struct PhysicalProject {
+    pub exprs: Vec<Expr>,
+    pub schema: SchemaRef,
+    pub input: Arc<PhysicalPlan>,
+}
+
+impl VolcanoExecutor for PhysicalProject {
+    fn init(&self, context: &mut ExecutionContext) -> QuillSQLResult<()> {
+        self.input.init(context)
+    }
+
+    fn next(&self, context: &mut ExecutionContext) -> QuillSQLResult<Option<Tuple>> {
+        if let Some(tuple) = self.input.next(context)? {
+            let mut new_values = Vec::new();
+            for expr in &self.exprs {
+                new_values.push(expr.evaluate(&tuple)?);
+            }
+            Ok(Some(Tuple::new(self.output_schema(), new_values)))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn output_schema(&self) -> SchemaRef {
+        self.schema.clone()
+    }
+}
+
+impl std::fmt::Display for PhysicalProject {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Project")
+    }
+}

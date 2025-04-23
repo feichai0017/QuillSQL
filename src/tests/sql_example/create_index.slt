@@ -1,0 +1,5 @@
+statement ok
+create table t1 (a int, b int)
+
+statement ok
+create index idx1 on t1 (a)

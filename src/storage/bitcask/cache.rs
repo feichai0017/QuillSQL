@@ -1,5 +1,5 @@
 // src/storage/bitcask/cache.rs
-use crate::error::Result;
+use crate::error::QuillSQLResult;
 use crate::storage::bitcask::datafile::Entry;
 use crate::utils::cache::lru_k::LRUKReplacer;
 use crate::utils::cache::Replacer;
@@ -67,7 +67,7 @@ where
         None
     }
 
-    pub fn put(&mut self, key: K, value: V) -> Result<()> {
+    pub fn put(&mut self, key: K, value: V) -> QuillSQLResult<()> {
         let frame_id = self.key_to_frame_id(&key);
 
         // 如果已存在，直接更新

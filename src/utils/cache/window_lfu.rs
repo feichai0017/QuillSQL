@@ -1,6 +1,6 @@
 use super::Replacer; // 引入定义的 trait
-use crate::error::{Error, Result};
-use crate::storage::b_plus_tree::buffer_pool_manager::FrameId;
+use crate::error::{QuillSQLError, QuillSQLResult};
+use crate::buffer::FrameId;
 use std::collections::HashMap;
 use std::time::{Duration, Instant}; // 使用真实时间
 
@@ -38,7 +38,7 @@ impl Replacer for WindowLFUReplacer {
         Self::with_window(capacity, DEFAULT_WINDOW_DURATION)
     }
 
-    fn record_access(&mut self, frame_id: FrameId) -> Result<()> {
+    fn record_access(&mut self, frame_id: FrameId) -> QuillSQLResult<()> {
         let now = Instant::now();
         if let Some(node) = self.node_store.get_mut(&frame_id) {
             node.frequency += 1;
@@ -48,7 +48,7 @@ impl Replacer for WindowLFUReplacer {
             // BufferPoolManager 应该保证在调用 record_access 前已确保有空间
             if self.node_store.len() >= self.capacity {
                  // 通常不应在这里失败，BPM 应该先调用 evict
-                return Err(Error::Internal(format!(
+                return Err(QuillSQLError::Internal(format!(
                     "WindowLFU capacity {} reached when accessing new frame {}",
                     self.capacity, frame_id
                 )));
@@ -108,7 +108,7 @@ impl Replacer for WindowLFUReplacer {
         }
     }
 
-    fn set_evictable(&mut self, frame_id: FrameId, set_evictable: bool) -> Result<()> {
+    fn set_evictable(&mut self, frame_id: FrameId, set_evictable: bool) -> QuillSQLResult<()> {
         if let Some(node) = self.node_store.get_mut(&frame_id) {
             let was_evictable = node.is_evictable;
             node.is_evictable = set_evictable;
@@ -125,7 +125,7 @@ impl Replacer for WindowLFUReplacer {
             }
             Ok(())
         } else {
-            Err(Error::Internal(format!(
+            Err(QuillSQLError::Internal(format!(
                 "Frame {} not found in WindowLFUReplacer::set_evictable",
                 frame_id
             )))

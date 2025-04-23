@@ -6,7 +6,7 @@ use memmap2::MmapOptions;
 use serde::{Deserialize, Serialize};
 
 use crate::storage::bitcask::REMOVE_TOMBSTONE;
-use crate::error::Result;
+use crate::error::QuillSQLResult;
 
 #[derive(Clone, Debug)]
 pub struct DataFileMetadata {
@@ -64,7 +64,7 @@ pub struct DataFile {
 }
 
 impl DataFile {
-    pub fn create(path: &std::path::Path, is_readonly: bool) -> Result<DataFile> {
+    pub fn create(path: &std::path::Path, is_readonly: bool) -> QuillSQLResult<DataFile> {
         let datafile = if is_readonly {
             OpenOptions::new().read(true).open(&path)?
         } else {
@@ -95,7 +95,7 @@ impl DataFile {
         self.id
     }
 
-    pub fn write(&mut self, key: &[u8], value: &[u8], timestamp: u128) -> Result<u64> {
+    pub fn write(&mut self, key: &[u8], value: &[u8], timestamp: u128) -> QuillSQLResult<u64> {
         let entry = Entry {
             timestamp,
             key: key.to_vec(),
@@ -110,11 +110,11 @@ impl DataFile {
         Ok(offset)
     }
 
-    pub fn remove(&mut self, key: &[u8], timestamp: u128) -> Result<u64> {
+    pub fn remove(&mut self, key: &[u8], timestamp: u128) -> QuillSQLResult<u64> {
         self.write(key, REMOVE_TOMBSTONE, timestamp)
     }
 
-    pub fn read(&mut self, offset: u64) -> Result<Entry> {
+    pub fn read(&mut self, offset: u64) -> QuillSQLResult<Entry> {
         let mmap = unsafe { MmapOptions::new().map(&*self.file)? };
         let decoded: Entry = bincode::deserialize(&mmap[(offset as usize)..])?;
         Ok(decoded)
@@ -126,7 +126,7 @@ impl DataFile {
         DataFileIterator { file }
     }
 
-    pub fn sync(&mut self) -> Result<()> {
+    pub fn sync(&mut self) -> QuillSQLResult<()> {
         self.file.sync_all().map_err(Into::into)
     }
 

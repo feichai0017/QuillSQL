@@ -1,192 +1,194 @@
-use crate::error::Result;
-use crate::storage::b_plus_tree::buffer_pool_manager::BufferPoolManager;
-use crate::storage::b_plus_tree::buffer_pool_manager::{AtomicPageId, INVALID_PAGE_ID};
-use crate::storage::codec::table_page::TablePageCodec;
-use crate::storage::b_plus_tree::page::table_page::{RecordId, TablePage, TupleMeta};
+use crate::buffer::{AtomicPageId, INVALID_PAGE_ID};
+use crate::catalog::SchemaRef;
 use crate::utils::util::page_bytes_to_array;
+use crate::storage::codec::TablePageCodec;
+use crate::storage::b_plus_tree::page::{RecordId, TablePage, TupleMeta, INVALID_RID};
+use crate::{buffer::BufferPoolManager, error::QuillSQLResult};
 use std::collections::Bound;
 use std::ops::RangeBounds;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
+use crate::storage::tuple::Tuple;
+
 #[derive(Debug)]
 pub struct TableHeap {
+    pub schema: SchemaRef,
     pub buffer_pool: Arc<BufferPoolManager>,
     pub first_page_id: AtomicPageId,
     pub last_page_id: AtomicPageId,
 }
 
 impl TableHeap {
-    pub fn try_new(buffer_pool: Arc<BufferPoolManager>) -> Result<Self> {
+    pub fn try_new(schema: SchemaRef, buffer_pool: Arc<BufferPoolManager>) -> QuillSQLResult<Self> {
         // new a page and initialize
         let first_page = buffer_pool.new_page()?;
-        let first_page_id = first_page.read().page_id;
-        let table_page = TablePage::new(INVALID_PAGE_ID);
+        let first_page_id = first_page.read().unwrap().page_id;
+        let table_page = TablePage::new(schema.clone(), INVALID_PAGE_ID);
         first_page
             .write()
+            .unwrap()
             .set_data(page_bytes_to_array(&TablePageCodec::encode(&table_page)));
 
         Ok(Self {
+            schema,
             buffer_pool,
             first_page_id: AtomicPageId::new(first_page_id),
             last_page_id: AtomicPageId::new(first_page_id),
         })
     }
 
-    /// Inserts raw byte data into the table.
+    /// Inserts a tuple into the table.
+    ///
+    /// This function inserts the given tuple into the table. If the last page in the table
+    /// has enough space for the tuple, it is inserted there. Otherwise, a new page is allocated
+    /// and the tuple is inserted there.
     ///
     /// Parameters:
-    /// - `meta`: The metadata associated with the data.
-    /// - `data`: The raw byte data (`Vec<u8>`) to be inserted.
+    /// - `meta`: The metadata associated with the tuple.
+    /// - `tuple`: The tuple to be inserted.
     ///
     /// Returns:
-    /// A `Result` containing the `RecordId` of the inserted data if successful.
-    pub fn insert_data(&self, meta: &TupleMeta, data: &[u8]) -> Result<RecordId> {
+    /// An `Option` containing the `Rid` of the inserted tuple if successful, otherwise `None`.
+    pub fn insert_tuple(&self, meta: &TupleMeta, tuple: &Tuple) -> QuillSQLResult<RecordId> {
         let mut last_page_id = self.last_page_id.load(Ordering::SeqCst);
+        let (last_page, mut last_table_page) = self
+            .buffer_pool
+            .fetch_table_page(last_page_id, self.schema.clone())?;
 
-        // Need to loop until we find or create a page with enough space
+        // Loop until a suitable page is found for inserting the tuple
         loop {
-            let (page_ref, mut table_page) = self.buffer_pool.fetch_table_page(last_page_id)?; // Fetch the current candidate page
-
-            // Check if the current page has enough space using next_data_offset
-            if table_page.next_data_offset(data).is_ok() {
-                // Yes, insert into this page
-                let slot_id = table_page.insert_data(meta, data)?;
-
-                // Write the modified page back
-                page_ref
-                    .write()
-                    .set_data(page_bytes_to_array(&TablePageCodec::encode(&table_page)));
-
-                // Return the new RecordId
-                return Ok(RecordId::new(last_page_id, slot_id as u32));
+            if last_table_page.next_tuple_offset(tuple).is_ok() {
+                break;
             }
 
-            // Current page is full, need to allocate a new one
             // if there's no tuple in the page, and we can't insert the tuple,
             // then this tuple is too large.
             assert!(
-                table_page.header.num_tuples > 0 || table_page.header.num_deleted_tuples > 0, // Check if page was ever used
-                "Data is too large to fit in an empty page, cannot insert"
+                last_table_page.header.num_tuples > 0,
+                "tuple is too large, cannot insert"
             );
 
-            // Allocate a new page
-            let new_page = self.buffer_pool.new_page()?;
-            let new_page_id = new_page.read().page_id;
-            let new_table_page = TablePage::new(INVALID_PAGE_ID);
-            new_page
+            // Allocate a new page if no more table pages are available.
+            let next_page = self.buffer_pool.new_page()?;
+            let next_page_id = next_page.read().unwrap().page_id;
+            let next_table_page = TablePage::new(self.schema.clone(), INVALID_PAGE_ID);
+            next_page
                 .write()
+                .unwrap()
                 .set_data(page_bytes_to_array(&TablePageCodec::encode(
-                    &new_table_page,
+                    &next_table_page,
                 )));
 
-            // Update and release the *previous* page to point to the new page
-            table_page.header.next_page_id = new_page_id;
-            let prev_page_ref = self.buffer_pool.fetch_page(last_page_id)?; // Re-fetch previous page ref to write
-            prev_page_ref
+            // Update and release the previous page
+            last_table_page.header.next_page_id = next_page_id;
+            last_page
                 .write()
-                .set_data(page_bytes_to_array(&TablePageCodec::encode(&table_page)));
+                .unwrap()
+                .set_data(page_bytes_to_array(&TablePageCodec::encode(
+                    &last_table_page,
+                )));
 
-            // Update last_page_id tracker and loop to try inserting into the new page
-            self.last_page_id.store(new_page_id, Ordering::SeqCst);
-            last_page_id = new_page_id;
-            // The loop will now fetch and check the new page
+            // Update last_page_id.
+            last_page_id = next_page_id;
+            last_table_page = next_table_page;
+            self.last_page_id.store(last_page_id, Ordering::SeqCst);
         }
+
+        // Insert the tuple into the chosen page
+        let slot_id = last_table_page.insert_tuple(meta, tuple)?;
+
+        last_page
+            .write()
+            .unwrap()
+            .set_data(page_bytes_to_array(&TablePageCodec::encode(
+                &last_table_page,
+            )));
+
+        // Map the slot_id to a Rid and return
+        Ok(RecordId::new(last_page_id, slot_id as u32))
     }
 
-    // Update existing data identified by RecordId
-    pub fn update_data(&self, rid: RecordId, data: &[u8]) -> Result<()> {
-        let (page, mut table_page) = self.buffer_pool.fetch_table_page(rid.page_id)?;
-        table_page.update_data(data, rid.slot_num as u16)?; // Use update_data
+    pub fn update_tuple(&self, rid: RecordId, tuple: Tuple) -> QuillSQLResult<()> {
+        let (page, mut table_page) = self
+            .buffer_pool
+            .fetch_table_page(rid.page_id, self.schema.clone())?;
+        table_page.update_tuple(tuple, rid.slot_num as u16)?;
 
         page.write()
+            .unwrap()
             .set_data(page_bytes_to_array(&TablePageCodec::encode(&table_page)));
         Ok(())
     }
 
-    // Update only the metadata
-    pub fn update_tuple_meta(&self, meta: TupleMeta, rid: RecordId) -> Result<()> {
-        let (page, mut table_page) = self.buffer_pool.fetch_table_page(rid.page_id)?;
+    pub fn update_tuple_meta(&self, meta: TupleMeta, rid: RecordId) -> QuillSQLResult<()> {
+        let (page, mut table_page) = self
+            .buffer_pool
+            .fetch_table_page(rid.page_id, self.schema.clone())?;
         table_page.update_tuple_meta(meta, rid.slot_num as u16)?;
 
         page.write()
+            .unwrap()
             .set_data(page_bytes_to_array(&TablePageCodec::encode(&table_page)));
         Ok(())
     }
 
-    // Get both metadata and data
-    pub fn get_full_data(&self, rid: RecordId) -> Result<(TupleMeta, Vec<u8>)> {
-        let (_, table_page) = self.buffer_pool.fetch_table_page(rid.page_id)?;
-        let result = table_page.get_data(rid.slot_num as u16)?; // Use get_data
+    pub fn full_tuple(&self, rid: RecordId) -> QuillSQLResult<(TupleMeta, Tuple)> {
+        let (_, table_page) = self
+            .buffer_pool
+            .fetch_table_page(rid.page_id, self.schema.clone())?;
+        let result = table_page.tuple(rid.slot_num as u16)?;
         Ok(result)
     }
 
-    // Get only the data
-    pub fn get_data(&self, rid: RecordId) -> Result<Vec<u8>> {
-        let (_meta, data) = self.get_full_data(rid)?;
-        Ok(data)
+    pub fn tuple(&self, rid: RecordId) -> QuillSQLResult<Tuple> {
+        let (_meta, tuple) = self.full_tuple(rid)?;
+        Ok(tuple)
     }
 
-    // Get only the metadata
-    pub fn tuple_meta(&self, rid: RecordId) -> Result<TupleMeta> {
-        let (meta, _data) = self.get_full_data(rid)?;
+    pub fn tuple_meta(&self, rid: RecordId) -> QuillSQLResult<TupleMeta> {
+        let (meta, _tuple) = self.full_tuple(rid)?;
         Ok(meta)
     }
 
-    // Find the first valid (not deleted) RecordId
-    pub fn get_first_rid(&self) -> Result<Option<RecordId>> {
-        let mut page_id_option = Some(self.first_page_id.load(Ordering::SeqCst));
-
-        while let Some(page_id) = page_id_option {
-            if page_id == INVALID_PAGE_ID {
-                break;
+    pub fn get_first_rid(&self) -> QuillSQLResult<Option<RecordId>> {
+        let first_page_id = self.first_page_id.load(Ordering::SeqCst);
+        let (_, table_page) = self
+            .buffer_pool
+            .fetch_table_page(first_page_id, self.schema.clone())?;
+        
+        // Find first non-deleted tuple
+        for slot_num in 0..table_page.header.num_tuples {
+            if !table_page.header.tuple_infos[slot_num as usize].meta.is_deleted {
+                return Ok(Some(RecordId::new(first_page_id, slot_num as u32)));
             }
-            let (_, table_page) = self.buffer_pool.fetch_table_page(page_id)?;
-            for slot_num in 0..table_page.header.num_tuples {
-                if let Ok(meta) = table_page.tuple_meta(slot_num) {
-                    if !meta.is_deleted {
-                        return Ok(Some(RecordId::new(page_id, slot_num as u32)));
-                    }
-                }
-            }
-            page_id_option = Some(table_page.header.next_page_id);
         }
+        
         Ok(None)
     }
 
-    // Find the next valid (not deleted) RecordId after the given one
-    pub fn get_next_rid(&self, rid: RecordId) -> Result<Option<RecordId>> {
-        let (_, current_table_page) = self.buffer_pool.fetch_table_page(rid.page_id)?;
-        let mut current_slot = rid.slot_num as u16;
-
-        // Try next slots in the current page
-        current_slot += 1;
-        while current_slot < current_table_page.header.num_tuples {
-            if let Ok(meta) = current_table_page.tuple_meta(current_slot) {
-                if !meta.is_deleted {
-                    return Ok(Some(RecordId::new(rid.page_id, current_slot as u32)));
-                }
-            }
-            current_slot += 1;
+    pub fn get_next_rid(&self, rid: RecordId) -> QuillSQLResult<Option<RecordId>> {
+        let (_, table_page) = self
+            .buffer_pool
+            .fetch_table_page(rid.page_id, self.schema.clone())?;
+        let next_rid = table_page.get_next_rid(&rid);
+        if next_rid.is_some() {
+            return Ok(next_rid);
         }
 
-        // Move to the next page(s) if necessary
-        let mut next_page_id_option = Some(current_table_page.header.next_page_id);
-        while let Some(page_id) = next_page_id_option {
-            if page_id == INVALID_PAGE_ID {
-                break;
-            }
-            let (_, table_page) = self.buffer_pool.fetch_table_page(page_id)?;
-            for slot_num in 0..table_page.header.num_tuples {
-                if let Ok(meta) = table_page.tuple_meta(slot_num) {
-                    if !meta.is_deleted {
-                        return Ok(Some(RecordId::new(page_id, slot_num as u32)));
-                    }
-                }
-            }
-            next_page_id_option = Some(table_page.header.next_page_id);
+        if table_page.header.next_page_id == INVALID_PAGE_ID {
+            return Ok(None);
         }
-
+        let (_, next_table_page) = self
+            .buffer_pool
+            .fetch_table_page(table_page.header.next_page_id, self.schema.clone())?;
+        
+        // Find first non-deleted tuple in next page
+        for slot_num in 0..next_table_page.header.num_tuples {
+            if !next_table_page.header.tuple_infos[slot_num as usize].meta.is_deleted {
+                return Ok(Some(RecordId::new(table_page.header.next_page_id, slot_num as u32)));
+            }
+        }
         Ok(None)
     }
 }
@@ -196,8 +198,9 @@ pub struct TableIterator {
     heap: Arc<TableHeap>,
     start_bound: Bound<RecordId>,
     end_bound: Bound<RecordId>,
-    cursor: Option<RecordId>, // Use Option to represent initial state / end
-                              // Remove started/ended flags, cursor Option handles this
+    cursor: RecordId,
+    started: bool,
+    ended: bool,
 }
 
 impl TableIterator {
@@ -206,56 +209,101 @@ impl TableIterator {
             heap,
             start_bound: range.start_bound().cloned(),
             end_bound: range.end_bound().cloned(),
-            cursor: None, // Start with no cursor position
+            cursor: INVALID_RID,
+            started: false,
+            ended: false,
         }
     }
 
-    // Helper to check if a rid is within the end bound
-    fn is_within_end_bound(&self, rid: RecordId) -> bool {
-        match self.end_bound {
-            Bound::Included(bound_rid) => {
-                rid.page_id <= bound_rid.page_id && rid.slot_num <= bound_rid.slot_num
-            }
-            Bound::Excluded(bound_rid) => {
-                rid.page_id < bound_rid.page_id
-                    || (rid.page_id == bound_rid.page_id && rid.slot_num < bound_rid.slot_num)
-            }
-            Bound::Unbounded => true,
+    pub fn next(&mut self) -> QuillSQLResult<Option<(RecordId, Tuple)>> {
+        if self.ended {
+            return Ok(None);
         }
-    }
 
-    pub fn next(&mut self) -> Result<Option<(RecordId, Vec<u8>)>> {
-        let next_rid = if self.cursor.is_none() {
-            // First call to next()
-            // Determine the starting RecordId based on start_bound
-            match self.start_bound {
-                Bound::Included(rid) => Some(rid),
-                Bound::Excluded(rid) => self.heap.get_next_rid(rid)?,
-                Bound::Unbounded => self.heap.get_first_rid()?,
-            }
-        } else {
-            // Subsequent calls: get the next RID after the current cursor
-            self.heap.get_next_rid(self.cursor.unwrap())?
-        };
-
-        if let Some(current_rid) = next_rid {
-            // Check if the determined/next RID is within the end bound
-            if self.is_within_end_bound(current_rid) {
-                self.cursor = Some(current_rid); // Update cursor
-                                                 // Fetch the data for the current valid RID
-                match self.heap.get_data(current_rid) {
-                    Ok(data) => Ok(Some((current_rid, data))),
-                    Err(e) => Err(e), // Propagate error fetching data
+        if self.started {
+            match self.end_bound {
+                Bound::Included(rid) => {
+                    if let Some(next_rid) = self.heap.get_next_rid(self.cursor)? {
+                        if next_rid == rid {
+                            self.ended = true;
+                        }
+                        self.cursor = next_rid;
+                        Ok(self
+                            .heap
+                            .tuple(self.cursor)
+                            .ok()
+                            .map(|tuple| (self.cursor, tuple)))
+                    } else {
+                        Ok(None)
+                    }
                 }
-            } else {
-                // Reached or exceeded the end bound
-                self.cursor = None; // Mark iterator as finished
-                Ok(None)
+                Bound::Excluded(rid) => {
+                    if let Some(next_rid) = self.heap.get_next_rid(self.cursor)? {
+                        if next_rid == rid {
+                            Ok(None)
+                        } else {
+                            self.cursor = next_rid;
+                            Ok(self
+                                .heap
+                                .tuple(self.cursor)
+                                .ok()
+                                .map(|tuple| (self.cursor, tuple)))
+                        }
+                    } else {
+                        Ok(None)
+                    }
+                }
+                Bound::Unbounded => {
+                    if let Some(next_rid) = self.heap.get_next_rid(self.cursor)? {
+                        self.cursor = next_rid;
+                        Ok(self
+                            .heap
+                            .tuple(self.cursor)
+                            .ok()
+                            .map(|tuple| (self.cursor, tuple)))
+                    } else {
+                        Ok(None)
+                    }
+                }
             }
         } else {
-            // No more RIDs found
-            self.cursor = None; // Mark iterator as finished
-            Ok(None)
+            self.started = true;
+            match self.start_bound {
+                Bound::Included(rid) => {
+                    self.cursor = rid;
+                    Ok(self
+                        .heap
+                        .tuple(self.cursor)
+                        .ok()
+                        .map(|tuple| (self.cursor, tuple)))
+                }
+                Bound::Excluded(rid) => {
+                    if let Some(next_rid) = self.heap.get_next_rid(rid)? {
+                        self.cursor = next_rid;
+                        Ok(self
+                            .heap
+                            .tuple(self.cursor)
+                            .ok()
+                            .map(|tuple| (self.cursor, tuple)))
+                    } else {
+                        self.ended = true;
+                        Ok(None)
+                    }
+                }
+                Bound::Unbounded => {
+                    if let Some(first_rid) = self.heap.get_first_rid()? {
+                        self.cursor = first_rid;
+                        Ok(self
+                            .heap
+                            .tuple(self.cursor)
+                            .ok()
+                            .map(|tuple| (self.cursor, tuple)))
+                    } else {
+                        self.ended = true;
+                        Ok(None)
+                    }
+                }
+            }
         }
     }
 }
@@ -266,151 +314,183 @@ mod tests {
     use std::sync::Arc;
     use tempfile::TempDir;
 
-    // Correct imports based on assumed project structure
-    use crate::error::Result;
-    use crate::storage::b_plus_tree::buffer_pool_manager::BufferPoolManager;
+    use crate::catalog::{Column, DataType, Schema};
     use crate::storage::b_plus_tree::disk::disk_manager::DiskManager;
     use crate::storage::b_plus_tree::disk::disk_scheduler::DiskScheduler;
-    use crate::storage::b_plus_tree::page::table_page::{
-        TupleMeta, EMPTY_TUPLE_META,
-    };
-    use crate::storage::b_plus_tree::table_heap::{TableHeap, TableIterator};
-    // Helper to create test data
-    fn create_test_data(s: &str) -> Vec<u8> {
-        s.as_bytes().to_vec()
-    }
+    use crate::storage::b_plus_tree::page::EMPTY_TUPLE_META;
+    use crate::storage::b_plus_tree::table_heap::TableIterator;
+    use crate::storage::{b_plus_tree::table_heap::TableHeap, tuple::Tuple};
+    use crate::buffer::BufferPoolManager;
 
     #[test]
-    pub fn test_table_heap_insert_and_get_data() -> Result<()> {
+    pub fn test_table_heap_update_tuple_meta() {
         let temp_dir = TempDir::new().unwrap();
-        let temp_path = temp_dir.path().join("test_heap.db");
-        let disk_manager = Arc::new(DiskManager::try_new(temp_path)?);
-        let disk_scheduler = Arc::new(DiskScheduler::new(disk_manager));
-        let buffer_pool = Arc::new(BufferPoolManager::new(1000, 2, disk_scheduler)?);
-        let table_heap = TableHeap::try_new(buffer_pool)?;
+        let temp_path = temp_dir.path().join("test.db");
 
-        let data1 = create_test_data("record1");
-        let data2 = create_test_data("record2");
-        let data3 = create_test_data("record3");
+        let schema = Arc::new(Schema::new(vec![
+            Column::new("a", DataType::Int8, false),
+            Column::new("b", DataType::Int16, false),
+        ]));
+        let disk_manager = DiskManager::try_new(temp_path).unwrap();
+        let disk_scheduler = Arc::new(DiskScheduler::new(Arc::new(disk_manager)));
+        let buffer_pool = Arc::new(BufferPoolManager::new(1000, disk_scheduler));
+        let table_heap = TableHeap::try_new(schema.clone(), buffer_pool).unwrap();
 
-        let meta1 = TupleMeta {
-            insert_txn_id: 1,
-            delete_txn_id: 0,
-            is_deleted: false,
-        };
-        let meta2 = TupleMeta {
-            insert_txn_id: 2,
-            delete_txn_id: 0,
-            is_deleted: false,
-        };
-        let meta3 = TupleMeta {
-            insert_txn_id: 3,
-            delete_txn_id: 0,
-            is_deleted: false,
-        };
+        let _rid1 = table_heap
+            .insert_tuple(
+                &EMPTY_TUPLE_META,
+                &Tuple::new(schema.clone(), vec![1i8.into(), 1i16.into()]),
+            )
+            .unwrap();
+        let rid2 = table_heap
+            .insert_tuple(
+                &EMPTY_TUPLE_META,
+                &Tuple::new(schema.clone(), vec![2i8.into(), 2i16.into()]),
+            )
+            .unwrap();
+        let _rid3 = table_heap
+            .insert_tuple(
+                &EMPTY_TUPLE_META,
+                &Tuple::new(schema.clone(), vec![3i8.into(), 3i16.into()]),
+            )
+            .unwrap();
 
-        let rid1 = table_heap.insert_data(&meta1, &data1)?;
-        let rid2 = table_heap.insert_data(&meta2, &data2)?;
-        let rid3 = table_heap.insert_data(&meta3, &data3)?;
-
-        let (ret_meta1, ret_data1) = table_heap.get_full_data(rid1)?;
-        assert_eq!(ret_meta1, meta1);
-        assert_eq!(ret_data1, data1);
-
-        let (ret_meta2, ret_data2) = table_heap.get_full_data(rid2)?;
-        assert_eq!(ret_meta2, meta2);
-        assert_eq!(ret_data2, data2);
-
-        let (ret_meta3, ret_data3) = table_heap.get_full_data(rid3)?;
-        assert_eq!(ret_meta3, meta3);
-        assert_eq!(ret_data3, data3);
-
-        Ok(())
-    }
-
-    #[test]
-    pub fn test_table_heap_update_tuple_meta() -> Result<()> {
-        let temp_dir = TempDir::new().unwrap();
-        let temp_path = temp_dir.path().join("test_heap_meta.db");
-        let disk_manager = Arc::new(DiskManager::try_new(temp_path)?);
-        let disk_scheduler = Arc::new(DiskScheduler::new(disk_manager));
-        let buffer_pool = Arc::new(BufferPoolManager::new(1000, 2, disk_scheduler)?);
-        let table_heap = TableHeap::try_new(buffer_pool)?;
-
-        let rid1 = table_heap.insert_data(&EMPTY_TUPLE_META, &create_test_data("data1"))?;
-        let rid2 = table_heap.insert_data(&EMPTY_TUPLE_META, &create_test_data("data2"))?;
-        let rid3 = table_heap.insert_data(&EMPTY_TUPLE_META, &create_test_data("data3"))?;
-
-        let mut meta = table_heap.tuple_meta(rid2)?;
-        assert!(!meta.is_deleted);
-        meta.insert_txn_id = 10;
-        meta.delete_txn_id = 20;
+        let mut meta = table_heap.tuple_meta(rid2).unwrap();
+        meta.insert_txn_id = 1;
+        meta.delete_txn_id = 2;
         meta.is_deleted = true;
-        table_heap.update_tuple_meta(meta, rid2)?;
+        table_heap.update_tuple_meta(meta, rid2).unwrap();
 
-        let updated_meta = table_heap.tuple_meta(rid2)?;
-        assert_eq!(updated_meta.insert_txn_id, 10);
-        assert_eq!(updated_meta.delete_txn_id, 20);
-        assert!(updated_meta.is_deleted);
-
-        // Check others are unaffected
-        assert!(!table_heap.tuple_meta(rid1)?.is_deleted);
-        assert!(!table_heap.tuple_meta(rid3)?.is_deleted);
-
-        Ok(())
+        let meta = table_heap.tuple_meta(rid2).unwrap();
+        assert_eq!(meta.insert_txn_id, 1);
+        assert_eq!(meta.delete_txn_id, 2);
+        assert!(meta.is_deleted);
     }
 
     #[test]
-    pub fn test_table_heap_iterator() -> Result<()> {
+    pub fn test_table_heap_insert_tuple() {
         let temp_dir = TempDir::new().unwrap();
-        let temp_path = temp_dir.path().join("test_heap_iter.db");
-        let disk_manager = Arc::new(DiskManager::try_new(temp_path)?);
-        let disk_scheduler = Arc::new(DiskScheduler::new(disk_manager));
-        let buffer_pool = Arc::new(BufferPoolManager::new(1000, 2, disk_scheduler)?);
-        let table_heap = Arc::new(TableHeap::try_new(buffer_pool)?);
+        let temp_path = temp_dir.path().join("test.db");
 
-        let data1 = create_test_data("iter_data1");
-        let data2 = create_test_data("iter_data2");
-        let data3 = create_test_data("iter_data3");
-        let data4_deleted = create_test_data("iter_data4_deleted");
-        let data5 = create_test_data("iter_data5");
+        let schema = Arc::new(Schema::new(vec![
+            Column::new("a", DataType::Int8, false),
+            Column::new("b", DataType::Int16, false),
+        ]));
+        let disk_manager = DiskManager::try_new(temp_path).unwrap();
+        let disk_scheduler = Arc::new(DiskScheduler::new(Arc::new(disk_manager)));
+        let buffer_pool = Arc::new(BufferPoolManager::new(1000, disk_scheduler));
+        let table_heap = TableHeap::try_new(schema.clone(), buffer_pool).unwrap();
 
-        let rid1 = table_heap.insert_data(&EMPTY_TUPLE_META, &data1)?;
-        let rid2 = table_heap.insert_data(&EMPTY_TUPLE_META, &data2)?;
-        let rid3 = table_heap.insert_data(&EMPTY_TUPLE_META, &data3)?;
-        let rid4 = table_heap.insert_data(&EMPTY_TUPLE_META, &data4_deleted)?; // Insert data to be deleted
-        let rid5 = table_heap.insert_data(&EMPTY_TUPLE_META, &data5)?;
+        let meta1 = super::TupleMeta {
+            insert_txn_id: 1,
+            delete_txn_id: 1,
+            is_deleted: false,
+        };
+        let rid1 = table_heap
+            .insert_tuple(
+                &meta1,
+                &Tuple::new(schema.clone(), vec![1i8.into(), 1i16.into()]),
+            )
+            .unwrap();
+        let meta2 = super::TupleMeta {
+            insert_txn_id: 2,
+            delete_txn_id: 2,
+            is_deleted: false,
+        };
+        let rid2 = table_heap
+            .insert_tuple(
+                &meta2,
+                &Tuple::new(schema.clone(), vec![2i8.into(), 2i16.into()]),
+            )
+            .unwrap();
+        let meta3 = super::TupleMeta {
+            insert_txn_id: 3,
+            delete_txn_id: 3,
+            is_deleted: false,
+        };
+        let rid3 = table_heap
+            .insert_tuple(
+                &meta3,
+                &Tuple::new(schema.clone(), vec![3i8.into(), 3i16.into()]),
+            )
+            .unwrap();
 
-        // Mark rid4 as deleted
-        let mut meta4 = table_heap.tuple_meta(rid4)?;
-        meta4.is_deleted = true;
-        table_heap.update_tuple_meta(meta4, rid4)?;
+        let (meta, tuple) = table_heap.full_tuple(rid1).unwrap();
+        assert_eq!(meta, meta1);
+        assert_eq!(tuple.data, vec![1i8.into(), 1i16.into()]);
 
-        // Iterate over all non-deleted items
+        let (meta, tuple) = table_heap.full_tuple(rid2).unwrap();
+        assert_eq!(meta, meta2);
+        assert_eq!(tuple.data, vec![2i8.into(), 2i16.into()]);
+
+        let (meta, tuple) = table_heap.full_tuple(rid3).unwrap();
+        assert_eq!(meta, meta3);
+        assert_eq!(tuple.data, vec![3i8.into(), 3i16.into()]);
+    }
+
+    #[test]
+    pub fn test_table_heap_iterator() {
+        let temp_dir = TempDir::new().unwrap();
+        let temp_path = temp_dir.path().join("test.db");
+
+        let schema = Arc::new(Schema::new(vec![
+            Column::new("a", DataType::Int8, false),
+            Column::new("b", DataType::Int16, false),
+        ]));
+
+        let disk_manager = DiskManager::try_new(temp_path).unwrap();
+        let disk_scheduler = Arc::new(DiskScheduler::new(Arc::new(disk_manager)));
+        let buffer_pool = Arc::new(BufferPoolManager::new(1000, disk_scheduler));
+        let table_heap = Arc::new(TableHeap::try_new(schema.clone(), buffer_pool).unwrap());
+
+        let meta1 = super::TupleMeta {
+            insert_txn_id: 1,
+            delete_txn_id: 1,
+            is_deleted: false,
+        };
+        let rid1 = table_heap
+            .insert_tuple(
+                &meta1,
+                &Tuple::new(schema.clone(), vec![1i8.into(), 1i16.into()]),
+            )
+            .unwrap();
+        let meta2 = super::TupleMeta {
+            insert_txn_id: 2,
+            delete_txn_id: 2,
+            is_deleted: false,
+        };
+        let rid2 = table_heap
+            .insert_tuple(
+                &meta2,
+                &Tuple::new(schema.clone(), vec![2i8.into(), 2i16.into()]),
+            )
+            .unwrap();
+        let meta3 = super::TupleMeta {
+            insert_txn_id: 3,
+            delete_txn_id: 3,
+            is_deleted: false,
+        };
+        let rid3 = table_heap
+            .insert_tuple(
+                &meta3,
+                &Tuple::new(schema.clone(), vec![3i8.into(), 3i16.into()]),
+            )
+            .unwrap();
+
         let mut iterator = TableIterator::new(table_heap.clone(), ..);
-        let mut results = Vec::new();
-        while let Some(item) = iterator.next()? {
-            results.push(item);
-        }
 
-        // Should skip the deleted record (rid4)
-        assert_eq!(results.len(), 4);
-        assert_eq!(results[0], (rid1, data1));
-        assert_eq!(results[1], (rid2, data2));
-        assert_eq!(results[2], (rid3, data3));
-        assert_eq!(results[3], (rid5, data5));
+        let (rid, tuple) = iterator.next().unwrap().unwrap();
+        assert_eq!(rid, rid1);
+        assert_eq!(tuple.data, vec![1i8.into(), 1i16.into()]);
 
-        // Test bounded iteration (e.g., from rid2 inclusive to rid5 exclusive)
-        let mut iterator_bounded = TableIterator::new(table_heap.clone(), rid2..rid5);
-        let mut results_bounded = Vec::new();
-        while let Some(item) = iterator_bounded.next()? {
-            results_bounded.push(item);
-        }
+        let (rid, tuple) = iterator.next().unwrap().unwrap();
+        assert_eq!(rid, rid2);
+        assert_eq!(tuple.data, vec![2i8.into(), 2i16.into()]);
 
-        // Should include rid2, rid3 (skip deleted rid4), and stop before rid5
-        assert_eq!(results_bounded.len(), 2);
-        assert_eq!(results_bounded[0].0, rid2);
-        assert_eq!(results_bounded[1].0, rid3);
-        Ok(())
+        let (rid, tuple) = iterator.next().unwrap().unwrap();
+        assert_eq!(rid, rid3);
+        assert_eq!(tuple.data, vec![3i8.into(), 3i16.into()]);
+
+        assert!(iterator.next().unwrap().is_none());
     }
 }

@@ -8,13 +8,13 @@ use std::{
     sync::{atomic::AtomicU32, Mutex, MutexGuard},
 };
 
-use crate::error::{Error, Result};
+use crate::error::{QuillSQLError, QuillSQLResult};
 
-use crate::storage::b_plus_tree::buffer_pool_manager::{PageId, PAGE_SIZE, INVALID_PAGE_ID};
-use crate::storage::codec::{freelist_page::FreelistPageCodec, meta_page::MetaPageCodec};
-use crate::storage::b_plus_tree::page::freelist_page::FreelistPage;
-use crate::storage::b_plus_tree::page::meta_page::MetaPage;
-use crate::storage::b_plus_tree::page::meta_page::META_PAGE_SIZE;
+use crate::buffer::{PageId, PAGE_SIZE, INVALID_PAGE_ID};
+use crate::storage::codec::{FreelistPageCodec, MetaPageCodec};
+use crate::storage::b_plus_tree::page::FreelistPage;
+use crate::storage::b_plus_tree::page::MetaPage;
+use crate::storage::b_plus_tree::page::META_PAGE_SIZE;
 
 static EMPTY_PAGE: [u8; PAGE_SIZE] = [0; PAGE_SIZE];
 
@@ -26,7 +26,7 @@ pub struct DiskManager {
 }
 
 impl DiskManager {
-    pub fn try_new(db_path: impl AsRef<Path>) -> Result<Self> {
+    pub fn try_new(db_path: impl AsRef<Path>) -> QuillSQLResult<Self> {
         let mut is_new_file = false;
         let (db_file, meta) = if db_path.as_ref().exists() {
             let mut db_file = std::fs::OpenOptions::new()
@@ -53,7 +53,7 @@ impl DiskManager {
         // calculate next page id
         let db_file_len = db_file.metadata()?.len();
         if (db_file_len - *META_PAGE_SIZE as u64) % PAGE_SIZE as u64 != 0 {
-            return Err(Error::Internal(format!(
+            return Err(QuillSQLError::Internal(format!(
                 "db file size not a multiple of {} + meta page size {}",
                 PAGE_SIZE, *META_PAGE_SIZE,
             )));
@@ -98,7 +98,7 @@ impl DiskManager {
         Ok(disk_manager)
     }
 
-    pub fn read_page(&self, page_id: PageId) -> Result<[u8; PAGE_SIZE]> {
+    pub fn read_page(&self, page_id: PageId) -> QuillSQLResult<[u8; PAGE_SIZE]> {
         let mut guard = self.db_file.lock().unwrap();
         let mut buf = [0; PAGE_SIZE];
 
@@ -112,9 +112,9 @@ impl DiskManager {
         Ok(buf)
     }
 
-    pub fn write_page(&self, page_id: PageId, data: &[u8]) -> Result<()> {
+    pub fn write_page(&self, page_id: PageId, data: &[u8]) -> QuillSQLResult<()> {
         if data.len() != PAGE_SIZE {
-            return Err(Error::Internal(format!(
+            return Err(QuillSQLError::Internal(format!(
                 "Page size is not {}",
                 PAGE_SIZE
             )));
@@ -123,7 +123,7 @@ impl DiskManager {
         Self::write_page_internal(&mut guard, page_id, data)
     }
 
-    pub fn allocate_page(&self) -> Result<PageId> {
+    pub fn allocate_page(&self) -> QuillSQLResult<PageId> {
         if let Some(page_id) = self.freelist_pop()? {
             Ok(page_id)
         } else {
@@ -139,14 +139,14 @@ impl DiskManager {
         }
     }
 
-    pub fn allocate_freelist_page(&self) -> Result<PageId> {
+    pub fn allocate_freelist_page(&self) -> QuillSQLResult<PageId> {
         let page_id = self.allocate_page()?;
         let freelist_page = FreelistPage::new();
         self.write_page(page_id, &FreelistPageCodec::encode(&freelist_page))?;
         Ok(page_id)
     }
 
-    pub fn deallocate_page(&self, page_id: PageId) -> Result<()> {
+    pub fn deallocate_page(&self, page_id: PageId) -> QuillSQLResult<()> {
         // Write an empty page (all zeros) to the deallocated page.
         // But this page is not deallocated, only data will be written with null or zeros.
         let mut guard = self.db_file.lock().unwrap();
@@ -157,7 +157,7 @@ impl DiskManager {
         Ok(())
     }
 
-    fn freelist_push(&self, page_id: PageId) -> Result<()> {
+    fn freelist_push(&self, page_id: PageId) -> QuillSQLResult<()> {
         let mut curr_page_id = INVALID_PAGE_ID;
         let mut next_page_id = self.meta.read().unwrap().freelist_page_id;
         loop {
@@ -192,7 +192,7 @@ impl DiskManager {
         Ok(())
     }
 
-    fn freelist_pop(&self) -> Result<Option<PageId>> {
+    fn freelist_pop(&self) -> QuillSQLResult<Option<PageId>> {
         let mut freelist_page_id = self.meta.read().unwrap().freelist_page_id;
         loop {
             if freelist_page_id != INVALID_PAGE_ID {
@@ -210,7 +210,7 @@ impl DiskManager {
         }
     }
 
-    fn write_meta_page(&self) -> Result<()> {
+    fn write_meta_page(&self) -> QuillSQLResult<()> {
         let mut guard = self.db_file.lock().unwrap();
         guard.seek(std::io::SeekFrom::Start(0))?;
         guard.write_all(&MetaPageCodec::encode(&self.meta.read().unwrap()))?;
@@ -222,7 +222,7 @@ impl DiskManager {
         guard: &mut MutexGuard<File>,
         page_id: PageId,
         data: &[u8],
-    ) -> Result<()> {
+    ) -> QuillSQLResult<()> {
         // Seek to the start of the page in the database file and write the data.
         guard.seek(std::io::SeekFrom::Start(
             (*META_PAGE_SIZE + (page_id - 1) as usize * PAGE_SIZE) as u64,
@@ -232,7 +232,7 @@ impl DiskManager {
         Ok(())
     }
 
-    pub fn db_file_len(&self) -> Result<u64> {
+    pub fn db_file_len(&self) -> QuillSQLResult<u64> {
         let guard = self.db_file.lock().unwrap();
         let meta = guard.metadata()?;
         Ok(meta.len())
@@ -241,9 +241,9 @@ impl DiskManager {
 
 #[cfg(test)]
 mod tests {
-    use crate::storage::b_plus_tree::buffer_pool_manager::PAGE_SIZE;
-    use crate::storage::codec::meta_page::MetaPageCodec;
-    use crate::storage::b_plus_tree::page::meta_page::EMPTY_META_PAGE;
+    use crate::buffer::PAGE_SIZE;
+    use crate::storage::codec::MetaPageCodec;
+    use crate::storage::b_plus_tree::page::EMPTY_META_PAGE;
     use tempfile::TempDir;
 
     #[test]

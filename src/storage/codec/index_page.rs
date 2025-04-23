@@ -1,11 +1,11 @@
-use crate::error::{Error, Result};
-use crate::storage::b_plus_tree::buffer_pool_manager::PAGE_SIZE;
-use crate::storage::codec::{common::CommonCodec, table_page::RidCodec, DecodedData};
-use crate::storage::b_plus_tree::comparator::default_comparator;
-use crate::storage::b_plus_tree::page::index_page::{
+use crate::buffer::PAGE_SIZE;
+use crate::catalog::SchemaRef;
+use crate::storage::codec::{CommonCodec, DecodedData, RidCodec, TupleCodec};
+use crate::storage::b_plus_tree::page::{
     BPlusTreeInternalPage, BPlusTreeInternalPageHeader, BPlusTreeLeafPage, BPlusTreeLeafPageHeader,
     BPlusTreePage, BPlusTreePageType,
 };
+use crate::error::{QuillSQLError, QuillSQLResult};
 
 pub struct BPlusTreePageCodec;
 
@@ -17,9 +17,9 @@ impl BPlusTreePageCodec {
         }
     }
 
-    pub fn decode(bytes: &[u8]) -> Result<DecodedData<BPlusTreePage>> {
+    pub fn decode(bytes: &[u8], schema: SchemaRef) -> QuillSQLResult<DecodedData<BPlusTreePage>> {
         if bytes.len() != PAGE_SIZE {
-            return Err(Error::Internal(format!(
+            return Err(QuillSQLError::Storage(format!(
                 "Index page size is not {} instead of {}",
                 PAGE_SIZE,
                 bytes.len()
@@ -31,11 +31,11 @@ impl BPlusTreePageCodec {
 
         match page_type {
             BPlusTreePageType::LeafPage => {
-                let (page, offset) = BPlusTreeLeafPageCodec::decode(bytes)?;
+                let (page, offset) = BPlusTreeLeafPageCodec::decode(bytes, schema.clone())?;
                 Ok((BPlusTreePage::Leaf(page), offset))
             }
             BPlusTreePageType::InternalPage => {
-                let (page, offset) = BPlusTreeInternalPageCodec::decode(bytes)?;
+                let (page, offset) = BPlusTreeInternalPageCodec::decode(bytes, schema.clone())?;
                 Ok((BPlusTreePage::Internal(page), offset))
             }
         }
@@ -48,21 +48,22 @@ impl BPlusTreeLeafPageCodec {
     pub fn encode(page: &BPlusTreeLeafPage) -> Vec<u8> {
         let mut bytes = vec![];
         bytes.extend(BPlusTreeLeafPageHeaderCodec::encode(&page.header));
-        for (key, rid) in page.array.iter() {
-            // 对于Vec<u8>类型的key，先编码长度再添加内容
-            bytes.extend(CommonCodec::encode_u32(key.len() as u32));
-            bytes.extend(key);
+        for (tuple, rid) in page.array.iter() {
+            bytes.extend(TupleCodec::encode(tuple));
             bytes.extend(RidCodec::encode(rid));
         }
-        // make sure length of bytes is BUSTUBX_PAGE_SIZE
+        // make sure length of bytes is PAGE_SIZE
         assert!(bytes.len() <= PAGE_SIZE);
         bytes.extend(vec![0; PAGE_SIZE - bytes.len()]);
         bytes
     }
 
-    pub fn decode(bytes: &[u8]) -> Result<DecodedData<BPlusTreeLeafPage>> {
+    pub fn decode(
+        bytes: &[u8],
+        schema: SchemaRef,
+    ) -> QuillSQLResult<DecodedData<BPlusTreeLeafPage>> {
         if bytes.len() != PAGE_SIZE {
-            return Err(Error::Internal(format!(
+            return Err(QuillSQLError::Storage(format!(
                 "Index page size is not {} instead of {}",
                 PAGE_SIZE,
                 bytes.len()
@@ -79,25 +80,25 @@ impl BPlusTreeLeafPageCodec {
 
             let mut array = vec![];
             for _ in 0..header.current_size {
-                let (key, offset) = CommonCodec::decode_bytes(left_bytes)?;
+                let (tuple, offset) = TupleCodec::decode(left_bytes, schema.clone())?;
                 left_bytes = &left_bytes[offset..];
 
                 let (rid, offset) = RidCodec::decode(left_bytes)?;
                 left_bytes = &left_bytes[offset..];
 
-                array.push((key, rid));
+                array.push((tuple, rid));
             }
 
             Ok((
                 BPlusTreeLeafPage {
+                    schema,
                     header,
                     array,
-                    comparator: default_comparator,
                 },
                 PAGE_SIZE,
             ))
         } else {
-            Err(Error::Internal(
+            Err(QuillSQLError::Storage(
                 "Index page type must be leaf page".to_string(),
             ))
         }
@@ -110,21 +111,22 @@ impl BPlusTreeInternalPageCodec {
     pub fn encode(page: &BPlusTreeInternalPage) -> Vec<u8> {
         let mut bytes = vec![];
         bytes.extend(BPlusTreeInternalPageHeaderCodec::encode(&page.header));
-        for (key, page_id) in page.array.iter() {
-            // 对于Vec<u8>类型的key，先编码长度再添加内容
-            bytes.extend(CommonCodec::encode_u32(key.len() as u32));
-            bytes.extend(key);
+        for (tuple, page_id) in page.array.iter() {
+            bytes.extend(TupleCodec::encode(tuple));
             bytes.extend(CommonCodec::encode_u32(*page_id));
         }
-        // make sure length of bytes is BUSTUBX_PAGE_SIZE
+        // make sure length of bytes is PAGE_SIZE
         assert!(bytes.len() <= PAGE_SIZE);
         bytes.extend(vec![0; PAGE_SIZE - bytes.len()]);
         bytes
     }
 
-    pub fn decode(bytes: &[u8]) -> Result<DecodedData<BPlusTreeInternalPage>> {
+    pub fn decode(
+        bytes: &[u8],
+        schema: SchemaRef,
+    ) -> QuillSQLResult<DecodedData<BPlusTreeInternalPage>> {
         if bytes.len() != PAGE_SIZE {
-            return Err(Error::Internal(format!(
+            return Err(QuillSQLError::Storage(format!(
                 "Index page size is not {} instead of {}",
                 PAGE_SIZE,
                 bytes.len()
@@ -141,25 +143,25 @@ impl BPlusTreeInternalPageCodec {
 
             let mut array = vec![];
             for _ in 0..header.current_size {
-                let (key, offset) = CommonCodec::decode_bytes(left_bytes)?;
+                let (tuple, offset) = TupleCodec::decode(left_bytes, schema.clone())?;
                 left_bytes = &left_bytes[offset..];
 
                 let (page_id, offset) = CommonCodec::decode_u32(left_bytes)?;
                 left_bytes = &left_bytes[offset..];
 
-                array.push((key, page_id));
+                array.push((tuple, page_id));
             }
 
             Ok((
                 BPlusTreeInternalPage {
+                    schema,
                     header,
                     array,
-                    comparator: default_comparator,
                 },
                 PAGE_SIZE,
             ))
         } else {
-            Err(Error::Internal(
+            Err(QuillSQLError::Storage(
                 "Index page type must be internal page".to_string(),
             ))
         }
@@ -176,12 +178,12 @@ impl BPlusTreePageTypeCodec {
         }
     }
 
-    pub fn decode(bytes: &[u8]) -> Result<DecodedData<BPlusTreePageType>> {
+    pub fn decode(bytes: &[u8]) -> QuillSQLResult<DecodedData<BPlusTreePageType>> {
         let (flag, offset) = CommonCodec::decode_u8(bytes)?;
         match flag {
             1 => Ok((BPlusTreePageType::LeafPage, offset)),
             2 => Ok((BPlusTreePageType::InternalPage, offset)),
-            _ => Err(Error::Internal(format!("Invalid page type {}", flag))),
+            _ => Err(QuillSQLError::Storage(format!("Invalid page type {}", flag))),
         }
     }
 }
@@ -198,7 +200,7 @@ impl BPlusTreeLeafPageHeaderCodec {
         bytes
     }
 
-    pub fn decode(bytes: &[u8]) -> Result<DecodedData<BPlusTreeLeafPageHeader>> {
+    pub fn decode(bytes: &[u8]) -> QuillSQLResult<DecodedData<BPlusTreeLeafPageHeader>> {
         let mut left_bytes = bytes;
 
         let (page_type, offset) = BPlusTreePageTypeCodec::decode(left_bytes)?;
@@ -236,7 +238,7 @@ impl BPlusTreeInternalPageHeaderCodec {
         bytes
     }
 
-    pub fn decode(bytes: &[u8]) -> Result<DecodedData<BPlusTreeInternalPageHeader>> {
+    pub fn decode(bytes: &[u8]) -> QuillSQLResult<DecodedData<BPlusTreeInternalPageHeader>> {
         let mut left_bytes = bytes;
 
         let (page_type, offset) = BPlusTreePageTypeCodec::decode(left_bytes)?;
@@ -261,65 +263,41 @@ impl BPlusTreeInternalPageHeaderCodec {
 
 #[cfg(test)]
 mod tests {
+    use crate::catalog::{Column, DataType, Schema};
     use crate::storage::codec::index_page::BPlusTreePageCodec;
-    use crate::storage::b_plus_tree::page::index_page::{
+    use crate::storage::b_plus_tree::page::{
         BPlusTreeInternalPage, BPlusTreeLeafPage, BPlusTreePage,
     };
-    use crate::storage::b_plus_tree::page::table_page::RecordId;
-
-    // 辅助函数，创建测试用的字节数组
-    fn create_test_key(value: u32) -> Vec<u8> {
-        value.to_be_bytes().to_vec()
-    }
+    use crate::storage::tuple::Tuple;
+    use crate::storage::b_plus_tree::page::RecordId;
+    use std::sync::Arc;
 
     #[test]
     fn index_page_codec() {
-        // 创建叶子页面并插入键值对
-        let mut leaf_page = BPlusTreeLeafPage::new(100);
-        let key1 = create_test_key(1);
-        let key2 = create_test_key(2);
+        let schema = Arc::new(Schema::new(vec![
+            Column::new("a", DataType::Int8, true),
+            Column::new("b", DataType::Int32, true),
+        ]));
+        let tuple1 = Tuple::new(schema.clone(), vec![1i8.into(), 1i32.into()]);
         let rid1 = RecordId::new(1, 1);
+        let tuple2 = Tuple::new(schema.clone(), vec![2i8.into(), 2i32.into()]);
         let rid2 = RecordId::new(2, 2);
 
-        leaf_page.insert(&key1, rid1);
-        leaf_page.insert(&key2, rid2);
-
-        // 测试叶子页面的编码和解码
+        let mut leaf_page = BPlusTreeLeafPage::new(schema.clone(), 100);
+        leaf_page.insert(tuple1.clone(), rid1);
+        leaf_page.insert(tuple2.clone(), rid2);
         let page = BPlusTreePage::Leaf(leaf_page);
-        let encoded = BPlusTreePageCodec::encode(&page);
-        let (decoded_page, _) = BPlusTreePageCodec::decode(&encoded).unwrap();
+        let (new_page, _) =
+            BPlusTreePageCodec::decode(&BPlusTreePageCodec::encode(&page), schema.clone()).unwrap();
+        assert_eq!(new_page, page);
 
-        // 验证解码后的页面与原始页面相等
-        match (decoded_page, page) {
-            (BPlusTreePage::Leaf(decoded), BPlusTreePage::Leaf(original)) => {
-                assert_eq!(decoded.header.current_size, original.header.current_size);
-                assert_eq!(decoded.array.len(), original.array.len());
-                // 可以进一步验证具体的key-value对是否匹配
-            }
-            _ => panic!("Decoded page type doesn't match original"),
-        }
-
-        // 创建内部页面并插入键值对
-        let mut internal_page = BPlusTreeInternalPage::new(100);
-        let empty_key = Vec::new(); // 第一个键为空
-
-        internal_page.insert(empty_key, 0);
-        internal_page.insert(key1.clone(), 1);
-        internal_page.insert(key2.clone(), 2);
-
-        // 测试内部页面的编码和解码
+        let mut internal_page = BPlusTreeInternalPage::new(schema.clone(), 100);
+        internal_page.insert(Tuple::empty(schema.clone()), 1);
+        internal_page.insert(tuple1, 2);
+        internal_page.insert(tuple2, 3);
         let page = BPlusTreePage::Internal(internal_page);
-        let encoded = BPlusTreePageCodec::encode(&page);
-        let (decoded_page, _) = BPlusTreePageCodec::decode(&encoded).unwrap();
-
-        // 验证解码后的页面与原始页面相等
-        match (decoded_page, page) {
-            (BPlusTreePage::Internal(decoded), BPlusTreePage::Internal(original)) => {
-                assert_eq!(decoded.header.current_size, original.header.current_size);
-                assert_eq!(decoded.array.len(), original.array.len());
-                // 可以进一步验证具体的key-value对是否匹配
-            }
-            _ => panic!("Decoded page type doesn't match original"),
-        }
+        let (new_page, _) =
+            BPlusTreePageCodec::decode(&BPlusTreePageCodec::encode(&page), schema.clone()).unwrap();
+        assert_eq!(new_page, page);
     }
 }

@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use glob::glob;
 use rayon::prelude::*;
 
-use crate::error::{Error, Result};
+use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::storage::bitcask::cache::BitcaskCache;
 use crate::storage::bitcask::datafile::DataFile;
 use crate::storage::bitcask::datafile::DataFileMetadata;
@@ -41,17 +41,17 @@ pub struct Bitcask {
     data_file_limit: u64,
 }
 
-pub fn new(options: Options) -> Result<Bitcask> {
+pub fn new(options: Options) -> QuillSQLResult<Bitcask> {
     // best effort:
     let _ = env_logger::try_init();
 
     create_dir_all(&options.base_dir).map_err(|source| {
-        Error::Internal(format!("Failed to create database directory: {}", source))
+        QuillSQLError::Storage(format!("Failed to create database directory: {}", source))
     })?;
 
     let created_dir = create_dir_all(&options.base_dir);
     if let Err(err_msg) = created_dir {
-        return Err(Error::Internal(format!(
+        return Err(QuillSQLError::Storage(format!(
             "Failed to create '{}': {}",
             options.base_dir.display(),
             err_msg
@@ -93,11 +93,11 @@ impl Bitcask {
     }
 
     // Startup Jobs:
-    pub fn startup(&mut self, base_dir: &Path) -> Result<()> {
+    pub fn startup(&mut self, base_dir: &Path) -> QuillSQLResult<()> {
         let mut data_files_sorted = self.get_data_files_except_current(&base_dir)?;
 
         self.build_keydir(&mut data_files_sorted)
-            .map_err(|source| Error::Internal(format!("Failed to build keydir: {}", source)))?;
+            .map_err(|source| QuillSQLError::Internal(format!("Failed to build keydir: {}", source)))?;
 
         self.cleanup()?;
         //self.merge()?;
@@ -106,7 +106,7 @@ impl Bitcask {
     }
 
     /// call merge to reclaim some disk space
-    pub fn merge(&mut self) -> Result<()> {
+    pub fn merge(&mut self) -> QuillSQLResult<()> {
         let base_dir = &self.options.base_dir;
 
         let data_files: Vec<PathBuf> = self
@@ -195,7 +195,7 @@ impl Bitcask {
         Ok(())
     }
 
-    fn get_data_files_except_current(&self, base_dir: &Path) -> Result<Vec<PathBuf>> {
+    fn get_data_files_except_current(&self, base_dir: &Path) -> QuillSQLResult<Vec<PathBuf>> {
         let mut entries = self.glob_files(&base_dir, DATA_FILE_GLOB_FORMAT)?;
 
         entries.sort_by(|a, b| natord::compare(a.to_str().unwrap(), b.to_str().unwrap()));
@@ -215,13 +215,13 @@ impl Bitcask {
         Ok(entries)
     }
 
-    fn glob_files(&self, base_dir: &Path, pattern: &'static str) -> Result<Vec<PathBuf>> {
+    fn glob_files(&self, base_dir: &Path, pattern: &'static str) -> QuillSQLResult<Vec<PathBuf>> {
         let glob_path = base_dir.join(pattern);
         let glob_path_str = glob_path
             .to_str()
-            .ok_or_else(|| Error::Internal(format!("Invalid path: {}", glob_path.display())))?;
+            .ok_or_else(|| QuillSQLError::Internal(format!("Invalid path: {}", glob_path.display())))?;
         let glob_result =
-            glob(glob_path_str).map_err(|e| Error::Internal(format!("Glob error: {}", e)))?;
+            glob(glob_path_str).map_err(|e| QuillSQLError::Internal(format!("Glob error: {}", e)))?;
         let mut entries: Vec<PathBuf> = glob_result.filter_map(|entry| entry.ok()).collect();
         entries.sort_by(|a, b| {
             let a_str = a.to_str().unwrap_or("");
@@ -231,7 +231,7 @@ impl Bitcask {
         Ok(entries)
     }
 
-    fn build_keydir(&mut self, datafiles_paths: &mut Vec<PathBuf>) -> Result<()> {
+    fn build_keydir(&mut self, datafiles_paths: &mut Vec<PathBuf>) -> QuillSQLResult<()> {
         trace!(
             "rebuilding keydir now based on the files: {:?}",
             datafiles_paths
@@ -349,7 +349,7 @@ impl Bitcask {
         Ok(())
     }
 
-    fn cleanup(&mut self) -> Result<()> {
+    fn cleanup(&mut self) -> QuillSQLResult<()> {
         let entries = self.glob_files(&self.options.base_dir, DATA_FILE_GLOB_FORMAT)?;
 
         for entry in entries {
@@ -373,7 +373,7 @@ impl Bitcask {
         Ok(())
     }
 
-    fn switch_to_new_data_file(&mut self) -> Result<()> {
+    fn switch_to_new_data_file(&mut self) -> QuillSQLResult<()> {
         let data_file_id = util::time();
 
         let new_path =
@@ -404,7 +404,7 @@ impl Bitcask {
         Ok(())
     }
 
-    pub fn write(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
+    pub fn write(&mut self, key: &[u8], value: &[u8]) -> QuillSQLResult<()> {
         let data_file_id = self.current_data_file.get_id();
 
         let timestamp = util::time();
@@ -426,7 +426,7 @@ impl Bitcask {
         Ok(())
     }
 
-    pub fn read(&self, key: &[u8]) -> Result<Vec<u8>> {
+    pub fn read(&self, key: &[u8]) -> QuillSQLResult<Vec<u8>> {
         let entry = self.keydir.get(key)?;
 
         let data_filename = data_file_format(entry.file_id);
@@ -443,7 +443,7 @@ impl Bitcask {
         Ok(found_entry.value)
     }
 
-    pub fn read_cache(&mut self, key: &[u8]) -> Result<Vec<u8>> {
+    pub fn read_cache(&mut self, key: &[u8]) -> QuillSQLResult<Vec<u8>> {
         let entry = self.keydir.get(key)?;
 
         if let Some(df) = self.data_files_cache.get_mut(&entry.file_id) {
@@ -465,7 +465,7 @@ impl Bitcask {
         Ok(found_entry.value)
     }
 
-    pub fn remove(&mut self, key: &[u8]) -> Result<()> {
+    pub fn remove(&mut self, key: &[u8]) -> QuillSQLResult<()> {
         let timestamp = util::time();
         self.current_data_file.remove(key, timestamp)?;
         self.keydir.remove(key)
@@ -502,11 +502,11 @@ impl Bitcask {
         self.keydir.keys_range_max(max)
     }
 
-    pub fn sync(&mut self) -> Result<()> {
+    pub fn sync(&mut self) -> QuillSQLResult<()> {
         self.current_data_file.sync()
     }
 
-    pub fn close(&mut self) -> Result<()> {
+    pub fn close(&mut self) -> QuillSQLResult<()> {
         self.sync()
     }
 
@@ -523,7 +523,7 @@ mod tests {
 
     // 基本读写测试
     #[test]
-    fn test_basic_read_write() -> Result<()> {
+    fn test_basic_read_write() -> QuillSQLResult<()> {
         let dir = tempdir()?;
         let path = dir.path().to_path_buf();
         let mut bitcask = new(Options {
@@ -546,7 +546,7 @@ mod tests {
 
     // 缓存读取测试
     #[test]
-    fn test_cache_read() -> Result<()> {
+    fn test_cache_read() -> QuillSQLResult<()> {
         let dir = tempdir()?;
         let path = dir.path().to_path_buf();
         let mut bitcask = new(Options {
@@ -583,7 +583,7 @@ mod tests {
 
     // 删除测试
     #[test]
-    fn test_remove() -> Result<()> {
+    fn test_remove() -> QuillSQLResult<()> {
         let dir = tempdir()?;
         let path = dir.path().to_path_buf();
         let mut bitcask = new(Options {
@@ -613,7 +613,7 @@ mod tests {
 
     // 数据持久性测试
     #[test]
-    fn test_persistence() -> Result<()> {
+    fn test_persistence() -> QuillSQLResult<()> {
         let dir = tempdir()?;
         let path = dir.path().to_path_buf();
 
@@ -650,7 +650,7 @@ mod tests {
 
     // 大数据测试
     #[test]
-    fn test_large_values() -> Result<()> {
+    fn test_large_values() -> QuillSQLResult<()> {
         let dir = tempdir()?;
         let path = dir.path().to_path_buf();
         let mut bitcask = new(Options {
@@ -673,7 +673,7 @@ mod tests {
 
     // 缓存替换策略测试
     #[test]
-    fn test_cache_replacement() -> Result<()> {
+    fn test_cache_replacement() -> QuillSQLResult<()> {
         let dir = tempdir()?;
         let path = dir.path().to_path_buf();
 

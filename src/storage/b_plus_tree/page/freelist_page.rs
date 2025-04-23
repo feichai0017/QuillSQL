@@ -1,5 +1,5 @@
-use crate::storage::b_plus_tree::buffer_pool_manager::{PageId, INVALID_PAGE_ID, PAGE_SIZE};
-use crate::storage::codec::{common::CommonCodec, freelist_page::FreelistPageHeaderCodec};
+use crate::buffer::{PageId, PAGE_SIZE, INVALID_PAGE_ID};
+use crate::storage::codec::{CommonCodec, FreelistPageHeaderCodec};
 use std::sync::LazyLock;
 
 static EMPTY_FREELIST_PAGE_HEADER: FreelistPageHeader = FreelistPageHeader {

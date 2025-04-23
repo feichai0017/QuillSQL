@@ -1,100 +1,65 @@
-use futures::{SinkExt, TryStreamExt};
+use clap::Parser;
+use quill_sql::database::Database;
+use quill_sql::utils::util::pretty_format_tuples;
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
-use std::env;
-use std::{error::Error, net::SocketAddr};
-use tokio::net::TcpStream;
-use tokio_util::codec::{FramedRead, FramedWrite, LinesCodec};
 
-const RESPONSE_END: &str = "!!!end!!!";
-
-pub struct Client {
-    stream: TcpStream,
-    txn_version: Option<u64>,
+#[derive(Debug, Parser, PartialEq)]
+#[clap(author, version, about, long_about= None)]
+struct Args {
+    #[clap(short = 'f', long, help = "Path to your database file")]
+    file: Option<String>,
 }
 
-impl Client {
-    pub async fn new(addr: SocketAddr) -> Result<Self, Box<dyn Error>> {
-        let stream = TcpStream::connect(addr).await?;
-        Ok(Self {
-            stream,
-            txn_version: None,
-        })
-    }
+fn main() {
+    env_logger::init();
+    let args = Args::parse();
 
-    pub async fn execute_sql(&mut self, sql_cmd: &str) -> Result<(), Box<dyn Error>> {
-        let (r, w) = self.stream.split();
-        let mut sink = FramedWrite::new(w, LinesCodec::new());
-        let mut stream = FramedRead::new(r, LinesCodec::new());
+    let mut db = if let Some(path) = args.file {
+        Database::new_on_disk(path.as_str())
+            .unwrap_or_else(|e| panic!("fail to open {} file, err: {}", path, e))
+    } else {
+        Database::new_temp().expect("fail to open temp database")
+    };
 
-        // 发送命令并执行
-        sink.send(sql_cmd).await?;
+    println!(":) Welcome to the bustubx, please input sql.");
+    let mut rl = DefaultEditor::new().expect("created editor");
+    rl.load_history(".history").ok();
 
-        // 拿到结果并打印
-        while let Some(res) = stream.try_next().await? {
-            if res == RESPONSE_END {
+    loop {
+        let readline = rl.readline("quillssql=# ");
+        match readline {
+            Ok(line) => {
+                let _ = rl.add_history_entry(line.as_str());
+                if line == "exit" || line == "\\q" {
+                    println!("bye!");
+                    break;
+                }
+                let result = db.run(&line);
+                match result {
+                    Ok(tuples) => {
+                        if !tuples.is_empty() {
+                            println!("{}", pretty_format_tuples(&tuples))
+                        }
+                    }
+                    Err(e) => println!("{}", e),
+                }
+            }
+            Err(ReadlineError::Interrupted) => {
+                println!("CTRL-C");
                 break;
             }
-            // 解析事务命令
-            if res.starts_with("TRANSACTION") {
-                let args = res.split(" ").collect::<Vec<_>>();
-                if args[2] == "COMMIT" || args[2] == "ROLLBACK" {
-                    self.txn_version = None;
-                }
-                if args[2] == "BEGIN" {
-                    let version = args[1].parse::<u64>().unwrap();
-                    self.txn_version = Some(version);
-                }
+            Err(ReadlineError::Eof) => {
+                println!("CTRL-D");
+                break;
             }
-            println!("{}", res);
-        }
-        Ok(())
-    }
-}
-
-impl Drop for Client {
-    fn drop(&mut self) {
-        if self.txn_version.is_some() {
-            futures::executor::block_on(self.execute_sql("ROLLBACK;")).expect("rollback failed");
-        }
-    }
-}
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
-    let addr = env::args()
-        .nth(1)
-        .unwrap_or_else(|| "127.0.0.1:8080".to_string());
-
-    let addr = addr.parse::<SocketAddr>()?;
-    let mut client = Client::new(addr).await?;
-
-    let mut editor = DefaultEditor::new()?;
-    loop {
-        let prompt = match client.txn_version {
-            Some(version) => format!("sqldb#{}> ", version),
-            None => "sqldb> ".into(),
-        };
-        let readline = editor.readline(&prompt);
-        match readline {
-            Ok(sql_cmd) => {
-                let sql_cmd = sql_cmd.trim();
-                if sql_cmd.len() > 0 {
-                    if sql_cmd == "quit" {
-                        break;
-                    }
-                    editor.add_history_entry(sql_cmd)?;
-                    client.execute_sql(sql_cmd).await?;
-                }
-            }
-            Err(ReadlineError::Interrupted) => break,
-            Err(ReadlineError::Eof) => break,
             Err(err) => {
                 println!("Error: {:?}", err);
                 break;
             }
         }
     }
+    db.flush().unwrap();
 
-    Ok(())
+    rl.save_history(".history").ok();
 }

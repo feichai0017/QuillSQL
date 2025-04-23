@@ -1,10 +1,9 @@
-use crate::error::{Error, Result};
-use crate::storage::b_plus_tree::buffer_pool_manager::PAGE_SIZE;
-use crate::storage::codec::{common::CommonCodec, DecodedData};
-use crate::storage::b_plus_tree::page::table_page::{
-    RecordId, TablePage, TablePageHeader, TupleInfo, TupleMeta,
-};
+use crate::buffer::PAGE_SIZE;
+use crate::catalog::SchemaRef;
 use crate::utils::util::page_bytes_to_array;
+use crate::storage::codec::{CommonCodec, DecodedData};
+use crate::storage::b_plus_tree::page::{RecordId, TablePage, TablePageHeader, TupleInfo, TupleMeta};
+use crate::error::{QuillSQLError, QuillSQLResult};
 
 pub struct TablePageCodec;
 
@@ -16,9 +15,9 @@ impl TablePageCodec {
         all_bytes.to_vec()
     }
 
-    pub fn decode(bytes: &[u8]) -> Result<DecodedData<TablePage>> {
+    pub fn decode(bytes: &[u8], schema: SchemaRef) -> QuillSQLResult<DecodedData<TablePage>> {
         if bytes.len() != PAGE_SIZE {
-            return Err(Error::Internal(format!(
+            return Err(QuillSQLError::Storage(format!(
                 "Table page size is not {} instead of {}",
                 PAGE_SIZE,
                 bytes.len()
@@ -27,6 +26,7 @@ impl TablePageCodec {
         let (header, _) = TablePageHeaderCodec::decode(bytes)?;
         Ok((
             TablePage {
+                schema,
                 header,
                 data: page_bytes_to_array(&bytes[0..PAGE_SIZE]),
             },
@@ -49,7 +49,7 @@ impl TablePageHeaderCodec {
         bytes
     }
 
-    pub fn decode(bytes: &[u8]) -> Result<DecodedData<TablePageHeader>> {
+    pub fn decode(bytes: &[u8]) -> QuillSQLResult<DecodedData<TablePageHeader>> {
         let mut left_bytes = bytes;
 
         let (next_page_id, offset) = CommonCodec::decode_u32(left_bytes)?;
@@ -92,7 +92,7 @@ impl TablePageHeaderTupleInfoCodec {
         bytes
     }
 
-    pub fn decode(bytes: &[u8]) -> Result<DecodedData<TupleInfo>> {
+    pub fn decode(bytes: &[u8]) -> QuillSQLResult<DecodedData<TupleInfo>> {
         let mut left_bytes = bytes;
         let (tuple_offset, offset) = CommonCodec::decode_u16(left_bytes)?;
         left_bytes = &left_bytes[offset..];
@@ -129,7 +129,7 @@ impl RidCodec {
         bytes
     }
 
-    pub fn decode(bytes: &[u8]) -> Result<DecodedData<RecordId>> {
+    pub fn decode(bytes: &[u8]) -> QuillSQLResult<DecodedData<RecordId>> {
         let mut left_bytes = bytes;
 
         let (page_id, offset) = CommonCodec::decode_u32(left_bytes)?;
@@ -147,34 +147,40 @@ impl RidCodec {
 
 #[cfg(test)]
 mod tests {
-    use crate::storage::b_plus_tree::buffer_pool_manager::INVALID_PAGE_ID;
+    use crate::buffer::INVALID_PAGE_ID;
+    use crate::catalog::{Column, DataType, Schema};
     use crate::storage::codec::table_page::TablePageHeaderCodec;
-    use crate::storage::codec::table_page::TablePageCodec;
-    use crate::storage::b_plus_tree::page::table_page::{TablePage, TupleMeta};
+    use crate::storage::codec::TablePageCodec;
+    use crate::storage::b_plus_tree::page::{TablePage, TupleMeta};
+    use crate::storage::tuple::Tuple;
+    use std::sync::Arc;
 
     #[test]
     fn table_page_codec() {
-        // 创建测试数据
-        let data1 = vec![1, 2, 3, 4];
-        let data2 = vec![5, 6, 7, 8];
-
+        let schema = Arc::new(Schema::new(vec![
+            Column::new("a", DataType::Int8, true),
+            Column::new("b", DataType::Int32, true),
+        ]));
+        let tuple1 = Tuple::new(schema.clone(), vec![1i8.into(), 1i32.into()]);
         let tuple1_meta = TupleMeta {
             insert_txn_id: 1,
             delete_txn_id: 2,
             is_deleted: false,
         };
-
+        let tuple2 = Tuple::new(schema.clone(), vec![2i8.into(), 2i32.into()]);
         let tuple2_meta = TupleMeta {
             insert_txn_id: 3,
             delete_txn_id: 4,
             is_deleted: true,
         };
 
-        let mut table_page = TablePage::new(INVALID_PAGE_ID);
-        table_page.insert_data(&tuple1_meta, &data1).unwrap();
-        table_page.insert_data(&tuple2_meta, &data2).unwrap();
+        let mut table_page = TablePage::new(schema.clone(), INVALID_PAGE_ID);
+        table_page.insert_tuple(&tuple1_meta, &tuple1).unwrap();
+        table_page.insert_tuple(&tuple2_meta, &tuple2).unwrap();
 
-        let (new_page, _) = TablePageCodec::decode(&TablePageCodec::encode(&table_page)).unwrap();
+        let (new_page, _) =
+            TablePageCodec::decode(&TablePageCodec::encode(&table_page), schema.clone()).unwrap();
+        assert_eq!(new_page.schema, table_page.schema);
         assert_eq!(new_page.header, table_page.header);
         let header_size = TablePageHeaderCodec::encode(&table_page.header).len();
         assert_eq!(new_page.data[header_size..], table_page.data[header_size..]);

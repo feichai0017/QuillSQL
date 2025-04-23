@@ -1,9 +1,10 @@
-use crate::error::{Error, Result};
-use crate::storage::b_plus_tree::buffer_pool_manager::{PageId, INVALID_PAGE_ID, PAGE_SIZE};
-use crate::storage::codec::table_page::{TablePageHeaderCodec, TablePageHeaderTupleInfoCodec};
-use derive_new;
+use crate::buffer::{PageId, PAGE_SIZE, INVALID_PAGE_ID};
+use crate::catalog::SchemaRef;
+use crate::storage::codec::{TablePageHeaderCodec, TablePageHeaderTupleInfoCodec, TupleCodec};
+use crate::transaction::TransactionId;
+use crate::error::{QuillSQLError, QuillSQLResult};
+use crate::storage::tuple::Tuple;
 use std::sync::LazyLock;
-use crate::storage::mvcc::TransactionId;
 
 pub static EMPTY_TUPLE_META: TupleMeta = TupleMeta {
     insert_txn_id: 0,
@@ -20,22 +21,23 @@ pub static EMPTY_TUPLE_INFO: LazyLock<TupleInfo> = LazyLock::new(|| TupleInfo {
 /**
  * Slotted page format:
  *  ---------------------------------------------------------
- *  | HEADER | ... FREE SPACE ... | ... INSERTED DATA ... |
+ *  | HEADER | ... FREE SPACE ... | ... INSERTED TUPLES ... |
  *  ---------------------------------------------------------
  *                                ^
  *                                free space pointer
  *
  *  Header format (size in bytes):
  *  ----------------------------------------------------------------------------
- *  | NextPageId (4)| NumItems(2) | NumDeletedItems(2) |
+ *  | NextPageId (4)| NumTuples(2) | NumDeletedTuples(2) |
  *  ----------------------------------------------------------------------------
  *  ----------------------------------------------------------------
- *  | Item_1 offset+size + ItemMeta | Item_2 offset+size + ItemMeta | ... |
+ *  | Tuple_1 offset+size + TupleMeta | Tuple_2 offset+size + TupleMeta | ... |
  *  ----------------------------------------------------------------
  *
  */
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct TablePage {
+    pub schema: SchemaRef,
     pub header: TablePageHeader,
     // 整个页原始数据
     pub data: [u8; PAGE_SIZE],
@@ -75,8 +77,9 @@ pub struct RecordId {
 }
 
 impl TablePage {
-    pub fn new(next_page_id: PageId) -> Self {
+    pub fn new(schema: SchemaRef, next_page_id: PageId) -> Self {
         Self {
+            schema,
             header: TablePageHeader {
                 next_page_id,
                 num_tuples: 0,
@@ -87,47 +90,52 @@ impl TablePage {
         }
     }
 
-    // Get the offset for the next data insertion.
-    pub fn next_data_offset(&self, data: &[u8]) -> Result<usize> {
-        // Get the ending offset of the current slot. If there are inserted items,
-        // get the offset of the previous inserted item; otherwise, set it to the size of the page.
+    // Get the offset for the next tuple insertion.
+    pub fn next_tuple_offset(&self, tuple: &Tuple) -> QuillSQLResult<usize> {
+        // Get the ending offset of the current slot. If there are inserted tuples,
+        // get the offset of the previous inserted tuple; otherwise, set it to the size of the page.
         let slot_end_offset = if self.header.num_tuples > 0 {
             self.header.tuple_infos[self.header.num_tuples as usize - 1].offset as usize
         } else {
             PAGE_SIZE
         };
 
-        // Check if the current slot has enough space for the new data. Return an error if not.
-        if slot_end_offset < data.len() {
-            return Err(Error::Internal("No enough space to store data".to_string()));
+        // Check if the current slot has enough space for the new tuple. Return None if not.
+        if slot_end_offset < TupleCodec::encode(tuple).len() {
+            return Err(QuillSQLError::Storage(
+                "No enough space to store tuple".to_string(),
+            ));
         }
 
-        // Calculate the insertion offset for the new data by subtracting its length
+        // Calculate the insertion offset for the new tuple by subtracting its data length
         // from the ending offset of the current slot.
-        let data_offset = slot_end_offset - data.len();
+        let tuple_offset = slot_end_offset - TupleCodec::encode(tuple).len();
 
-        // Calculate the minimum valid data insertion offset, including the table page header size,
+        // Calculate the minimum valid tuple insertion offset, including the table page header size,
         // the total size of each tuple info (existing tuple infos and newly added tuple info).
-        let min_data_offset = TablePageHeaderCodec::encode(&self.header).len()
+        let min_tuple_offset = TablePageHeaderCodec::encode(&self.header).len()
             + TablePageHeaderTupleInfoCodec::encode(&EMPTY_TUPLE_INFO).len();
-        if data_offset < min_data_offset {
-            return Err(Error::Internal("No enough space to store data".to_string()));
+        if tuple_offset < min_tuple_offset {
+            return Err(QuillSQLError::Storage(
+                "No enough space to store tuple".to_string(),
+            ));
         }
 
-        // Return the calculated insertion offset for the new data.
-        Ok(data_offset)
+        // Return the calculated insertion offset for the new tuple.
+        Ok(tuple_offset)
     }
 
-    pub fn insert_data(&mut self, meta: &TupleMeta, data: &[u8]) -> Result<u16> {
-        // Get the offset for the next data insertion.
-        let data_offset = self.next_data_offset(data)?;
+    pub fn insert_tuple(&mut self, meta: &TupleMeta, tuple: &Tuple) -> QuillSQLResult<u16> {
+        // Get the offset for the next tuple insertion.
+        let tuple_offset = self.next_tuple_offset(tuple)?;
         let tuple_id = self.header.num_tuples;
-        debug_assert!(data.len() < u16::MAX as usize);
+        let tuple_bytes = TupleCodec::encode(tuple);
+        debug_assert!(tuple_bytes.len() < u16::MAX as usize);
 
-        // Store data information including offset, length, and metadata.
+        // Store tuple information including offset, length, and metadata.
         self.header.tuple_infos.push(TupleInfo {
-            offset: data_offset as u16,
-            size: data.len() as u16,
+            offset: tuple_offset as u16,
+            size: tuple_bytes.len() as u16,
             meta: *meta,
         });
 
@@ -139,14 +147,14 @@ impl TablePage {
             self.header.num_deleted_tuples += 1;
         }
 
-        // Copy the data into the appropriate position within the page's data buffer.
-        self.data[data_offset..data_offset + data.len()].copy_from_slice(data);
+        // Copy the tuple's data into the appropriate position within the page's data buffer.
+        self.data[tuple_offset..tuple_offset + tuple_bytes.len()].copy_from_slice(&tuple_bytes);
         Ok(tuple_id)
     }
 
-    pub fn update_tuple_meta(&mut self, meta: TupleMeta, slot_num: u16) -> Result<()> {
+    pub fn update_tuple_meta(&mut self, meta: TupleMeta, slot_num: u16) -> QuillSQLResult<()> {
         if slot_num >= self.header.num_tuples {
-            return Err(Error::Internal(format!(
+            return Err(QuillSQLError::Storage(format!(
                 "tuple_id {} out of range",
                 slot_num
             )));
@@ -159,31 +167,36 @@ impl TablePage {
         Ok(())
     }
 
-    pub fn update_data(&mut self, data: &[u8], slot_num: u16) -> Result<()> {
+    pub fn update_tuple(&mut self, tuple: Tuple, slot_num: u16) -> QuillSQLResult<()> {
         if slot_num >= self.header.num_tuples {
-            return Err(Error::Internal(format!(
+            return Err(QuillSQLError::Storage(format!(
                 "tuple_id {} out of range",
                 slot_num
             )));
         }
         let offset = self.header.tuple_infos[slot_num as usize].offset as usize;
         let size = self.header.tuple_infos[slot_num as usize].size as usize;
-        if data.len() == size {
-            self.data[offset..(offset + size)].copy_from_slice(data);
+        let tuple_bytes = TupleCodec::encode(&tuple);
+        if tuple_bytes.len() == size {
+            self.data[offset..(offset + size)].copy_from_slice(&tuple_bytes);
         } else {
-            // need to move other data
-            let mut full_items = vec![];
+            // need move other tuples
+            let mut full_tuples = vec![];
             for info in self.header.tuple_infos.iter() {
-                full_items.push((
+                full_tuples.push((
                     info.meta,
-                    self.data[info.offset as usize..(info.offset + info.size) as usize].to_vec(),
+                    TupleCodec::decode(
+                        &self.data[info.offset as usize..(info.offset + info.size) as usize],
+                        self.schema.clone(),
+                    )?
+                    .0,
                 ));
             }
-            full_items[slot_num as usize].1 = data.to_vec();
+            full_tuples[slot_num as usize].1 = tuple;
 
-            let mut new_page = TablePage::new(self.header.next_page_id);
-            for (meta, item_data) in full_items.iter() {
-                new_page.insert_data(meta, item_data)?;
+            let mut new_page = TablePage::new(self.schema.clone(), self.header.next_page_id);
+            for (meta, tuple) in full_tuples.iter() {
+                new_page.insert_tuple(meta, tuple)?;
             }
             self.header = new_page.header;
             self.data = new_page.data;
@@ -191,9 +204,9 @@ impl TablePage {
         Ok(())
     }
 
-    pub fn get_data(&self, slot_num: u16) -> Result<(TupleMeta, Vec<u8>)> {
+    pub fn tuple(&self, slot_num: u16) -> QuillSQLResult<(TupleMeta, Tuple)> {
         if slot_num >= self.header.num_tuples {
-            return Err(Error::Internal(format!(
+            return Err(QuillSQLError::Storage(format!(
                 "tuple_id {} out of range",
                 slot_num
             )));
@@ -202,14 +215,17 @@ impl TablePage {
         let offset = self.header.tuple_infos[slot_num as usize].offset;
         let size = self.header.tuple_infos[slot_num as usize].size;
         let meta = self.header.tuple_infos[slot_num as usize].meta;
-        let data = self.data[offset as usize..(offset + size) as usize].to_vec();
+        let (tuple, _) = TupleCodec::decode(
+            &self.data[offset as usize..(offset + size) as usize],
+            self.schema.clone(),
+        )?;
 
-        Ok((meta, data))
+        Ok((meta, tuple))
     }
 
-    pub fn tuple_meta(&self, slot_num: u16) -> Result<TupleMeta> {
+    pub fn tuple_meta(&self, slot_num: u16) -> QuillSQLResult<TupleMeta> {
         if slot_num >= self.header.num_tuples {
-            return Err(Error::Internal(format!(
+            return Err(QuillSQLError::Storage(format!(
                 "tuple_id {} out of range",
                 slot_num
             )));
@@ -224,8 +240,7 @@ impl TablePage {
         // Find next non-deleted tuple
         while tuple_id + 1 < self.header.num_tuples as u32 {
             tuple_id += 1;
-            let meta = self.header.tuple_infos[tuple_id as usize].meta;
-            if !meta.is_deleted {
+            if !self.header.tuple_infos[tuple_id as usize].meta.is_deleted {
                 return Some(RecordId::new(rid.page_id, tuple_id));
             }
         }
@@ -236,50 +251,74 @@ impl TablePage {
 
 #[cfg(test)]
 mod tests {
-    use crate::storage::b_plus_tree::page::table_page::EMPTY_TUPLE_META;
-
-    // 辅助函数，创建测试用的字节数组
-    fn create_test_data(value: u32) -> Vec<u8> {
-        value.to_be_bytes().to_vec()
-    }
+    use crate::catalog::{Column, DataType, Schema};
+    use crate::storage::tuple::Tuple;
+    use crate::storage::b_plus_tree::page::EMPTY_TUPLE_META;
+    use std::sync::Arc;
 
     #[test]
-    pub fn test_table_page_get_data() {
-        let mut table_page = super::TablePage::new(0);
-        let data1 = create_test_data(1);
-        let data2 = create_test_data(2);
-        let data3 = create_test_data(3);
-
-        let tuple_id = table_page.insert_data(&EMPTY_TUPLE_META, &data1).unwrap();
+    pub fn test_table_page_get_tuple() {
+        let schema = Arc::new(Schema::new(vec![
+            Column::new("a", DataType::Int8, false),
+            Column::new("b", DataType::Int16, false),
+        ]));
+        let mut table_page = super::TablePage::new(schema.clone(), 0);
+        let tuple_id = table_page
+            .insert_tuple(
+                &EMPTY_TUPLE_META,
+                &Tuple::new(schema.clone(), vec![1i8.into(), 1i16.into()]),
+            )
+            .unwrap();
         assert_eq!(tuple_id, 0);
-
-        let tuple_id = table_page.insert_data(&EMPTY_TUPLE_META, &data2).unwrap();
+        let tuple_id = table_page
+            .insert_tuple(
+                &EMPTY_TUPLE_META,
+                &Tuple::new(schema.clone(), vec![2i8.into(), 2i16.into()]),
+            )
+            .unwrap();
         assert_eq!(tuple_id, 1);
-
-        let tuple_id = table_page.insert_data(&EMPTY_TUPLE_META, &data3).unwrap();
+        let tuple_id = table_page
+            .insert_tuple(
+                &EMPTY_TUPLE_META,
+                &Tuple::new(schema.clone(), vec![3i8.into(), 3i16.into()]),
+            )
+            .unwrap();
         assert_eq!(tuple_id, 2);
 
-        let (tuple_meta, retrieved_data) = table_page.get_data(0).unwrap();
+        let (tuple_meta, tuple) = table_page.tuple(0).unwrap();
         assert_eq!(tuple_meta, EMPTY_TUPLE_META);
-        assert_eq!(retrieved_data, data1);
-
-        let (_tuple_meta, retrieved_data) = table_page.get_data(1).unwrap();
-        assert_eq!(retrieved_data, data2);
-
-        let (_tuple_meta, retrieved_data) = table_page.get_data(2).unwrap();
-        assert_eq!(retrieved_data, data3);
+        assert_eq!(tuple.data, vec![1i8.into(), 1i16.into()]);
+        let (_tuple_meta, tuple) = table_page.tuple(1).unwrap();
+        assert_eq!(tuple.data, vec![2i8.into(), 2i16.into()]);
+        let (_tuple_meta, tuple) = table_page.tuple(2).unwrap();
+        assert_eq!(tuple.data, vec![3i8.into(), 3i16.into()]);
     }
 
     #[test]
     pub fn test_table_page_update_tuple_meta() {
-        let mut table_page = super::TablePage::new(0);
-        let data1 = create_test_data(1);
-        let data2 = create_test_data(2);
-        let data3 = create_test_data(3);
-
-        let _tuple_id = table_page.insert_data(&EMPTY_TUPLE_META, &data1).unwrap();
-        let _tuple_id = table_page.insert_data(&EMPTY_TUPLE_META, &data2).unwrap();
-        let _tuple_id = table_page.insert_data(&EMPTY_TUPLE_META, &data3).unwrap();
+        let schema = Arc::new(Schema::new(vec![
+            Column::new("a", DataType::Int8, false),
+            Column::new("b", DataType::Int16, false),
+        ]));
+        let mut table_page = super::TablePage::new(schema.clone(), 0);
+        let _tuple_id = table_page
+            .insert_tuple(
+                &EMPTY_TUPLE_META,
+                &Tuple::new(schema.clone(), vec![1i8.into(), 1i16.into()]),
+            )
+            .unwrap();
+        let _tuple_id = table_page
+            .insert_tuple(
+                &EMPTY_TUPLE_META,
+                &Tuple::new(schema.clone(), vec![2i8.into(), 2i16.into()]),
+            )
+            .unwrap();
+        let _tuple_id = table_page
+            .insert_tuple(
+                &EMPTY_TUPLE_META,
+                &Tuple::new(schema.clone(), vec![3i8.into(), 3i16.into()]),
+            )
+            .unwrap();
 
         let mut tuple_meta = table_page.tuple_meta(0).unwrap();
         tuple_meta.is_deleted = true;

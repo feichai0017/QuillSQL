@@ -1,6 +1,6 @@
-use crate::error::Result;
-use crate::storage::codec::{common::CommonCodec, DecodedData};
-use crate::storage::b_plus_tree::page::meta_page::MetaPage;
+use crate::storage::codec::{CommonCodec, DecodedData};
+use crate::storage::b_plus_tree::page::MetaPage;
+use crate::error::QuillSQLResult;
 
 pub struct MetaPageCodec;
 
@@ -25,7 +25,7 @@ impl MetaPageCodec {
         bytes
     }
 
-    pub fn decode(bytes: &[u8]) -> Result<DecodedData<MetaPage>> {
+    pub fn decode(bytes: &[u8]) -> QuillSQLResult<DecodedData<MetaPage>> {
         let mut left_bytes = bytes;
 
         let (major_version, offset) = CommonCodec::decode_u32(left_bytes)?;
@@ -64,8 +64,8 @@ impl MetaPageCodec {
 
 #[cfg(test)]
 mod tests {
-    use crate::storage::codec::meta_page::MetaPageCodec;
-    use crate::storage::b_plus_tree::page::meta_page::MetaPage;
+    use crate::storage::codec::MetaPageCodec;
+    use crate::storage::b_plus_tree::page::MetaPage;
 
     #[test]
     fn meta_page_codec() {

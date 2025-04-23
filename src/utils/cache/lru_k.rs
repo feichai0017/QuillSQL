@@ -1,6 +1,6 @@
 use super::Replacer;
-use crate::error::{Error, Result};
-use crate::storage::b_plus_tree::buffer_pool_manager::FrameId;
+use crate::error::{QuillSQLError, QuillSQLResult};
+use crate::buffer::FrameId;
 use std::collections::{HashMap, LinkedList};
 
 #[derive(Debug)]
@@ -54,108 +54,72 @@ impl Replacer for LRUKReplacer {
     }
 
     // 驱逐 evictable 且具有最大 k-distance 的 frame
+    // 驱逐 evictable 且具有最大 k-distance 的 frame
     fn evict(&mut self) -> Option<FrameId> {
         let mut max_k_distance = 0;
-        let mut victim_frame = None;
-        let mut infinite_victim = None;
-
-        for (&frame_id, node) in self.node_store.iter() {
+        let mut result = None;
+        for (frame_id, node) in self.node_store.iter() {
             if !node.is_evictable {
                 continue;
             }
-            if node.history.len() < self.k {
-                // history < k: Treat as infinite distance
-                // Among infinite distance frames, evict the one with the oldest timestamp
-                let oldest_ts = *node.history.front().unwrap_or(&u64::MAX);
-                match infinite_victim {
-                    None => infinite_victim = Some((frame_id, oldest_ts)),
-                    Some((_, ts)) => {
-                        if oldest_ts < ts {
-                            infinite_victim = Some((frame_id, oldest_ts));
-                        }
-                    }
-                }
+            let k_distance = if node.history.len() < self.k {
+                u64::MAX - node.history.front().unwrap()
             } else {
-                // history >= k: Calculate finite k-distance
-                let k_distance = self.current_timestamp - node.history.front().unwrap();
-                if k_distance > max_k_distance {
-                    max_k_distance = k_distance;
-                    victim_frame = Some(frame_id);
-                }
+                self.current_timestamp - node.history.front().unwrap()
+            };
+            if k_distance > max_k_distance {
+                max_k_distance = k_distance;
+                result = Some(*frame_id);
             }
         }
-
-        // Prioritize evicting frames with finite k-distance first (LRU among >= k accesses)
-        // If no such frame exists or multiple have the same max k-distance (unlikely with u64 timestamps),
-        // then evict the frame with infinite distance and the oldest access.
-        let final_victim = match victim_frame {
-            Some(finite_victim) => Some(finite_victim),
-            None => infinite_victim.map(|(id, _)| id),
-        };
-
-        if let Some(frame_id) = final_victim {
-            self.remove(frame_id); // remove handles node_store and current_size
+        if let Some(frame_id) = result {
+            self.remove(frame_id);
         }
-        final_victim
+        result
     }
 
     // 记录frame的访问
-    fn record_access(&mut self, frame_id: FrameId) -> Result<()> {
+    fn record_access(&mut self, frame_id: FrameId) -> QuillSQLResult<()> {
         if let Some(node) = self.node_store.get_mut(&frame_id) {
             node.record_access(self.current_timestamp);
+            self.current_timestamp += 1;
         } else {
             // 创建新node
             if self.node_store.len() >= self.replacer_size {
-                return Err(Error::Internal(format!(
-                    "LRUK capacity {} reached when accessing new frame {}",
-                    self.replacer_size, frame_id
-                )));
+                return Err(QuillSQLError::Internal(
+                    "frame size exceeds the limit".to_string(),
+                ));
             }
             let mut node = LRUKNode::new(self.k);
             node.record_access(self.current_timestamp);
+            self.current_timestamp += 1;
             self.node_store.insert(frame_id, node);
-            // New frames are initially not evictable, current_size doesn't change
         }
-        self.current_timestamp += 1;
         Ok(())
     }
 
     // 设置frame是否可被置换
-    fn set_evictable(&mut self, frame_id: FrameId, set_evictable: bool) -> Result<()> {
+    fn set_evictable(&mut self, frame_id: FrameId, set_evictable: bool) -> QuillSQLResult<()> {
         if let Some(node) = self.node_store.get_mut(&frame_id) {
-            let was_evictable = node.is_evictable;
+            let evictable = node.is_evictable;
             node.is_evictable = set_evictable;
-            if set_evictable && !was_evictable {
+            if set_evictable && !evictable {
                 self.current_size += 1;
-            } else if !set_evictable && was_evictable {
-                if self.current_size > 0 {
-                    self.current_size -= 1;
-                } else {
-                    eprintln!(
-                        "Warning: Attempted to decrease LRUKReplacer size below zero for frame {}",
-                        frame_id
-                    );
-                }
+            } else if !set_evictable && evictable {
+                self.current_size -= 1;
             }
             Ok(())
         } else {
-            Err(Error::Internal(format!(
-                "Frame {} not found in LRUKReplacer::set_evictable",
-                frame_id
-            )))
+            Err(QuillSQLError::Internal("frame not found".to_string()))
         }
     }
 
     // 移除frame
     fn remove(&mut self, frame_id: FrameId) {
-        if let Some(node) = self.node_store.remove(&frame_id) {
-            if node.is_evictable {
-                if self.current_size > 0 {
-                    self.current_size -= 1;
-                } else {
-                    eprintln!("Warning: Attempted to decrease LRUKReplacer size below zero during remove for frame {}", frame_id);
-                }
-            }
+        if let Some(node) = self.node_store.get(&frame_id) {
+            assert!(node.is_evictable, "frame is not evictable");
+            self.node_store.remove(&frame_id);
+            self.current_size -= 1;
         }
     }
 
@@ -171,7 +135,7 @@ impl LRUKReplacer {
             current_size: 0,
             replacer_size: num_frames,
             k,
-            node_store: HashMap::with_capacity(num_frames),
+            node_store: HashMap::new(),
             current_timestamp: 0,
         }
     }

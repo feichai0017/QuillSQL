@@ -1,5 +1,5 @@
-use crate::error::{Error, Result};
-use crate::storage::b_plus_tree::buffer_pool_manager::FrameId;
+use crate::error::{QuillSQLError, QuillSQLResult};
+use crate::buffer::FrameId;
 use crate::utils::cache::Replacer;
 use std::collections::HashMap;
 
@@ -55,7 +55,7 @@ impl Replacer for ClockLRUReplacer {
     /// 记录frame的访问
     /// 如果frame已存在，将其引用位设为true
     /// 如果frame不存在，添加到缓存中
-    fn record_access(&mut self, frame_id: FrameId) -> Result<()> {
+    fn record_access(&mut self, frame_id: FrameId) -> QuillSQLResult<()> {
         if let Some(&index) = self.frame_map.get(&frame_id) {
             // frame已存在，将引用位设为true
             if let Some(entry) = &mut self.frames[index] {
@@ -64,7 +64,7 @@ impl Replacer for ClockLRUReplacer {
         } else {
             // frame不存在，需要添加
             if self.frame_map.len() >= self.capacity {
-                return Err(Error::Internal("frame size exceeds capacity".to_string()));
+                return Err(QuillSQLError::Internal("frame size exceeds capacity".to_string()));
             }
             
             // 寻找一个空位
@@ -163,7 +163,7 @@ impl Replacer for ClockLRUReplacer {
     }
 
     /// 设置frame是否可被驱逐
-    fn set_evictable(&mut self, frame_id: FrameId, set_evictable: bool) -> Result<()> {
+    fn set_evictable(&mut self, frame_id: FrameId, set_evictable: bool) -> QuillSQLResult<()> {
         if let Some(&index) = self.frame_map.get(&frame_id) {
             if let Some(entry) = &mut self.frames[index] {
                 // 更新可驱逐状态
@@ -181,7 +181,7 @@ impl Replacer for ClockLRUReplacer {
             }
         }
         
-        Err(Error::Internal(format!("frame {} not found", frame_id)))
+        Err(QuillSQLError::Internal(format!("frame {} not found", frame_id)))
     }
 
     /// 从缓存中移除指定frame
