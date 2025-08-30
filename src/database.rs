@@ -14,8 +14,8 @@ use crate::{
     catalog::Catalog,
     execution::{ExecutionContext, ExecutionEngine},
     plan::{LogicalPlanner, PlannerContext},
-    storage::b_plus_tree::disk::disk_manager::DiskManager,
-    storage::b_plus_tree::disk::disk_scheduler::DiskScheduler,
+    storage::disk_manager::DiskManager,
+    storage::disk_scheduler::DiskScheduler,
     storage::tuple::Tuple,
 };
 

@@ -8,13 +8,13 @@ use crate::buffer::page::{Page, PageId, PAGE_SIZE};
 use crate::buffer::PageRef;
 use crate::catalog::SchemaRef;
 use crate::error::{QuillSQLError, QuillSQLResult};
-use crate::storage::b_plus_tree::disk::disk_scheduler::DiskScheduler;
+use crate::storage::disk_scheduler::DiskScheduler;
 use crate::storage::codec::{
     BPlusTreeInternalPageCodec, BPlusTreeLeafPageCodec, BPlusTreePageCodec, TablePageCodec,
 };
 use crate::storage::{
-    b_plus_tree::page::TablePage,
-    b_plus_tree::page::{BPlusTreeInternalPage, BPlusTreeLeafPage, BPlusTreePage},
+    page::TablePage,
+    page::{BPlusTreeInternalPage, BPlusTreeLeafPage, BPlusTreePage},
 };
 
 use crate::utils::cache::lru_k::LRUKReplacer;
@@ -283,9 +283,9 @@ impl BufferPoolManager {
 
 #[cfg(test)]
 mod tests {
-    use crate::storage::b_plus_tree::disk::disk_scheduler::DiskScheduler;
+    use crate::storage::disk_scheduler::DiskScheduler;
     use crate::utils::cache::Replacer;
-    use crate::{buffer::BufferPoolManager, storage::b_plus_tree::disk::disk_manager::DiskManager};
+    use crate::{buffer::BufferPoolManager, storage::disk_manager::DiskManager};
     use std::sync::Arc;
     use tempfile::TempDir;
 

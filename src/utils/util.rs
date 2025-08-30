@@ -1,13 +1,13 @@
 use crate::buffer::PAGE_SIZE;
 use crate::execution::physical_plan::PhysicalPlan;
 use crate::plan::logical_plan::LogicalPlan;
-use crate::storage::b_plus_tree::b_plus_tree_index::BPlusTreeIndex;
+use crate::storage::index::BPlusTreeIndex;
 use crate::error::{QuillSQLError, QuillSQLResult};
 use comfy_table::Cell;
 use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
 
-use crate::storage::b_plus_tree::page::BPlusTreePage;
+use crate::storage::page::BPlusTreePage;
 use crate::storage::tuple::Tuple;
 
 pub fn pretty_format_tuples(tuples: &Vec<Tuple>) -> comfy_table::Table {

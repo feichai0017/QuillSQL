@@ -2,7 +2,7 @@ use std::sync::Mutex;
 
 use crate::catalog::SchemaRef;
 use crate::error::QuillSQLError;
-use crate::storage::b_plus_tree::table_heap::TableIterator;
+use crate::storage::table_heap::TableIterator;
 use crate::utils::table_ref::TableReference;
 use crate::{
     execution::{ExecutionContext, VolcanoExecutor},

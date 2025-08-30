@@ -6,8 +6,8 @@ use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::utils::scalar::ScalarValue;
 use crate::utils::table_ref::TableReference;
 
-use crate::storage::b_plus_tree::b_plus_tree_index::BPlusTreeIndex;
-use crate::storage::b_plus_tree::table_heap::TableHeap;
+use crate::storage::index::BPlusTreeIndex;
+use crate::storage::table_heap::TableHeap;
 use std::sync::{Arc, LazyLock};
 
 pub static INFORMATION_SCHEMA_NAME: &str = "information_schema";

@@ -253,7 +253,7 @@ impl TablePage {
 mod tests {
     use crate::catalog::{Column, DataType, Schema};
     use crate::storage::tuple::Tuple;
-    use crate::storage::b_plus_tree::page::EMPTY_TUPLE_META;
+    use crate::storage::page::EMPTY_TUPLE_META;
     use std::sync::Arc;
 
     #[test]

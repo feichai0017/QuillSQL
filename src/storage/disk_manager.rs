@@ -12,9 +12,9 @@ use crate::error::{QuillSQLError, QuillSQLResult};
 
 use crate::buffer::{PageId, PAGE_SIZE, INVALID_PAGE_ID};
 use crate::storage::codec::{FreelistPageCodec, MetaPageCodec};
-use crate::storage::b_plus_tree::page::FreelistPage;
-use crate::storage::b_plus_tree::page::MetaPage;
-use crate::storage::b_plus_tree::page::META_PAGE_SIZE;
+use crate::storage::page::FreelistPage;
+use crate::storage::page::MetaPage;
+use crate::storage::page::META_PAGE_SIZE;
 
 static EMPTY_PAGE: [u8; PAGE_SIZE] = [0; PAGE_SIZE];
 
@@ -243,7 +243,7 @@ impl DiskManager {
 mod tests {
     use crate::buffer::PAGE_SIZE;
     use crate::storage::codec::MetaPageCodec;
-    use crate::storage::b_plus_tree::page::EMPTY_META_PAGE;
+    use crate::storage::page::EMPTY_META_PAGE;
     use tempfile::TempDir;
 
     #[test]

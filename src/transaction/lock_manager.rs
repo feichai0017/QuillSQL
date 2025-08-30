@@ -1,4 +1,4 @@
-use crate::storage::b_plus_tree::page::RecordId;
+use crate::storage::page::RecordId;
 use crate::utils::table_ref::TableReference;
 use crate::transaction::{Transaction, TransactionId};
 use std::collections::HashMap;

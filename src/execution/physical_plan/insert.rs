@@ -3,7 +3,7 @@ use std::sync::atomic::Ordering;
 use std::sync::{atomic::AtomicU32, Arc};
 
 use crate::catalog::{SchemaRef, INSERT_OUTPUT_SCHEMA_REF};
-use crate::storage::b_plus_tree::page::EMPTY_TUPLE_META;
+use crate::storage::page::EMPTY_TUPLE_META;
 use crate::storage::tuple::Tuple;
 use crate::utils::scalar::ScalarValue;
 use crate::utils::table_ref::TableReference;

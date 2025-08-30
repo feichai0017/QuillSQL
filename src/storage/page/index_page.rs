@@ -1,6 +1,6 @@
 use crate::buffer::{PageId, INVALID_PAGE_ID};
 use crate::catalog::{Schema, SchemaRef};
-use crate::storage::b_plus_tree::page::RecordId;
+use crate::storage::page::RecordId;
 use crate::storage::tuple::Tuple;
 use std::sync::Arc;
 
@@ -453,10 +453,10 @@ impl BPlusTreeLeafPage {
 #[cfg(test)]
 mod tests {
     use crate::utils::scalar::ScalarValue;
-    use crate::storage::b_plus_tree::page::{BPlusTreeInternalPage, BPlusTreeLeafPage};
+    use crate::storage::page::{BPlusTreeInternalPage, BPlusTreeLeafPage};
     use crate::{
         catalog::{Column, DataType, Schema},
-        storage::b_plus_tree::page::RecordId,
+        storage::page::RecordId,
     };
     use crate::storage::tuple::Tuple;
     use std::sync::Arc;

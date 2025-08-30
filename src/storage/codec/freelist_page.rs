@@ -1,6 +1,6 @@
 use crate::buffer::PAGE_SIZE;
 use crate::storage::codec::{CommonCodec, DecodedData};
-use crate::storage::b_plus_tree::page::{FreelistPage, FreelistPageHeader};
+use crate::storage::page::{FreelistPage, FreelistPageHeader};
 use crate::error::QuillSQLResult;
 
 pub struct FreelistPageHeaderCodec;
@@ -72,7 +72,7 @@ impl FreelistPageCodec {
 #[cfg(test)]
 mod tests {
     use crate::storage::codec::FreelistPageCodec;
-    use crate::storage::b_plus_tree::page::{FreelistPage, FreelistPageHeader, FREELIST_PAGE_MAX_SIZE};
+    use crate::storage::page::{FreelistPage, FreelistPageHeader, FREELIST_PAGE_MAX_SIZE};
 
     #[test]
     fn freelist_page_codec() {

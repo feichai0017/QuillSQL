@@ -1,7 +1,7 @@
 use crate::buffer::PAGE_SIZE;
 use crate::catalog::SchemaRef;
 use crate::storage::codec::{CommonCodec, DecodedData, RidCodec, TupleCodec};
-use crate::storage::b_plus_tree::page::{
+use crate::storage::page::{
     BPlusTreeInternalPage, BPlusTreeInternalPageHeader, BPlusTreeLeafPage, BPlusTreeLeafPageHeader,
     BPlusTreePage, BPlusTreePageType,
 };
@@ -265,11 +265,11 @@ impl BPlusTreeInternalPageHeaderCodec {
 mod tests {
     use crate::catalog::{Column, DataType, Schema};
     use crate::storage::codec::index_page::BPlusTreePageCodec;
-    use crate::storage::b_plus_tree::page::{
+    use crate::storage::page::{
         BPlusTreeInternalPage, BPlusTreeLeafPage, BPlusTreePage,
     };
     use crate::storage::tuple::Tuple;
-    use crate::storage::b_plus_tree::page::RecordId;
+    use crate::storage::page::RecordId;
     use std::sync::Arc;
 
     #[test]

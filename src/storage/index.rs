@@ -10,10 +10,10 @@ use crate::utils::util::page_bytes_to_array;
 use crate::storage::codec::{
     BPlusTreeInternalPageCodec, BPlusTreeLeafPageCodec, BPlusTreePageCodec,
 };
-use crate::storage::b_plus_tree::page::{InternalKV, LeafKV};
+use crate::storage::page::{InternalKV, LeafKV};
 use crate::{
     buffer::BufferPoolManager,
-    storage::b_plus_tree::page::{BPlusTreeInternalPage, BPlusTreeLeafPage, BPlusTreePage, RecordId},
+    storage::page::{BPlusTreeInternalPage, BPlusTreeLeafPage, BPlusTreePage, RecordId},
     error::QuillSQLError,
 };
 
@@ -733,10 +733,10 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::catalog::SchemaRef;
-    use crate::storage::b_plus_tree::b_plus_tree_index::TreeIndexIterator;
-    use crate::storage::b_plus_tree::disk::disk_manager::DiskManager;
-    use crate::storage::b_plus_tree::disk::disk_scheduler::DiskScheduler;
-    use crate::storage::b_plus_tree::page::RecordId;
+    use crate::storage::index::TreeIndexIterator;
+    use crate::storage::disk_manager::DiskManager;
+    use crate::storage::disk_scheduler::DiskScheduler;
+    use crate::storage::page::RecordId;
     use crate::storage::tuple::Tuple;
     use crate::utils::util::pretty_format_index_tree;
     use crate::{

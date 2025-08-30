@@ -2,7 +2,7 @@ use crate::buffer::PAGE_SIZE;
 use crate::catalog::SchemaRef;
 use crate::utils::util::page_bytes_to_array;
 use crate::storage::codec::{CommonCodec, DecodedData};
-use crate::storage::b_plus_tree::page::{RecordId, TablePage, TablePageHeader, TupleInfo, TupleMeta};
+use crate::storage::page::{RecordId, TablePage, TablePageHeader, TupleInfo, TupleMeta};
 use crate::error::{QuillSQLError, QuillSQLResult};
 
 pub struct TablePageCodec;
@@ -151,7 +151,7 @@ mod tests {
     use crate::catalog::{Column, DataType, Schema};
     use crate::storage::codec::table_page::TablePageHeaderCodec;
     use crate::storage::codec::TablePageCodec;
-    use crate::storage::b_plus_tree::page::{TablePage, TupleMeta};
+    use crate::storage::page::{TablePage, TupleMeta};
     use crate::storage::tuple::Tuple;
     use std::sync::Arc;
 

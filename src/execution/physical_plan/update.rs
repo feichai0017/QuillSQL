@@ -2,7 +2,7 @@ use crate::catalog::{SchemaRef, UPDATE_OUTPUT_SCHEMA_REF};
 use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::execution::{ExecutionContext, VolcanoExecutor};
 use crate::expression::{Expr, ExprTrait};
-use crate::storage::b_plus_tree::table_heap::TableIterator;
+use crate::storage::table_heap::TableIterator;
 use crate::storage::tuple::{Tuple, EMPTY_TUPLE};
 use crate::utils::scalar::ScalarValue;
 use crate::utils::table_ref::TableReference;

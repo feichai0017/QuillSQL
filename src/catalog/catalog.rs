@@ -7,13 +7,13 @@ use crate::catalog::{
     INFORMATION_SCHEMA_INDEXES, INFORMATION_SCHEMA_NAME, INFORMATION_SCHEMA_SCHEMAS,
     INFORMATION_SCHEMA_TABLES, SCHEMAS_SCHMEA, TABLES_SCHMEA,
 };
-use crate::storage::b_plus_tree::disk::disk_manager::DiskManager;
+use crate::storage::disk_manager::DiskManager;
 use crate::storage::tuple::Tuple;
 use crate::utils::table_ref::TableReference;
-use crate::storage::b_plus_tree::page::{BPLUS_INTERNAL_PAGE_MAX_SIZE, BPLUS_LEAF_PAGE_MAX_SIZE, EMPTY_TUPLE_META};
+use crate::storage::page::{BPLUS_INTERNAL_PAGE_MAX_SIZE, BPLUS_LEAF_PAGE_MAX_SIZE, EMPTY_TUPLE_META};
 use crate::{
     buffer::BufferPoolManager,
-    storage::{b_plus_tree::b_plus_tree_index::BPlusTreeIndex, b_plus_tree::table_heap::TableHeap},
+    storage::{index::BPlusTreeIndex, table_heap::TableHeap},
     error::{QuillSQLError, QuillSQLResult},
 };
 

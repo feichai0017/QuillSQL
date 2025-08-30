@@ -14,4 +14,3 @@ pub use sqlparser::ast::ColumnDef;
 pub use sqlparser::ast::TableConstraint;
 pub use sqlparser::ast::ObjectName;
 
-

@@ -2,7 +2,7 @@ use crate::buffer::{AtomicPageId, INVALID_PAGE_ID};
 use crate::catalog::SchemaRef;
 use crate::utils::util::page_bytes_to_array;
 use crate::storage::codec::TablePageCodec;
-use crate::storage::b_plus_tree::page::{RecordId, TablePage, TupleMeta, INVALID_RID};
+use crate::storage::page::{RecordId, TablePage, TupleMeta, INVALID_RID};
 use crate::{buffer::BufferPoolManager, error::QuillSQLResult};
 use std::collections::Bound;
 use std::ops::RangeBounds;
@@ -315,11 +315,11 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::catalog::{Column, DataType, Schema};
-    use crate::storage::b_plus_tree::disk::disk_manager::DiskManager;
-    use crate::storage::b_plus_tree::disk::disk_scheduler::DiskScheduler;
-    use crate::storage::b_plus_tree::page::EMPTY_TUPLE_META;
-    use crate::storage::b_plus_tree::table_heap::TableIterator;
-    use crate::storage::{b_plus_tree::table_heap::TableHeap, tuple::Tuple};
+    use crate::storage::disk_manager::DiskManager;
+    use crate::storage::disk_scheduler::DiskScheduler;
+    use crate::storage::page::EMPTY_TUPLE_META;
+    use crate::storage::table_heap::TableIterator;
+    use crate::storage::{table_heap::TableHeap, tuple::Tuple};
     use crate::buffer::BufferPoolManager;
 
     #[test]
