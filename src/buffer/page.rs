@@ -18,9 +18,9 @@ pub const PAGE_SIZE: usize = 4096;
 pub struct Page {
     pub page_id: PageId,
     data: [u8; PAGE_SIZE],
-    // 被引用次数
+    // reference count number
     pub pin_count: u32,
-    // 是否被写过
+    // whether it has been written
     pub is_dirty: bool,
 }
 
