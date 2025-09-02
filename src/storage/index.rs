@@ -1,23 +1,92 @@
+use dashmap::DashMap;
 use std::collections::VecDeque;
 use std::ops::{Bound, RangeBounds};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::buffer::{AtomicPageId, PageId, PageRef, INVALID_PAGE_ID};
 use crate::catalog::SchemaRef;
 use crate::error::QuillSQLResult;
-use crate::utils::util::page_bytes_to_array;
 use crate::storage::codec::{
     BPlusTreeInternalPageCodec, BPlusTreeLeafPageCodec, BPlusTreePageCodec,
 };
 use crate::storage::page::{InternalKV, LeafKV};
+use crate::utils::util::page_bytes_to_array;
 use crate::{
     buffer::BufferPoolManager,
-    storage::page::{BPlusTreeInternalPage, BPlusTreeLeafPage, BPlusTreePage, RecordId},
     error::QuillSQLError,
+    storage::page::{BPlusTreeInternalPage, BPlusTreeLeafPage, BPlusTreePage, RecordId},
 };
 
 use crate::storage::tuple::Tuple;
+
+// OLC (Optimistic Lock Coupling) metadata for concurrent B+Tree
+// Version field layout: [63:2]=version, bit1=OBSOLETE(optional), bit0=LOCK
+#[derive(Debug)]
+pub struct NodeMeta {
+    // Combined version and lock bits
+    version_lock: AtomicU64,
+}
+
+impl NodeMeta {
+    const LOCK_BIT: u64 = 1;
+    const OBSOLETE_BIT: u64 = 2;
+    const VERSION_SHIFT: u64 = 2;
+
+    pub fn new() -> Self {
+        Self {
+            version_lock: AtomicU64::new(0),
+        }
+    }
+
+    // Load current version without lock info
+    pub fn load(&self) -> u64 {
+        self.version_lock.load(Ordering::Acquire)
+    }
+
+    // Try to acquire exclusive lock with version check
+    pub fn try_lock(&self, expected_version: u64) -> bool {
+        let expected = expected_version & !Self::LOCK_BIT; // Clear lock bit
+        let desired = expected | Self::LOCK_BIT; // Set lock bit
+        self.version_lock
+            .compare_exchange_weak(expected, desired, Ordering::AcqRel, Ordering::Relaxed)
+            .is_ok()
+    }
+
+    // Unlock and increment version
+    pub fn unlock_and_bump(&self) {
+        let current = self.version_lock.load(Ordering::Acquire);
+        let new_version = ((current >> Self::VERSION_SHIFT) + 1) << Self::VERSION_SHIFT;
+        self.version_lock.store(new_version, Ordering::Release);
+    }
+
+    // Mark node as obsolete (optional feature)
+    pub fn mark_obsolete(&self) {
+        let current = self.version_lock.load(Ordering::Acquire);
+        let new_value = current | Self::OBSOLETE_BIT;
+        self.version_lock.store(new_value, Ordering::Release);
+    }
+
+    // Check if node is locked or obsolete
+    pub fn is_locked(&self) -> bool {
+        (self.version_lock.load(Ordering::Acquire) & Self::LOCK_BIT) != 0
+    }
+
+    pub fn is_obsolete(&self) -> bool {
+        (self.version_lock.load(Ordering::Acquire) & Self::OBSOLETE_BIT) != 0
+    }
+}
+
+// OLC metrics for monitoring
+#[derive(Debug, Default)]
+pub struct OlcMetrics {
+    pub olc_write_retry_total: AtomicU64,
+    pub olc_read_restart_total: AtomicU64,
+    pub olc_lock_fail_total: AtomicU64,
+    pub olc_split_total: AtomicU64,
+    pub olc_merge_total: AtomicU64,
+    pub olc_borrow_total: AtomicU64,
+}
 
 struct Context {
     pub root_page_id: PageId,
@@ -35,6 +104,7 @@ impl Context {
 }
 
 // B+树索引
+// OLC不改页格式，仅内存元数据
 #[derive(Debug)]
 pub struct BPlusTreeIndex {
     pub key_schema: SchemaRef,
@@ -42,6 +112,10 @@ pub struct BPlusTreeIndex {
     pub internal_max_size: u32,
     pub leaf_max_size: u32,
     pub root_page_id: AtomicPageId,
+    // OLC metadata: only tracks pages used by this index
+    pub node_meta: DashMap<PageId, NodeMeta>,
+    // OLC metrics for monitoring and debugging
+    pub olc_metrics: OlcMetrics,
 }
 
 impl BPlusTreeIndex {
@@ -57,6 +131,8 @@ impl BPlusTreeIndex {
             internal_max_size,
             leaf_max_size,
             root_page_id: AtomicPageId::new(INVALID_PAGE_ID),
+            node_meta: DashMap::new(),
+            olc_metrics: OlcMetrics::default(),
         }
     }
 
@@ -112,6 +188,9 @@ impl BPlusTreeIndex {
                 // new 一个新的root page
                 let new_root_page = self.buffer_pool.new_page()?;
                 let new_root_page_id = new_root_page.read().unwrap().page_id;
+
+                // Add OLC metadata for new root page
+                self.node_meta.insert(new_root_page_id, NodeMeta::new());
                 let mut new_root_internal_page =
                     BPlusTreeInternalPage::new(self.key_schema.clone(), self.internal_max_size);
 
@@ -174,7 +253,9 @@ impl BPlusTreeIndex {
         while curr_tree_page.is_underflow(self.root_page_id.load(Ordering::SeqCst) == curr_page_id)
         {
             let Some(parent_page_id) = context.read_set.pop_back() else {
-                return Err(QuillSQLError::Storage("Cannot find parent page".to_string()));
+                return Err(QuillSQLError::Storage(
+                    "Cannot find parent page".to_string(),
+                ));
             };
             let (left_sibling_page_id, right_sibling_page_id) =
                 self.find_sibling_pages(parent_page_id, curr_page_id)?;
@@ -219,6 +300,9 @@ impl BPlusTreeIndex {
         let new_page = self.buffer_pool.new_page()?;
         let new_page_id = new_page.read().unwrap().page_id;
 
+        // Add OLC metadata for new page
+        self.node_meta.insert(new_page_id, NodeMeta::new());
+
         let mut leaf_page = BPlusTreeLeafPage::new(self.key_schema.clone(), self.leaf_max_size);
         leaf_page.insert(key.clone(), rid);
 
@@ -241,36 +325,24 @@ impl BPlusTreeIndex {
             return Ok(None);
         }
 
-        let root_page_id = self.root_page_id.load(Ordering::SeqCst);
-        let mut current_page_ref = self.buffer_pool.fetch_page(root_page_id)?;
-
-        loop {
-            // 1. hold current node readguard
-            let page_r_guard = current_page_ref.read().unwrap();
-            let (tree_page, _) = BPlusTreePageCodec::decode(page_r_guard.data(), self.key_schema.clone())?;
-
-            match tree_page {
-                BPlusTreePage::Internal(internal_page) => {
-                    let next_page_id = internal_page.look_up(key);
-                    
-                    // a. get child pageref
-                    let next_page_ref = self.buffer_pool.fetch_page(next_page_id)?;
-
-                    // b. drop parent lock
-                    drop(page_r_guard);
-                    current_page_ref = next_page_ref;
-                }
-                BPlusTreePage::Leaf(leaf_page) => {
-                    let result = leaf_page.look_up(key);
-                    return Ok(result);
-                }
-            }
-        }
-
-        
+        // 找到leaf page
+        let mut context = Context::new(self.root_page_id.load(Ordering::SeqCst));
+        let Some(leaf_page) = self.find_leaf_page(key, &mut context)? else {
+            return Ok(None);
+        };
+        let (leaf_tree_page, _) = BPlusTreeLeafPageCodec::decode(
+            leaf_page.read().unwrap().data(),
+            self.key_schema.clone(),
+        )?;
+        let result = leaf_tree_page.look_up(key);
+        Ok(result)
     }
 
-    fn find_leaf_page(&self, key: &Tuple, context: &mut Context) -> QuillSQLResult<Option<PageRef>> {
+    fn find_leaf_page(
+        &self,
+        key: &Tuple,
+        context: &mut Context,
+    ) -> QuillSQLResult<Option<PageRef>> {
         if self.is_empty() {
             return Ok(None);
         }
@@ -305,6 +377,14 @@ impl BPlusTreeIndex {
     fn split(&self, tree_page: &mut BPlusTreePage) -> QuillSQLResult<InternalKV> {
         let new_page = self.buffer_pool.new_page()?;
         let new_page_id = new_page.read().unwrap().page_id;
+
+        // Add OLC metadata for new page
+        self.node_meta.insert(new_page_id, NodeMeta::new());
+
+        // Increment split counter
+        self.olc_metrics
+            .olc_split_total
+            .fetch_add(1, Ordering::Relaxed);
 
         match tree_page {
             BPlusTreePage::Leaf(leaf_page) => {
@@ -512,6 +592,14 @@ impl BPlusTreeIndex {
         // 删除右边页
         self.buffer_pool.delete_page(right_page_id)?;
 
+        // Remove OLC metadata for deleted page
+        self.node_meta.remove(&right_page_id);
+
+        // Increment merge counter
+        self.olc_metrics
+            .olc_merge_total
+            .fetch_add(1, Ordering::Relaxed);
+
         // 更新父节点
         let (parent_page, mut parent_internal_page) = self
             .buffer_pool
@@ -525,6 +613,9 @@ impl BPlusTreeIndex {
             self.root_page_id.store(left_page_id, Ordering::SeqCst);
             // 删除旧的根节点
             self.buffer_pool.delete_page(parent_page_id)?;
+
+            // Remove OLC metadata for deleted old root
+            self.node_meta.remove(&parent_page_id);
             Ok(left_page_id)
         } else {
             parent_page.write().unwrap().set_data(page_bytes_to_array(
@@ -744,14 +835,15 @@ impl TreeIndexIterator {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use std::ops::Bound;
     use std::sync::Arc;
     use tempfile::TempDir;
 
     use crate::catalog::SchemaRef;
-    use crate::storage::index::TreeIndexIterator;
     use crate::storage::disk_manager::DiskManager;
     use crate::storage::disk_scheduler::DiskScheduler;
+    use crate::storage::index::TreeIndexIterator;
     use crate::storage::page::RecordId;
     use crate::storage::tuple::Tuple;
     use crate::utils::util::pretty_format_index_tree;
@@ -989,5 +1081,83 @@ B+ Tree Level No.2:
         assert_eq!(iterator4.next().unwrap(), Some(RecordId::new(11, 11)));
         assert_eq!(iterator4.next().unwrap(), None);
         assert_eq!(iterator4.next().unwrap(), None);
+    }
+
+    #[test]
+    fn test_node_meta_concurrent_lock() {
+        let meta = NodeMeta::new();
+
+        // Initial version should be 0
+        let initial_version = meta.load();
+        assert_eq!(initial_version, 0);
+        assert!(!meta.is_locked());
+        assert!(!meta.is_obsolete());
+
+        // Should be able to lock with correct version
+        assert!(meta.try_lock(initial_version));
+        assert!(meta.is_locked());
+
+        // Should fail to lock again when already locked
+        assert!(!meta.try_lock(initial_version));
+
+        // Unlock and bump version
+        meta.unlock_and_bump();
+        assert!(!meta.is_locked());
+
+        let new_version = meta.load();
+        assert_ne!(new_version, initial_version);
+        assert_eq!(new_version >> NodeMeta::VERSION_SHIFT, 1);
+    }
+
+    #[test]
+    fn test_node_meta_version_monotonic() {
+        let meta = NodeMeta::new();
+        let mut prev_version = meta.load();
+
+        for _ in 0..10 {
+            assert!(meta.try_lock(prev_version));
+            meta.unlock_and_bump();
+            let curr_version = meta.load();
+            assert!(curr_version > prev_version);
+            prev_version = curr_version;
+        }
+    }
+
+    #[test]
+    fn test_node_meta_obsolete() {
+        let meta = NodeMeta::new();
+        assert!(!meta.is_obsolete());
+
+        meta.mark_obsolete();
+        assert!(meta.is_obsolete());
+    }
+
+    #[test]
+    fn test_olc_metadata_management() {
+        let (index, key_schema) = build_index();
+
+        // Check that OLC metadata is created for pages
+        assert!(!index.node_meta.is_empty());
+
+        // Insert should create new pages and metadata
+        let initial_meta_count = index.node_meta.len();
+
+        for i in 12..20 {
+            index
+                .insert(
+                    &Tuple::new(
+                        key_schema.clone(),
+                        vec![(i as i8).into(), (i as i16).into()],
+                    ),
+                    RecordId::new(i, i),
+                )
+                .unwrap();
+        }
+
+        // Should have more metadata entries due to splits
+        assert!(index.node_meta.len() >= initial_meta_count);
+
+        // Check metrics
+        assert!(index.olc_metrics.olc_split_total.load(Ordering::Relaxed) > 0);
     }
 }

@@ -8,6 +8,7 @@ use crate::utils::table_ref::TableReference;
 
 use crate::storage::index::BPlusTreeIndex;
 use crate::storage::table_heap::TableHeap;
+use dashmap::DashMap;
 use std::sync::{Arc, LazyLock};
 
 pub static INFORMATION_SCHEMA_NAME: &str = "information_schema";
@@ -290,6 +291,8 @@ fn load_user_indexes(db: &mut Database) -> QuillSQLResult<()> {
             internal_max_size: *internal_max_size,
             leaf_max_size: *leaf_max_size,
             root_page_id: AtomicPageId::new(*root_page_id),
+            node_meta: DashMap::new(),
+            olc_metrics: crate::storage::index::OlcMetrics::default(),
         };
         db.catalog
             .load_index(table_ref, index_name, Arc::new(b_plus_tree_index))?;
