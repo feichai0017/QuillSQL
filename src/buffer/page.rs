@@ -60,6 +60,7 @@ impl Page {
     }
 }
 
+#[derive(Clone)]
 pub struct PageRef {
     pub page: Arc<RwLock<Page>>,
     pub page_table: Arc<DashMap<PageId, FrameId>>,
@@ -103,8 +104,8 @@ impl Drop for PageRef {
 
 #[cfg(test)]
 mod tests {
-    use crate::utils::cache::lru_k::LRUKReplacer;
     use crate::buffer::{Page, PageRef};
+    use crate::utils::cache::lru_k::LRUKReplacer;
     use dashmap::DashMap;
     use std::sync::{Arc, RwLock};
 

@@ -37,7 +37,6 @@ impl TableHeap {
             last_page_id: AtomicPageId::new(first_page_id),
         })
     }
-
     /// Inserts a tuple into the table.
     ///
     /// This function inserts the given tuple into the table. If the last page in the table

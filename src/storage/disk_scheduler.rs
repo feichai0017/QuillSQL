@@ -184,7 +184,7 @@ impl DiskScheduler {
 // Implement Drop for graceful shutdown
 impl Drop for DiskScheduler {
     fn drop(&mut self) {
-        println!("DEBUG: DiskScheduler dropping. Sending Shutdown signal...");
+        // println!("DEBUG: DiskScheduler dropping. Sending Shutdown signal...");
         // Send shutdown signal. Ignore error if channel already closed.
         let _ = self.request_sender.send(DiskRequest::Shutdown);
 
@@ -193,7 +193,7 @@ impl Drop for DiskScheduler {
             if let Err(e) = handle.join() {
                 eprintln!("ERROR: Disk I/O worker thread panicked: {:?}", e);
             } else {
-                println!("DEBUG: Disk I/O worker thread joined successfully.");
+                // println!("DEBUG: Disk I/O worker thread joined successfully.");
             }
         } else {
             println!("WARN: Background thread handle already taken on Drop.");
@@ -241,13 +241,13 @@ mod tests {
     fn test_scheduler_allocate_write_read() -> QuillSQLResult<()> {
         let (_temp_dir, scheduler, _dm) = create_test_scheduler();
 
-        // 分配页面
+        // allocate pagge
         let rx_alloc = scheduler.schedule_allocate()?;
         let page_id = rx_alloc
             .recv()
             .map_err(|e| QuillSQLError::Internal(format!("RecvError: {}", e)))??;
 
-        // 写入测试数据
+        // write page test
         let content = "Hello DiskScheduler!";
         let data_bytes = create_dummy_page_bytes(content);
         let rx_write = scheduler.schedule_write(page_id, data_bytes)?;
@@ -255,7 +255,7 @@ mod tests {
             .recv()
             .map_err(|e| QuillSQLError::Internal(format!("RecvError: {}", e)))??;
 
-        // 读取并验证数据
+        // read and verify data
         let rx_read = scheduler.schedule_read(page_id)?;
         let read_result = rx_read
             .recv()
@@ -269,7 +269,7 @@ mod tests {
     fn test_scheduler_deallocate() -> QuillSQLResult<()> {
         let (_temp_dir, scheduler, dm) = create_test_scheduler();
 
-        // 分配页面并写入数据
+        // allocate page and write data
         let page_id = scheduler
             .schedule_allocate()?
             .recv()
@@ -280,13 +280,13 @@ mod tests {
             .recv()
             .map_err(|e| QuillSQLError::Internal(format!("RecvError: {}", e)))??;
 
-        // 释放页面
+        // free page
         let rx_dealloc = scheduler.schedule_deallocate(page_id)?;
         rx_dealloc
             .recv()
             .map_err(|e| QuillSQLError::Internal(format!("RecvError: {}", e)))??;
 
-        // 验证页面内容已清零
+        // verify deallocation by attempting to read (should return zeroed data)
         let data_after_dealloc = dm.read_page(page_id)?;
         assert!(data_after_dealloc.iter().all(|&b| b == 0));
 

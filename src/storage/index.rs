@@ -241,17 +241,33 @@ impl BPlusTreeIndex {
             return Ok(None);
         }
 
-        // 找到leaf page
-        let mut context = Context::new(self.root_page_id.load(Ordering::SeqCst));
-        let Some(leaf_page) = self.find_leaf_page(key, &mut context)? else {
-            return Ok(None);
-        };
-        let (leaf_tree_page, _) = BPlusTreeLeafPageCodec::decode(
-            leaf_page.read().unwrap().data(),
-            self.key_schema.clone(),
-        )?;
-        let result = leaf_tree_page.look_up(key);
-        Ok(result)
+        let root_page_id = self.root_page_id.load(Ordering::SeqCst);
+        let mut current_page_ref = self.buffer_pool.fetch_page(root_page_id)?;
+
+        loop {
+            // 1. hold current node readguard
+            let page_r_guard = current_page_ref.read().unwrap();
+            let (tree_page, _) = BPlusTreePageCodec::decode(page_r_guard.data(), self.key_schema.clone())?;
+
+            match tree_page {
+                BPlusTreePage::Internal(internal_page) => {
+                    let next_page_id = internal_page.look_up(key);
+                    
+                    // a. get child pageref
+                    let next_page_ref = self.buffer_pool.fetch_page(next_page_id)?;
+
+                    // b. drop parent lock
+                    drop(page_r_guard);
+                    current_page_ref = next_page_ref;
+                }
+                BPlusTreePage::Leaf(leaf_page) => {
+                    let result = leaf_page.look_up(key);
+                    return Ok(result);
+                }
+            }
+        }
+
+        
     }
 
     fn find_leaf_page(&self, key: &Tuple, context: &mut Context) -> QuillSQLResult<Option<PageRef>> {
