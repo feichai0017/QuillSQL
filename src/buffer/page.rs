@@ -60,7 +60,7 @@ impl Page {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct PageRef {
     pub page: Arc<RwLock<Page>>,
     pub page_table: Arc<DashMap<PageId, FrameId>>,

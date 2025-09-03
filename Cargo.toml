@@ -6,6 +6,8 @@ edition = "2021"
 [dependencies]
 log = "0.4.21"
 parking_lot = "0.12.1"
+parking_lot_core = "0.9.0"
+serial_test = "3.2.0"
 dashmap = "6.1.0"
 derive-with = "0.6.0"
 derive-new = "0.7.0"

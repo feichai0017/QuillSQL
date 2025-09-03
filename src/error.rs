@@ -27,4 +27,7 @@ pub enum QuillSQLError {
 
     #[error("Storage error: {0}")]
     Storage(String),
+
+    #[error("Unwind")]
+    Unwind,
 }
