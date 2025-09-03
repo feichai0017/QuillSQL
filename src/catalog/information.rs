@@ -8,7 +8,6 @@ use crate::utils::table_ref::TableReference;
 
 use crate::storage::index::BPlusTreeIndex;
 use crate::storage::table_heap::TableHeap;
-use dashmap::DashMap;
 use std::sync::{Arc, LazyLock};
 
 pub static INFORMATION_SCHEMA_NAME: &str = "information_schema";
