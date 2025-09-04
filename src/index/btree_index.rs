@@ -7,15 +7,15 @@ use crate::buffer::{AtomicPageId, PageId, PageRef, INVALID_PAGE_ID};
 use crate::catalog::SchemaRef;
 use crate::error::QuillSQLResult;
 use crate::index::Index;
-use crate::utils::util::page_bytes_to_array;
 use crate::storage::codec::{
     BPlusTreeInternalPageCodec, BPlusTreeLeafPageCodec, BPlusTreePageCodec,
 };
 use crate::storage::page::{InternalKV, LeafKV};
+use crate::utils::util::page_bytes_to_array;
 use crate::{
     buffer::BufferPoolManager,
-    storage::page::{BPlusTreeInternalPage, BPlusTreeLeafPage, BPlusTreePage, RecordId},
     error::QuillSQLError,
+    storage::page::{BPlusTreeInternalPage, BPlusTreeLeafPage, BPlusTreePage, RecordId},
 };
 
 use crate::storage::tuple::Tuple;
@@ -96,10 +96,10 @@ impl BPlusTreeIndex {
             ));
         };
 
-        let (mut leaf_tree_page, _) = BPlusTreeLeafPageCodec::decode(
-            leaf_page.read().unwrap().data(),
-            self.key_schema.clone(),
-        )?;
+        let leaf_guard = leaf_page.read_guard()?;
+        let (mut leaf_tree_page, _) =
+            BPlusTreeLeafPageCodec::decode(leaf_guard.data(), self.key_schema.clone())?;
+        drop(leaf_guard); // 释放读锁
         leaf_tree_page.insert(key.clone(), rid);
 
         let mut curr_page = leaf_page;
@@ -110,14 +110,17 @@ impl BPlusTreeIndex {
             // 向右分裂出一个新page
             let internalkv = self.split(&mut curr_tree_page)?;
 
-            curr_page
-                .write()
-                .unwrap()
-                .set_data(page_bytes_to_array(&BPlusTreePageCodec::encode(
+            {
+                let mut write_guard = curr_page.write_guard()?;
+                write_guard.set_data(page_bytes_to_array(&BPlusTreePageCodec::encode(
                     &curr_tree_page,
                 )));
+            }
 
-            let curr_page_id = curr_page.read().unwrap().page_id;
+            let curr_page_id = {
+                let read_guard = curr_page.read_guard()?;
+                read_guard.page_id()
+            };
             if let Some(parent_page_id) = context.read_set.pop_back() {
                 // 更新父节点
                 let (parent_page, mut parent_tree_page) = self
@@ -130,7 +133,10 @@ impl BPlusTreeIndex {
             } else if curr_page_id == self.root_page_id.load(Ordering::SeqCst) {
                 // new 一个新的root page
                 let new_root_page = self.buffer_pool.new_page()?;
-                let new_root_page_id = new_root_page.read().unwrap().page_id;
+                let new_root_page_id = {
+                    let read_guard = new_root_page.read_guard()?;
+                    read_guard.page_id()
+                };
                 let mut new_root_internal_page =
                     BPlusTreeInternalPage::new(self.key_schema.clone(), self.internal_max_size);
 
@@ -141,9 +147,12 @@ impl BPlusTreeIndex {
                 );
                 new_root_internal_page.insert(internalkv.0, internalkv.1);
 
-                new_root_page.write().unwrap().set_data(page_bytes_to_array(
-                    &BPlusTreeInternalPageCodec::encode(&new_root_internal_page),
-                ));
+                {
+                    let mut write_guard = new_root_page.write_guard()?;
+                    write_guard.set_data(page_bytes_to_array(&BPlusTreeInternalPageCodec::encode(
+                        &new_root_internal_page,
+                    )));
+                }
 
                 // 更新root page id
                 self.root_page_id.store(new_root_page_id, Ordering::SeqCst);
@@ -193,7 +202,9 @@ impl BPlusTreeIndex {
         while curr_tree_page.is_underflow(self.root_page_id.load(Ordering::SeqCst) == curr_page_id)
         {
             let Some(parent_page_id) = context.read_set.pop_back() else {
-                return Err(QuillSQLError::Storage("Cannot find parent page".to_string()));
+                return Err(QuillSQLError::Storage(
+                    "Cannot find parent page".to_string(),
+                ));
             };
             let (left_sibling_page_id, right_sibling_page_id) =
                 self.find_sibling_pages(parent_page_id, curr_page_id)?;
@@ -236,17 +247,20 @@ impl BPlusTreeIndex {
 
     fn start_new_tree(&self, key: &Tuple, rid: RecordId) -> QuillSQLResult<()> {
         let new_page = self.buffer_pool.new_page()?;
-        let new_page_id = new_page.read().unwrap().page_id;
+        let new_page_id = {
+            let read_guard = new_page.read_guard()?;
+            read_guard.page_id()
+        };
 
         let mut leaf_page = BPlusTreeLeafPage::new(self.key_schema.clone(), self.leaf_max_size);
         leaf_page.insert(key.clone(), rid);
 
-        new_page
-            .write()
-            .unwrap()
-            .set_data(page_bytes_to_array(&BPlusTreeLeafPageCodec::encode(
+        {
+            let mut write_guard = new_page.write_guard()?;
+            write_guard.set_data(page_bytes_to_array(&BPlusTreeLeafPageCodec::encode(
                 &leaf_page,
             )));
+        }
 
         // 更新root page id
         self.root_page_id.store(new_page_id, Ordering::SeqCst);
@@ -265,15 +279,18 @@ impl BPlusTreeIndex {
         let Some(leaf_page) = self.find_leaf_page(key, &mut context)? else {
             return Ok(None);
         };
-        let (leaf_tree_page, _) = BPlusTreeLeafPageCodec::decode(
-            leaf_page.read().unwrap().data(),
-            self.key_schema.clone(),
-        )?;
+        let leaf_guard = leaf_page.read_guard()?;
+        let (leaf_tree_page, _) =
+            BPlusTreeLeafPageCodec::decode(leaf_guard.data(), self.key_schema.clone())?;
         let result = leaf_tree_page.look_up(key);
         Ok(result)
     }
 
-    fn find_leaf_page(&self, key: &Tuple, context: &mut Context) -> QuillSQLResult<Option<PageRef>> {
+    fn find_leaf_page(
+        &self,
+        key: &Tuple,
+        context: &mut Context,
+    ) -> QuillSQLResult<Option<PageRef>> {
         if self.is_empty() {
             return Ok(None);
         }
@@ -286,9 +303,11 @@ impl BPlusTreeIndex {
         loop {
             match curr_tree_page {
                 BPlusTreePage::Internal(internal_page) => {
-                    context
-                        .read_set
-                        .push_back(curr_page.read().unwrap().page_id);
+                    let curr_page_id = {
+                        let read_guard = curr_page.read_guard()?;
+                        read_guard.page_id()
+                    };
+                    context.read_set.push_back(curr_page_id);
                     // 查找下一页
                     let next_page_id = internal_page.look_up(key);
                     let (next_page, next_tree_page) = self
@@ -992,5 +1011,75 @@ B+ Tree Level No.2:
         assert_eq!(iterator4.next().unwrap(), Some(RecordId::new(11, 11)));
         assert_eq!(iterator4.next().unwrap(), None);
         assert_eq!(iterator4.next().unwrap(), None);
+    }
+
+    #[test]
+    pub fn test_concurrent_btree_operations() {
+        use std::thread;
+        use std::time::Duration;
+
+        let (index, key_schema) = build_index();
+        let index = Arc::new(index);
+
+        // 插入一些初始数据
+        for i in 1..=10 {
+            let key = Tuple::new(
+                key_schema.clone(),
+                vec![(i as i8).into(), (i as i16).into()],
+            );
+            index.insert(&key, RecordId::new(i, i)).unwrap();
+        }
+
+        let mut handles = vec![];
+
+        // 启动多个读线程
+        for i in 0..3 {
+            let index_clone = index.clone();
+            let key_schema_clone = key_schema.clone();
+            let handle = thread::spawn(move || {
+                for j in 1..=5 {
+                    let key = Tuple::new(
+                        key_schema_clone.clone(),
+                        vec![(j as i8).into(), (j as i16).into()],
+                    );
+                    let result = index_clone.get(&key).unwrap();
+                    assert_eq!(result, Some(RecordId::new(j, j)));
+                    thread::sleep(Duration::from_millis(1));
+                }
+                println!("Reader {} completed", i);
+            });
+            handles.push(handle);
+        }
+
+        // 启动一个写线程
+        let index_writer = index.clone();
+        let key_schema_writer = key_schema.clone();
+        let writer_handle = thread::spawn(move || {
+            for i in 11..=15 {
+                let key = Tuple::new(
+                    key_schema_writer.clone(),
+                    vec![(i as i8).into(), (i as i16).into()],
+                );
+                index_writer.insert(&key, RecordId::new(i, i)).unwrap();
+                thread::sleep(Duration::from_millis(2));
+                println!("Writer inserted key {}", i);
+            }
+        });
+        handles.push(writer_handle);
+
+        // 等待所有线程完成
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // 验证所有数据都正确插入
+        for i in 1..=15 {
+            let key = Tuple::new(
+                key_schema.clone(),
+                vec![(i as i8).into(), (i as i16).into()],
+            );
+            let result = index.get(&key).unwrap();
+            assert_eq!(result, Some(RecordId::new(i, i)));
+        }
     }
 }
