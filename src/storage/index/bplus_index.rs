@@ -2,6 +2,9 @@ use std::collections::VecDeque;
 use std::ops::{Bound, RangeBounds};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::thread;
+
+use log::debug;
 
 use crate::buffer::{AtomicPageId, PageId, PageRef, INVALID_PAGE_ID};
 use crate::catalog::SchemaRef;
@@ -84,173 +87,183 @@ impl BPlusTreeIndex {
     }
 
     pub fn insert(&self, key: &Tuple, rid: RecordId) -> QuillSQLResult<()> {
+        let tid = thread::current().id();
+        debug!("[{:?}] Insert: Starting insert for key {:?}", tid, key);
         if self.is_empty() {
-            self.start_new_tree(key, rid)?;
-            return Ok(());
-        }
-        let mut context = Context::new(self.root_page_id.load(Ordering::SeqCst));
-        // 找到leaf page
-        let Some(leaf_page) = self.find_leaf_page(key, &mut context)? else {
-            return Err(QuillSQLError::Storage(
-                "Cannot find leaf page to insert".to_string(),
-            ));
-        };
-
-        let (mut leaf_tree_page, _) = BPlusTreeLeafPageCodec::decode(
-            leaf_page.read().unwrap().data(),
-            self.key_schema.clone(),
-        )?;
-        leaf_tree_page.insert(key.clone(), rid);
-
-        let mut curr_page = leaf_page;
-        let mut curr_tree_page = BPlusTreePage::Leaf(leaf_tree_page);
-
-        // leaf page已满则分裂
-        while curr_tree_page.is_full() {
-            // 向右分裂出一个新page
-            let internalkv = self.split(&mut curr_tree_page)?;
-
-            curr_page
-                .write()
-                .unwrap()
-                .set_data(page_bytes_to_array(&BPlusTreePageCodec::encode(
-                    &curr_tree_page,
-                )));
-
-            let curr_page_id = curr_page.read().unwrap().page_id;
-            if let Some(parent_page_id) = context.read_set.pop_back() {
-                // 更新父节点
-                let (parent_page, mut parent_tree_page) = self
-                    .buffer_pool
-                    .fetch_tree_page(parent_page_id, self.key_schema.clone())?;
-                parent_tree_page.insert_internalkv(internalkv);
-
-                curr_page = parent_page;
-                curr_tree_page = parent_tree_page;
-            } else if curr_page_id == self.root_page_id.load(Ordering::SeqCst) {
-                // new 一个新的root page
-                let new_root_page = self.buffer_pool.new_page()?;
-                let new_root_page_id = new_root_page.read().unwrap().page_id;
-                let mut new_root_internal_page =
-                    BPlusTreeInternalPage::new(self.key_schema.clone(), self.internal_max_size);
-
-                // internal page第一个kv对的key为空
-                new_root_internal_page.insert(
-                    Tuple::empty(self.key_schema.clone()),
-                    self.root_page_id.load(Ordering::SeqCst),
-                );
-                new_root_internal_page.insert(internalkv.0, internalkv.1);
-
-                new_root_page.write().unwrap().set_data(page_bytes_to_array(
-                    &BPlusTreeInternalPageCodec::encode(&new_root_internal_page),
-                ));
-
-                // 更新root page id
-                self.root_page_id.store(new_root_page_id, Ordering::SeqCst);
-
-                curr_page = new_root_page;
-                curr_tree_page = BPlusTreePage::Internal(new_root_internal_page);
+            debug!("[{:?}] Insert: Tree is empty, attempting to start new tree.", tid);
+            match self.start_new_tree(key, rid) {
+                Ok(_) => {
+                    debug!("[{:?}] Insert: Successfully started new tree.", tid);
+                    return Ok(());
+                },
+                Err(e) => {
+                    if e.to_string().contains("Race condition detected") {
+                         debug!("[{:?}] Insert: Lost race to start new tree, falling back to conservative insert.", tid);
+                         return self.insert_conservative(key, rid);
+                    }
+                    return Err(e);
+                }
             }
         }
-
-        curr_page
-            .write()
-            .unwrap()
-            .set_data(page_bytes_to_array(&BPlusTreePageCodec::encode(
-                &curr_tree_page,
-            )));
-
-        Ok(())
+        self.insert_optimistic(key, rid)
     }
-
+    
     pub fn insert_optimistic(&self, key: &Tuple, rid: RecordId) -> QuillSQLResult<()> {
-        // 1. 使用我们已经实现的并发 `get` 的逻辑，只用读锁找到叶子节点
-        let leaf_page_ref = self.find_leaf_page_concurrent(key)?;
+        let tid = thread::current().id();
+        debug!("[{:?}] Optimistic Insert: Starting for key {:?}", tid, key);
         
-        // 如果树是空的或者找不到页面（理论上不应该），需要处理
-        let leaf_page_ref = match leaf_page_ref {
+        let leaf_page_ref = match self.find_leaf_page_concurrent(key)? {
             Some(page) => page,
             None => {
-                // 处理空树的初始插入，这需要一个写锁
-                return self.start_new_tree(key, rid);
+                debug!("[{:?}] Optimistic Insert: Tree seems empty, falling back to conservative.", tid);
+                return self.insert_conservative(key, rid);
             }
         };
 
-        // 2. 检查叶子节点是否已满
-        { // 创建一个短生命周期的读锁作用域
-            let leaf_page_guard = leaf_page_ref.read().unwrap();
-            let (leaf_page, _) = BPlusTreeLeafPageCodec::decode(&leaf_page_guard.data(), self.key_schema.clone())?;
+        let page_id = leaf_page_ref.read().unwrap().page_id;
+        debug!("[{:?}] Optimistic Insert: Found leaf page {}, acquiring write lock.", tid, page_id);
+        
+        let mut leaf_page_write_guard = leaf_page_ref.write().unwrap();
+        let (mut leaf_page, _) = BPlusTreeLeafPageCodec::decode(&leaf_page_write_guard.data(), self.key_schema.clone())?;
 
-            // 3. 决定走“快速路径”还是“慢速路径”
-            if !leaf_page.is_full() {
-                // --- 快速路径 (Fast Path) ---
-                // 页面空间足够，不会分裂
-                drop(leaf_page_guard); // 必须先释放读锁
-
-                // 重新获取写锁
-                let mut leaf_page_write_guard = leaf_page_ref.write().unwrap();
-                let (mut leaf_page, _) = BPlusTreeLeafPageCodec::decode(&leaf_page_write_guard.data(), self.key_schema.clone())?;
-                
-                leaf_page.insert(key.clone(), rid);
-                leaf_page_write_guard.set_data(page_bytes_to_array(&BPlusTreeLeafPageCodec::encode(&leaf_page)));
-                
-                // 操作完成，锁和 PageRef 在函数结束时自动释放
-                return Ok(());
-            }
-        } // 读锁在这里释放
-
-        // --- 慢速路径 (Slow Path) ---
-        // 页面已满，需要分裂，必须从头再来
-        // `leaf_page_ref` 在离开上面的作用域后被 drop，所有锁都已释放
-        return self.insert_conservative(key, rid);
+        if !leaf_page.is_full() {
+            debug!("[{:?}] Optimistic Insert: Page {} is not full. Inserting.", tid, page_id);
+            leaf_page.insert(key.clone(), rid);
+            leaf_page_write_guard.set_data(page_bytes_to_array(&BPlusTreeLeafPageCodec::encode(&leaf_page)));
+            debug!("[{:?}] Optimistic Insert: Success on page {}. Releasing write lock.", tid, page_id);
+            return Ok(());
+        } else {
+            debug!("[{:?}] Optimistic Insert: Page {} is full. Releasing lock and falling back to conservative.", tid, page_id);
+            drop(leaf_page_write_guard);
+            return self.insert_conservative(key, rid);
+        }
     }
-
+    
     fn insert_conservative(&self, key: &Tuple, rid: RecordId) -> QuillSQLResult<()> {
-        let mut traversal_path: Vec<PageRef> = Vec::new(); // 不再需要单独的 Context 结构体
-        let mut current_page_id = self.root_page_id.load(Ordering::SeqCst);
+        let tid = thread::current().id();
+        debug!("[{:?}] Conservative Insert: Starting for key {:?}", tid, key);
 
-        loop {
-            let page_ref = self.buffer_pool.fetch_page(current_page_id)?;
-            let mut page_guard = page_ref.write().unwrap(); // 获取写锁
+        let root_page_id = self.root_page_id.load(Ordering::SeqCst);
+        let mut locked_path: Vec<PageRef> = Vec::new();
+        let root_page_ref = self.buffer_pool.fetch_page(root_page_id)?;
+        locked_path.push(root_page_ref);
 
+        'traversal: loop {
+            let current_page_ref = locked_path.last().unwrap();
+            let (is_leaf, next_page_id_opt) = {
+                let current_page_guard = current_page_ref.read().unwrap();
+                let page_id = current_page_guard.page_id;
+                debug!("[{:?}] Conservative Traverse: Reading page {}", tid, page_id);
+                
+                let (current_tree_page, _) =
+                    BPlusTreePageCodec::decode(&current_page_guard.data(), self.key_schema.clone())?;
+                
+                match &current_tree_page {
+                    BPlusTreePage::Internal(internal_page) => {
+                        let next_id = internal_page.look_up(key);
+                        debug!("[{:?}] Conservative Traverse: Page {} is internal, next page is {}", tid, page_id, next_id);
+                        (false, Some(next_id))
+                    }
+                    BPlusTreePage::Leaf(_) => {
+                        debug!("[{:?}] Conservative Traverse: Page {} is leaf. Traversal done.", tid, page_id);
+                        (true, None)
+                    }
+                }
+            };
+
+            if is_leaf {
+                break 'traversal;
+            }
+
+            let next_page_id = next_page_id_opt.unwrap();
+            let next_page_ref = self.buffer_pool.fetch_page(next_page_id)?;
+
+            let child_is_safe = {
+                let next_page_guard = next_page_ref.read().unwrap();
+                let (next_tree_page, _) =
+                    BPlusTreePageCodec::decode(&next_page_guard.data(), self.key_schema.clone())?;
+                !next_tree_page.is_full()
+            };
+
+            // ★★★ 核心修复 ★★★
+            // 使用 drain 来安全地释放祖先节点的锁，同时保留父节点的原始 PageRef
+            if child_is_safe {
+                debug!("[{:?}] Conservative Traverse: Child page {} is safe. Releasing ancestor locks.", tid, next_page_id);
+                if locked_path.len() > 1 {
+                    // 移除从 0 到倒数第二个元素，只留下最后一个（即父节点）
+                    // 这样就释放了所有祖先节点的锁
+                    locked_path.drain(0..locked_path.len() - 1);
+                }
+            } else {
+                debug!("[{:?}] Conservative Traverse: Child page {} is NOT safe. Keeping parent lock.", tid, next_page_id);
+            }
+
+            locked_path.push(next_page_ref);
+    
+        }
+
+        debug!("[{:?}] Conservative Insert: Path locked {:?}. Starting split/update phase.", tid, locked_path.iter().map(|p| p.read().unwrap().page_id).collect::<Vec<_>>());
+
+        let mut new_child_entry: Option<(Tuple, u32)> = None;
+
+        while let Some(page_to_process_ref) = locked_path.pop() {
+            let mut page_guard = page_to_process_ref.write().unwrap();
+            let page_id = page_guard.page_id;
             let (mut tree_page, _) =
                 BPlusTreePageCodec::decode(&page_guard.data(), self.key_schema.clone())?;
             
-            traversal_path.push(page_ref.clone());
+            debug!("[{:?}] Conservative Update: Processing page {} with write lock.", tid, page_id);
 
-            match &mut tree_page {
-                BPlusTreePage::Internal(internal_page) => {
-                    let next_page_id = internal_page.look_up(key);
-                    
-                    // 预判子节点是否安全
-                    let child_page = self.buffer_pool.fetch_page(next_page_id)?;
-                    let child_page_read_guard = child_page.read().unwrap();
-                    let (child_tree_page, _) = BPlusTreePageCodec::decode(&child_page_read_guard.data(), self.key_schema.clone())?;
-                    
-                    // 如果子节点是安全的（不会分裂），则释放祖先节点的锁
-                    if !child_tree_page.is_full() {
-                        // drain 会 drop 掉 PageRef，从而 unpin 和 unlock
-                        traversal_path.drain(0..traversal_path.len() - 1);
+            match new_child_entry {
+                Some((ref new_key, new_page_id)) => {
+                    if let BPlusTreePage::Internal(internal) = &mut tree_page {
+                        debug!("[{:?}] Conservative Update: Inserting split result ({:?}, {}) into internal page {}", tid, new_key, new_page_id, page_id);
+                        internal.insert(new_key.clone(), new_page_id);
                     }
-                    
-                    current_page_id = next_page_id;
                 }
-                BPlusTreePage::Leaf(leaf_page) => {
-                    leaf_page.insert(key.clone(), rid);
-                    
-                    // 如果叶子节点满了，进行分裂
-                    if leaf_page.is_full() {
-                        // 分裂逻辑需要 `traversal_path` 来找到父节点
-                        // let parent_page_ref = traversal_path.get(traversal_path.len() - 2);
-                        // ... 在这里实现分裂和父节点更新 ...
+                None => {
+                    if let BPlusTreePage::Leaf(leaf) = &mut tree_page {
+                        debug!("[{:?}] Conservative Update: Inserting original key {:?} into leaf page {}", tid, key, page_id);
+                        leaf.insert(key.clone(), rid);
                     }
-
-                    page_guard.set_data(page_bytes_to_array(&BPlusTreePageCodec::encode(&tree_page)));
-                    
-                    return Ok(());
                 }
             }
+
+            if tree_page.is_full() {
+                debug!("[{:?}] Conservative Update: Page {} is full. Splitting.", tid, page_id);
+                new_child_entry = Some(self.split(&mut tree_page)?);
+                
+                if locked_path.is_empty() {
+                    debug!("[{:?}] Conservative Update: Root page {} split. Creating new root.", tid, page_id);
+                    let old_root_page_id = page_id;
+                    let new_root_page_ref = self.buffer_pool.new_page()?;
+                    let new_root_page_id = new_root_page_ref.read().unwrap().page_id;
+                    let (new_key, new_child_page_id) = new_child_entry.take().unwrap();
+                    
+                    {
+                        let mut new_root_guard = new_root_page_ref.write().unwrap();
+                        let mut new_root_page = BPlusTreeInternalPage::new(self.key_schema.clone(), self.internal_max_size);
+                        new_root_page.insert(Tuple::empty(self.key_schema.clone()), old_root_page_id);
+                        new_root_page.insert(new_key, new_child_page_id);
+                        new_root_guard.set_data(page_bytes_to_array(&BPlusTreeInternalPageCodec::encode(&new_root_page)));
+                    }
+                    
+                    self.root_page_id.store(new_root_page_id, Ordering::SeqCst);
+                    debug!("[{:?}] Conservative Update: New root is page {}. Atomically updated root pointer.", tid, new_root_page_id);
+                    new_child_entry = None;
+                }
+            } else {
+                new_child_entry = None;
+            }
+            
+            page_guard.set_data(page_bytes_to_array(&BPlusTreePageCodec::encode(&tree_page)));
+            debug!("[{:?}] Conservative Update: Wrote back page {}. Releasing write lock.", tid, page_id);
+
+            if new_child_entry.is_none() {
+                break;
+            }
         }
+        Ok(())
     }
 
     pub fn delete(&self, key: &Tuple) -> QuillSQLResult<()> {
@@ -325,23 +338,33 @@ impl BPlusTreeIndex {
     }
 
     fn start_new_tree(&self, key: &Tuple, rid: RecordId) -> QuillSQLResult<()> {
+        let tid = thread::current().id();
+        debug!("[{:?}] Start New Tree: Attempting for key {:?}", tid, key);
         let new_page = self.buffer_pool.new_page()?;
         let new_page_id = new_page.read().unwrap().page_id;
-
+        
         let mut leaf_page = BPlusTreeLeafPage::new(self.key_schema.clone(), self.leaf_max_size);
         leaf_page.insert(key.clone(), rid);
+        new_page.write().unwrap().set_data(page_bytes_to_array(&BPlusTreeLeafPageCodec::encode(&leaf_page)));
 
-        new_page
-            .write()
-            .unwrap()
-            .set_data(page_bytes_to_array(&BPlusTreeLeafPageCodec::encode(
-                &leaf_page,
-            )));
+        let result = self.root_page_id.compare_exchange(
+            INVALID_PAGE_ID,
+            new_page_id,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        );
 
-        // 更新root page id
-        self.root_page_id.store(new_page_id, Ordering::SeqCst);
-
-        Ok(())
+        match result {
+            Ok(_) => {
+                debug!("[{:?}] Start New Tree: Success! New root is page {}", tid, new_page_id);
+                Ok(())
+            },
+            Err(_) => {
+                debug!("[{:?}] Start New Tree: Lost race! Deleting orphaned page {}", tid, new_page_id);
+                self.buffer_pool.delete_page(new_page_id)?;
+                Err(QuillSQLError::Internal("Race condition detected: Tree already initialized".to_string()))
+            }
+        }
     }
 
     // 找到叶子节点上对应的Value
@@ -440,13 +463,12 @@ impl BPlusTreeIndex {
 
         match tree_page {
             BPlusTreePage::Leaf(leaf_page) => {
-                // 拆分kv对
+                // 叶子节点分裂逻辑是正确的，保持不变
                 let mut new_leaf_page =
                     BPlusTreeLeafPage::new(self.key_schema.clone(), self.leaf_max_size);
                 new_leaf_page
                     .batch_insert(leaf_page.split_off(leaf_page.header.current_size as usize / 2));
 
-                // 更新next page id
                 new_leaf_page.header.next_page_id = leaf_page.header.next_page_id;
                 leaf_page.header.next_page_id = new_page.read().unwrap().page_id;
 
@@ -457,19 +479,25 @@ impl BPlusTreeIndex {
                 Ok((new_leaf_page.key_at(0).clone(), new_page_id))
             }
             BPlusTreePage::Internal(internal_page) => {
-                // 拆分kv对
+                // ★★★ 核心修复：实现正确的内部节点分裂逻辑 ★★★
+                
+                // 1. 找到中间位置的 key-value 对
+                let mid_idx = internal_page.header.current_size as usize / 2;
+                let (middle_key, _) = internal_page.array[mid_idx].clone();
+
+                // 2. 将中间 key 之后的条目移动到新的右节点
                 let mut new_internal_page =
                     BPlusTreeInternalPage::new(self.key_schema.clone(), self.internal_max_size);
-                new_internal_page.batch_insert(
-                    internal_page.split_off(internal_page.header.current_size as usize / 2),
-                );
-
+                // split_off 会把 mid_idx 以及之后的所有元素都移走
+                new_internal_page.batch_insert(internal_page.split_off(mid_idx));
+                
+                // 3. 将新的右节点写回磁盘
                 new_page.write().unwrap().set_data(page_bytes_to_array(
                     &BPlusTreeInternalPageCodec::encode(&new_internal_page),
                 ));
 
-                let min_leafkv = self.find_subtree_min_leafkv(new_page_id)?;
-                Ok((min_leafkv.0, new_page_id))
+                // 4. 返回被“上推”的中间 key 和新节点的 page_id
+                Ok((middle_key, new_page_id))
             }
         }
     }

@@ -205,7 +205,7 @@ impl BPlusTreeInternalPage {
     }
 
     pub fn is_full(&self) -> bool {
-        self.header.current_size > self.header.max_size
+        self.header.current_size >= self.header.max_size
     }
 
     pub fn split_off(&mut self, at: usize) -> Vec<InternalKV> {
@@ -349,7 +349,7 @@ impl BPlusTreeLeafPage {
     }
 
     pub fn is_full(&self) -> bool {
-        self.header.current_size > self.header.max_size
+        self.header.current_size >= self.header.max_size
     }
 
     pub fn insert(&mut self, key: Tuple, rid: RecordId) {
