@@ -41,6 +41,31 @@ impl BPlusTreePage {
             Self::Leaf(page) => page.header.current_size > page.min_size(),
         }
     }
+
+    /// Check if page is safe for insertion (won't split)
+    /// A page is safe for insertion if it has room for at least one more entry
+    pub fn is_safe_for_insert(&self) -> bool {
+        match self {
+            Self::Internal(page) => page.header.current_size < page.header.max_size,
+            Self::Leaf(page) => page.header.current_size < page.header.max_size,
+        }
+    }
+
+    /// Check if page is safe for deletion (won't need to merge/redistribute)
+    /// A page is safe for deletion if it has more than minimum entries
+    pub fn is_safe_for_delete(&self, is_root: bool) -> bool {
+        if is_root {
+            match self {
+                Self::Internal(page) => page.header.current_size > 1, // Root can have 1 entry
+                Self::Leaf(_) => true,                                // Root leaf can be empty
+            }
+        } else {
+            match self {
+                Self::Internal(page) => page.header.current_size > page.min_size(),
+                Self::Leaf(page) => page.header.current_size > page.min_size(),
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -452,13 +477,13 @@ impl BPlusTreeLeafPage {
 
 #[cfg(test)]
 mod tests {
-    use crate::utils::scalar::ScalarValue;
     use crate::storage::page::{BPlusTreeInternalPage, BPlusTreeLeafPage};
+    use crate::storage::tuple::Tuple;
+    use crate::utils::scalar::ScalarValue;
     use crate::{
         catalog::{Column, DataType, Schema},
         storage::page::RecordId,
     };
-    use crate::storage::tuple::Tuple;
     use std::sync::Arc;
 
     #[test]
