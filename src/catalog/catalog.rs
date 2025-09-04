@@ -13,7 +13,8 @@ use crate::utils::table_ref::TableReference;
 use crate::storage::page::{BPLUS_INTERNAL_PAGE_MAX_SIZE, BPLUS_LEAF_PAGE_MAX_SIZE, EMPTY_TUPLE_META};
 use crate::{
     buffer::BufferPoolManager,
-    storage::{index::bplus_index::BPlusTreeIndex, table_heap::TableHeap},
+    storage::{table_heap::TableHeap},
+    index::btree_index::BPlusTreeIndex,
     error::{QuillSQLError, QuillSQLResult},
 };
 

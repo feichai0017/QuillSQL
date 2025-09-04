@@ -1,6 +1,6 @@
 use crate::catalog::SchemaRef;
 use crate::error::{QuillSQLError, QuillSQLResult};
-use crate::storage::index::Index;
+use crate::index::Index;
 use crate::storage::page::RecordId;
 use crate::storage::tuple::Tuple;
 use bztree::BzTree;
@@ -76,7 +76,7 @@ impl fmt::Debug for BzTreeIndex {
 mod tests {
     use super::*;
     use crate::catalog::{Column, DataType, Schema};
-    use crate::storage::index::Index;
+    use crate::index::Index;
     use crate::storage::tuple::Tuple;
     use rand::seq::{IndexedRandom, SliceRandom};
     use rand::Rng;

@@ -1,6 +1,6 @@
 use crate::{catalog::SchemaRef, error::QuillSQLResult, storage::page::RecordId, storage::tuple::Tuple};
 
-pub mod bplus_index;
+pub mod btree_index;
 pub mod bz_index;
 
 
@@ -28,7 +28,8 @@ mod test {
     use rand::{seq::IndexedRandom, Rng, thread_rng};
     use tempfile::TempDir;
 
-    use crate::{buffer::BufferPoolManager, catalog::{Column, DataType, Schema, SchemaRef}, error::QuillSQLResult, storage::{disk_manager::DiskManager, disk_scheduler::DiskScheduler, index::{Index, bplus_index::BPlusTreeIndex, bz_index::BzTreeIndex}, page::RecordId, tuple::Tuple}};
+    use crate::{buffer::BufferPoolManager, catalog::{Column, DataType, Schema, SchemaRef}, error::QuillSQLResult, storage::{disk_manager::DiskManager, disk_scheduler::DiskScheduler, page::RecordId, tuple::Tuple}};
+    use crate::index::{Index, btree_index::BPlusTreeIndex, bz_index::BzTreeIndex};
 
     #[test]
     //#[ignore]

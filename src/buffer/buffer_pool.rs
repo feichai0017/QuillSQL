@@ -3,15 +3,15 @@ use dashmap::DashMap;
 use std::sync::RwLock;
 use std::{collections::VecDeque, sync::Arc};
 
-use crate::buffer::page::{Page, PageId, PAGE_SIZE};
+use crate::buffer::page::{Page, PageId, PageReadGuard, PageWriteGuard, PAGE_SIZE};
 
 use crate::buffer::PageRef;
 use crate::catalog::SchemaRef;
 use crate::error::{QuillSQLError, QuillSQLResult};
-use crate::storage::disk_scheduler::DiskScheduler;
 use crate::storage::codec::{
     BPlusTreeInternalPageCodec, BPlusTreeLeafPageCodec, BPlusTreePageCodec, TablePageCodec,
 };
+use crate::storage::disk_scheduler::DiskScheduler;
 use crate::storage::{
     page::TablePage,
     page::{BPlusTreeInternalPage, BPlusTreeLeafPage, BPlusTreePage},
@@ -85,7 +85,10 @@ impl BufferPoolManager {
         if let Some(frame_id_ref) = self.page_table.get(&page_id) {
             let frame_id = *frame_id_ref;
             let page = self.pool[frame_id].clone();
-            page.write().unwrap().pin_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            page.write()
+                .unwrap()
+                .pin_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             self.replacer
                 .write()
                 .unwrap()
@@ -174,6 +177,27 @@ impl BufferPoolManager {
         Ok((page, tree_leaf_page))
     }
 
+    /// Fetch a page and return read guard
+    /// This is the recommended way to access pages for concurrent read operations
+    pub fn fetch_page_read(&self, page_id: PageId) -> QuillSQLResult<PageReadGuard> {
+        let page_ref = self.fetch_page(page_id)?;
+        page_ref.read_guard()
+    }
+
+    /// Fetch a page and return write guard  
+    /// This is the recommended way to access pages for concurrent write operations
+    pub fn fetch_page_write(&self, page_id: PageId) -> QuillSQLResult<PageWriteGuard> {
+        let page_ref = self.fetch_page(page_id)?;
+        page_ref.write_guard()
+    }
+
+    /// Create a new page and return write guard
+    /// Useful for initializing new pages with immediate write access
+    pub fn new_page_write(&self) -> QuillSQLResult<PageWriteGuard> {
+        let page_ref = self.new_page()?;
+        page_ref.write_guard()
+    }
+
     pub fn flush_page(&self, page_id: PageId) -> QuillSQLResult<bool> {
         if let Some(frame_id_ref) = self.page_table.get(&page_id) {
             let frame_id = *frame_id_ref;
@@ -217,7 +241,13 @@ impl BufferPoolManager {
             drop(frame_id_lock);
 
             let page = self.pool[frame_id].clone();
-            if page.read().unwrap().pin_count.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+            if page
+                .read()
+                .unwrap()
+                .pin_count
+                .load(std::sync::atomic::Ordering::SeqCst)
+                > 0
+            {
                 return Ok(false);
             }
 
@@ -374,14 +404,26 @@ mod tests {
 
         let page = buffer_pool.fetch_page(page1_id).unwrap();
         assert_eq!(page.read().unwrap().page_id, page1_id);
-        assert_eq!(page.read().unwrap().pin_count.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            page.read()
+                .unwrap()
+                .pin_count
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
         assert_eq!(buffer_pool.replacer.read().unwrap().size(), 2);
         drop(page);
         assert_eq!(buffer_pool.replacer.read().unwrap().size(), 3);
 
         let page = buffer_pool.fetch_page(page2_id).unwrap();
         assert_eq!(page.read().unwrap().page_id, page2_id);
-        assert_eq!(page.read().unwrap().pin_count.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            page.read()
+                .unwrap()
+                .pin_count
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
         assert_eq!(buffer_pool.replacer.read().unwrap().size(), 2);
         drop(page);
         assert_eq!(buffer_pool.replacer.read().unwrap().size(), 3);
@@ -421,5 +463,92 @@ mod tests {
         let page = buffer_pool.fetch_page(page1_id).unwrap();
         assert_eq!(page.read().unwrap().page_id, page1_id);
         assert!(page.read().unwrap().data().iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    pub fn test_buffer_pool_guard_api() {
+        let (_temp_dir, buffer_pool, _ds) = setup_test_environment(3);
+
+        // 测试 new_page_write
+        let mut write_guard = buffer_pool.new_page_write().unwrap();
+        let page_id = write_guard.page_id();
+
+        // 写入测试数据
+        let test_data = [42u8; crate::buffer::page::PAGE_SIZE];
+        write_guard.set_data(test_data);
+        assert!(write_guard.is_dirty());
+        drop(write_guard);
+
+        // 测试 fetch_page_read
+        let read_guard = buffer_pool.fetch_page_read(page_id).unwrap();
+        assert_eq!(read_guard.page_id(), page_id);
+        assert_eq!(read_guard.data()[0], 42);
+        assert!(read_guard.is_dirty());
+        drop(read_guard);
+
+        // 测试 fetch_page_write
+        let mut write_guard2 = buffer_pool.fetch_page_write(page_id).unwrap();
+        assert_eq!(write_guard2.page_id(), page_id);
+        write_guard2.set_dirty(false);
+        assert!(!write_guard2.is_dirty());
+        drop(write_guard2);
+
+        // 验证修改被保留
+        let final_guard = buffer_pool.fetch_page_read(page_id).unwrap();
+        assert!(!final_guard.is_dirty());
+        assert_eq!(final_guard.data()[0], 42);
+    }
+
+    #[test]
+    pub fn test_concurrent_guard_access() {
+        use std::thread;
+        use std::time::Duration;
+
+        let (_temp_dir, buffer_pool, _ds) = setup_test_environment(5);
+        let buffer_pool = Arc::new(buffer_pool);
+
+        // 创建一个页面
+        let page_id = {
+            let guard = buffer_pool.new_page_write().unwrap();
+            guard.page_id()
+        };
+
+        let mut handles = vec![];
+
+        // 启动多个读线程
+        for i in 0..3 {
+            let bp = buffer_pool.clone();
+            let handle = thread::spawn(move || {
+                for _ in 0..5 {
+                    let guard = bp.fetch_page_read(page_id).unwrap();
+                    assert_eq!(guard.page_id(), page_id);
+                    thread::sleep(Duration::from_millis(1));
+                }
+                println!("Reader {} completed", i);
+            });
+            handles.push(handle);
+        }
+
+        // 启动一个写线程
+        let bp_writer = buffer_pool.clone();
+        let writer_handle = thread::spawn(move || {
+            for i in 0..3 {
+                let mut guard = bp_writer.fetch_page_write(page_id).unwrap();
+                let test_data = [i as u8; crate::buffer::page::PAGE_SIZE];
+                guard.set_data(test_data);
+                thread::sleep(Duration::from_millis(5));
+                println!("Writer {} completed", i);
+            }
+        });
+        handles.push(writer_handle);
+
+        // 等待所有线程完成
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // 验证最终状态
+        let final_guard = buffer_pool.fetch_page_read(page_id).unwrap();
+        assert_eq!(final_guard.data()[0], 2); // 最后一次写入
     }
 }
