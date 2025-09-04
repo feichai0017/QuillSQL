@@ -5,7 +5,7 @@ use dashmap::DashMap;
 use derive_with::With;
 use log::error;
 use std::ops::Deref;
-use std::sync::atomic::AtomicU32;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 
 pub type PageId = u32;
@@ -14,12 +14,12 @@ pub type AtomicPageId = AtomicU32;
 pub const INVALID_PAGE_ID: PageId = 0;
 pub const PAGE_SIZE: usize = 4096;
 
-#[derive(Debug, Clone, With)]
+#[derive(Debug, With)]
 pub struct Page {
     pub page_id: PageId,
     data: [u8; PAGE_SIZE],
     // reference count number
-    pub pin_count: u32,
+    pub pin_count: AtomicU32,
     // whether it has been written
     pub is_dirty: bool,
 }
@@ -32,14 +32,14 @@ impl Page {
         Self {
             page_id,
             data: [0; PAGE_SIZE],
-            pin_count: 0,
+            pin_count: AtomicU32::new(0),
             is_dirty: false,
         }
     }
     pub fn destroy(&mut self) {
         self.page_id = 0;
         self.data = [0; PAGE_SIZE];
-        self.pin_count = 0;
+        self.pin_count.store(0, std::sync::atomic::Ordering::SeqCst);
         self.is_dirty = false;
     }
 
@@ -77,27 +77,26 @@ impl Deref for PageRef {
 
 impl Drop for PageRef {
     fn drop(&mut self) {
-        if self.page.read().unwrap().pin_count == 0 {
-            return;
-        }
-        let page_id = self.page.read().unwrap().page_id;
-        if let Some(frame_id) = self.page_table.get(&page_id) {
-            self.page.write().unwrap().pin_count -= 1;
-            if self.page.read().unwrap().pin_count == 0 {
+        let page_guard = self.page.read().unwrap();
+        let page_id = page_guard.page_id;
+
+        // 使用原子减法，并检查操作前的值
+        if page_guard.pin_count.fetch_sub(1, Ordering::SeqCst) == 1 {
+            // 如果减之前是 1，说明现在是 0 了
+            if let Some(frame_id) = self.page_table.get(&page_id) {
                 if let Err(e) = self
                     .replacer
                     .write()
                     .unwrap()
                     .set_evictable(*frame_id, true)
                 {
-                    panic!(
+                    // 在 drop 中 panic 是不好的，最好是 log an error
+                    error!(
                         "Failed to set evictable to frame {}, err: {:?}",
                         *frame_id, e
                     );
                 }
             }
-        } else {
-            error!("Cannot unpin page id {} as it is not in the pool", page_id);
         }
     }
 }

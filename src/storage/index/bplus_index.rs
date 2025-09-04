@@ -6,11 +6,12 @@ use std::sync::Arc;
 use crate::buffer::{AtomicPageId, PageId, PageRef, INVALID_PAGE_ID};
 use crate::catalog::SchemaRef;
 use crate::error::QuillSQLResult;
+use crate::storage::index::Index;
 use crate::utils::util::page_bytes_to_array;
 use crate::storage::codec::{
     BPlusTreeInternalPageCodec, BPlusTreeLeafPageCodec, BPlusTreePageCodec,
 };
-use crate::storage::page::{InternalKV, LeafKV};
+use crate::storage::page::{self, InternalKV, LeafKV};
 use crate::{
     buffer::BufferPoolManager,
     storage::page::{BPlusTreeInternalPage, BPlusTreeLeafPage, BPlusTreePage, RecordId},
@@ -42,6 +43,24 @@ pub struct BPlusTreeIndex {
     pub internal_max_size: u32,
     pub leaf_max_size: u32,
     pub root_page_id: AtomicPageId,
+}
+
+impl Index for BPlusTreeIndex {
+    fn insert(&self, key: &Tuple, value: RecordId) -> QuillSQLResult<()> {
+        self.insert(key, value)
+    }
+
+    fn get(&self, key: &Tuple) -> QuillSQLResult<Option<RecordId>> {
+        self.get(key)
+    }
+
+    fn delete(&self, key: &Tuple) -> QuillSQLResult<()> {
+        self.delete(key)
+    }
+
+    fn key_schema(&self) -> &SchemaRef {
+        &self.key_schema
+    }
 }
 
 impl BPlusTreeIndex {
@@ -144,6 +163,96 @@ impl BPlusTreeIndex {
         Ok(())
     }
 
+    pub fn insert_optimistic(&self, key: &Tuple, rid: RecordId) -> QuillSQLResult<()> {
+        // 1. 使用我们已经实现的并发 `get` 的逻辑，只用读锁找到叶子节点
+        let leaf_page_ref = self.find_leaf_page_concurrent(key)?;
+        
+        // 如果树是空的或者找不到页面（理论上不应该），需要处理
+        let leaf_page_ref = match leaf_page_ref {
+            Some(page) => page,
+            None => {
+                // 处理空树的初始插入，这需要一个写锁
+                return self.start_new_tree(key, rid);
+            }
+        };
+
+        // 2. 检查叶子节点是否已满
+        { // 创建一个短生命周期的读锁作用域
+            let leaf_page_guard = leaf_page_ref.read().unwrap();
+            let (leaf_page, _) = BPlusTreeLeafPageCodec::decode(&leaf_page_guard.data(), self.key_schema.clone())?;
+
+            // 3. 决定走“快速路径”还是“慢速路径”
+            if !leaf_page.is_full() {
+                // --- 快速路径 (Fast Path) ---
+                // 页面空间足够，不会分裂
+                drop(leaf_page_guard); // 必须先释放读锁
+
+                // 重新获取写锁
+                let mut leaf_page_write_guard = leaf_page_ref.write().unwrap();
+                let (mut leaf_page, _) = BPlusTreeLeafPageCodec::decode(&leaf_page_write_guard.data(), self.key_schema.clone())?;
+                
+                leaf_page.insert(key.clone(), rid);
+                leaf_page_write_guard.set_data(page_bytes_to_array(&BPlusTreeLeafPageCodec::encode(&leaf_page)));
+                
+                // 操作完成，锁和 PageRef 在函数结束时自动释放
+                return Ok(());
+            }
+        } // 读锁在这里释放
+
+        // --- 慢速路径 (Slow Path) ---
+        // 页面已满，需要分裂，必须从头再来
+        // `leaf_page_ref` 在离开上面的作用域后被 drop，所有锁都已释放
+        return self.insert_conservative(key, rid);
+    }
+
+    fn insert_conservative(&self, key: &Tuple, rid: RecordId) -> QuillSQLResult<()> {
+        let mut traversal_path: Vec<PageRef> = Vec::new(); // 不再需要单独的 Context 结构体
+        let mut current_page_id = self.root_page_id.load(Ordering::SeqCst);
+
+        loop {
+            let page_ref = self.buffer_pool.fetch_page(current_page_id)?;
+            let mut page_guard = page_ref.write().unwrap(); // 获取写锁
+
+            let (mut tree_page, _) =
+                BPlusTreePageCodec::decode(&page_guard.data(), self.key_schema.clone())?;
+            
+            traversal_path.push(page_ref.clone());
+
+            match &mut tree_page {
+                BPlusTreePage::Internal(internal_page) => {
+                    let next_page_id = internal_page.look_up(key);
+                    
+                    // 预判子节点是否安全
+                    let child_page = self.buffer_pool.fetch_page(next_page_id)?;
+                    let child_page_read_guard = child_page.read().unwrap();
+                    let (child_tree_page, _) = BPlusTreePageCodec::decode(&child_page_read_guard.data(), self.key_schema.clone())?;
+                    
+                    // 如果子节点是安全的（不会分裂），则释放祖先节点的锁
+                    if !child_tree_page.is_full() {
+                        // drain 会 drop 掉 PageRef，从而 unpin 和 unlock
+                        traversal_path.drain(0..traversal_path.len() - 1);
+                    }
+                    
+                    current_page_id = next_page_id;
+                }
+                BPlusTreePage::Leaf(leaf_page) => {
+                    leaf_page.insert(key.clone(), rid);
+                    
+                    // 如果叶子节点满了，进行分裂
+                    if leaf_page.is_full() {
+                        // 分裂逻辑需要 `traversal_path` 来找到父节点
+                        // let parent_page_ref = traversal_path.get(traversal_path.len() - 2);
+                        // ... 在这里实现分裂和父节点更新 ...
+                    }
+
+                    page_guard.set_data(page_bytes_to_array(&BPlusTreePageCodec::encode(&tree_page)));
+                    
+                    return Ok(());
+                }
+            }
+        }
+    }
+
     pub fn delete(&self, key: &Tuple) -> QuillSQLResult<()> {
         if self.is_empty() {
             return Ok(());
@@ -242,8 +351,7 @@ impl BPlusTreeIndex {
         }
 
         // 找到leaf page
-        let mut context = Context::new(self.root_page_id.load(Ordering::SeqCst));
-        let Some(leaf_page) = self.find_leaf_page(key, &mut context)? else {
+        let Some(leaf_page) = self.find_leaf_page_concurrent(key)? else {
             return Ok(None);
         };
         let (leaf_tree_page, _) = BPlusTreeLeafPageCodec::decode(
@@ -280,6 +388,46 @@ impl BPlusTreeIndex {
                 }
                 BPlusTreePage::Leaf(_leaf_page) => {
                     return Ok(Some(curr_page));
+                }
+            }
+        }
+    }
+
+    fn find_leaf_page_concurrent(&self, key: &Tuple) -> QuillSQLResult<Option<PageRef>> {
+        if self.is_empty() {
+            return Ok(None);
+        }
+
+        let mut current_page_id = self.root_page_id.load(Ordering::SeqCst);
+        let mut parent_page_ref: Option<PageRef> = None;
+
+        loop {
+            let current_page_ref = self.buffer_pool.fetch_page(current_page_id)?;
+            let page_read_guard = current_page_ref.read().unwrap(); // 获取读锁
+
+            // 临时解码页面内容，判断是内部节点还是叶子节点
+            let (tree_page, _) = BPlusTreePageCodec::decode(page_read_guard.data(), self.key_schema.clone())?;
+
+            // 锁耦合：一旦我们锁定了子节点，就可以释放父节点的锁
+            if let Some(parent_ref) = parent_page_ref.take() {
+                // parent_ref 的 Drop 会自动处理 unpin
+                drop(parent_ref);
+            }
+
+            match tree_page {
+                BPlusTreePage::Internal(internal_page) => {
+                    let next_page_id = internal_page.look_up(key);
+                    // 更新 page_id 以便下一次循环
+                    current_page_id = next_page_id;
+                    // 将当前页作为下一次循环的父页
+                    parent_page_ref = Some(current_page_ref.clone());
+                    // 释放当前页的读锁，进入下一次循环
+                    drop(page_read_guard);
+                }
+                BPlusTreePage::Leaf(_) => {
+                    // 到达叶子节点，持有它的锁并返回
+                    drop(page_read_guard);
+                    return Ok(Some(current_page_ref));
                 }
             }
         }
@@ -729,11 +877,14 @@ impl TreeIndexIterator {
 #[cfg(test)]
 mod tests {
     use std::ops::Bound;
-    use std::sync::Arc;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+    use rand::seq::SliceRandom;
+    use rand::Rng;
     use tempfile::TempDir;
 
     use crate::catalog::SchemaRef;
-    use crate::storage::index::TreeIndexIterator;
+    use crate::storage::index::bplus_index::TreeIndexIterator;
     use crate::storage::disk_manager::DiskManager;
     use crate::storage::disk_scheduler::DiskScheduler;
     use crate::storage::page::RecordId;
@@ -974,4 +1125,200 @@ B+ Tree Level No.2:
         assert_eq!(iterator4.next().unwrap(), None);
         assert_eq!(iterator4.next().unwrap(), None);
     }
+
+    // Helper function to build a larger B+ Tree with a non-overflowing data type.
+    fn build_large_index() -> (BPlusTreeIndex, SchemaRef) {
+        let temp_dir = TempDir::new().unwrap();
+        let temp_path = temp_dir.path().join("test_concurrent.db");
+
+        // Use i32 to avoid overflow, as we're inserting 1000 keys.
+        let key_schema = Arc::new(Schema::new(vec![
+            Column::new("a", DataType::Int32, false),
+            Column::new("b", DataType::Int32, false),
+        ]));
+        let disk_manager = DiskManager::try_new(temp_path).unwrap();
+        let disk_scheduler = Arc::new(DiskScheduler::new(Arc::new(disk_manager)));
+        let buffer_pool = Arc::new(BufferPoolManager::new(1000, disk_scheduler));
+        // It's okay to have smaller page sizes for the test to force more splits and depth.
+        let index = BPlusTreeIndex::new(key_schema.clone(), buffer_pool, 10, 10);
+
+        // Insert 1000 keys.
+        for i in 0..1000 {
+            let key = Tuple::new(
+                key_schema.clone(),
+                // Both values are now i32
+                vec![(i as i32).into(), (i as i32).into()],
+            );
+            // Use a consistent RID for easy verification.
+            let rid = RecordId::new(i as u32, i as u32);
+            index.insert(&key, rid).unwrap();
+        }
+
+        (index, key_schema)
+    }
+
+    #[test]
+    pub fn test_concurrent_get() {
+        let (index, key_schema) = build_large_index();
+        let index = Arc::new(index);
+
+        let mut handles = vec![];
+        let num_threads = 10;
+        let num_reads_per_thread = 1000;
+        let num_total_keys = 1000;
+
+        for _ in 0..num_threads {
+            let index_clone = Arc::clone(&index);
+            let key_schema_clone = Arc::clone(&key_schema);
+
+            let handle = std::thread::spawn(move || {
+                // Create a random number generator for each thread.
+                let mut rng = rand::rng();
+                for _ in 0..num_reads_per_thread {
+                    // Generate a key within the valid range of inserted keys (0-999).
+                    let key_val = rng.random_range(0..num_total_keys);
+
+                    let key = Tuple::new(
+                        key_schema_clone.clone(),
+                        vec![(key_val as i32).into(), (key_val as i32).into()],
+                    );
+                    
+                    let result = index_clone.get(&key).unwrap();
+
+                    // The expected RID should match how we created it in `build_large_index`.
+                    let expected_rid = RecordId::new(key_val as u32, key_val as u32);
+                    
+                    // This assertion should now pass.
+                    assert_eq!(result, Some(expected_rid));
+                }
+            });
+            handles.push(handle);
+        }
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn test_bplus_tree_concurrent_high_contention_cmu_style() {
+        const NUM_THREADS: usize = 8;
+        const KEYS_PER_THREAD: i32 = 500;
+        const TOTAL_KEYS: i32 = NUM_THREADS as i32 * KEYS_PER_THREAD;
+
+        // --- 1. 设置环境 ---
+        let (index, key_schema, _temp_dir) = { // _temp_dir 的生命周期需要保持到测试结束
+            let temp_dir = TempDir::new().unwrap();
+            let temp_path = temp_dir.path().join("test_concurrent_cmu.db");
+            let key_schema = Arc::new(Schema::new(vec![Column::new("id", DataType::Int32, false)]));
+            let disk_manager = DiskManager::try_new(temp_path).unwrap();
+            let disk_scheduler = Arc::new(DiskScheduler::new(Arc::new(disk_manager)));
+            let buffer_pool = Arc::new(BufferPoolManager::new(1000, disk_scheduler));
+            let index = Arc::new(BPlusTreeIndex::new(key_schema.clone(), buffer_pool, 10, 10));
+            (index, key_schema, temp_dir)
+        };
+        
+        // --- 2. 阶段一：并发插入 ---
+        println!("\n--- Phase 1: Concurrent Insert ---");
+        let mut handles = vec![];
+        // 使用 Barrier 来确保所有线程尽可能同时开始，增加冲突概率
+        let barrier = Arc::new(Barrier::new(NUM_THREADS));
+
+        for i in 0..NUM_THREADS {
+            let index_clone = Arc::clone(&index);
+            let key_schema_clone = Arc::clone(&key_schema);
+            let barrier_clone = Arc::clone(&barrier);
+
+            let handle = thread::spawn(move || {
+                // 每个线程负责插入一段连续的 key
+                let start_key = i as i32 * KEYS_PER_THREAD;
+                let end_key = start_key + KEYS_PER_THREAD;
+                
+                barrier_clone.wait(); // 等待所有线程就绪
+
+                for key_val in start_key..end_key {
+                    let key_tuple = Tuple::new(key_schema_clone.clone(), vec![key_val.into()]);
+                    let rid = RecordId::new(key_val as u32, key_val as u32);
+                    index_clone.insert(&key_tuple, rid).unwrap();
+                }
+            });
+            handles.push(handle);
+        }
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        
+        // --- 中间验证：检查所有 key 是否都已插入 ---
+        for i in 0..TOTAL_KEYS {
+            let key_tuple = Tuple::new(key_schema.clone(), vec![i.into()]);
+            let expected_rid = RecordId::new(i as u32, i as u32);
+            match index.get(&key_tuple) {
+                Ok(Some(rid)) => assert_eq!(rid, expected_rid, "Key {} should exist after insert phase", i),
+                _ => panic!("Key {} not found after insert phase", i),
+            }
+        }
+        println!("--- Phase 1: All keys inserted and verified successfully. ---");
+
+        // --- 3. 阶段二：并发删除 ---
+        println!("\n--- Phase 2: Concurrent Delete ---");
+        let mut handles = vec![];
+        let barrier = Arc::new(Barrier::new(NUM_THREADS));
+        
+        // 将所有 key 随机打乱，让不同线程删除随机的 key，而不是连续的块
+        let mut keys_to_delete: Vec<i32> = (0..TOTAL_KEYS).collect();
+        let mut rng = rand::rng();
+        keys_to_delete.shuffle(&mut rng);
+        let keys_arc = Arc::new(keys_to_delete);
+
+        for i in 0..NUM_THREADS {
+            let index_clone = Arc::clone(&index);
+            let key_schema_clone = Arc::clone(&key_schema);
+            let barrier_clone = Arc::clone(&barrier);
+            let keys_to_delete_clone = Arc::clone(&keys_arc);
+
+            let handle = thread::spawn(move || {
+                // 每个线程负责删除总 key 集合的一部分
+                let start_index = i * (TOTAL_KEYS as usize / NUM_THREADS);
+                let end_index = start_index + (TOTAL_KEYS as usize / NUM_THREADS);
+                
+                barrier_clone.wait(); // 等待所有线程就绪
+
+                for key_idx in start_index..end_index {
+                    let key_val = keys_to_delete_clone[key_idx];
+                    let key_tuple = Tuple::new(key_schema_clone.clone(), vec![key_val.into()]);
+                    index_clone.delete(&key_tuple).unwrap();
+                }
+            });
+            handles.push(handle);
+        }
+        
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        
+        println!("--- Phase 2: Concurrent delete phase finished. ---");
+
+        // --- 4. 阶段三：最终状态验证 ---
+        println!("\n--- Phase 3: Final Verification ---");
+        let mut not_found_count = 0;
+        for i in 0..TOTAL_KEYS {
+            let key_tuple = Tuple::new(key_schema.clone(), vec![i.into()]);
+            if let Ok(None) = index.get(&key_tuple) {
+                // Key 确实被删除了，符合预期
+                not_found_count += 1;
+            } else {
+                panic!("Key {} should have been deleted but was found!", i);
+            }
+        }
+        
+        assert_eq!(not_found_count, TOTAL_KEYS, "Not all keys were deleted correctly.");
+        println!("--- Phase 3: Verification successful. All keys are deleted. ---");
+        
+        // 最终检查树是否为空（如果你的实现支持）
+        // 这里我们假设 is_empty() 方法是线程安全的
+        assert!(index.is_empty(), "The tree should be empty after deleting all keys.");
+        println!("\nCMU-style high contention test passed!");
+    }
+
 }

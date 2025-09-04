@@ -6,7 +6,7 @@ use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::utils::scalar::ScalarValue;
 use crate::utils::table_ref::TableReference;
 
-use crate::storage::index::BPlusTreeIndex;
+use crate::storage::index::bplus_index::BPlusTreeIndex;
 use crate::storage::table_heap::TableHeap;
 use std::sync::{Arc, LazyLock};
 

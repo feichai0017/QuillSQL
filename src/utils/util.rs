@@ -1,7 +1,7 @@
 use crate::buffer::PAGE_SIZE;
 use crate::execution::physical_plan::PhysicalPlan;
 use crate::plan::logical_plan::LogicalPlan;
-use crate::storage::index::BPlusTreeIndex;
+use crate::storage::index::bplus_index::BPlusTreeIndex;
 use crate::error::{QuillSQLError, QuillSQLResult};
 use comfy_table::Cell;
 use std::collections::VecDeque;

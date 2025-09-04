@@ -79,6 +79,12 @@ impl Tuple {
     }
 }
 
+impl Ord for Tuple {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.partial_cmp(other).unwrap_or(Ordering::Equal)
+    }
+}
+
 impl PartialOrd for Tuple {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         let column_count = self.schema.column_count();

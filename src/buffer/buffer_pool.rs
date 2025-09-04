@@ -85,7 +85,7 @@ impl BufferPoolManager {
         if let Some(frame_id_ref) = self.page_table.get(&page_id) {
             let frame_id = *frame_id_ref;
             let page = self.pool[frame_id].clone();
-            page.write().unwrap().pin_count += 1;
+            page.write().unwrap().pin_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             self.replacer
                 .write()
                 .unwrap()
@@ -217,7 +217,7 @@ impl BufferPoolManager {
             drop(frame_id_lock);
 
             let page = self.pool[frame_id].clone();
-            if page.read().unwrap().pin_count > 0 {
+            if page.read().unwrap().pin_count.load(std::sync::atomic::Ordering::SeqCst) > 0 {
                 return Ok(false);
             }
 
@@ -374,14 +374,14 @@ mod tests {
 
         let page = buffer_pool.fetch_page(page1_id).unwrap();
         assert_eq!(page.read().unwrap().page_id, page1_id);
-        assert_eq!(page.read().unwrap().pin_count, 1);
+        assert_eq!(page.read().unwrap().pin_count.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert_eq!(buffer_pool.replacer.read().unwrap().size(), 2);
         drop(page);
         assert_eq!(buffer_pool.replacer.read().unwrap().size(), 3);
 
         let page = buffer_pool.fetch_page(page2_id).unwrap();
         assert_eq!(page.read().unwrap().page_id, page2_id);
-        assert_eq!(page.read().unwrap().pin_count, 1);
+        assert_eq!(page.read().unwrap().pin_count.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert_eq!(buffer_pool.replacer.read().unwrap().size(), 2);
         drop(page);
         assert_eq!(buffer_pool.replacer.read().unwrap().size(), 3);
