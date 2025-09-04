@@ -256,29 +256,37 @@ impl BPlusTreeInternalPage {
 
     // 查找key对应的page_id
     pub fn look_up(&self, key: &Tuple) -> PageId {
-        // 第一个key为空，所以从1开始
+        // 使用二分查找来定位key应该在哪个子页面中。
+        // 我们的目标是找到最后一个 key <= 搜索key 的位置，然后返回该位置的 page_id。
+
+        // 内部节点的数组中，第一个元素的 key 是一个无意义的哨兵（null），
+        // 所以我们的有效搜索范围从索引 1 开始。
         let mut start = 1;
-        if self.header.current_size == 0 {
-            println!("look_up empty page");
+        let mut end = self.header.current_size as i32 - 1;
+        
+        // 如果页面中没有有效的 key（只有一个哨兵），直接返回第一个指针。
+        if self.header.current_size <= 1 {
+            return self.array[0].1;
         }
-        let mut end = self.header.current_size - 1;
-        while start < end {
-            let mid = (start + end) / 2;
-            let compare_res = key.partial_cmp(&self.array[mid as usize].0).unwrap();
-            if compare_res == std::cmp::Ordering::Equal {
-                return self.array[mid as usize].1;
-            } else if compare_res == std::cmp::Ordering::Less {
+
+        while start <= end {
+            let mid = start + (end - start) / 2;
+            // Rust 的 partial_cmp 已经处理了 Tuple 的比较
+            if self.array[mid as usize].0.partial_cmp(key).unwrap() == std::cmp::Ordering::Greater {
+                // 中间值的 key > 搜索的 key，说明目标在左半部分
                 end = mid - 1;
             } else {
+                // 中间值的 key <= 搜索的 key，说明目标可能就是这个或者在右半部分
                 start = mid + 1;
             }
         }
-        let compare_res = key.partial_cmp(&self.array[start as usize].0).unwrap();
-        if compare_res == std::cmp::Ordering::Less {
-            self.array[start as usize - 1].1
-        } else {
-            self.array[start as usize].1
-        }
+
+        // 循环结束后，`end` 指向的就是最后一个 key <= 搜索 key 的位置。
+        // 例如，对于 keys [5, 10, 15]，搜索 12，循环会结束在 end=1 (key=10)，start=2。
+        // 搜索 2，会结束在 end=0 (哨兵key)，start=1。
+        // 搜索 20，会结束在 end=3 (key=15)，start=4。
+        // 因此，正确的子页面指针就存储在 end 索引处。
+        self.array[end as usize].1
     }
 }
 

@@ -422,37 +422,41 @@ impl BPlusTreeIndex {
         }
 
         let mut current_page_id = self.root_page_id.load(Ordering::SeqCst);
-        let mut parent_page_ref: Option<PageRef> = None;
 
+        // 循环直到找到叶子节点
         loop {
+            // 1. 获取并持有当前页面的 PageRef（这会 pin 住页面）
             let current_page_ref = self.buffer_pool.fetch_page(current_page_id)?;
-            let page_read_guard = current_page_ref.read().unwrap(); // 获取读锁
+            
+            // 2. 获取当前页面的读锁，锁守卫的生命周期将持续到循环的末尾或显式 drop
+            let page_read_guard = current_page_ref.read().unwrap();
 
-            // 临时解码页面内容，判断是内部节点还是叶子节点
-            let (tree_page, _) = BPlusTreePageCodec::decode(page_read_guard.data(), self.key_schema.clone())?;
-
-            // 锁耦合：一旦我们锁定了子节点，就可以释放父节点的锁
-            if let Some(parent_ref) = parent_page_ref.take() {
-                // parent_ref 的 Drop 会自动处理 unpin
-                drop(parent_ref);
-            }
+            // 3. 解码页面内容
+            let (tree_page, _) =
+                BPlusTreePageCodec::decode(page_read_guard.data(), self.key_schema.clone())?;
 
             match tree_page {
                 BPlusTreePage::Internal(internal_page) => {
+                    // a. 如果是内部节点，查找下一个子页面的 ID
                     let next_page_id = internal_page.look_up(key);
-                    // 更新 page_id 以便下一次循环
+                    
+                    // b. 关键：在释放当前节点的锁之前，我们不需要做任何事。
+                    //    因为下一次循环开始时，会 fetch 新的页面，
+                    //    而旧的 `current_page_ref` 和 `page_read_guard` 会在
+                    //    下一次循环赋值时被自动 drop，从而安全地 unpin 和 unlock。
+                    //    这种隐式的锁耦合是 Rust RAII 的强大之处。
                     current_page_id = next_page_id;
-                    // 将当前页作为下一次循环的父页
-                    parent_page_ref = Some(current_page_ref.clone());
-                    // 释放当前页的读锁，进入下一次循环
-                    drop(page_read_guard);
                 }
                 BPlusTreePage::Leaf(_) => {
-                    // 到达叶子节点，持有它的锁并返回
-                    drop(page_read_guard);
+                    // b. 如果是叶子节点，我们已经找到了目标。
+                    //    我们不再需要持有读锁，所以显式 drop 它。
+                    drop(page_read_guard); 
+                    //    返回持有的 PageRef，调用者可以用它来获取写锁或读取内容。
                     return Ok(Some(current_page_ref));
                 }
             }
+            // `page_read_guard` 在这里离开作用域，自动释放读锁
+            // `current_page_ref` 在下一次循环开始时被新的 ref 覆盖，旧的 ref 被 drop
         }
     }
 
@@ -463,7 +467,7 @@ impl BPlusTreeIndex {
 
         match tree_page {
             BPlusTreePage::Leaf(leaf_page) => {
-                // 叶子节点分裂逻辑是正确的，保持不变
+                // 叶子节点的分裂逻辑是正确的，保持不变。
                 let mut new_leaf_page =
                     BPlusTreeLeafPage::new(self.key_schema.clone(), self.leaf_max_size);
                 new_leaf_page
@@ -479,24 +483,37 @@ impl BPlusTreeIndex {
                 Ok((new_leaf_page.key_at(0).clone(), new_page_id))
             }
             BPlusTreePage::Internal(internal_page) => {
-                // ★★★ 核心修复：实现正确的内部节点分裂逻辑 ★★★
-                
-                // 1. 找到中间位置的 key-value 对
-                let mid_idx = internal_page.header.current_size as usize / 2;
-                let (middle_key, _) = internal_page.array[mid_idx].clone();
+                // ★★★ 最终修正的内部节点分裂逻辑 ★★★
 
-                // 2. 将中间 key 之后的条目移动到新的右节点
+                // 1. 找到分裂点
+                let mid_idx = internal_page.header.current_size as usize / 2;
+
+                // 2. 将后半部分的元素移动到一个临时的 Vec 中，准备创建新页面。
+                let new_kvs = internal_page.array.split_off(mid_idx);
+                
+                // 3. 更新旧（左）节点的 size。
+                internal_page.header.current_size = internal_page.array.len() as u32;
+
+                // 4. 从刚移出的后半部分元素中，取出第一个元素。它的 key 就是要上推的 middle_key。
+                let (middle_key, first_child_of_new_page) = new_kvs.get(0).unwrap().clone();
+                
+                // 5. 创建新的右侧兄弟节点。
                 let mut new_internal_page =
                     BPlusTreeInternalPage::new(self.key_schema.clone(), self.internal_max_size);
-                // split_off 会把 mid_idx 以及之后的所有元素都移走
-                new_internal_page.batch_insert(internal_page.split_off(mid_idx));
+
+                // 6. 新的右侧节点的第一个指针，就是刚取出的那个 middle_key 原本关联的指针。
+                //    并且它的 key 应该是哨兵（null）。
+                new_internal_page.insert(Tuple::empty(self.key_schema.clone()), first_child_of_new_page);
                 
-                // 3. 将新的右节点写回磁盘
+                // 7. 将 new_kvs 中剩余的元素（从第二个开始）插入到新页面。
+                new_internal_page.batch_insert(new_kvs[1..].to_vec());
+                
+                // 8. 将新页面写回缓冲池。
                 new_page.write().unwrap().set_data(page_bytes_to_array(
                     &BPlusTreeInternalPageCodec::encode(&new_internal_page),
                 ));
 
-                // 4. 返回被“上推”的中间 key 和新节点的 page_id
+                // 9. 返回被上推的 middle_key 和新页面的 ID。
                 Ok((middle_key, new_page_id))
             }
         }
