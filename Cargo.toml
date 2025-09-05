@@ -5,6 +5,10 @@ edition = "2021"
 
 [dependencies]
 log = "0.4.21"
+stack-map = "1.0.5"
+ebr = { version = "0.2.13" }
+bztree = "0.2.0"
+crossbeam-epoch = "0.9.18"
 parking_lot = "0.12.1"
 parking_lot_core = "0.9.0"
 serial_test = "3.2.0"

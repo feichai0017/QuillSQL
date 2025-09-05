@@ -13,3 +13,4 @@ pub mod optimizer;
 pub mod plan;
 pub mod transaction;
 pub mod tests;
+pub mod index;
