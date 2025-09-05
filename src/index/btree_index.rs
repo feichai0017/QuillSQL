@@ -826,17 +826,6 @@ impl BPlusTreeIndex {
         Ok(true)
     }
 
-    fn find_sibling_pages(
-        &self,
-        parent_page_id: PageId,
-        child_page_id: PageId,
-    ) -> QuillSQLResult<(Option<PageId>, Option<PageId>)> {
-        let (_, parent_internal_page) = self
-            .buffer_pool
-            .fetch_tree_internal_page(parent_page_id, self.key_schema.clone())?;
-        Ok(parent_internal_page.sibling_page_ids(child_page_id))
-    }
-
     fn merge(
         &self,
         parent_page_id: PageId,
@@ -914,11 +903,6 @@ impl BPlusTreeIndex {
     // 查找子树最小的leafKV
     fn find_subtree_min_leafkv(&self, page_id: PageId) -> QuillSQLResult<LeafKV> {
         self.find_subtree_leafkv(page_id, true)
-    }
-
-    // 查找子树最大的leafKV
-    fn find_subtree_max_leafkv(&self, page_id: PageId) -> QuillSQLResult<LeafKV> {
-        self.find_subtree_leafkv(page_id, false)
     }
 
     fn find_subtree_leafkv(&self, page_id: PageId, min_or_max: bool) -> QuillSQLResult<LeafKV> {
