@@ -20,20 +20,23 @@ pub static EMPTY_TUPLE_INFO: LazyLock<TupleInfo> = LazyLock::new(|| TupleInfo {
 
 /**
  * Slotted page format:
+ * ```text
  *  ---------------------------------------------------------
  *  | HEADER | ... FREE SPACE ... | ... INSERTED TUPLES ... |
  *  ---------------------------------------------------------
  *                                ^
  *                                free space pointer
+ * ```
  *
- *  Header format (size in bytes):
+ * Header format (size in bytes):
+ * ```text
  *  ----------------------------------------------------------------------------
  *  | NextPageId (4)| NumTuples(2) | NumDeletedTuples(2) |
  *  ----------------------------------------------------------------------------
  *  ----------------------------------------------------------------
  *  | Tuple_1 offset+size + TupleMeta | Tuple_2 offset+size + TupleMeta | ... |
  *  ----------------------------------------------------------------
- *
+ * ```
  */
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct TablePage {

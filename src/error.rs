@@ -28,6 +28,9 @@ pub enum QuillSQLError {
     #[error("Storage error: {0}")]
     Storage(String),
 
+    #[error("Concurrent error: {0}")]
+    Concurrent(String),
+
     #[error("Unwind")]
     Unwind,
 }
