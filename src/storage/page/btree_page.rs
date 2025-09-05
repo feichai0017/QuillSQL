@@ -124,30 +124,12 @@ impl BPlusTreeInternalPage {
     }
 
     /// Insert a key-value pair into the internal page using binary search
-    /// The first key is always null and should be skipped when searching
+    /// Works whether the page has a leading NULL sentinel or not.
     pub fn insert(&mut self, key: Tuple, page_id: PageId) {
-        // Skip first null key when searching
-        let mut left = 1;
-        let mut right = self.header.current_size as i32 - 1;
-
-        // Find insert position using binary search
-        let mut pos = self.header.current_size as usize;
-        while left <= right {
-            let mid = left + (right - left) / 2;
-            match key.partial_cmp(&self.array[mid as usize].0).unwrap() {
-                std::cmp::Ordering::Less => {
-                    pos = mid as usize;
-                    right = mid - 1;
-                }
-                std::cmp::Ordering::Greater => left = mid + 1,
-                std::cmp::Ordering::Equal => {
-                    pos = mid as usize;
-                    break;
-                }
-            }
-        }
-
-        // Insert at found position
+        let size = self.header.current_size as usize;
+        let pos = self.array[..size]
+            .binary_search_by(|(k, _)| k.cmp(&key))
+            .unwrap_or_else(|pos| pos);
         self.array.insert(pos, (key, page_id));
         self.header.current_size += 1;
     }
@@ -155,7 +137,7 @@ impl BPlusTreeInternalPage {
         let kvs_len = kvs.len();
         self.array.extend(kvs);
         self.header.current_size += kvs_len as u32;
-        self.array.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        self.array.sort_by(|a, b| a.0.cmp(&b.0));
     }
 
     pub fn delete(&mut self, key: &Tuple) {
@@ -205,6 +187,7 @@ impl BPlusTreeInternalPage {
     }
 
     pub fn is_full(&self) -> bool {
+        // Split happens only after overflow so full means strictly greater
         self.header.current_size > self.header.max_size
     }
 
@@ -234,50 +217,26 @@ impl BPlusTreeInternalPage {
         if self.header.current_size == 0 {
             return None;
         }
-        // 第一个key为空，所以从1开始
-        let mut start: i32 = 1;
-        let mut end: i32 = self.header.current_size as i32 - 1;
-        while start < end {
-            let mid = (start + end) / 2;
-            let compare_res = key.partial_cmp(&self.array[mid as usize].0).unwrap();
-            if compare_res == std::cmp::Ordering::Equal {
-                return Some(mid as usize);
-            } else if compare_res == std::cmp::Ordering::Less {
-                end = mid - 1;
-            } else {
-                start = mid + 1;
-            }
-        }
-        if key.partial_cmp(&self.array[start as usize].0).unwrap() == std::cmp::Ordering::Equal {
-            return Some(start as usize);
-        }
-        None
+        let size = self.header.current_size as usize;
+        self.array[..size]
+            .binary_search_by(|(k, _)| k.cmp(key))
+            .ok()
     }
 
-    // 查找key对应的page_id
+    // 查找key对应的page_id（返回最后一个 <= key 的指针）。
     pub fn look_up(&self, key: &Tuple) -> PageId {
-        // 第一个key为空，所以从1开始
-        let mut start = 1;
-        if self.header.current_size == 0 {
-            println!("look_up empty page");
+        let size = self.header.current_size as usize;
+        debug_assert!(size > 0, "Internal page look_up called on empty page");
+        if size == 0 {
+            return INVALID_PAGE_ID;
         }
-        let mut end = self.header.current_size - 1;
-        while start < end {
-            let mid = (start + end) / 2;
-            let compare_res = key.partial_cmp(&self.array[mid as usize].0).unwrap();
-            if compare_res == std::cmp::Ordering::Equal {
-                return self.array[mid as usize].1;
-            } else if compare_res == std::cmp::Ordering::Less {
-                end = mid - 1;
-            } else {
-                start = mid + 1;
+        let slice = &self.array[..size];
+        match slice.binary_search_by(|(k, _)| k.cmp(key)) {
+            Ok(i) => slice[i].1,
+            Err(ins) => {
+                let idx = ins.saturating_sub(1);
+                slice[idx].1
             }
-        }
-        let compare_res = key.partial_cmp(&self.array[start as usize].0).unwrap();
-        if compare_res == std::cmp::Ordering::Less {
-            self.array[start as usize - 1].1
-        } else {
-            self.array[start as usize].1
         }
     }
 }
@@ -349,31 +308,15 @@ impl BPlusTreeLeafPage {
     }
 
     pub fn is_full(&self) -> bool {
+        // Split happens only after overflow so full means strictly greater
         self.header.current_size > self.header.max_size
     }
 
     pub fn insert(&mut self, key: Tuple, rid: RecordId) {
-        let mut left = 0;
-        let mut right = self.header.current_size as i32 - 1;
-        let mut pos = self.header.current_size as usize;
-
-        // Find insert position using binary search
-        while left <= right {
-            let mid = left + (right - left) / 2;
-            match key.partial_cmp(&self.array[mid as usize].0).unwrap() {
-                std::cmp::Ordering::Less => {
-                    pos = mid as usize;
-                    right = mid - 1;
-                }
-                std::cmp::Ordering::Greater => left = mid + 1,
-                std::cmp::Ordering::Equal => {
-                    pos = mid as usize;
-                    break;
-                }
-            }
-        }
-
-        // Insert at found position
+        let size = self.header.current_size as usize;
+        let pos = self.array[..size]
+            .binary_search_by(|(k, _)| k.cmp(&key))
+            .unwrap_or_else(|pos| pos);
         self.array.insert(pos, (key, rid));
         self.header.current_size += 1;
     }
@@ -382,7 +325,7 @@ impl BPlusTreeLeafPage {
         let kvs_len = kvs.len();
         self.array.extend(kvs);
         self.header.current_size += kvs_len as u32;
-        self.array.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        self.array.sort_by(|a, b| a.0.cmp(&b.0));
     }
 
     pub fn split_off(&mut self, at: usize) -> Vec<LeafKV> {
@@ -418,23 +361,10 @@ impl BPlusTreeLeafPage {
         if self.header.current_size == 0 {
             return None;
         }
-        let mut start: i32 = 0;
-        let mut end: i32 = self.header.current_size as i32 - 1;
-        while start < end {
-            let mid = (start + end) / 2;
-            let compare_res = key.partial_cmp(&self.array[mid as usize].0).unwrap();
-            if compare_res == std::cmp::Ordering::Equal {
-                return Some(mid as usize);
-            } else if compare_res == std::cmp::Ordering::Less {
-                end = mid - 1;
-            } else {
-                start = mid + 1;
-            }
-        }
-        if key.partial_cmp(&self.array[start as usize].0).unwrap() == std::cmp::Ordering::Equal {
-            return Some(start as usize);
-        }
-        None
+        let size = self.header.current_size as usize;
+        self.array[..size]
+            .binary_search_by(|(k, _)| k.cmp(key))
+            .ok()
     }
 
     pub fn next_closest(&self, tuple: &Tuple, included: bool) -> Option<usize> {

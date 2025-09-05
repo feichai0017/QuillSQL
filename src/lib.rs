@@ -2,7 +2,6 @@ pub mod error;
 pub mod sql;
 pub mod storage;
 pub mod utils;
-pub mod benchmarks;
 pub mod buffer;
 pub mod catalog;
 pub mod database;
