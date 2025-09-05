@@ -281,12 +281,21 @@ impl BPlusTreeInternalPage {
 
     // 查找key对应的page_id
     pub fn look_up(&self, key: &Tuple) -> PageId {
+        if self.header.current_size == 0 {
+            // Empty page should not happen in a well-formed tree
+            log::error!("look_up called on empty internal page");
+            return INVALID_PAGE_ID;
+        }
+
+        if self.header.current_size == 1 {
+            // Only one entry (the empty key), return its value
+            return self.array[0].1;
+        }
+
         // 第一个key为空，所以从1开始
         let mut start = 1;
-        if self.header.current_size == 0 {
-            println!("look_up empty page");
-        }
         let mut end = self.header.current_size - 1;
+
         while start < end {
             let mid = (start + end) / 2;
             let compare_res = key.partial_cmp(&self.array[mid as usize].0).unwrap();
@@ -298,8 +307,14 @@ impl BPlusTreeInternalPage {
                 start = mid + 1;
             }
         }
+
+        // Ensure we don't access out of bounds
+        if start >= self.header.current_size {
+            return self.array[(self.header.current_size - 1) as usize].1;
+        }
+
         let compare_res = key.partial_cmp(&self.array[start as usize].0).unwrap();
-        if compare_res == std::cmp::Ordering::Less {
+        if compare_res == std::cmp::Ordering::Less && start > 0 {
             self.array[start as usize - 1].1
         } else {
             self.array[start as usize].1
