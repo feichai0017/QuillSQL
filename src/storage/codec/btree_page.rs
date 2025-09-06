@@ -264,7 +264,7 @@ impl BPlusTreeInternalPageHeaderCodec {
 #[cfg(test)]
 mod tests {
     use crate::catalog::{Column, DataType, Schema};
-    use crate::storage::codec::index_page::BPlusTreePageCodec;
+    use crate::storage::codec::btree_page::BPlusTreePageCodec;
     use crate::storage::page::{
         BPlusTreeInternalPage, BPlusTreeLeafPage, BPlusTreePage,
     };

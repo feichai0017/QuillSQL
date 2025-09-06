@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::ops::{Bound, RangeBounds};
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use crate::buffer::{AtomicPageId, PageId, PageRef, INVALID_PAGE_ID};
 use crate::catalog::SchemaRef;
@@ -43,6 +43,8 @@ pub struct BPlusTreeIndex {
     pub internal_max_size: u32,
     pub leaf_max_size: u32,
     pub root_page_id: AtomicPageId,
+    // Coarse-grained index-level lock: readers share, writers exclude
+    pub index_lock: RwLock<()>,
 }
 
 impl Index for BPlusTreeIndex {
@@ -77,6 +79,7 @@ impl BPlusTreeIndex {
             internal_max_size,
             leaf_max_size,
             root_page_id: AtomicPageId::new(INVALID_PAGE_ID),
+            index_lock: RwLock::new(()),
         }
     }
 
@@ -84,7 +87,14 @@ impl BPlusTreeIndex {
         self.root_page_id.load(Ordering::SeqCst) == INVALID_PAGE_ID
     }
 
+    // Public locked API: write lock for insert
     pub fn insert(&self, key: &Tuple, rid: RecordId) -> QuillSQLResult<()> {
+        let _guard = self.index_lock.write().unwrap();
+        self.insert_unlocked(key, rid)
+    }
+
+    // Internal logic without acquiring the index-level lock
+    fn insert_unlocked(&self, key: &Tuple, rid: RecordId) -> QuillSQLResult<()> {
         if self.is_empty() {
             self.start_new_tree(key, rid)?;
             return Ok(());
@@ -164,7 +174,14 @@ impl BPlusTreeIndex {
         Ok(())
     }
 
+    // Public locked API: write lock for delete
     pub fn delete(&self, key: &Tuple) -> QuillSQLResult<()> {
+        let _guard = self.index_lock.write().unwrap();
+        self.delete_unlocked(key)
+    }
+
+    // Internal logic without acquiring the index-level lock
+    fn delete_unlocked(&self, key: &Tuple) -> QuillSQLResult<()> {
         if self.is_empty() {
             return Ok(());
         }
@@ -255,8 +272,14 @@ impl BPlusTreeIndex {
         Ok(())
     }
 
-    // 找到叶子节点上对应的Value
+    // Public locked API: read lock for get
     pub fn get(&self, key: &Tuple) -> QuillSQLResult<Option<RecordId>> {
+        let _guard = self.index_lock.read().unwrap();
+        self.get_unlocked(key)
+    }
+
+    // Internal logic without acquiring the index-level lock
+    fn get_unlocked(&self, key: &Tuple) -> QuillSQLResult<Option<RecordId>> {
         if self.is_empty() {
             return Ok(None);
         }
@@ -579,6 +602,7 @@ impl BPlusTreeIndex {
     }
 
     pub fn get_first_leaf_page(&self) -> QuillSQLResult<BPlusTreeLeafPage> {
+        let _guard = self.index_lock.read().unwrap();
         let (_, mut curr_tree_page) = self.buffer_pool.fetch_tree_page(
             self.root_page_id.load(Ordering::SeqCst),
             self.key_schema.clone(),
@@ -623,6 +647,7 @@ impl TreeIndexIterator {
     }
 
     pub fn load_next_leaf_page(&mut self) -> QuillSQLResult<bool> {
+        let _guard = self.index.index_lock.read().unwrap();
         let next_page_id = self.leaf_page.header.next_page_id;
         if next_page_id == INVALID_PAGE_ID {
             Ok(false)
