@@ -14,7 +14,7 @@ use crate::storage::page::{BPLUS_INTERNAL_PAGE_MAX_SIZE, BPLUS_LEAF_PAGE_MAX_SIZ
 use crate::{
     buffer::BufferPoolManager,
     storage::{table_heap::TableHeap},
-    index::btree_index::BPlusTreeIndex,
+    storage::index::btree_index::BPlusTreeIndex,
     error::{QuillSQLError, QuillSQLResult},
 };
 

@@ -4,3 +4,4 @@ pub mod disk_scheduler;
 pub mod page;
 pub mod table_heap;
 pub mod tuple;
+pub mod index;
