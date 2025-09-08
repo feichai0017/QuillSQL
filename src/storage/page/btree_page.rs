@@ -29,6 +29,24 @@ impl BPlusTreePage {
             Self::Leaf(page) => page.header.current_size < page.min_size(),
         }
     }
+    pub fn min_size(&self) -> u32 {
+        match self {
+            Self::Internal(page) => page.min_size(),
+            Self::Leaf(page) => page.min_size(),
+        }
+    }
+    pub fn current_size(&self) -> u32 {
+        match self {
+            Self::Internal(page) => page.header.current_size,
+            Self::Leaf(page) => page.header.current_size,
+        }
+    }
+    pub fn max_size(&self) -> u32 {
+        match self {
+            Self::Internal(page) => page.header.max_size,
+            Self::Leaf(page) => page.header.max_size,
+        }
+    }
     pub fn insert_internalkv(&mut self, internalkv: InternalKV) {
         match self {
             Self::Internal(page) => page.insert(internalkv.0, internalkv.1),
@@ -92,7 +110,7 @@ impl BPlusTreeInternalPage {
         }
     }
     pub fn min_size(&self) -> u32 {
-        self.header.max_size / 2
+        (self.header.max_size + 1) / 2
     }
     pub fn key_at(&self, index: usize) -> &Tuple {
         &self.array[index].0
@@ -138,6 +156,16 @@ impl BPlusTreeInternalPage {
         self.array.extend(kvs);
         self.header.current_size += kvs_len as u32;
         self.array.sort_by(|a, b| a.0.cmp(&b.0));
+    }
+
+    pub fn remove(&mut self, page_id: PageId) -> Option<(Tuple, PageId)> {
+        if let Some(pos) = self.array.iter().position(|&(_, pid)| pid == page_id) {
+            let removed = self.array.remove(pos);
+            self.header.current_size -= 1;
+            Some(removed)
+        } else {
+            None
+        }
     }
 
     pub fn delete(&mut self, key: &Tuple) {
@@ -223,21 +251,120 @@ impl BPlusTreeInternalPage {
             .ok()
     }
 
+    // 查找page_id对应的索引位置
+    pub fn value_index(&self, page_id: PageId) -> Option<usize> {
+        if self.header.current_size == 0 {
+            return None;
+        }
+        let size = self.header.current_size as usize;
+        self.array[..size]
+            .iter()
+            .position(|(_, pid)| *pid == page_id)
+    }
+
     // 查找key对应的page_id（返回最后一个 <= key 的指针）。
     pub fn look_up(&self, key: &Tuple) -> PageId {
         let size = self.header.current_size as usize;
-        debug_assert!(size > 0, "Internal page look_up called on empty page");
-        if size == 0 {
-            return INVALID_PAGE_ID;
-        }
-        let slice = &self.array[..size];
-        match slice.binary_search_by(|(k, _)| k.cmp(key)) {
-            Ok(i) => slice[i].1,
-            Err(ins) => {
-                let idx = ins.saturating_sub(1);
-                slice[idx].1
+
+        // Manual binary search that skips the sentinel at index 0
+        let mut low = 1;
+        // high can be size - 1, which is fine since key_at will be checked against size
+        let mut high = size;
+        let mut result_idx = 0; // Will point to P0 if key is smaller than all keys
+
+        while low < high {
+            let mid = low + (high - low) / 2;
+            if key >= self.key_at(mid) {
+                low = mid + 1;
+            } else {
+                high = mid;
             }
         }
+        // low is the insertion point. We need the element to the left of it.
+        result_idx = low - 1;
+
+        self.value_at(result_idx)
+    }
+
+    // 查找key对应的page_id的可变引用（返回最后一个 <= key 的指针）。
+    pub fn look_up_mut(&mut self, key: &Tuple) -> Option<&mut PageId> {
+        let size = self.header.current_size as usize;
+
+        // Manual binary search that skips the sentinel at index 0
+        let mut low = 1;
+        let mut high = size;
+        let mut result_idx = 0;
+
+        while low < high {
+            let mid = low + (high - low) / 2;
+            if key >= self.key_at(mid) {
+                low = mid + 1;
+            } else {
+                high = mid;
+            }
+        }
+        result_idx = low - 1;
+
+        Some(&mut self.array[result_idx].1)
+    }
+
+    /// Removes the first key-value pair (not the sentinel) and returns it.
+    /// Also returns the key that will be promoted up to the parent.
+    pub fn remove_first_kv(&mut self) -> (Tuple, PageId) {
+        // 检查页面状态是否一致
+        if self.array.len() != self.header.current_size as usize {
+            panic!(
+                "Page state inconsistent: array len {} != current_size {}",
+                self.array.len(),
+                self.header.current_size
+            );
+        }
+
+        // The first "real" key is at index 1, after the sentinel.
+        if self.array.len() <= 1 {
+            panic!(
+                "remove_first_kv called on internal page with array len {} and current_size {}",
+                self.array.len(),
+                self.header.current_size
+            );
+        }
+        let result = self.array.remove(1);
+        self.header.current_size -= 1;
+        result
+    }
+    pub fn remove_last_kv(&mut self) -> (Tuple, PageId) {
+        // 检查页面状态是否一致
+        if self.array.len() != self.header.current_size as usize {
+            panic!(
+                "Page state inconsistent: array len {} != current_size {}",
+                self.array.len(),
+                self.header.current_size
+            );
+        }
+
+        if self.array.is_empty() {
+            panic!(
+                "remove_last_kv called on empty internal page with current_size {}",
+                self.header.current_size
+            );
+        }
+
+        let result = self.array.pop().unwrap();
+        self.header.current_size -= 1;
+        assert_eq!(self.header.current_size as usize, self.array.len());
+        result
+    }
+    pub fn merge(&mut self, middle_key: Tuple, other: &mut BPlusTreeInternalPage) {
+        // The middle key from the parent is pushed as a new separator,
+        // pointing to the first child of the 'other' (right) page.
+        self.array
+            .push((middle_key, other.array.first().unwrap().1));
+
+        // The remaining key-pointer pairs from the 'other' page are appended.
+        // We drain from index 1 to skip 'other' page's sentinel entry.
+        self.array.extend(other.array.drain(1..));
+
+        self.header.current_size = self.array.len() as u32;
     }
 }
 
@@ -296,7 +423,7 @@ impl BPlusTreeLeafPage {
     }
 
     pub fn min_size(&self) -> u32 {
-        self.header.max_size / 2
+        (self.header.max_size + 1) / 2
     }
 
     pub fn key_at(&self, index: usize) -> &Tuple {
@@ -357,6 +484,12 @@ impl BPlusTreeLeafPage {
         key_index.map(|index| self.array[index].1)
     }
 
+    // 查找key对应的rid的可变引用
+    pub fn look_up_mut(&mut self, key: &Tuple) -> Option<&mut RecordId> {
+        let key_index = self.key_index(key);
+        key_index.map(|index| &mut self.array[index].1)
+    }
+
     fn key_index(&self, key: &Tuple) -> Option<usize> {
         if self.header.current_size == 0 {
             return None;
@@ -365,6 +498,55 @@ impl BPlusTreeLeafPage {
         self.array[..size]
             .binary_search_by(|(k, _)| k.cmp(key))
             .ok()
+    }
+
+    /// Removes and returns the first key-value pair.
+    pub fn remove_first_kv(&mut self) -> (Tuple, RecordId) {
+        // 检查页面状态是否一致
+        if self.array.len() != self.header.current_size as usize {
+            panic!(
+                "Page state inconsistent: array len {} != current_size {}",
+                self.array.len(),
+                self.header.current_size
+            );
+        }
+
+        if self.array.is_empty() {
+            panic!(
+                "remove_first_kv called on empty leaf page with current_size {}",
+                self.header.current_size
+            );
+        }
+
+        let result = self.array.remove(0);
+        self.header.current_size -= 1;
+        result
+    }
+    pub fn remove_last_kv(&mut self) -> (Tuple, RecordId) {
+        // 检查页面状态是否一致
+        if self.array.len() != self.header.current_size as usize {
+            panic!(
+                "Page state inconsistent: array len {} != current_size {}",
+                self.array.len(),
+                self.header.current_size
+            );
+        }
+
+        if self.array.is_empty() {
+            panic!(
+                "remove_last_kv called on empty leaf page with current_size {}",
+                self.header.current_size
+            );
+        }
+
+        let result = self.array.pop().unwrap();
+        self.header.current_size -= 1;
+        result
+    }
+    pub fn merge(&mut self, other: &mut BPlusTreeLeafPage) {
+        self.array.extend(other.array.drain(..));
+        self.header.current_size = self.array.len() as u32;
+        self.header.next_page_id = other.header.next_page_id;
     }
 
     pub fn next_closest(&self, tuple: &Tuple, included: bool) -> Option<usize> {
@@ -382,13 +564,13 @@ impl BPlusTreeLeafPage {
 
 #[cfg(test)]
 mod tests {
-    use crate::utils::scalar::ScalarValue;
     use crate::storage::page::{BPlusTreeInternalPage, BPlusTreeLeafPage};
+    use crate::storage::tuple::Tuple;
+    use crate::utils::scalar::ScalarValue;
     use crate::{
         catalog::{Column, DataType, Schema},
         storage::page::RecordId,
     };
-    use crate::storage::tuple::Tuple;
     use std::sync::Arc;
 
     #[test]
