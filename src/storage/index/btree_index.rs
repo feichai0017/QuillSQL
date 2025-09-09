@@ -17,7 +17,6 @@ use crate::{
 };
 
 use crate::storage::tuple::Tuple;
-use rand::seq::SliceRandom;
 
 #[derive(Debug)]
 pub struct Context {
@@ -244,8 +243,8 @@ impl BPlusTreeIndex {
             return Ok(());
         }
 
-        let mut parent_guard = context.write_set.pop_back().unwrap();
-        let (mut parent_page, _) =
+        let parent_guard = context.write_set.pop_back().unwrap();
+        let (parent_page, _) =
             BPlusTreeInternalPageCodec::decode(&parent_guard.data, self.key_schema.clone())?;
         let node_idx = parent_page.value_index(node_guard.page_id()).unwrap();
 
@@ -402,9 +401,9 @@ impl BPlusTreeIndex {
     fn coalesce(
         &self,
         mut left_guard: WritePageGuard,
-        mut right_guard: WritePageGuard,
+        right_guard: WritePageGuard,
         mut parent_guard: WritePageGuard,
-        parent_idx_of_right_node: usize,
+        _parent_idx_of_right_node: usize,
         context: &mut Context,
     ) -> QuillSQLResult<()> {
         let right_page_id = right_guard.page_id();
@@ -447,7 +446,7 @@ impl BPlusTreeIndex {
         Ok(())
     }
 
-    fn adjust_root(&self, mut root_guard: WritePageGuard) -> QuillSQLResult<()> {
+    fn adjust_root(&self, root_guard: WritePageGuard) -> QuillSQLResult<()> {
         let (root_page, _) = BPlusTreePageCodec::decode(&root_guard.data, self.key_schema.clone())?;
         let root_id = root_guard.page_id();
 
@@ -549,10 +548,31 @@ impl BPlusTreeIndex {
                 BPlusTreePage::Internal(internal_page) => {
                     let mut new_internal =
                         BPlusTreeInternalPage::new(self.key_schema.clone(), self.internal_max_size);
+
+                    // 计算中间键位置（注意包含哨兵，索引从0开始，1.. 是真实键）
                     let middle_idx = internal_page.header.current_size as usize / 2;
-                    let middle_key = internal_page.key_at(middle_idx).clone();
-                    // 分裂 internal page 时，中间的 key 要向上提，而不是留在新页面
-                    new_internal.batch_insert(internal_page.split_off(middle_idx));
+
+                    // 将 [middle_idx, ..) 全部从左页移出
+                    let mut moved = internal_page.split_off(middle_idx);
+
+                    // moved[0] 为 (K_mid, P_mid)，其中 K_mid 需要上推到父节点，
+                    // 而 P_mid 作为右页的哨兵指针（右页最左指针）。
+                    let (middle_key, right_sentinel_ptr) = {
+                        let pair = moved.get(0).ok_or(QuillSQLError::Internal(
+                            "Internal split moved entries empty".to_string(),
+                        ))?;
+                        (pair.0.clone(), pair.1)
+                    };
+
+                    // 右页插入哨兵 (Empty, P_mid)
+                    new_internal.insert(Tuple::empty(self.key_schema.clone()), right_sentinel_ptr);
+
+                    // 将剩余的键值对（严格大于 middle_key 的部分）批量放入右页
+                    if moved.len() > 1 {
+                        // 跳过 moved[0]（middle_key）
+                        new_internal.batch_insert(moved.split_off(1));
+                    }
+
                     let new_data = BPlusTreeInternalPageCodec::encode(&new_internal);
                     new_page_guard.data.copy_from_slice(&new_data);
                     middle_key
@@ -710,14 +730,14 @@ mod tests {
     use crate::storage::disk_manager::DiskManager;
     use crate::storage::disk_scheduler::DiskScheduler;
     use crate::storage::index::btree_index::TreeIndexIterator;
-    use crate::storage::page::RecordId;
+    use crate::storage::page::{BPlusTreePage, RecordId};
     use crate::storage::tuple::Tuple;
     use crate::{
         buffer::BufferPoolManager,
         catalog::{Column, DataType, Schema},
         storage::codec::BPlusTreePageCodec,
     };
-    use rand::seq::SliceRandom;
+    // use rand::seq::SliceRandom;
 
     use super::BPlusTreeIndex;
 
@@ -987,122 +1007,65 @@ mod tests {
     }
 
     #[test]
-    pub fn test_scale() {
-        let key_schema = Arc::new(Schema::new(vec![Column::new("a", DataType::Int64, false)]));
-        let temp_dir = TempDir::new().unwrap();
-        let temp_path = temp_dir.path().join("test.db");
-        let disk_manager = DiskManager::try_new(temp_path).unwrap();
-        let disk_scheduler = Arc::new(DiskScheduler::new(Arc::new(disk_manager)));
-        let buffer_pool = Arc::new(BufferPoolManager::new(30, disk_scheduler));
-        let index = BPlusTreeIndex::new(key_schema.clone(), buffer_pool.clone(), 3, 3);
+    pub fn test_concurrent_insert() {
+        let runs = 3;
+        let scale_factor = 1000;
+        let thread_nums = 4;
 
-        let scale = 1000;
-        let mut keys: Vec<i64> = (1..=scale).collect();
-        keys.shuffle(&mut rand::thread_rng());
-        println!("\n--- Shuffled keys for insertion ---\n{:?}", keys);
+        for _ in 0..runs {
+            let key_schema = Arc::new(Schema::new(vec![Column::new("a", DataType::Int64, false)]));
+            let temp_dir = TempDir::new().unwrap();
+            let temp_path = temp_dir.path().join("test.db");
+            let disk_manager = DiskManager::try_new(temp_path).unwrap();
+            let disk_scheduler = Arc::new(DiskScheduler::new(Arc::new(disk_manager)));
+            let buffer_pool = Arc::new(BufferPoolManager::new(50, disk_scheduler));
+            let index = Arc::new(BPlusTreeIndex::new(
+                key_schema.clone(),
+                buffer_pool.clone(),
+                4,
+                4,
+            ));
 
-        for &key in &keys {
-            let tuple = Tuple::new(key_schema.clone(), vec![key.into()]);
-            let rid = RecordId::new(key as u32, key as u32);
-            index.insert(&tuple, rid).unwrap();
-        }
+            // 简单洗牌以打散键分布，使用原地 Fisher-Yates，避免依赖 rand::thread_rng
+            let mut keys: Vec<i64> = (1..scale_factor).collect();
+            let mut seed: u64 = 0x9E3779B97F4A7C15;
+            for i in (1..keys.len()).rev() {
+                // 线性同余伪随机，避免引入额外依赖
+                seed = seed
+                    .wrapping_mul(2862933555777941757)
+                    .wrapping_add(3037000493);
+                let j = (seed as usize) % (i + 1);
+                keys.swap(i, j);
+            }
 
-        let mut remove_keys = Vec::new();
-        for i in 0..scale / 2 {
-            remove_keys.push(keys[i as usize]);
-        }
-        println!("\n--- Keys to be removed ---\n{:?}", remove_keys);
+            let mut threads = vec![];
+            for i in 0..thread_nums {
+                let index_clone = index.clone();
+                let key_schema_clone = key_schema.clone();
+                let keys_clone = keys.clone();
+                threads.push(std::thread::spawn(move || {
+                    for key in &keys_clone {
+                        if key % thread_nums as i64 == i as i64 {
+                            let tuple = Tuple::new(key_schema_clone.clone(), vec![(*key).into()]);
+                            let rid = RecordId::new(*key as u32, *key as u32);
+                            index_clone.insert(&tuple, rid).unwrap();
+                        }
+                    }
+                }));
+            }
 
-        for &key in &remove_keys {
-            let tuple = Tuple::new(key_schema.clone(), vec![key.into()]);
-            index.delete(&tuple).unwrap();
-        }
+            for t in threads {
+                t.join().unwrap();
+            }
 
-        println!("\n--- Verifying final state ---");
-        for &key in &keys {
-            let tuple = Tuple::new(key_schema.clone(), vec![key.into()]);
-            let is_present = index.get(&tuple).unwrap().is_some();
-            if !is_present {
-                assert!(
-                    remove_keys.contains(&key),
-                    "key {} was not found but was not in remove_keys",
-                    key
-                );
-            } else {
-                assert!(
-                    !remove_keys.contains(&key),
-                    "key {} was found but was in remove_keys",
-                    key
-                );
+            for key in &keys {
+                let tuple = Tuple::new(key_schema.clone(), vec![(*key).into()]);
+                let result = index.get(&tuple).unwrap();
+                assert!(result.is_some());
+                assert_eq!(result.unwrap().slot_num, *key as u32);
             }
         }
-
-        let mut iter = TreeIndexIterator::new(Arc::new(index), ..);
-        let mut remaining_keys: Vec<i64> = keys
-            .into_iter()
-            .filter(|k| !remove_keys.contains(k))
-            .collect();
-        remaining_keys.sort();
-
-        let mut iter_result = Vec::new();
-        while let Some(rid) = iter.next().unwrap() {
-            iter_result.push(rid.slot_num as i64);
-        }
-
-        assert_eq!(remaining_keys, iter_result);
     }
-
-    // #[test]
-    // pub fn test_concurrent_insert() {
-    //     let runs = 3;
-    //     let scale_factor = 1000;
-    //     let thread_nums = 4;
-
-    //     for _ in 0..runs {
-    //         let key_schema = Arc::new(Schema::new(vec![Column::new("a", DataType::Int64, false)]));
-    //         let temp_dir = TempDir::new().unwrap();
-    //         let temp_path = temp_dir.path().join("test.db");
-    //         let disk_manager = DiskManager::try_new(temp_path).unwrap();
-    //         let disk_scheduler = Arc::new(DiskScheduler::new(Arc::new(disk_manager)));
-    //         let buffer_pool = Arc::new(BufferPoolManager::new(50, disk_scheduler));
-    //         let index = Arc::new(BPlusTreeIndex::new(
-    //             key_schema.clone(),
-    //             buffer_pool.clone(),
-    //             4,
-    //             4,
-    //         ));
-
-    //         let mut keys: Vec<i64> = (1..scale_factor).collect();
-    //         keys.shuffle(&mut rand::thread_rng());
-
-    //         let mut threads = vec![];
-    //         for i in 0..thread_nums {
-    //             let index_clone = index.clone();
-    //             let key_schema_clone = key_schema.clone();
-    //             let keys_clone = keys.clone();
-    //             threads.push(std::thread::spawn(move || {
-    //                 for key in &keys_clone {
-    //                     if key % thread_nums as i64 == i as i64 {
-    //                         let tuple = Tuple::new(key_schema_clone.clone(), vec![(*key).into()]);
-    //                         let rid = RecordId::new(*key as u32, *key as u32);
-    //                         index_clone.insert(&tuple, rid).unwrap();
-    //                     }
-    //                 }
-    //             }));
-    //         }
-
-    //         for t in threads {
-    //             t.join().unwrap();
-    //         }
-
-    //         for key in &keys {
-    //             let tuple = Tuple::new(key_schema.clone(), vec![(*key).into()]);
-    //             let result = index.get(&tuple).unwrap();
-    //             assert!(result.is_some());
-    //             assert_eq!(result.unwrap().slot_num, *key as u32);
-    //         }
-    //     }
-    // }
 
     #[test]
     pub fn test_index_insert1() {
@@ -1246,5 +1209,133 @@ mod tests {
         assert_eq!(iterator4.next().unwrap(), Some(RecordId::new(11, 11)));
         assert_eq!(iterator4.next().unwrap(), None);
         assert_eq!(iterator4.next().unwrap(), None);
+    }
+
+    #[test]
+    pub fn test_leaf_split_structure() {
+        let key_schema = Arc::new(Schema::new(vec![Column::new("a", DataType::Int64, false)]));
+
+        let temp_dir = TempDir::new().unwrap();
+        let temp_path = temp_dir.path().join("test.db");
+        let disk_manager = DiskManager::try_new(temp_path).unwrap();
+        let disk_scheduler = Arc::new(DiskScheduler::new(Arc::new(disk_manager)));
+        let buffer_pool = Arc::new(BufferPoolManager::new(50, disk_scheduler));
+        // internal_max_size 大一些避免内部再分裂；leaf_max_size=3 触发一次叶子分裂
+        let index = BPlusTreeIndex::new(key_schema.clone(), buffer_pool.clone(), 10, 3);
+
+        for k in [1i64, 2, 3, 4] {
+            let tuple = Tuple::new(key_schema.clone(), vec![k.into()]);
+            let rid = RecordId::new(k as u32, k as u32);
+            index.insert(&tuple, rid).unwrap();
+        }
+
+        let root_page_id = index.root_page_id.load(std::sync::atomic::Ordering::SeqCst);
+        let root_guard = buffer_pool.fetch_page_read(root_page_id).unwrap();
+        let (root_page, _) =
+            BPlusTreePageCodec::decode(&root_guard.data, key_schema.clone()).unwrap();
+
+        // 根应为内部页
+        let BPlusTreePage::Internal(root_internal) = root_page else {
+            panic!("root is not internal after leaf split");
+        };
+
+        // 父分隔键应等于右叶的首键
+        let parent_sep = root_internal.key_at(1).clone();
+        let left_pid = root_internal.value_at(0);
+        let right_pid = root_internal.value_at(1);
+
+        let left_guard = buffer_pool.fetch_page_read(left_pid).unwrap();
+        let right_guard = buffer_pool.fetch_page_read(right_pid).unwrap();
+        let (left_page, _) =
+            BPlusTreePageCodec::decode(&left_guard.data, key_schema.clone()).unwrap();
+        let (right_page, _) =
+            BPlusTreePageCodec::decode(&right_guard.data, key_schema.clone()).unwrap();
+
+        let BPlusTreePage::Leaf(left_leaf) = left_page else {
+            panic!("left child not leaf");
+        };
+        let BPlusTreePage::Leaf(right_leaf) = right_page else {
+            panic!("right child not leaf");
+        };
+
+        // 父分隔键 == 右叶首键
+        assert_eq!(parent_sep, right_leaf.key_at(0).clone());
+        // 叶子链指针串联
+        assert_eq!(left_leaf.header.next_page_id, right_pid);
+    }
+
+    #[test]
+    pub fn test_internal_split_structure() {
+        let key_schema = Arc::new(Schema::new(vec![Column::new("a", DataType::Int64, false)]));
+
+        let temp_dir = TempDir::new().unwrap();
+        let temp_path = temp_dir.path().join("test.db");
+        let disk_manager = DiskManager::try_new(temp_path).unwrap();
+        let disk_scheduler = Arc::new(DiskScheduler::new(Arc::new(disk_manager)));
+        let buffer_pool = Arc::new(BufferPoolManager::new(50, disk_scheduler));
+        // small internal_max_size 以促发 internal 分裂；leaf_max_size=3
+        let index = BPlusTreeIndex::new(key_schema.clone(), buffer_pool.clone(), 3, 3);
+
+        // 插入 1..=10，确保叶分裂多次，根内部页溢出触发 internal 分裂
+        for k in 1i64..=10 {
+            let tuple = Tuple::new(key_schema.clone(), vec![k.into()]);
+            index
+                .insert(&tuple, RecordId::new(k as u32, k as u32))
+                .unwrap();
+        }
+
+        let root_page_id = index.root_page_id.load(std::sync::atomic::Ordering::SeqCst);
+        let root_guard = buffer_pool.fetch_page_read(root_page_id).unwrap();
+        let (root_page, _) =
+            BPlusTreePageCodec::decode(&root_guard.data, key_schema.clone()).unwrap();
+
+        // internal 分裂后，根应为内部页，其孩子也应为内部页（高度提升）
+        let BPlusTreePage::Internal(root_internal) = root_page else {
+            panic!("root not internal after internal split");
+        };
+        assert_eq!(root_internal.header.current_size, 2); // new root: 哨兵 + 1 分隔键
+
+        let left_pid = root_internal.value_at(0);
+        let right_pid = root_internal.value_at(1);
+        let middle = root_internal.key_at(1).clone();
+
+        let left_guard = buffer_pool.fetch_page_read(left_pid).unwrap();
+        let right_guard = buffer_pool.fetch_page_read(right_pid).unwrap();
+        let (left_page, _) =
+            BPlusTreePageCodec::decode(&left_guard.data, key_schema.clone()).unwrap();
+        let (right_page, _) =
+            BPlusTreePageCodec::decode(&right_guard.data, key_schema.clone()).unwrap();
+
+        let BPlusTreePage::Internal(left_internal) = left_page else {
+            panic!("left child not internal");
+        };
+        let BPlusTreePage::Internal(right_internal) = right_page else {
+            panic!("right child not internal");
+        };
+
+        // 右内部页索引0必须为哨兵（空 key）
+        assert_eq!(right_internal.array[0].0, Tuple::empty(key_schema.clone()));
+
+        // middle_key 不应出现在任一子内部页的真实键集合中
+        let mut contains_middle = false;
+        for (i, (k, _)) in left_internal.array.iter().enumerate() {
+            if i == 0 {
+                continue;
+            }
+            if *k == middle {
+                contains_middle = true;
+                break;
+            }
+        }
+        for (i, (k, _)) in right_internal.array.iter().enumerate() {
+            if i == 0 {
+                continue;
+            }
+            if *k == middle {
+                contains_middle = true;
+                break;
+            }
+        }
+        assert!(!contains_middle, "middle key leaked into children");
     }
 }

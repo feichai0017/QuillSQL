@@ -21,7 +21,7 @@ use crate::utils::cache::Replacer;
 
 pub type FrameId = usize;
 
-pub const BUFFER_POOL_SIZE: usize = 1000;
+pub const BUFFER_POOL_SIZE: usize = 5000;
 
 #[derive(Debug)]
 pub struct BufferPoolManager {

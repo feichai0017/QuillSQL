@@ -1,6 +1,4 @@
 use crate::buffer::BufferPoolManager;
-use crate::storage::codec::BPlusTreePageCodec;
-use crate::storage::page::BPlusTreePage;
 use derive_with::With;
 use std::mem::{self, ManuallyDrop};
 use std::ops::{Deref, DerefMut};
