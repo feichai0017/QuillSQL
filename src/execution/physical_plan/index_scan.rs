@@ -1,7 +1,7 @@
 use crate::catalog::SchemaRef;
 use crate::error::QuillSQLError;
 use crate::execution::{ExecutionContext, VolcanoExecutor};
-use crate::index::btree_index::TreeIndexIterator;
+use crate::storage::index::btree_index::TreeIndexIterator;
 use crate::utils::table_ref::TableReference;
 use crate::{error::QuillSQLResult, storage::tuple::Tuple};
 use std::ops::{Bound, RangeBounds};

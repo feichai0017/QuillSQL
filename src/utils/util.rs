@@ -1,7 +1,7 @@
 use crate::buffer::PAGE_SIZE;
 use crate::execution::physical_plan::PhysicalPlan;
 use crate::plan::logical_plan::LogicalPlan;
-use crate::index::btree_index::BPlusTreeIndex;
+use crate::storage::index::btree_index::BPlusTreeIndex;
 use crate::error::{QuillSQLError, QuillSQLResult};
 use comfy_table::Cell;
 use std::collections::VecDeque;
@@ -72,8 +72,6 @@ pub fn page_bytes_to_array(bytes: &[u8]) -> [u8; PAGE_SIZE] {
 }
 
 pub(crate) fn pretty_format_index_tree(index: &BPlusTreeIndex) -> QuillSQLResult<String> {
-    // Hold a read lock during formatting to avoid concurrent mutation
-    let _guard = index.index_lock.read().unwrap();
     let mut display = String::new();
 
     if index.is_empty() {
