@@ -31,6 +31,15 @@ pub enum QuillSQLError {
     #[error("Concurrent error: {0}")]
     Concurrent(String),
 
+    #[error("Transaction error: {0}")]
+    Transaction(String),
+
+    #[error("Lock error: {0}")]
+    Lock(String),
+
+    #[error("Deadlock detected")]
+    Deadlock,
+
     #[error("Unwind")]
     Unwind,
 }
