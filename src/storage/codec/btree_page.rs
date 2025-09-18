@@ -1,11 +1,37 @@
 use crate::buffer::PAGE_SIZE;
 use crate::catalog::SchemaRef;
+use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::storage::codec::{CommonCodec, DecodedData, RidCodec, TupleCodec};
 use crate::storage::page::{
-    BPlusTreeInternalPage, BPlusTreeInternalPageHeader, BPlusTreeLeafPage, BPlusTreeLeafPageHeader,
-    BPlusTreePage, BPlusTreePageType,
+    BPlusTreeHeaderPage, BPlusTreeInternalPage, BPlusTreeInternalPageHeader, BPlusTreeLeafPage,
+    BPlusTreeLeafPageHeader, BPlusTreePage, BPlusTreePageType,
 };
-use crate::error::{QuillSQLError, QuillSQLResult};
+
+pub struct BPlusTreeHeaderPageCodec;
+
+impl BPlusTreeHeaderPageCodec {
+    pub fn encode(page: &BPlusTreeHeaderPage) -> Vec<u8> {
+        let mut bytes = vec![];
+        bytes.extend(CommonCodec::encode_u32(page.root_page_id));
+        bytes.extend(vec![0; PAGE_SIZE - bytes.len()]);
+        bytes
+    }
+
+    pub fn decode(bytes: &[u8]) -> QuillSQLResult<DecodedData<BPlusTreeHeaderPage>> {
+        if bytes.len() != PAGE_SIZE {
+            return Err(QuillSQLError::Storage(format!(
+                "Header page size is not {} instead of {}",
+                PAGE_SIZE,
+                bytes.len()
+            )));
+        }
+
+        let (root_page_id, offset) = CommonCodec::decode_u32(bytes)?;
+        let page = BPlusTreeHeaderPage { root_page_id };
+
+        Ok((page, offset))
+    }
+}
 
 pub struct BPlusTreePageCodec;
 
@@ -183,7 +209,10 @@ impl BPlusTreePageTypeCodec {
         match flag {
             1 => Ok((BPlusTreePageType::LeafPage, offset)),
             2 => Ok((BPlusTreePageType::InternalPage, offset)),
-            _ => Err(QuillSQLError::Storage(format!("Invalid page type {}", flag))),
+            _ => Err(QuillSQLError::Storage(format!(
+                "Invalid page type {}",
+                flag
+            ))),
         }
     }
 }
@@ -197,6 +226,7 @@ impl BPlusTreeLeafPageHeaderCodec {
         bytes.extend(CommonCodec::encode_u32(header.current_size));
         bytes.extend(CommonCodec::encode_u32(header.max_size));
         bytes.extend(CommonCodec::encode_u32(header.next_page_id));
+        bytes.extend(CommonCodec::encode_u32(header.version));
         bytes
     }
 
@@ -215,12 +245,16 @@ impl BPlusTreeLeafPageHeaderCodec {
         let (next_page_id, offset) = CommonCodec::decode_u32(left_bytes)?;
         left_bytes = &left_bytes[offset..];
 
+        let (version, offset) = CommonCodec::decode_u32(left_bytes)?;
+        left_bytes = &left_bytes[offset..];
+
         Ok((
             BPlusTreeLeafPageHeader {
                 page_type,
                 current_size,
                 max_size,
                 next_page_id,
+                version,
             },
             bytes.len() - left_bytes.len(),
         ))
@@ -235,6 +269,7 @@ impl BPlusTreeInternalPageHeaderCodec {
         bytes.extend(BPlusTreePageTypeCodec::encode(&header.page_type));
         bytes.extend(CommonCodec::encode_u32(header.current_size));
         bytes.extend(CommonCodec::encode_u32(header.max_size));
+        bytes.extend(CommonCodec::encode_u32(header.version));
         bytes
     }
 
@@ -250,11 +285,15 @@ impl BPlusTreeInternalPageHeaderCodec {
         let (max_size, offset) = CommonCodec::decode_u32(left_bytes)?;
         left_bytes = &left_bytes[offset..];
 
+        let (version, offset) = CommonCodec::decode_u32(left_bytes)?;
+        left_bytes = &left_bytes[offset..];
+
         Ok((
             BPlusTreeInternalPageHeader {
                 page_type,
                 current_size,
                 max_size,
+                version,
             },
             bytes.len() - left_bytes.len(),
         ))
@@ -265,11 +304,9 @@ impl BPlusTreeInternalPageHeaderCodec {
 mod tests {
     use crate::catalog::{Column, DataType, Schema};
     use crate::storage::codec::btree_page::BPlusTreePageCodec;
-    use crate::storage::page::{
-        BPlusTreeInternalPage, BPlusTreeLeafPage, BPlusTreePage,
-    };
-    use crate::storage::tuple::Tuple;
     use crate::storage::page::RecordId;
+    use crate::storage::page::{BPlusTreeInternalPage, BPlusTreeLeafPage, BPlusTreePage};
+    use crate::storage::tuple::Tuple;
     use std::sync::Arc;
 
     #[test]

@@ -8,8 +8,8 @@ use crate::storage::tuple::Tuple;
 use crate::utils::scalar::ScalarValue;
 use crate::utils::table_ref::TableReference;
 use crate::{
-    execution::{ExecutionContext, VolcanoExecutor},
     error::QuillSQLResult,
+    execution::{ExecutionContext, VolcanoExecutor},
 };
 
 use super::PhysicalPlan;
@@ -91,11 +91,14 @@ impl VolcanoExecutor for PhysicalInsert {
             let indexes = context.catalog.table_indexes(&self.table)?;
             for index in indexes {
                 if let Ok(key_tuple) = tuple.project_with_schema(index.key_schema.clone()) {
-                    let root_page_id = index.root_page_id.load(Ordering::SeqCst);
+                    let root_page_id = index.get_root_page_id()?;
                     index.insert(&key_tuple, rid)?;
-                    let new_root_page_id = index.root_page_id.load(Ordering::SeqCst);
+                    let new_root_page_id = index.get_root_page_id()?;
                     if new_root_page_id != root_page_id {
-                        // TODO update system table
+                        // The root page ID has changed, which means a split propagated to the root.
+                        // With the new header page model, we no longer need to update the catalog here,
+                        // as the header_page_id is immutable. The root_page_id is updated within
+                        // the header page automatically.
                     }
                 }
             }

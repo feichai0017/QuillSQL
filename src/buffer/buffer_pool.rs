@@ -8,12 +8,13 @@ use crate::buffer::page::{self, Page, PageId, ReadPageGuard, WritePageGuard, PAG
 use crate::catalog::SchemaRef;
 use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::storage::codec::{
-    BPlusTreeInternalPageCodec, BPlusTreeLeafPageCodec, BPlusTreePageCodec, TablePageCodec,
+    BPlusTreeHeaderPageCodec, BPlusTreeInternalPageCodec, BPlusTreeLeafPageCodec,
+    BPlusTreePageCodec, TablePageCodec,
 };
 use crate::storage::disk_scheduler::DiskScheduler;
 use crate::storage::{
     page::TablePage,
-    page::{BPlusTreeInternalPage, BPlusTreeLeafPage, BPlusTreePage},
+    page::{BPlusTreeHeaderPage, BPlusTreeInternalPage, BPlusTreeLeafPage, BPlusTreePage},
 };
 
 use crate::utils::cache::lru_k::LRUKReplacer;
@@ -110,9 +111,35 @@ impl BufferPoolManager {
             .set_evictable(frame_id, false)?;
 
         // 🚀 性能优化：使用原子操作增加pin_count，无需写锁
-        page_arc.read().unwrap().pin();
+        {
+            let reader = page_arc.read().unwrap();
+            reader.pin();
+            if std::env::var("QUILL_DEBUG_LOCK").ok().as_deref() == Some("2") {
+                eprintln!(
+                    "[LOCK DEBUG] thread={:?} attempt write page_id={}",
+                    std::thread::current().id(),
+                    reader.page_id()
+                );
+            }
+        }
 
-        Ok(page::new_write_guard(self.clone(), page_arc))
+        let guard = page::new_write_guard(self.clone(), page_arc.clone());
+        if std::env::var("QUILL_DEBUG_LOCK").ok().as_deref() == Some("2") {
+            // Safe to read page id with read lock for logging
+            if let Ok(r) = page_arc.try_read() {
+                eprintln!(
+                    "[LOCK DEBUG] thread={:?} acquired write page_id={}",
+                    std::thread::current().id(),
+                    r.page_id()
+                );
+            } else {
+                eprintln!(
+                    "[LOCK DEBUG] thread={:?} acquired write page_id=<busy>",
+                    std::thread::current().id()
+                );
+            }
+        }
+        Ok(guard)
     }
 
     pub(crate) fn unpin_page(&self, page_id: PageId, is_dirty: bool) -> QuillSQLResult<()> {
@@ -223,6 +250,15 @@ impl BufferPoolManager {
         let guard = self.fetch_page_read(page_id)?;
         let (tree_leaf_page, _) = BPlusTreeLeafPageCodec::decode(&guard.data, key_schema.clone())?;
         Ok((guard, tree_leaf_page))
+    }
+
+    pub fn fetch_header_page(
+        self: &Arc<Self>,
+        page_id: PageId,
+    ) -> QuillSQLResult<(ReadPageGuard, BPlusTreeHeaderPage)> {
+        let guard = self.fetch_page_read(page_id)?;
+        let (header_page, _) = BPlusTreeHeaderPageCodec::decode(&guard.data)?;
+        Ok((guard, header_page))
     }
 
     pub fn flush_page(&self, page_id: PageId) -> QuillSQLResult<bool> {

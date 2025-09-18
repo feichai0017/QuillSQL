@@ -53,7 +53,7 @@ pub static INDEXES_SCHMEA: LazyLock<SchemaRef> = LazyLock::new(|| {
         Column::new("key_schema", DataType::Varchar(None), false),
         Column::new("internal_max_size", DataType::UInt32, false),
         Column::new("leaf_max_size", DataType::UInt32, false),
-        Column::new("root_page_id", DataType::UInt32, false),
+        Column::new("header_page_id", DataType::UInt32, false),
     ]))
 });
 
@@ -273,7 +273,7 @@ fn load_user_indexes(db: &mut Database) -> QuillSQLResult<()> {
         let ScalarValue::UInt32(Some(leaf_max_size)) = index_tuple.value(6)? else {
             return error;
         };
-        let ScalarValue::UInt32(Some(root_page_id)) = index_tuple.value(7)? else {
+        let ScalarValue::UInt32(Some(header_page_id)) = index_tuple.value(7)? else {
             return error;
         };
 
@@ -284,13 +284,13 @@ fn load_user_indexes(db: &mut Database) -> QuillSQLResult<()> {
             table_schema,
         )?);
 
-        let b_plus_tree_index = BPlusTreeIndex {
+        let b_plus_tree_index = BPlusTreeIndex::open(
             key_schema,
-            buffer_pool: db.buffer_pool.clone(),
-            internal_max_size: *internal_max_size,
-            leaf_max_size: *leaf_max_size,
-            root_page_id: AtomicPageId::new(*root_page_id),
-        };
+            db.buffer_pool.clone(),
+            *internal_max_size,
+            *leaf_max_size,
+            *header_page_id,
+        );
         db.catalog
             .load_index(table_ref, index_name, Arc::new(b_plus_tree_index))?;
     }
