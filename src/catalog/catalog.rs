@@ -8,14 +8,16 @@ use crate::catalog::{
     INFORMATION_SCHEMA_TABLES, SCHEMAS_SCHMEA, TABLES_SCHMEA,
 };
 use crate::storage::disk_manager::DiskManager;
+use crate::storage::page::{
+    BPLUS_INTERNAL_PAGE_MAX_SIZE, BPLUS_LEAF_PAGE_MAX_SIZE, EMPTY_TUPLE_META,
+};
 use crate::storage::tuple::Tuple;
 use crate::utils::table_ref::TableReference;
-use crate::storage::page::{BPLUS_INTERNAL_PAGE_MAX_SIZE, BPLUS_LEAF_PAGE_MAX_SIZE, EMPTY_TUPLE_META};
 use crate::{
     buffer::BufferPoolManager,
-    storage::{table_heap::TableHeap},
-    storage::index::btree_index::BPlusTreeIndex,
     error::{QuillSQLError, QuillSQLResult},
+    storage::index::btree_index::BPlusTreeIndex,
+    storage::table_heap::TableHeap,
 };
 
 pub static DEFAULT_CATALOG_NAME: &str = "quillsql";
@@ -316,7 +318,7 @@ impl Catalog {
                 key_schema_to_varchar(&b_plus_tree_index.key_schema).into(),
                 b_plus_tree_index.internal_max_size.into(),
                 b_plus_tree_index.leaf_max_size.into(),
-                b_plus_tree_index.root_page_id.load(Ordering::SeqCst).into(),
+                b_plus_tree_index.header_page_id.into(),
             ],
         );
         indexes_table

@@ -1,8 +1,8 @@
 use crate::buffer::PAGE_SIZE;
+use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::execution::physical_plan::PhysicalPlan;
 use crate::plan::logical_plan::LogicalPlan;
 use crate::storage::index::btree_index::BPlusTreeIndex;
-use crate::error::{QuillSQLError, QuillSQLResult};
 use comfy_table::Cell;
 use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
@@ -74,13 +74,13 @@ pub fn page_bytes_to_array(bytes: &[u8]) -> [u8; PAGE_SIZE] {
 pub(crate) fn pretty_format_index_tree(index: &BPlusTreeIndex) -> QuillSQLResult<String> {
     let mut display = String::new();
 
-    if index.is_empty() {
+    if index.is_empty()? {
         display.push_str("Empty tree.");
         return Ok(display);
     }
     // 层序遍历
     let mut curr_queue = VecDeque::new();
-    curr_queue.push_back(index.root_page_id.load(Ordering::SeqCst));
+    curr_queue.push_back(index.get_root_page_id()?);
 
     let mut level_index = 1;
     loop {
@@ -170,7 +170,6 @@ pub(crate) fn pretty_format_index_tree(index: &BPlusTreeIndex) -> QuillSQLResult
     }
 }
 
-
 pub fn time() -> u128 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -178,14 +177,16 @@ pub fn time() -> u128 {
         .as_nanos()
 }
 
-pub fn extract_id_from_filename(
-    entry: &std::path::PathBuf,
-) -> QuillSQLResult<u128> {
+pub fn extract_id_from_filename(entry: &std::path::PathBuf) -> QuillSQLResult<u128> {
     entry
         .extension()
-        .ok_or_else(|| QuillSQLError::Internal(format!("Missing extension (ie. not in format: data.<id>)")))?
+        .ok_or_else(|| {
+            QuillSQLError::Internal(format!("Missing extension (ie. not in format: data.<id>)"))
+        })?
         .to_str()
-        .ok_or_else(|| QuillSQLError::Internal("Failed to convert extension to string".to_string()))?
+        .ok_or_else(|| {
+            QuillSQLError::Internal("Failed to convert extension to string".to_string())
+        })?
         .parse::<u128>()
         .map_err(|e| QuillSQLError::Internal(format!("Failed to parse id: {}", e)))
 }

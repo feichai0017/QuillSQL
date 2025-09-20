@@ -1,8 +1,9 @@
 use crate::catalog::{SchemaRef, EMPTY_SCHEMA_REF};
-use crate::utils::table_ref::TableReference;
-use crate::{catalog::Schema, utils::scalar::ScalarValue, error::QuillSQLResult};
 use crate::error::QuillSQLError;
+use crate::utils::table_ref::TableReference;
+use crate::{catalog::Schema, error::QuillSQLResult, utils::scalar::ScalarValue};
 use std::cmp::Ordering;
+use std::fmt::{Display, Formatter};
 use std::sync::{Arc, LazyLock};
 
 pub static EMPTY_TUPLE: LazyLock<Tuple> = LazyLock::new(|| Tuple::empty(EMPTY_SCHEMA_REF.clone()));
@@ -97,6 +98,18 @@ impl PartialOrd for Tuple {
             }
         }
         Some(Ordering::Equal)
+    }
+}
+
+impl Display for Tuple {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let values = self
+            .data
+            .iter()
+            .map(|v| v.to_string())
+            .collect::<Vec<String>>()
+            .join(", ");
+        write!(f, "({})", values)
     }
 }
 

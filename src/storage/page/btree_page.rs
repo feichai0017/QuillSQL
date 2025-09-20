@@ -7,6 +7,11 @@ use std::sync::Arc;
 pub const BPLUS_INTERNAL_PAGE_MAX_SIZE: usize = 10;
 pub const BPLUS_LEAF_PAGE_MAX_SIZE: usize = 10;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BPlusTreeHeaderPage {
+    pub root_page_id: PageId,
+}
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum BPlusTreePage {
     Internal(BPlusTreeInternalPage),
@@ -95,6 +100,7 @@ pub struct BPlusTreeInternalPageHeader {
     pub current_size: u32,
     // max kv size can be stored
     pub max_size: u32,
+    pub version: u32,
 }
 
 impl BPlusTreeInternalPage {
@@ -105,6 +111,7 @@ impl BPlusTreeInternalPage {
                 page_type: BPlusTreePageType::InternalPage,
                 current_size: 0,
                 max_size,
+                version: 0,
             },
             array: Vec::with_capacity(max_size as usize),
         }
@@ -153,9 +160,23 @@ impl BPlusTreeInternalPage {
     }
     pub fn batch_insert(&mut self, kvs: Vec<InternalKV>) {
         let kvs_len = kvs.len();
+        // For internal pages, the input `kvs` must already be sorted and strictly greater
+        // than existing keys (except the sentinel at index 0). We simply append to preserve
+        // the invariant that the sentinel stays at index 0.
         self.array.extend(kvs);
         self.header.current_size += kvs_len as u32;
-        self.array.sort_by(|a, b| a.0.cmp(&b.0));
+    }
+
+    /// Insert (key,new_page_id) right after the entry whose value equals `old_page_id`.
+    /// This mirrors BusTub's InsertNodeAfter semantics and preserves relative child order.
+    pub fn insert_after(&mut self, old_page_id: PageId, key: Tuple, new_page_id: PageId) {
+        let pos = self
+            .array
+            .iter()
+            .position(|&(_, pid)| pid == old_page_id)
+            .expect("old child not found in parent when inserting after");
+        self.array.insert(pos + 1, (key, new_page_id));
+        self.header.current_size += 1;
     }
 
     pub fn remove(&mut self, page_id: PageId) -> Option<(Tuple, PageId)> {
@@ -266,46 +287,29 @@ impl BPlusTreeInternalPage {
     pub fn look_up(&self, key: &Tuple) -> PageId {
         let size = self.header.current_size as usize;
 
-        // Manual binary search that skips the sentinel at index 0
-        let mut low = 1;
-        // high can be size - 1, which is fine since key_at will be checked against size
-        let mut high = size;
-        let mut result_idx = 0; // Will point to P0 if key is smaller than all keys
+        // Use `partition_point` to find the first key > `key`.
+        // The predicate `probe_key <= key` partitions the array. `partition_point`
+        // returns the index of the first element for which the predicate is false.
+        // This is equivalent to an upper_bound search.
+        // We search on the slice of valid keys (skipping the sentinel at index 0).
+        let partition_idx = self.array[1..size].partition_point(|(probe_key, _)| probe_key <= key);
 
-        while low < high {
-            let mid = low + (high - low) / 2;
-            if key >= self.key_at(mid) {
-                low = mid + 1;
-            } else {
-                high = mid;
-            }
-        }
-        // low is the insertion point. We need the element to the left of it.
-        result_idx = low - 1;
-
-        self.value_at(result_idx)
+        // The index `partition_idx` is relative to the slice `array[1..]`.
+        // The corresponding pointer is at `partition_idx` in the original array.
+        self.value_at(partition_idx)
     }
 
     // 查找key对应的page_id的可变引用（返回最后一个 <= key 的指针）。
     pub fn look_up_mut(&mut self, key: &Tuple) -> Option<&mut PageId> {
         let size = self.header.current_size as usize;
-
-        // Manual binary search that skips the sentinel at index 0
-        let mut low = 1;
-        let mut high = size;
-        let mut result_idx = 0;
-
-        while low < high {
-            let mid = low + (high - low) / 2;
-            if key >= self.key_at(mid) {
-                low = mid + 1;
-            } else {
-                high = mid;
-            }
+        if size == 0 {
+            return None;
         }
-        result_idx = low - 1;
 
-        Some(&mut self.array[result_idx].1)
+        // Use `partition_point` to find the first key > `key`.
+        let partition_idx = self.array[1..size].partition_point(|(probe_key, _)| probe_key <= key);
+
+        Some(&mut self.array[partition_idx].1)
     }
 
     /// Removes the first key-value pair (not the sentinel) and returns it.
@@ -393,6 +397,7 @@ pub struct BPlusTreeLeafPageHeader {
     // max kv size can be stored
     pub max_size: u32,
     pub next_page_id: PageId,
+    pub version: u32,
 }
 
 impl BPlusTreeLeafPage {
@@ -404,6 +409,7 @@ impl BPlusTreeLeafPage {
                 current_size: 0,
                 max_size,
                 next_page_id: INVALID_PAGE_ID,
+                version: 0,
             },
             array: Vec::with_capacity(max_size as usize),
         }
@@ -417,6 +423,7 @@ impl BPlusTreeLeafPage {
                 current_size: 0,
                 max_size: 0,
                 next_page_id: INVALID_PAGE_ID,
+                version: 0,
             },
             array: Vec::new(),
         }

@@ -1,9 +1,10 @@
 use crate::buffer::BufferPoolManager;
 use derive_with::With;
+use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::mem::{self, ManuallyDrop};
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::Arc;
 
 pub type PageId = u32;
 pub type AtomicPageId = AtomicU32;
@@ -24,7 +25,7 @@ impl Page {
         Self {
             page_id: INVALID_PAGE_ID,
             data: [0; PAGE_SIZE],
-            pin_count: AtomicU32::new(0),
+            pin_count: AtomicU32::new(0), // set by caller with proper ordering
             is_dirty: false,
         }
     }
@@ -56,19 +57,19 @@ impl Page {
         self.is_dirty = false;
     }
 
-    // 原子操作：增加pin_count
+    // 原子操作：增加pin_count（Acquire 以发布可见性给随后读）
     pub fn pin(&self) -> u32 {
-        self.pin_count.fetch_add(1, Ordering::Relaxed) + 1
+        self.pin_count.fetch_add(1, Ordering::AcqRel) + 1
     }
 
-    // 原子操作：减少pin_count
+    // 原子操作：减少pin_count（Release 以与获取/驱逐建立次序）
     pub fn unpin(&self) -> u32 {
-        self.pin_count.fetch_sub(1, Ordering::Relaxed)
+        self.pin_count.fetch_sub(1, Ordering::AcqRel)
     }
 
-    // 原子操作：获取当前pin_count
+    // 原子操作：获取当前pin_count（Acquire 保守读取）
     pub fn get_pin_count(&self) -> u32 {
-        self.pin_count.load(Ordering::Relaxed)
+        self.pin_count.load(Ordering::Acquire)
     }
 }
 
@@ -100,19 +101,15 @@ impl ReadPageGuard {
 
 impl Drop for ReadPageGuard {
     fn drop(&mut self) {
-        // 获取必要信息
+        // Unpin under latch (safe because evictor requires write lock to evict)
+        let old_pin = self.guard.unpin();
         let page_id = self.guard.page_id;
         let is_dirty = self.guard.is_dirty;
-
-        // 手动释放读锁
         unsafe {
             ManuallyDrop::drop(&mut self.guard);
         }
-
-        // 调用unpin_page，使用try_write避免死锁
-        if let Err(e) = self.bpm.unpin_page(page_id, is_dirty) {
-            // 如果页面已被删除或不存在，这是正常的竞态条件
-            eprintln!("Warning: Failed to unpin page {}: {}", page_id, e);
+        if let Err(e) = self.bpm.complete_unpin(page_id, is_dirty, old_pin) {
+            eprintln!("Warning: Failed to complete_unpin page {}: {}", page_id, e);
         }
     }
 }
@@ -151,19 +148,15 @@ impl WritePageGuard {
 
 impl Drop for WritePageGuard {
     fn drop(&mut self) {
-        // 获取必要信息
+        // Unpin under latch (safe with our eviction protocol)
+        let old_pin = self.guard.unpin();
         let page_id = self.guard.page_id;
         let is_dirty = self.guard.is_dirty;
-
-        // 手动释放写锁
         unsafe {
             ManuallyDrop::drop(&mut self.guard);
         }
-
-        // 调用unpin_page，使用try_write避免死锁
-        if let Err(e) = self.bpm.unpin_page(page_id, is_dirty) {
-            // 如果页面已被删除或不存在，这是正常的竞态条件
-            eprintln!("Warning: Failed to unpin page {}: {}", page_id, e);
+        if let Err(e) = self.bpm.complete_unpin(page_id, is_dirty, old_pin) {
+            eprintln!("Warning: Failed to complete_unpin page {}: {}", page_id, e);
         }
     }
 }
@@ -173,7 +166,7 @@ pub(crate) fn new_read_guard(
     bpm: Arc<BufferPoolManager>,
     page: Arc<RwLock<Page>>,
 ) -> ReadPageGuard {
-    let guard = page.read().unwrap();
+    let guard = page.read();
     // SAFETY: 这是安全的核心。我们将 guard 的生命周期从 page 的借用中分离出来。
     // 这是可行的，因为 ReadPageGuard 结构体本身持有一个 page 的 Arc 引用，
     // 保证了在 guard 的生命周期内，底层的 RwLock 不会被销毁。
@@ -189,7 +182,7 @@ pub(crate) fn new_write_guard(
     bpm: Arc<BufferPoolManager>,
     page: Arc<RwLock<Page>>,
 ) -> WritePageGuard {
-    let guard = page.write().unwrap();
+    let guard = page.write();
     // SAFETY: 同上，WritePageGuard 持有 page 的 Arc 引用，保证了安全性。
     let static_guard = unsafe { mem::transmute::<_, RwLockWriteGuard<'static, Page>>(guard) };
     WritePageGuard {
@@ -246,7 +239,7 @@ mod tests {
         };
 
         // 确认在创建后，pin_count 为 0，页面在 replacer 中
-        assert_eq!(bpm.replacer.read().unwrap().size(), 1);
+        assert_eq!(bpm.replacer.read().size(), 1);
 
         {
             let read_guard = bpm.fetch_page_read(page_id).unwrap();
@@ -256,13 +249,13 @@ mod tests {
             assert_eq!(read_guard.pin_count(), 1);
 
             // 页面被 pin 住，应该从 replacer 中移除
-            assert_eq!(bpm.replacer.read().unwrap().size(), 0);
+            assert_eq!(bpm.replacer.read().size(), 0);
 
             // read_guard 在此 drop
         }
 
         // 2. 测试 Drop - 确认页面被 unpin，并回到 replacer
-        assert_eq!(bpm.replacer.read().unwrap().size(), 1);
+        assert_eq!(bpm.replacer.read().size(), 1);
 
         // 验证 pin count 已经降回 0
         let final_check_guard = bpm.fetch_page_read(page_id).unwrap();
@@ -286,13 +279,13 @@ mod tests {
             assert!(write_guard.is_dirty);
 
             // 页面被 pin 住，replacer 应为空
-            assert_eq!(bpm.replacer.read().unwrap().size(), 0);
+            assert_eq!(bpm.replacer.read().size(), 0);
 
             // write_guard 在此 drop
         }
 
         // 3. 测试 Drop - 页面被 unpin，回到 replacer
-        assert_eq!(bpm.replacer.read().unwrap().size(), 1);
+        assert_eq!(bpm.replacer.read().size(), 1);
 
         // 4. 重新获取页面，验证数据和脏位
         let read_guard = bpm.fetch_page_read(page_id).unwrap();
@@ -326,14 +319,14 @@ mod tests {
         // 为了测试，我们手动在 frame 0 上创建一个页面
         let page_id = 100;
         bpm.page_table.insert(page_id, 0);
-        *page_arc.write().unwrap() = Page::new(page_id);
+        *page_arc.write() = Page::new(page_id);
 
         // 1. 获取一个写保护器
         let mut write_guard = bpm.fetch_page_write(page_id).unwrap();
 
         // 2. 尝试在持有写锁的同时获取读锁会失败
-        assert!(page_arc.try_read().is_err());
-        assert!(page_arc.try_write().is_err());
+        assert!(page_arc.try_read().is_none());
+        assert!(page_arc.try_write().is_none());
 
         // 3. 修改数据
         write_guard.data[0] = 123;
@@ -343,7 +336,7 @@ mod tests {
 
         // 5. 现在应该可以成功获取读锁了
         let read_guard = bpm.fetch_page_read(page_id).unwrap();
-        assert!(page_arc.try_write().is_err()); // 但仍然不能获取写锁
+        assert!(page_arc.try_write().is_none()); // 但仍然不能获取写锁
         assert_eq!(read_guard.data[0], 123);
     }
 }

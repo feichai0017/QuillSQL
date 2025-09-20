@@ -1,9 +1,10 @@
-use crate::buffer::{PageId, PAGE_SIZE, INVALID_PAGE_ID};
+use crate::buffer::{PageId, INVALID_PAGE_ID, PAGE_SIZE};
 use crate::catalog::SchemaRef;
-use crate::storage::codec::{TablePageHeaderCodec, TablePageHeaderTupleInfoCodec, TupleCodec};
-use crate::transaction::TransactionId;
 use crate::error::{QuillSQLError, QuillSQLResult};
+use crate::storage::codec::{TablePageHeaderCodec, TablePageHeaderTupleInfoCodec, TupleCodec};
 use crate::storage::tuple::Tuple;
+use crate::transaction::TransactionId;
+use std::fmt::{Display, Formatter};
 use std::sync::LazyLock;
 
 pub static EMPTY_TUPLE_META: TupleMeta = TupleMeta {
@@ -77,6 +78,12 @@ pub const INVALID_RID: RecordId = RecordId {
 pub struct RecordId {
     pub page_id: PageId,
     pub slot_num: u32,
+}
+
+impl Display for RecordId {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}-{}", self.page_id, self.slot_num)
+    }
 }
 
 impl TablePage {
@@ -239,7 +246,7 @@ impl TablePage {
 
     pub fn get_next_rid(&self, rid: &RecordId) -> Option<RecordId> {
         let mut tuple_id = rid.slot_num;
-        
+
         // Find next non-deleted tuple
         while tuple_id + 1 < self.header.num_tuples as u32 {
             tuple_id += 1;
@@ -255,8 +262,8 @@ impl TablePage {
 #[cfg(test)]
 mod tests {
     use crate::catalog::{Column, DataType, Schema};
-    use crate::storage::tuple::Tuple;
     use crate::storage::page::EMPTY_TUPLE_META;
+    use crate::storage::tuple::Tuple;
     use std::sync::Arc;
 
     #[test]
