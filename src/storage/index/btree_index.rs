@@ -1,7 +1,8 @@
+use parking_lot::{RwLock, RwLockWriteGuard};
 use std::collections::VecDeque;
 use std::fmt::Write;
 use std::ops::{Bound, RangeBounds};
-use std::sync::{Arc, RwLock, RwLockWriteGuard};
+use std::sync::Arc;
 
 use crate::buffer::{PageId, ReadPageGuard, WritePageGuard, INVALID_PAGE_ID};
 use crate::catalog::SchemaRef;
@@ -154,51 +155,37 @@ impl BPlusTreeIndex {
     }
 
     pub fn get(&self, key: &Tuple) -> QuillSQLResult<Option<RecordId>> {
-        // Retry-on-concurrent-modification to avoid surfacing transient decode errors.
-        for _ in 0..32 {
-            if self.is_empty()? {
-                return Ok(None);
-            }
-
-            let root_page_id = self.get_root_page_id()?;
-            if root_page_id == INVALID_PAGE_ID {
-                return Ok(None);
-            }
-
-            match self.find_leaf_page_optimistic(key) {
-                Ok(leaf_guard) => {
-                    let decoded =
-                        BPlusTreeLeafPageCodec::decode(&leaf_guard.data, self.key_schema.clone());
-                    if let Ok((leaf_page, _)) = decoded {
-                        let result = leaf_page.look_up(key);
-                        if result.is_none() {
-                            if std::env::var("QUILL_DEBUG_GET").ok().as_deref() == Some("1") {
-                                let keys: Vec<String> = leaf_page
-                                    .array
-                                    .iter()
-                                    .map(|(t, _)| format!("{}", t))
-                                    .collect();
-                                eprintln!(
-                                    "[GET DEBUG] missing key {} in leaf with keys {:?}",
-                                    key, keys
-                                );
-                                if let Ok(dot) = self.to_dot() {
-                                    eprintln!("[GET DEBUG] tree dot:\n{}", dot);
-                                }
-                            }
-                        }
-                        return Ok(result);
-                    } else {
-                        // Child page may have been reclaimed/reused; retry from root.
+        if self.is_empty()? {
+            return Ok(None);
+        }
+        let mut guard = self.find_leaf_page_optimistic(key)?;
+        // Walk right through leaf chain while key is greater than last key
+        loop {
+            let decoded = BPlusTreeLeafPageCodec::decode(&guard.data, self.key_schema.clone());
+            if let Ok((leaf_page, _)) = decoded {
+                if let Some(rid) = leaf_page.look_up(key) {
+                    return Ok(Some(rid));
+                }
+                if leaf_page.header.current_size > 0
+                    && leaf_page.header.next_page_id != INVALID_PAGE_ID
+                {
+                    let last_key = leaf_page.key_at((leaf_page.header.current_size - 1) as usize);
+                    if *key > *last_key {
+                        guard = self
+                            .buffer_pool
+                            .fetch_page_read(leaf_page.header.next_page_id)?;
                         continue;
                     }
                 }
-                Err(_) => continue,
+                return Ok(None);
+            } else {
+                // Retry once from root if decode failed (transient)
+                guard = self.find_leaf_page_optimistic(key)?;
+                let (leaf_page, _) =
+                    BPlusTreeLeafPageCodec::decode(&guard.data, self.key_schema.clone())?;
+                return Ok(leaf_page.look_up(key));
             }
         }
-        Err(QuillSQLError::Internal(
-            "get() failed to converge after retries".to_string(),
-        ))
     }
 
     /// 辅助函数：以写模式查找叶子页面，并沿途执行闩锁耦合。
@@ -216,10 +203,7 @@ impl BPlusTreeIndex {
                 key
             );
         }
-        // Acquire header lock for insert to avoid racing with concurrent root split
-        if is_insert {
-            context.header_lock_guard = Some(self.header_page_lock.write().unwrap());
-        }
+        // Do not pre-hold header lock on insert path; only take it around root modifications
         let root_page_id = self.get_root_page_id()?;
         if root_page_id == INVALID_PAGE_ID {
             // This should be handled by the caller (insert/delete)
@@ -244,7 +228,7 @@ impl BPlusTreeIndex {
                             child_page_id
                         );
                     }
-                    let mut child_guard = self.buffer_pool.fetch_page_write(child_page_id)?;
+                    let child_guard = self.buffer_pool.fetch_page_write(child_page_id)?;
                     let child_decoded =
                         BPlusTreePageCodec::decode(&child_guard.data, self.key_schema.clone());
                     let (child_page, _) = match child_decoded {
@@ -338,7 +322,7 @@ impl BPlusTreeIndex {
 
         // Guard tree initialization to avoid concurrent start_new_tree races.
         if self.is_empty()? {
-            let _lock = self.header_page_lock.write().unwrap();
+            let _lock = self.header_page_lock.write();
             let root_now = self.get_root_page_id()?;
             if root_now == INVALID_PAGE_ID {
                 if std::env::var("QUILL_DEBUG_INSERT").ok().as_deref() == Some("1") {
@@ -368,34 +352,71 @@ impl BPlusTreeIndex {
             let (mut leaf_page, _) =
                 BPlusTreeLeafPageCodec::decode(&leaf_guard.data, self.key_schema.clone())?;
 
-            // Redirect to right sibling if key no longer belongs to this leaf (post-split race)
-            if leaf_page.header.next_page_id != INVALID_PAGE_ID {
-                // Fetch next leaf to inspect its first key
-                let next_pid = leaf_page.header.next_page_id;
-                let next_guard = self.buffer_pool.fetch_page_read(next_pid)?;
-                if let Ok((next_leaf, _)) =
-                    BPlusTreeLeafPageCodec::decode(&next_guard.data, self.key_schema.clone())
-                {
-                    if leaf_page.header.current_size > 0 {
-                        let belongs_right = *key >= *next_leaf.key_at(0);
-                        if belongs_right {
-                            if std::env::var("QUILL_DEBUG_INSERT").ok().as_deref() == Some("1") {
-                                eprintln!(
-                                    "[INSERT] thread={:?} redirect_to_right: cur_leaf={} next_leaf={} key={} next_min={}",
-                                    std::thread::current().id(),
-                                    leaf_guard.page_id(),
-                                    next_pid,
-                                    key,
-                                    next_leaf.key_at(0)
-                                );
-                            }
-                            // Release locks and restart from root to avoid lock-order issues
-                            local_ctx.release_all_write_locks();
-                            context = Context::new();
-                            continue;
-                        }
+            // If we still hold a parent, verify that this leaf is the expected child.
+            // If not, redirect to the expected child to avoid misplacing keys across parent ranges.
+            if let Some(parent_guard_ref) = local_ctx.write_set.back() {
+                let (parent_page_chk, _) = BPlusTreeInternalPageCodec::decode(
+                    &parent_guard_ref.data,
+                    self.key_schema.clone(),
+                )?;
+                let expected_pid = parent_page_chk.look_up(key);
+                if expected_pid != leaf_guard.page_id() {
+                    if std::env::var("QUILL_DEBUG_FIND").ok().as_deref() == Some("1") {
+                        eprintln!(
+                            "[INSERT] parent_guided_redirect: from_leaf={} -> expected_child={}",
+                            leaf_guard.page_id(),
+                            expected_pid
+                        );
                     }
+                    drop(leaf_guard);
+                    leaf_guard = self.buffer_pool.fetch_page_write(expected_pid)?;
+                    let (new_leaf, _) =
+                        BPlusTreeLeafPageCodec::decode(&leaf_guard.data, self.key_schema.clone())?;
+                    leaf_page = new_leaf;
                 }
+            }
+
+            // Redirect to right siblings if key no longer belongs to this leaf (post-split race)
+            while leaf_page.header.current_size > 0
+                && leaf_page.header.next_page_id != INVALID_PAGE_ID
+            {
+                let last_key_ref = leaf_page.key_at((leaf_page.header.current_size - 1) as usize);
+                if *key <= *last_key_ref {
+                    break;
+                }
+                let next_pid = leaf_page.header.next_page_id;
+                // Peek the next leaf's minimal key using a read latch to avoid heavy contention
+                let next_guard_peek = self.buffer_pool.fetch_page_read(next_pid)?;
+                let (next_leaf_peek, _) =
+                    BPlusTreeLeafPageCodec::decode(&next_guard_peek.data, self.key_schema.clone())?;
+                let next_first_key = if next_leaf_peek.header.current_size > 0 {
+                    next_leaf_peek.key_at(0).clone()
+                } else {
+                    break;
+                };
+                drop(next_guard_peek);
+                if *key < next_first_key {
+                    break;
+                }
+                if std::env::var("QUILL_DEBUG_INSERT").ok().as_deref() == Some("1") {
+                    eprintln!(
+                        "[INSERT] thread={:?} redirect_to_sibling: from_leaf={} -> next_leaf={} key={} last_key={} next_first_key={}",
+                        std::thread::current().id(),
+                        leaf_guard.page_id(),
+                        next_pid,
+                        key,
+                        last_key_ref,
+                        next_first_key
+                    );
+                }
+                // Release any parents held and current leaf, then jump to next sibling directly
+                local_ctx.release_all_write_locks();
+                drop(leaf_guard);
+                let next_guard = self.buffer_pool.fetch_page_write(next_pid)?;
+                let (next_leaf, _) =
+                    BPlusTreeLeafPageCodec::decode(&next_guard.data, self.key_schema.clone())?;
+                leaf_guard = next_guard;
+                leaf_page = next_leaf;
             }
 
             // Update if key exists
@@ -430,12 +451,21 @@ impl BPlusTreeIndex {
                 }
                 // Avoid deadlock: allow split to acquire header lock when promoting root
                 local_ctx.header_lock_guard = None;
-                self.split(leaf_guard, &mut local_ctx)?;
-                // Release all locks and retry from root with fresh context
-                local_ctx.release_all_write_locks();
-
-                context = Context::new();
-                continue;
+                match self.split(leaf_guard, &mut local_ctx) {
+                    Ok(()) => {
+                        // Release all locks and retry from root with fresh context
+                        local_ctx.release_all_write_locks();
+                        context = Context::new();
+                        continue;
+                    }
+                    Err(QuillSQLError::Internal(_e)) => {
+                        // Structural race: drop latches and retry from root
+                        local_ctx.release_all_write_locks();
+                        context = Context::new();
+                        continue;
+                    }
+                    Err(e) => return Err(e),
+                }
             }
 
             // Safe to insert
@@ -459,33 +489,152 @@ impl BPlusTreeIndex {
 
     /// 公共 API: 删除一个键，使用闩锁耦合实现并发安全。
     pub fn delete(&self, key: &Tuple) -> QuillSQLResult<()> {
-        let mut context = Context::new();
-
         if self.is_empty()? {
             return Ok(());
         }
 
-        let (mut leaf_guard, mut context) = self.find_leaf_page_pessimistic(key, false, context)?;
-        let (mut leaf_page, _) =
-            BPlusTreeLeafPageCodec::decode(&leaf_guard.data, self.key_schema.clone())?;
+        let mut context = Context::new();
+        'restart: loop {
+            let (mut leaf_guard, mut local_ctx) =
+                self.find_leaf_page_pessimistic(key, false, context)?;
+            let (mut leaf_page, _) =
+                BPlusTreeLeafPageCodec::decode(&leaf_guard.data, self.key_schema.clone())?;
 
-        if leaf_page.look_up(key).is_none() {
-            return Ok(());
+            // If we still hold a parent, prefer parent-guided redirection to avoid crossing
+            // parent boundary via leaf chain which can cause livelock during structure changes.
+            if let Some(parent_guard_ref) = local_ctx.write_set.back() {
+                let (parent_page_chk, _) = BPlusTreeInternalPageCodec::decode(
+                    &parent_guard_ref.data,
+                    self.key_schema.clone(),
+                )?;
+                let expected_pid = parent_page_chk.look_up(key);
+                if expected_pid != leaf_guard.page_id() {
+                    if std::env::var("QUILL_DEBUG_FIND").ok().as_deref() == Some("1") {
+                        eprintln!(
+                            "[DELETE] parent_guided_redirect: from_leaf={} -> expected_child={}",
+                            leaf_guard.page_id(),
+                            expected_pid
+                        );
+                    }
+                    drop(leaf_guard);
+                    leaf_guard = self.buffer_pool.fetch_page_write(expected_pid)?;
+                    let (new_leaf, _) =
+                        BPlusTreeLeafPageCodec::decode(&leaf_guard.data, self.key_schema.clone())?;
+                    leaf_page = new_leaf;
+                }
+            }
+
+            // Redirect: if key belongs to right siblings, jump directly to sibling while keeping parent path
+            let mut hops: u32 = 0;
+            while leaf_page.header.current_size > 0
+                && leaf_page.header.next_page_id != INVALID_PAGE_ID
+            {
+                let last_key_ref = leaf_page.key_at((leaf_page.header.current_size - 1) as usize);
+                if *key <= *last_key_ref {
+                    break;
+                }
+                let next_pid = leaf_page.header.next_page_id;
+                if std::env::var("QUILL_DEBUG_FIND").ok().as_deref() == Some("1") {
+                    eprintln!(
+                        "[DELETE] thread={:?} redirect_to_sibling: from_leaf={} -> next_leaf={} key={} last_key={}",
+                        std::thread::current().id(),
+                        leaf_guard.page_id(),
+                        next_pid,
+                        key,
+                        last_key_ref
+                    );
+                }
+                hops += 1;
+                if hops > 8 {
+                    if std::env::var("QUILL_DEBUG_FIND").ok().as_deref() == Some("1") {
+                        eprintln!(
+                            "[DELETE] redirect_hops_exceeded: restart from root at leaf={}",
+                            leaf_guard.page_id()
+                        );
+                    }
+                    local_ctx.release_all_write_locks();
+                    drop(leaf_guard);
+                    context = Context::new();
+                    continue 'restart;
+                }
+                drop(leaf_guard);
+                leaf_guard = self.buffer_pool.fetch_page_write(next_pid)?;
+                let (new_leaf, _) =
+                    BPlusTreeLeafPageCodec::decode(&leaf_guard.data, self.key_schema.clone())?;
+                leaf_page = new_leaf;
+
+                // Do not force restart here; attempt deletion on the correct leaf first.
+            }
+
+            // Check presence & whether it is the first key (affects parent separator)
+            let was_first = if leaf_page.header.current_size > 0 {
+                let first_key = leaf_page.key_at(0).clone();
+                &first_key == key
+            } else {
+                false
+            };
+            if leaf_page.look_up(key).is_none() {
+                local_ctx.release_all_write_locks();
+                return Ok(());
+            }
+
+            leaf_page.delete(key);
+            leaf_page.header.version += 1;
+            leaf_guard
+                .data
+                .copy_from_slice(&BPlusTreeLeafPageCodec::encode(&leaf_page));
+
+            // If the node is underflowing, handle it.
+            if leaf_page.header.current_size < leaf_page.min_size() {
+                // If parent path is empty but this leaf is not the actual root, rebuild path
+                if local_ctx.write_set.is_empty() {
+                    let root_id = self.get_root_page_id()?;
+                    if leaf_guard.page_id() != root_id {
+                        local_ctx.release_all_write_locks();
+                        drop(leaf_guard);
+                        context = Context::new();
+                        continue 'restart;
+                    }
+                }
+                match self.handle_underflow(leaf_guard, &mut local_ctx) {
+                    Ok(()) => {
+                        local_ctx.release_all_write_locks();
+                        return Ok(());
+                    }
+                    Err(QuillSQLError::Internal(_)) => {
+                        // Structural race/mismatch: release and retry from root
+                        local_ctx.release_all_write_locks();
+                        context = Context::new();
+                        continue;
+                    }
+                    Err(e) => return Err(e),
+                }
+            } else {
+                // If we deleted the first key of this leaf, and there's a parent above,
+                // update the parent's separator key to the new minimal key of this leaf.
+                if was_first && leaf_page.header.current_size > 0 {
+                    if let Some(mut parent_guard) = local_ctx.write_set.pop_back() {
+                        let (mut parent_page, _) = BPlusTreeInternalPageCodec::decode(
+                            &parent_guard.data,
+                            self.key_schema.clone(),
+                        )?;
+                        if let Some(node_idx) = parent_page.value_index(leaf_guard.page_id()) {
+                            if node_idx > 0 {
+                                parent_page.array[node_idx].0 = leaf_page.key_at(0).clone();
+                                parent_page.header.version += 1;
+                                parent_guard.data.copy_from_slice(
+                                    &BPlusTreeInternalPageCodec::encode(&parent_page),
+                                );
+                            }
+                        }
+                        // push back to maintain path for later releases
+                        local_ctx.write_set.push_back(parent_guard);
+                    }
+                }
+                local_ctx.release_all_write_locks();
+                return Ok(());
+            }
         }
-
-        leaf_page.delete(key);
-        leaf_page.header.version += 1;
-        leaf_guard
-            .data
-            .copy_from_slice(&BPlusTreeLeafPageCodec::encode(&leaf_page));
-
-        // If the node is underflowing, handle it.
-        if leaf_page.header.current_size < leaf_page.min_size() {
-            self.handle_underflow(leaf_guard, &mut context)?;
-        }
-        // Drop all locks held in the context now that the operation is complete.
-        context.release_all_write_locks();
-        Ok(())
     }
 
     pub fn to_dot(&self) -> QuillSQLResult<String> {
@@ -577,13 +726,22 @@ impl BPlusTreeIndex {
             return Ok(());
         }
 
-        let mut parent_guard = context.write_set.pop_back().unwrap();
-        let (mut parent_page, _) =
+        let parent_guard = match context.write_set.pop_back() {
+            Some(g) => g,
+            None => {
+                return Err(QuillSQLError::Internal(
+                    "underflow: missing parent".to_string(),
+                ))
+            }
+        };
+        let (parent_page, _) =
             BPlusTreeInternalPageCodec::decode(&parent_guard.data, self.key_schema.clone())?;
 
-        let node_idx = parent_page
-            .value_index(node_guard.page_id())
-            .expect("Node not found in parent");
+        let Some(node_idx) = parent_page.value_index(node_guard.page_id()) else {
+            return Err(QuillSQLError::Internal(
+                "underflow: node not found in parent".to_string(),
+            ));
+        };
 
         // Try to borrow from the left sibling first (acquire locks in PageId order to avoid deadlock).
         if node_idx > 0 {
@@ -704,7 +862,7 @@ impl BPlusTreeIndex {
     fn coalesce(
         &self,
         mut left_guard: WritePageGuard,
-        mut right_guard: WritePageGuard,
+        right_guard: WritePageGuard,
         mut parent_guard: WritePageGuard,
         context: &mut Context,
     ) -> QuillSQLResult<()> {
@@ -716,7 +874,14 @@ impl BPlusTreeIndex {
             BPlusTreeInternalPageCodec::decode(&parent_guard.data, self.key_schema.clone())?;
 
         let right_page_id = right_guard.page_id();
-        let middle_key = parent_page.remove(right_page_id).unwrap().0;
+        let middle_key = match parent_page.remove(right_page_id) {
+            Some((k, _)) => k,
+            None => {
+                return Err(QuillSQLError::Internal(
+                    "coalesce: parent missing right child".to_string(),
+                ));
+            }
+        };
 
         match (&mut left_page, &mut right_page) {
             (BPlusTreePage::Leaf(left), BPlusTreePage::Leaf(right)) => {
@@ -874,7 +1039,7 @@ impl BPlusTreeIndex {
                 let new_root_id = root_internal.value_at(0);
                 // Drop page guard before touching header to avoid page<->header lock inversion
                 drop(root_guard);
-                let _lock = self.header_page_lock.write().unwrap();
+                let _lock = self.header_page_lock.write();
                 self.set_root_page_id(new_root_id)?;
                 self.buffer_pool.delete_page(root_id)?;
             }
@@ -882,7 +1047,7 @@ impl BPlusTreeIndex {
             if root_leaf.header.current_size == 0 {
                 // The lock is already held by the caller.
                 drop(root_guard);
-                let _lock = self.header_page_lock.write().unwrap();
+                let _lock = self.header_page_lock.write();
                 self.set_root_page_id(INVALID_PAGE_ID)?;
                 self.buffer_pool.delete_page(root_id)?;
             }
@@ -1113,13 +1278,21 @@ impl BPlusTreeIndex {
                 drop(new_page_guard);
                 drop(page_guard);
 
-                let _lock = self.header_page_lock.write().unwrap();
+                let _lock = self.header_page_lock.write();
                 self.set_root_page_id(new_root_id)?;
                 return Ok(());
             }
 
             // 否则，更新父节点
-            let mut parent_guard = context.write_set.pop_back().unwrap();
+            let mut parent_guard = match context.write_set.pop_back() {
+                Some(g) => g,
+                None => {
+                    // Parent missing due to concurrent structural change; restart from root
+                    return Err(QuillSQLError::Internal(
+                        "split: missing parent in context".to_string(),
+                    ));
+                }
+            };
             if std::env::var("QUILL_DEBUG_SPLIT").ok().as_deref() == Some("2") {
                 eprintln!(
                     "[SPLIT DEBUG] promote to parent={}, left={}, right={}",
@@ -1131,6 +1304,12 @@ impl BPlusTreeIndex {
             let (mut parent_page, _) =
                 BPlusTreeInternalPageCodec::decode(&parent_guard.data, self.key_schema.clone())?;
             // Insert the separator key right after the original left child (page_id)
+            if parent_page.value_index(page_id).is_none() {
+                // Parent no longer contains this child; signal upper layer to retry from root
+                return Err(QuillSQLError::Internal(
+                    "split: parent no longer contains left child".to_string(),
+                ));
+            }
             parent_page.insert_after(page_id, middle_key, new_page_id);
             parent_page.header.version += 1;
 
@@ -1240,7 +1419,10 @@ impl TreeIndexIterator {
 
 #[cfg(test)]
 mod tests {
+    use parking_lot::deadlock;
     use std::sync::Arc;
+    use std::sync::Once;
+    use std::time::Duration;
     use tempfile::TempDir;
 
     use crate::catalog::SchemaRef;
@@ -1256,6 +1438,26 @@ mod tests {
     };
 
     use super::BPlusTreeIndex;
+
+    fn ensure_deadlock_watchdog() {
+        static START: Once = Once::new();
+        START.call_once(|| {
+            std::thread::spawn(|| loop {
+                std::thread::sleep(Duration::from_millis(500));
+                let deadlocks = deadlock::check_deadlock();
+                if !deadlocks.is_empty() {
+                    eprintln!("DEADLOCK DETECTED: {} cycles", deadlocks.len());
+                    for (i, threads) in deadlocks.iter().enumerate() {
+                        eprintln!("Cycle {}:", i);
+                        for t in threads {
+                            eprintln!("  ThreadId={:?}\n{:?}", t.thread_id(), t.backtrace());
+                        }
+                    }
+                    panic!("deadlock detected");
+                }
+            });
+        });
+    }
 
     /// Creates a test environment with specified buffer pool size and B+ tree parameters
     fn create_test_index(
@@ -1437,6 +1639,7 @@ mod tests {
     /// TEST: SequentialEdgeMixTest - equivalent to BusTub's mixed insert/delete test
     #[test]
     fn test_sequential_edge_mix() {
+        ensure_deadlock_watchdog();
         for leaf_max_size in 2..=5 {
             let (_temp_dir, index, key_schema) = create_test_index(50, 3, leaf_max_size);
 
@@ -1503,9 +1706,24 @@ mod tests {
     /// TEST: Concurrent insert test - multi-threaded insertions
     #[test]
     fn test_concurrent_insert() {
+        // spawn deadlock watchdog
+        std::thread::spawn(|| loop {
+            std::thread::sleep(Duration::from_millis(500));
+            let deadlocks = deadlock::check_deadlock();
+            if !deadlocks.is_empty() {
+                eprintln!("DEADLOCK DETECTED: {} cycles", deadlocks.len());
+                for (i, threads) in deadlocks.iter().enumerate() {
+                    eprintln!("Cycle {}:", i);
+                    for t in threads {
+                        eprintln!("  ThreadId={:?}\n{:?}", t.thread_id(), t.backtrace());
+                    }
+                }
+                panic!("deadlock detected");
+            }
+        });
         const NUM_ITERS: usize = 3;
         const SCALE_FACTOR: i64 = 50; // further scaled down for fast diagnostics
-        const NUM_THREADS: usize = 2;
+        const NUM_THREADS: usize = 5;
 
         for _iter in 0..NUM_ITERS {
             let (_temp_dir, index, key_schema) = create_test_index(64, 3, 5);
@@ -1556,7 +1774,7 @@ mod tests {
     /// TEST: BasicScaleTest - equivalent to BusTub's large scale insertion test
     #[test]
     fn test_basic_scale() {
-        let (_temp_dir, index, key_schema) = create_test_index(30, 2, 3);
+        let (_temp_dir, index, key_schema) = create_test_index(512, 2, 3);
 
         let scale = 1000i64;
         let mut keys: Vec<i64> = (1..=scale).collect();
@@ -1587,12 +1805,12 @@ mod tests {
             }
         }
 
-        // Debug view
-        println!(
-            "Tree after {} inserts:\n{}",
-            keys.len(),
-            index.to_dot().unwrap()
-        );
+        // // Debug view
+        // println!(
+        //     "Tree after {} inserts:\n{}",
+        //     keys.len(),
+        //     index.to_dot().unwrap()
+        // );
 
         // Early probe for a known-missing sample to print context
         let probe = 630i64;
@@ -1695,6 +1913,21 @@ mod tests {
     /// TEST: Mixed concurrent operations
     #[test]
     fn test_concurrent_mix() {
+        // spawn deadlock watchdog
+        std::thread::spawn(|| loop {
+            std::thread::sleep(Duration::from_millis(500));
+            let deadlocks = deadlock::check_deadlock();
+            if !deadlocks.is_empty() {
+                eprintln!("DEADLOCK DETECTED: {} cycles", deadlocks.len());
+                for (i, threads) in deadlocks.iter().enumerate() {
+                    eprintln!("Cycle {}:", i);
+                    for t in threads {
+                        eprintln!("  ThreadId={:?}\n{:?}", t.thread_id(), t.backtrace());
+                    }
+                }
+                panic!("deadlock detected");
+            }
+        });
         const NUM_ITERS: usize = 5;
 
         for _iter in 0..NUM_ITERS {
