@@ -144,9 +144,22 @@ impl BPlusTreeInternalPageCodec {
         } else {
             bytes.extend(CommonCodec::encode_u8(0));
         }
+        // enable prefix-compress for internal keys
+        bytes.extend(CommonCodec::encode_u8(1)); // compression flag = 1 (prefix-compressed)
+        let mut prev_key_bytes: Vec<u8> = Vec::new();
         for (tuple, page_id) in page.array.iter() {
-            bytes.extend(TupleCodec::encode(tuple));
+            let full = TupleCodec::encode(tuple);
+            let mut lcp = 0usize;
+            let max_lcp = prev_key_bytes.len().min(full.len());
+            while lcp < max_lcp && prev_key_bytes[lcp] == full[lcp] {
+                lcp += 1;
+            }
+            let suffix = &full[lcp..];
+            bytes.extend(CommonCodec::encode_u16(lcp as u16));
+            bytes.extend(CommonCodec::encode_u32(suffix.len() as u32));
+            bytes.extend(suffix);
             bytes.extend(CommonCodec::encode_u32(*page_id));
+            prev_key_bytes = full;
         }
         // make sure length of bytes is PAGE_SIZE
         assert!(bytes.len() <= PAGE_SIZE);
@@ -185,15 +198,43 @@ impl BPlusTreeInternalPageCodec {
                 None
             };
 
+            // compression flag
+            let (compress_flag, offset) = CommonCodec::decode_u8(left_bytes)?;
+            left_bytes = &left_bytes[offset..];
+
             let mut array = vec![];
-            for _ in 0..header.current_size {
-                let (tuple, offset) = TupleCodec::decode(left_bytes, schema.clone())?;
-                left_bytes = &left_bytes[offset..];
-
-                let (page_id, offset) = CommonCodec::decode_u32(left_bytes)?;
-                left_bytes = &left_bytes[offset..];
-
-                array.push((tuple, page_id));
+            if compress_flag == 1 {
+                // prefix-compressed decoding
+                let mut prev_key_bytes: Vec<u8> = Vec::new();
+                for _ in 0..header.current_size {
+                    let (lcp_u16, o1) = CommonCodec::decode_u16(left_bytes)?;
+                    left_bytes = &left_bytes[o1..];
+                    let (suf_len_u32, o2) = CommonCodec::decode_u32(left_bytes)?;
+                    left_bytes = &left_bytes[o2..];
+                    let suf_len = suf_len_u32 as usize;
+                    let suffix = &left_bytes[..suf_len];
+                    left_bytes = &left_bytes[suf_len..];
+                    // reconstruct full key bytes
+                    let mut full = Vec::with_capacity(lcp_u16 as usize + suf_len);
+                    full.extend_from_slice(
+                        &prev_key_bytes[..(lcp_u16 as usize).min(prev_key_bytes.len())],
+                    );
+                    full.extend_from_slice(suffix);
+                    let (tuple, _off) = TupleCodec::decode(&full, schema.clone())?;
+                    prev_key_bytes = full;
+                    let (page_id, o3) = CommonCodec::decode_u32(left_bytes)?;
+                    left_bytes = &left_bytes[o3..];
+                    array.push((tuple, page_id));
+                }
+            } else {
+                // legacy raw format
+                for _ in 0..header.current_size {
+                    let (tuple, offset) = TupleCodec::decode(left_bytes, schema.clone())?;
+                    left_bytes = &left_bytes[offset..];
+                    let (page_id, offset) = CommonCodec::decode_u32(left_bytes)?;
+                    left_bytes = &left_bytes[offset..];
+                    array.push((tuple, page_id));
+                }
             }
 
             Ok((

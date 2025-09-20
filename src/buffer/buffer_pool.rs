@@ -2,6 +2,7 @@ use bytes::Bytes;
 use dashmap::DashMap;
 use parking_lot::{Mutex, RwLock};
 use std::sync::atomic::Ordering;
+// AtomicUsize removed since we no longer use sharded free-list RR here
 use std::{collections::VecDeque, sync::Arc};
 
 use crate::buffer::page::{self, Page, PageId, ReadPageGuard, WritePageGuard, PAGE_SIZE};
@@ -18,8 +19,10 @@ use crate::storage::{
     page::{BPlusTreeHeaderPage, BPlusTreeInternalPage, BPlusTreeLeafPage, BPlusTreePage},
 };
 
-use crate::utils::cache::lru_k::LRUKReplacer;
-use crate::utils::cache::Replacer;
+use crate::utils::cache::sharded_lru_k::ShardedLRUKReplacer;
+use crate::utils::cache::tiny_lfu::TinyLFU;
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+use std::time::Duration;
 
 pub type FrameId = usize;
 
@@ -28,12 +31,17 @@ pub const BUFFER_POOL_SIZE: usize = 5000;
 #[derive(Debug)]
 pub struct BufferPoolManager {
     pub(crate) pool: Vec<Arc<RwLock<Page>>>,
-    pub(crate) replacer: Arc<RwLock<LRUKReplacer>>,
+    pub(crate) replacer: Arc<RwLock<ShardedLRUKReplacer>>,
     pub(crate) disk_scheduler: Arc<DiskScheduler>,
     pub(crate) page_table: Arc<DashMap<PageId, FrameId>>,
     pub(crate) free_list: Arc<RwLock<VecDeque<FrameId>>>,
     /// Per-page inflight load guards to serialize concurrent loads of the same page
     pub(crate) inflight_loads: Arc<DashMap<PageId, Arc<Mutex<()>>>>,
+    /// Optional TinyLFU admission filter (best-effort)
+    pub(crate) tiny_lfu: Option<Arc<RwLock<TinyLFU>>>,
+    /// Background cleaner control flags
+    cleaner_started: AtomicBool,
+    cleaner_shutdown: AtomicBool,
 }
 impl BufferPoolManager {
     #[inline]
@@ -69,16 +77,101 @@ impl BufferPoolManager {
 
         Self {
             pool,
-            replacer: Arc::new(RwLock::new(LRUKReplacer::with_k(num_pages, 2))),
+            replacer: Arc::new(RwLock::new(ShardedLRUKReplacer::new(num_pages))),
             disk_scheduler,
             page_table: Arc::new(DashMap::new()),
             free_list: Arc::new(RwLock::new(free_list)),
             inflight_loads: Arc::new(DashMap::new()),
+            tiny_lfu: Some(Arc::new(RwLock::new(TinyLFU::new(
+                num_pages.next_power_of_two(),
+                4,
+            )))),
+            cleaner_started: AtomicBool::new(false),
+            cleaner_shutdown: AtomicBool::new(false),
         }
+    }
+
+    /// Lazily start a background cleaner if enabled by env `QUILL_BPM_CLEANER=1`.
+    fn maybe_start_cleaner(self: &Arc<Self>) {
+        if std::env::var("QUILL_BPM_CLEANER").ok().as_deref() != Some("1") {
+            return;
+        }
+        if self
+            .cleaner_started
+            .compare_exchange(false, true, AtomicOrdering::SeqCst, AtomicOrdering::SeqCst)
+            .is_err()
+        {
+            return;
+        }
+        let weak = Arc::downgrade(self);
+        std::thread::spawn(move || {
+            let sleep_ms: u64 = std::env::var("QUILL_BPM_SLEEP_MS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(50);
+            let dirty_pct_threshold: f64 = std::env::var("QUILL_BPM_DIRTY_PCT")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0.2);
+            let batch: usize = std::env::var("QUILL_BPM_BATCH")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(32);
+            let mut tick: u64 = 0;
+            loop {
+                std::thread::sleep(Duration::from_millis(sleep_ms));
+                if let Some(bpm) = weak.upgrade() {
+                    if bpm.cleaner_shutdown.load(AtomicOrdering::Relaxed) {
+                        break;
+                    }
+                    // Estimate dirty ratio and collect candidates
+                    let page_ids: Vec<PageId> = bpm.page_table.iter().map(|e| *e.key()).collect();
+                    if page_ids.is_empty() {
+                        continue;
+                    }
+                    let mut dirty_count = 0usize;
+                    for pid in &page_ids {
+                        if let Some(fid_ref) = bpm.page_table.get(pid) {
+                            let fid = *fid_ref;
+                            if bpm.pool[fid].read().is_dirty {
+                                dirty_count += 1;
+                            }
+                        }
+                    }
+                    let ratio = (dirty_count as f64) / (page_ids.len() as f64);
+                    if ratio < dirty_pct_threshold {
+                        // Periodically age tiny_lfu even if no cleaning
+                        tick += 1;
+                        if tick % 20 == 0 {
+                            if let Some(f) = &bpm.tiny_lfu {
+                                f.write().age();
+                            }
+                        }
+                        continue;
+                    }
+                    let mut cleaned = 0usize;
+                    for pid in page_ids {
+                        if cleaned >= batch {
+                            break;
+                        }
+                        // Best-effort flush
+                        let _ = bpm.flush_page(pid);
+                        cleaned += 1;
+                    }
+                    // Age the admission filter periodically
+                    if let Some(f) = &bpm.tiny_lfu {
+                        f.write().age();
+                    }
+                } else {
+                    break;
+                }
+            }
+        });
     }
 
     /// 创建一个新页面。
     pub fn new_page(self: &Arc<Self>) -> QuillSQLResult<WritePageGuard> {
+        self.maybe_start_cleaner();
         if self.free_list.read().is_empty() && self.replacer.read().size() == 0 {
             return Err(QuillSQLError::Storage(
                 "Cannot new page because buffer pool is full and no page to evict".to_string(),
@@ -107,6 +200,7 @@ impl BufferPoolManager {
 
     /// 获取一个只读页面。
     pub fn fetch_page_read(self: &Arc<Self>, page_id: PageId) -> QuillSQLResult<ReadPageGuard> {
+        self.maybe_start_cleaner();
         // Robust retry to tolerate delete/evict races
         for _ in 0..16 {
             if let Ok(frame_id) = self.get_frame_for_page(page_id) {
@@ -138,6 +232,7 @@ impl BufferPoolManager {
 
     /// 获取一个可写页面。
     pub fn fetch_page_write(self: &Arc<Self>, page_id: PageId) -> QuillSQLResult<WritePageGuard> {
+        self.maybe_start_cleaner();
         for _ in 0..16 {
             if let Ok(frame_id) = self.get_frame_for_page(page_id) {
                 let page_arc = self.pool[frame_id].clone();
@@ -216,6 +311,10 @@ impl BufferPoolManager {
         if let Some(frame_id_ref) = self.page_table.get(&page_id) {
             let frame_id = *frame_id_ref;
             self.replacer_record_access(frame_id)?;
+            // record access for admission
+            if let Some(f) = &self.tiny_lfu {
+                f.write().admit_record(page_id as u64);
+            }
             Ok(frame_id)
         } else {
             // Serialize concurrent loads for the same page_id
@@ -234,6 +333,17 @@ impl BufferPoolManager {
                 let frame_id2 = *frame_id_ref2;
                 self.replacer_record_access(frame_id2)?;
                 return Ok(frame_id2);
+            }
+
+            // Optional admission: if LFU thinks it's cold and replacer is full, deny admission
+            if let Some(f) = &self.tiny_lfu {
+                let est = f.read().estimate(page_id as u64);
+                if est == 0 && self.free_list.read().is_empty() && self.replacer.read().size() == 0
+                {
+                    return Err(QuillSQLError::Storage(
+                        "Cannot allocate frame: admission denied and no space".to_string(),
+                    ));
+                }
             }
 
             let frame_id = match self.allocate_frame() {
@@ -285,6 +395,9 @@ impl BufferPoolManager {
             }
 
             self.page_table.insert(page_id, frame_id);
+            if let Some(f) = &self.tiny_lfu {
+                f.write().admit_record(page_id as u64);
+            }
             if created_here {
                 self.inflight_loads.remove(&page_id);
             }
@@ -334,6 +447,15 @@ impl BufferPoolManager {
         let guard = self.fetch_page_read(page_id)?;
         let (tree_leaf_page, _) = BPlusTreeLeafPageCodec::decode(&guard.data, key_schema.clone())?;
         Ok((guard, tree_leaf_page))
+    }
+
+    /// Prefetch a page into buffer pool (best-effort). It fetches then immediately drops,
+    /// warming up the cache without holding the pin.
+    pub fn prefetch_page(self: &Arc<Self>, page_id: PageId) -> QuillSQLResult<()> {
+        if let Ok(g) = self.fetch_page_read(page_id) {
+            drop(g);
+        }
+        Ok(())
     }
 
     pub fn fetch_header_page(
@@ -494,7 +616,6 @@ mod tests {
     use crate::buffer::buffer_pool::BufferPoolManager;
     use crate::storage::disk_manager::DiskManager; // 假设您有 DiskManager
     use crate::storage::disk_scheduler::DiskScheduler; // 假设您有 DiskScheduler
-    use crate::utils::cache::Replacer;
     use std::fs;
     use std::sync::Arc;
     use tempfile::TempDir;
