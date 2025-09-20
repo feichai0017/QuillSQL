@@ -13,10 +13,36 @@ QuillSQL is a relational database system implemented in Rust, supporting standar
 
 ### B+ Tree Index
 
-- Classic database index structure
-- Supports range queries and sorting
-- Implements buffer pool management
-- Suitable for scenarios requiring complex queries
+Implemented per textbook B+Tree with production-grade concurrency. Highlights:
+
+- Structure & Concurrency
+  - Latch crabbing on write path: hold parent only when the child is unsafe
+  - Full B-link (high_key + right-sibling next pointer); readers can safely chase right during splits
+  - OLC (optimistic version checks) on read: restart from root if a page changes
+  - Sibling locking in PageId order for redistribute/merge to avoid ABBA deadlocks
+- Correctness & Recovery
+  - Header page atomically switches root to avoid intermediate states on root split/shrink
+  - Parent-guided redirection + leaf-chain hop to avoid misplacing keys across parent ranges
+  - Page header version/type checks; decode failure or version change triggers retry
+- Buffer Pool
+  - Read/WritePageGuard with RAII pin/unpin; drop makes the frame evictable again
+  - LRU-K replacement, inflight_loads to prevent thundering herd, flush dirty before eviction
+  - page_table <-> replacer consistency enforced to prevent accidental eviction
+- Iterator
+  - Leaf-chain based forward scan; compatible with B-link/OLC; no key loss under concurrent splits/merges
+  - Supports range scans and full scans
+- Benchmarks (optional)
+  - Hot-read and range-scan benches (ignored by default). Examples:
+    - Hot read (release):
+      ```bash
+      QUILL_BENCH_BPM=1024 QUILL_BENCH_N=50000 QUILL_BENCH_OPS=500000 \
+      cargo test -p quill-sql --lib storage::index::btree_index::tests::bench_get_hot_read --release -- --nocapture --ignored
+      ```
+    - Full scan (release):
+      ```bash
+      QUILL_BENCH_BPM=1024 QUILL_BENCH_N=30000 QUILL_BENCH_PASSES=20 \
+      cargo test -p quill-sql --lib storage::index::btree_index::tests::bench_range_scan --release -- --nocapture --ignored
+      ```
 
 ## Supported SQL Syntax
 

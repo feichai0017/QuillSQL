@@ -137,6 +137,13 @@ impl BPlusTreeInternalPageCodec {
     pub fn encode(page: &BPlusTreeInternalPage) -> Vec<u8> {
         let mut bytes = vec![];
         bytes.extend(BPlusTreeInternalPageHeaderCodec::encode(&page.header));
+        // encode optional high_key presence
+        if let Some(hk) = &page.high_key {
+            bytes.extend(CommonCodec::encode_u8(1));
+            bytes.extend(TupleCodec::encode(hk));
+        } else {
+            bytes.extend(CommonCodec::encode_u8(0));
+        }
         for (tuple, page_id) in page.array.iter() {
             bytes.extend(TupleCodec::encode(tuple));
             bytes.extend(CommonCodec::encode_u32(*page_id));
@@ -167,6 +174,17 @@ impl BPlusTreeInternalPageCodec {
             let (header, offset) = BPlusTreeInternalPageHeaderCodec::decode(left_bytes)?;
             left_bytes = &left_bytes[offset..];
 
+            // decode optional high_key
+            let (has_high_key, offset) = CommonCodec::decode_u8(left_bytes)?;
+            left_bytes = &left_bytes[offset..];
+            let high_key = if has_high_key == 1 {
+                let (hk, offset) = TupleCodec::decode(left_bytes, schema.clone())?;
+                left_bytes = &left_bytes[offset..];
+                Some(hk)
+            } else {
+                None
+            };
+
             let mut array = vec![];
             for _ in 0..header.current_size {
                 let (tuple, offset) = TupleCodec::decode(left_bytes, schema.clone())?;
@@ -183,6 +201,7 @@ impl BPlusTreeInternalPageCodec {
                     schema,
                     header,
                     array,
+                    high_key,
                 },
                 PAGE_SIZE,
             ))
@@ -270,6 +289,7 @@ impl BPlusTreeInternalPageHeaderCodec {
         bytes.extend(CommonCodec::encode_u32(header.current_size));
         bytes.extend(CommonCodec::encode_u32(header.max_size));
         bytes.extend(CommonCodec::encode_u32(header.version));
+        bytes.extend(CommonCodec::encode_u32(header.next_page_id));
         bytes
     }
 
@@ -288,12 +308,16 @@ impl BPlusTreeInternalPageHeaderCodec {
         let (version, offset) = CommonCodec::decode_u32(left_bytes)?;
         left_bytes = &left_bytes[offset..];
 
+        let (next_page_id, offset) = CommonCodec::decode_u32(left_bytes)?;
+        left_bytes = &left_bytes[offset..];
+
         Ok((
             BPlusTreeInternalPageHeader {
                 page_type,
                 current_size,
                 max_size,
                 version,
+                next_page_id,
             },
             bytes.len() - left_bytes.len(),
         ))

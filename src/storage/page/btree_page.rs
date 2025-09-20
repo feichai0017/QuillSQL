@@ -92,6 +92,8 @@ pub struct BPlusTreeInternalPage {
     pub header: BPlusTreeInternalPageHeader,
     // 第一个key为空，n个key对应n+1个value
     pub array: Vec<InternalKV>,
+    // B-link fence high key: keys in this node are strictly less than high_key if present
+    pub high_key: Option<Tuple>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -101,6 +103,8 @@ pub struct BPlusTreeInternalPageHeader {
     // max kv size can be stored
     pub max_size: u32,
     pub version: u32,
+    // B-link: right sibling pointer for chasing on concurrent splits
+    pub next_page_id: PageId,
 }
 
 impl BPlusTreeInternalPage {
@@ -112,8 +116,10 @@ impl BPlusTreeInternalPage {
                 current_size: 0,
                 max_size,
                 version: 0,
+                next_page_id: INVALID_PAGE_ID,
             },
             array: Vec::with_capacity(max_size as usize),
+            high_key: None,
         }
     }
     pub fn min_size(&self) -> u32 {
@@ -286,16 +292,7 @@ impl BPlusTreeInternalPage {
     // 查找key对应的page_id（返回最后一个 <= key 的指针）。
     pub fn look_up(&self, key: &Tuple) -> PageId {
         let size = self.header.current_size as usize;
-
-        // Use `partition_point` to find the first key > `key`.
-        // The predicate `probe_key <= key` partitions the array. `partition_point`
-        // returns the index of the first element for which the predicate is false.
-        // This is equivalent to an upper_bound search.
-        // We search on the slice of valid keys (skipping the sentinel at index 0).
         let partition_idx = self.array[1..size].partition_point(|(probe_key, _)| probe_key <= key);
-
-        // The index `partition_idx` is relative to the slice `array[1..]`.
-        // The corresponding pointer is at `partition_idx` in the original array.
         self.value_at(partition_idx)
     }
 

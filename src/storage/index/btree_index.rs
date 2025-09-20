@@ -889,6 +889,9 @@ impl BPlusTreeIndex {
             }
             (BPlusTreePage::Internal(left), BPlusTreePage::Internal(right)) => {
                 left.merge(middle_key, right);
+                // B-link maintenance: after merge, left should inherit right's high bound and next pointer
+                left.header.next_page_id = right.header.next_page_id;
+                left.high_key = right.high_key.clone();
             }
             _ => unreachable!("Mismatched page types in coalesce"),
         }
@@ -1071,22 +1074,49 @@ impl BPlusTreeIndex {
     }
 
     fn find_leaf_page_optimistic(&self, key: &Tuple) -> QuillSQLResult<ReadPageGuard> {
-        let mut current_guard = self.buffer_pool.fetch_page_read(self.get_root_page_id()?)?;
-
-        loop {
-            let (page, _) =
-                BPlusTreePageCodec::decode(&current_guard.data, self.key_schema.clone())?;
-
-            match page {
-                BPlusTreePage::Internal(internal) => {
-                    let next_page_id = internal.look_up(key);
-                    // Latch coupling: acquire child before releasing parent
-                    let child_guard = self.buffer_pool.fetch_page_read(next_page_id)?;
+        // OLC + B-link: version-check each step; if changed, restart. Allow right-sibling chase by high_key.
+        'restart: loop {
+            let mut current_guard = self.buffer_pool.fetch_page_read(self.get_root_page_id()?)?;
+            loop {
+                let decoded =
+                    BPlusTreePageCodec::decode(&current_guard.data, self.key_schema.clone());
+                if decoded.is_err() {
                     drop(current_guard);
-                    current_guard = child_guard;
+                    continue 'restart;
                 }
-                BPlusTreePage::Leaf(_) => {
-                    return Ok(current_guard);
+                let (page, _) = decoded.unwrap();
+                match page {
+                    BPlusTreePage::Internal(internal) => {
+                        let v1 = internal.header.version;
+                        if let Some(ref hk) = internal.high_key {
+                            if key >= hk && internal.header.next_page_id != INVALID_PAGE_ID {
+                                let sib = self
+                                    .buffer_pool
+                                    .fetch_page_read(internal.header.next_page_id)?;
+                                drop(current_guard);
+                                current_guard = sib;
+                                continue;
+                            }
+                        }
+                        let next_page_id = internal.look_up(key);
+                        let v2 = internal.header.version;
+                        if v1 != v2 {
+                            drop(current_guard);
+                            continue 'restart;
+                        }
+                        let child_guard = self.buffer_pool.fetch_page_read(next_page_id)?;
+                        drop(current_guard);
+                        current_guard = child_guard;
+                    }
+                    BPlusTreePage::Leaf(leaf) => {
+                        let v1 = leaf.header.version;
+                        let v2 = leaf.header.version;
+                        if v1 != v2 {
+                            drop(current_guard);
+                            continue 'restart;
+                        }
+                        return Ok(current_guard);
+                    }
                 }
             }
         }
@@ -1238,8 +1268,20 @@ impl BPlusTreeIndex {
                         new_internal.batch_insert(moved.split_off(1));
                     }
 
+                    // Set B-link wires:
+                    // - Save old high_key and next pointer from left
+                    let old_high_key = internal_page.high_key.clone();
+                    let old_next = internal_page.header.next_page_id;
+                    // - Left's high_key becomes middle_key
+                    internal_page.high_key = Some(middle_key.clone());
+                    // - Right's high_key inherits old left's high bound
+                    new_internal.high_key = old_high_key;
+                    // - Right's next pointer inherits left's next
+                    new_internal.header.next_page_id = old_next;
                     let new_data = BPlusTreeInternalPageCodec::encode(&new_internal);
                     new_page_guard.data.copy_from_slice(&new_data);
+                    // B-link: publish right sibling pointer for readers to chase
+                    internal_page.header.next_page_id = new_page_id;
                     internal_page.header.version += 1;
                     if std::env::var("QUILL_DEBUG_SPLIT").ok().as_deref() == Some("2") {
                         eprintln!(
@@ -2082,5 +2124,112 @@ mod tests {
 
         // Verify leaf chain linkage
         assert_eq!(left_leaf.header.next_page_id, right_pid);
+    }
+
+    // ---------------- Benchmarks (ignored by default) ----------------
+    #[test]
+    #[ignore]
+    fn bench_get_hot_read() {
+        fn getenv_usize(k: &str, default_v: usize) -> usize {
+            std::env::var(k)
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(default_v)
+        }
+
+        let bpm = getenv_usize("QUILL_BENCH_BPM", 1024);
+        let nkeys = getenv_usize("QUILL_BENCH_N", 20000) as i64;
+        let ops = getenv_usize("QUILL_BENCH_OPS", 200000);
+
+        let (_temp_dir, index, key_schema) = create_test_index(bpm, 3, 64);
+
+        // Prepare keys and insert (shuffled)
+        let mut keys: Vec<i64> = (1..=nkeys).collect();
+        // simple LCG shuffle
+        let mut seed: u64 = 0x9E3779B97F4A7C15;
+        for i in (1..keys.len()).rev() {
+            seed = seed
+                .wrapping_mul(2862933555777941757)
+                .wrapping_add(3037000493);
+            let j = (seed as usize) % (i + 1);
+            keys.swap(i, j);
+        }
+        for k in &keys {
+            let t = create_tuple_from_key(*k, key_schema.clone());
+            index.insert(&t, create_rid_from_key(*k)).unwrap();
+        }
+
+        // Hot set: last 10% keys
+        let hot_start = (nkeys as usize * 9) / 10;
+        let hot = &keys[hot_start..];
+
+        let start = std::time::Instant::now();
+        let mut found = 0usize;
+        // query stream via LCG over hot set
+        let mut x = 0x243F6A8885A308D3u64;
+        for _ in 0..ops {
+            x = x.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let idx = (x as usize) % hot.len();
+            let key = hot[idx];
+            let t = create_tuple_from_key(key, key_schema.clone());
+            if index.get(&t).unwrap().is_some() {
+                found += 1;
+            }
+        }
+        let el = start.elapsed();
+        let qps = (ops as f64) / el.as_secs_f64();
+        println!(
+            "bench_get_hot_read: ops={} time={:?} qps={:.1} found={}",
+            ops, el, qps, found
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_range_scan() {
+        fn getenv_usize(k: &str, default_v: usize) -> usize {
+            std::env::var(k)
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(default_v)
+        }
+
+        let bpm = getenv_usize("QUILL_BENCH_BPM", 1024);
+        let nkeys = getenv_usize("QUILL_BENCH_N", 30000) as i64;
+        let passes = getenv_usize("QUILL_BENCH_PASSES", 20);
+
+        let (_temp_dir, index, key_schema) = create_test_index(bpm, 3, 64);
+
+        // Insert in random order
+        let mut keys: Vec<i64> = (1..=nkeys).collect();
+        let mut seed: u64 = 0x9E3779B97F4A7C15;
+        for i in (1..keys.len()).rev() {
+            seed = seed
+                .wrapping_mul(2862933555777941757)
+                .wrapping_add(3037000493);
+            let j = (seed as usize) % (i + 1);
+            keys.swap(i, j);
+        }
+        for k in &keys {
+            let t = create_tuple_from_key(*k, key_schema.clone());
+            index.insert(&t, create_rid_from_key(*k)).unwrap();
+        }
+
+        let index = Arc::new(index);
+        let total = (nkeys as usize) * passes;
+        let start = std::time::Instant::now();
+        let mut seen = 0usize;
+        for _ in 0..passes {
+            let mut it = TreeIndexIterator::new(index.clone(), ..);
+            while let Some(_rid) = it.next().unwrap() {
+                seen += 1;
+            }
+        }
+        let el = start.elapsed();
+        let tps = (total as f64) / el.as_secs_f64();
+        println!(
+            "bench_range_scan: items={} time={:?} ips={:.1} seen={}",
+            total, el, tps, seen
+        );
     }
 }
