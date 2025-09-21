@@ -3,6 +3,7 @@ use crate::{
 };
 
 pub mod btree_index;
+pub mod btree_iterator;
 pub mod hash_index;
 
 /// A generic trait for database indexes.

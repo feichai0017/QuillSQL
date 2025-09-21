@@ -21,8 +21,6 @@ use crate::storage::{
 
 use crate::utils::cache::sharded_lru_k::ShardedLRUKReplacer;
 use crate::utils::cache::tiny_lfu::TinyLFU;
-use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
-use std::time::Duration;
 
 pub type FrameId = usize;
 
@@ -30,18 +28,15 @@ pub const BUFFER_POOL_SIZE: usize = 5000;
 
 #[derive(Debug)]
 pub struct BufferPoolManager {
-    pub(crate) pool: Vec<Arc<RwLock<Page>>>,
-    pub(crate) replacer: Arc<RwLock<ShardedLRUKReplacer>>,
-    pub(crate) disk_scheduler: Arc<DiskScheduler>,
-    pub(crate) page_table: Arc<DashMap<PageId, FrameId>>,
-    pub(crate) free_list: Arc<RwLock<VecDeque<FrameId>>>,
+    pub pool: Vec<Arc<RwLock<Page>>>,
+    pub replacer: Arc<RwLock<ShardedLRUKReplacer>>,
+    pub disk_scheduler: Arc<DiskScheduler>,
+    pub page_table: Arc<DashMap<PageId, FrameId>>,
+    pub free_list: Arc<RwLock<VecDeque<FrameId>>>,
     /// Per-page inflight load guards to serialize concurrent loads of the same page
-    pub(crate) inflight_loads: Arc<DashMap<PageId, Arc<Mutex<()>>>>,
+    pub inflight_loads: Arc<DashMap<PageId, Arc<Mutex<()>>>>,
     /// Optional TinyLFU admission filter (best-effort)
-    pub(crate) tiny_lfu: Option<Arc<RwLock<TinyLFU>>>,
-    /// Background cleaner control flags
-    cleaner_started: AtomicBool,
-    cleaner_shutdown: AtomicBool,
+    pub tiny_lfu: Option<Arc<RwLock<TinyLFU>>>,
 }
 impl BufferPoolManager {
     #[inline]
@@ -86,92 +81,11 @@ impl BufferPoolManager {
                 num_pages.next_power_of_two(),
                 4,
             )))),
-            cleaner_started: AtomicBool::new(false),
-            cleaner_shutdown: AtomicBool::new(false),
         }
-    }
-
-    /// Lazily start a background cleaner if enabled by env `QUILL_BPM_CLEANER=1`.
-    fn maybe_start_cleaner(self: &Arc<Self>) {
-        if std::env::var("QUILL_BPM_CLEANER").ok().as_deref() != Some("1") {
-            return;
-        }
-        if self
-            .cleaner_started
-            .compare_exchange(false, true, AtomicOrdering::SeqCst, AtomicOrdering::SeqCst)
-            .is_err()
-        {
-            return;
-        }
-        let weak = Arc::downgrade(self);
-        std::thread::spawn(move || {
-            let sleep_ms: u64 = std::env::var("QUILL_BPM_SLEEP_MS")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(50);
-            let dirty_pct_threshold: f64 = std::env::var("QUILL_BPM_DIRTY_PCT")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0.2);
-            let batch: usize = std::env::var("QUILL_BPM_BATCH")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(32);
-            let mut tick: u64 = 0;
-            loop {
-                std::thread::sleep(Duration::from_millis(sleep_ms));
-                if let Some(bpm) = weak.upgrade() {
-                    if bpm.cleaner_shutdown.load(AtomicOrdering::Relaxed) {
-                        break;
-                    }
-                    // Estimate dirty ratio and collect candidates
-                    let page_ids: Vec<PageId> = bpm.page_table.iter().map(|e| *e.key()).collect();
-                    if page_ids.is_empty() {
-                        continue;
-                    }
-                    let mut dirty_count = 0usize;
-                    for pid in &page_ids {
-                        if let Some(fid_ref) = bpm.page_table.get(pid) {
-                            let fid = *fid_ref;
-                            if bpm.pool[fid].read().is_dirty {
-                                dirty_count += 1;
-                            }
-                        }
-                    }
-                    let ratio = (dirty_count as f64) / (page_ids.len() as f64);
-                    if ratio < dirty_pct_threshold {
-                        // Periodically age tiny_lfu even if no cleaning
-                        tick += 1;
-                        if tick % 20 == 0 {
-                            if let Some(f) = &bpm.tiny_lfu {
-                                f.write().age();
-                            }
-                        }
-                        continue;
-                    }
-                    let mut cleaned = 0usize;
-                    for pid in page_ids {
-                        if cleaned >= batch {
-                            break;
-                        }
-                        // Best-effort flush
-                        let _ = bpm.flush_page(pid);
-                        cleaned += 1;
-                    }
-                    // Age the admission filter periodically
-                    if let Some(f) = &bpm.tiny_lfu {
-                        f.write().age();
-                    }
-                } else {
-                    break;
-                }
-            }
-        });
     }
 
     /// 创建一个新页面。
     pub fn new_page(self: &Arc<Self>) -> QuillSQLResult<WritePageGuard> {
-        self.maybe_start_cleaner();
         if self.free_list.read().is_empty() && self.replacer.read().size() == 0 {
             return Err(QuillSQLError::Storage(
                 "Cannot new page because buffer pool is full and no page to evict".to_string(),
@@ -200,7 +114,6 @@ impl BufferPoolManager {
 
     /// 获取一个只读页面。
     pub fn fetch_page_read(self: &Arc<Self>, page_id: PageId) -> QuillSQLResult<ReadPageGuard> {
-        self.maybe_start_cleaner();
         // Robust retry to tolerate delete/evict races
         for _ in 0..16 {
             if let Ok(frame_id) = self.get_frame_for_page(page_id) {
@@ -232,7 +145,6 @@ impl BufferPoolManager {
 
     /// 获取一个可写页面。
     pub fn fetch_page_write(self: &Arc<Self>, page_id: PageId) -> QuillSQLResult<WritePageGuard> {
-        self.maybe_start_cleaner();
         for _ in 0..16 {
             if let Ok(frame_id) = self.get_frame_for_page(page_id) {
                 let page_arc = self.pool[frame_id].clone();
@@ -286,7 +198,7 @@ impl BufferPoolManager {
 
     /// 完成 unpin 的后续处理：根据旧的 pin_count 决定是否可驱逐，并处理脏位。
     /// 该函数必须在未持有页面锁的情况下调用，以避免与 fetch_page_write 的锁序形成死锁。
-    pub(crate) fn complete_unpin(
+    pub fn complete_unpin(
         &self,
         page_id: PageId,
         is_dirty: bool,

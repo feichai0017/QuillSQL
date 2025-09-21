@@ -1,54 +1,125 @@
 # B+ Tree Index — Architecture, Features, Optimizations
 
 ## 1. Architecture Overview
-- Node Types: Internal, Leaf. Internal keeps key separators and child pointers; Leaf keeps (key, RID) and a linked-list via next_page_id.
-- Header Page: fixed entry point storing root_page_id; atomic root switch on split/shrink.
-- Concurrency:
-  - Write path: latch crabbing (hold parent only if child is unsafe). Deadlock avoided via PageId-ordered sibling locking.
-  - Read path: B-link + OLC. Readers can chase right siblings if key >= high_key; verify header.version and restart on change.
-- Page Layout:
-  - Internal header: {type, current_size, max_size, version, next_page_id} + high_key (optional) + array of (key, child)
-  - Leaf header: {type, current_size, max_size, next_page_id, version} + array of (key, rid)
 
-## 2. Key Features
-- B-link (high_key + next): smooth structural publication; readers bypass transient parent states.
-- OLC (version checks): page-level optimistic validation, restart on change or decode failure.
-- Parent-guided redirection: insert/delete confirm expected child from parent; avoid crossing parent boundaries.
-- Iterator: leaf-chain based forward scan, compatible with B-link/OLC, no key loss under concurrent splits/merges.
-- Safety: split/merge protocols preserve invariants; root adjust with header lock to avoid lock inversion.
+### 1.1 Node and Page Structure
+-   **Node Types**: `Internal` and `Leaf`.
+    -   **Internal Nodes**: Store separator keys and pointers to child pages. The first pointer is a "sentinel" that points to the subtree for all keys less than the first key in the node.
+    -   **Leaf Nodes**: Store `(key, RecordId)` pairs in sorted order. Leaves are linked together in a singly linked list (`next_page_id`) to allow for efficient range scans.
+-   **Header Page**: A fixed page (`header_page_id`) that acts as the entry point to the tree. It stores the `root_page_id`, allowing for atomic updates to the tree root when it splits or shrinks.
+-   **Page Layout**:
+    -   **Internal Page**: `{Header, High Key, Array<(Key, ChildPageId)>}`. The `High Key` is part of the B-link optimization.
+    -   **Leaf Page**: `{Header, Array<(Key, RID)>}`.
 
-## 3. Optimizations
-- Right-sibling chase on reads (B-link), reduces restarts from root.
-- Lightweight OLC in iterator; next-next prefetch to improve range-scan cache hit.
-- Internal key prefix compression:
-  - Encode: for each key, write LCP with previous key (u16) + suffix length (u32) + suffix + child pointer.
-  - Decode: reconstruct from LCP + suffix, compatible with legacy raw format via a compression flag.
-- Buffer Pool Synergy: prefetch_page API for iterator; admission (TinyLFU) reduces scan pollution; sharded LRUK to reduce lock contention.
+### 1.2 B-link Structure
 
-## 4. Algorithms (high level)
-- Find (read):
-  1) start from root, decode internal; if key >= high_key and next!=INVALID, chase next; else pick child via upper_bound.
-  2) version check before/after; if changed, restart root.
-  3) at leaf, version check, then lookup.
-- Insert (write):
-  1) latch-crabbing descend; if child full, hold parent.
-  2) split: write right sibling (with high_key/next), then publish left.next/high_key/version, then update parent.
-  3) on parent full, propagate split upward.
-- Delete (write):
-  1) descend; if underflow, try borrow from siblings (PageId order), else coalesce; maintain B-link wires: left inherits right's high_key/next on merge.
+The tree uses B-link pointers (`next_page_id`) on all levels (both internal and leaf nodes). This creates a "side-link" to the right sibling. This is crucial for concurrency, as it allows readers to recover from transient inconsistent states caused by concurrent page splits by "chasing" the link to the right sibling.
 
-## 5. Benchmarks & Notes
-- Hot-read (single-thread) may dip if admission denies cold pages during warm-up or if cleaner thread interferes.
-  - Mitigation: disable cleaner for read-only runs; relax admission (count-only) or warm cache first.
-- Range-scan benefits from prefix compression and iterator prefetch due to fewer cache misses and smaller internal pages.
+```
+              +------------------+
+              |   Root (Int)     |
+              +------------------+
+             /         |         \
+   +--------+      +--------+      +--------+
+   | Int P1 |----->| Int P2 |----->| Int P3 |  (Internal B-link pointers)
+   +--------+      +--------+      +--------+
+   /   |   \      /   |   \      /   |   \
++----+ +----+  +----+ +----+  +----+ +----+
+| L1 |-| L2 |->| L3 |-| L4 |->| L5 |-| L6 | (Leaf chain / B-links)
++----+ +----+  +----+ +----+  +----+ +----+
+```
 
-## 6. Tuning Tips
-- Disable cleaner for pure reads: do not set QUILL_BPM_CLEANER=1
-- Loosen admission: make TinyLFU count-only during hot-read benchmarks.
-- Increase Buffer Pool for large scans.
+## 2. Concurrency Control
 
-## 7. Future Work
-- Stronger OLC with bounded retries and telemetry.
-- CSB-like internal layout and columnar key prefixing.
-- NUMA-aware partitioning and router.
-- WAL/MVCC for crash recovery and snapshot isolation.
+The B+Tree employs a sophisticated, lock-free read path and a high-concurrency write path using latch crabbing.
+
+### 2.1 Read Path: Optimistic Lock Coupling (OLC) with B-links
+
+-   Readers traverse the tree from the root without taking any locks.
+-   On each page, a `version` number is read before and after processing the page's contents. If the version changes, it indicates a concurrent modification, and the read operation restarts from the root.
+-   If a reader is traversing an internal node and the search key is greater than or equal to the node's `high_key`, it knows a split has occurred. Instead of restarting, it can use the `next_page_id` B-link to "chase" to the right sibling and continue the search, minimizing restarts.
+
+### 2.2 Write Path: Latch Crabbing
+
+Writers (insert/delete) use a technique called **latch crabbing** (or lock coupling) to ensure safe concurrent modifications.
+
+-   **Process**: A writer acquires a write latch on a parent node before fetching and latching a child node. Once the child is latched, the writer checks if the child is "safe" for the operation (i.e., not full for an insert, not at minimum size for a delete).
+    -   If the child is **safe**, the latch on the parent (and all other ancestors) is released.
+    -   If the child is **unsafe**, the parent latch is held, as the child might need to split or merge, which would require modifying the parent.
+-   **`Context` Struct**: This process is managed by a `Context` struct that holds the stack of write guards (`write_set`) for the current traversal path. Releasing ancestor latches is as simple as clearing this stack.
+
+```
+Latch Crabbing on Insert:
+1. Latch(Root)
+2. Descend to Child C1. Latch(C1).
+3. Check if C1 is safe (not full).
+   IF SAFE:
+     ReleaseLatch(Root). Path is now just {C1}.
+   IF UNSAFE (full):
+     Keep Latch(Root). Path is {Root, C1}.
+4. Descend from C1 to C2. Latch(C2).
+5. Check if C2 is safe... and so on.
+```
+
+### 2.3 Deadlock Avoidance
+
+When modifying siblings (during merge or redistribution), deadlocks are possible if two threads try to acquire latches on the same two pages in opposite orders. This is prevented by enforcing a strict **PageId-ordered locking** protocol. When two sibling pages must be latched, the page with the lower `PageId` is always latched first.
+
+## 3. Key Algorithms & Features
+
+-   **Parent-Guided Redirection**: During an insert or delete, after a writer has descended to a leaf, it re-validates its position using the parent (if a latch is still held). If a concurrent split has moved the target key range to a different sibling, the writer can jump directly to the correct page instead of traversing the leaf chain, preventing race conditions.
+-   **Iterator**: The iterator performs a forward scan by following the leaf chain (`next_page_id`). It uses a lightweight form of OLC, checking the leaf page version to detect concurrent modifications and restart if necessary to ensure it doesn't miss keys.
+-   **Prefix Compression**: Keys in internal nodes are prefix-compressed to save space. Each key is stored as `(lcp, suffix_len, suffix)`. This reduces the size of internal pages, increasing the tree's fanout and reducing its height, which improves cache performance and reduces I/O.
+-   **Split/Merge Safety**:
+    -   **Split**: When a node splits, the new right sibling is written first. Then, the B-link pointer and separator key are published atomically by updating the left sibling and parent. This ensures readers can always navigate the structure correctly.
+    -   **Merge/Redistribute**: When a node is underfull, the implementation first tries to borrow an entry from a sibling (redistribute). If both siblings are at minimum size, it merges with a sibling. All these operations carefully maintain the B-link chain and parent pointers.
+
+## 4. Benchmarks & Performance
+
+### 4.1 Example: Range Scan Benchmark
+
+This benchmark measures the efficiency of the leaf-chain traversal, which is critical for `SELECT` queries with `WHERE` clauses on indexed columns. It benefits from iterator prefetching and prefix compression.
+
+```rust
+// Pseudo-code for a range scan benchmark
+use std::time::Instant;
+
+fn benchmark_range_scan(index: Arc<BPlusTreeIndex>, num_keys: i64, num_passes: usize) {
+    // 1. Populate the index with sequential keys
+    for key in 1..=num_keys {
+        let tuple = create_tuple_from_key(key, index.key_schema.clone());
+        index.insert(&tuple, create_rid_from_key(key)).unwrap();
+    }
+
+    // 2. Run the benchmark
+    let start = Instant::now();
+    let mut count = 0;
+    for _ in 0..num_passes {
+        // Create an iterator over the full key range
+        let mut iter = TreeIndexIterator::new(index.clone(), ..);
+        while let Some(_) = iter.next().unwrap() {
+            count += 1;
+        }
+    }
+    let elapsed = start.elapsed();
+    let total_items_scanned = num_keys as usize * num_passes;
+    let items_per_sec = total_items_scanned as f64 / elapsed.as_secs_f64();
+
+    println!(
+        "Range Scan: Scanned {} items in {:?}. Throughput: {:.2} items/sec",
+        total_items_scanned, elapsed, items_per_sec
+    );
+}
+```
+
+### 4.2 Performance Notes
+-   **Hot Reads**: Performance on hot-spot reads depends heavily on the Buffer Pool's ability to keep the upper levels of the tree and the hot leaf pages in memory. The TinyLFU admission policy in the BPM might initially penalize newly hot data, so for read-heavy benchmarks, warming up the cache or using a count-only admission policy is recommended.
+-   **Tuning**:
+    -   For pure read workloads, disable the BPM's background cleaner (`QUILL_BPM_CLEANER=0`).
+    -   Increase the Buffer Pool size for workloads with large working sets or frequent large scans.
+
+## 5. Future Work
+-   Stronger OLC with bounded retries and telemetry.
+-   CSB+-like internal layout and columnar key prefixing.
+-   NUMA-aware partitioning and router.
+-   WAL/MVCC for crash recovery and snapshot isolation.
