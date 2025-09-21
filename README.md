@@ -1,178 +1,104 @@
 # QuillSQL
 
 <div align="center">
-  <img src="/public/rust-db.png" alt="QuillSQL Cover" width="500"/>
+  <img src="/public/rust-db.png" alt="QuillSQL Cover" width="520"/>
+  <p><em>A tiny yet serious SQL database in Rust — simple, modular, pragmatic.</em></p>
 </div>
 
-A SQL database system implemented in Rust
+## ✨ Highlights
 
-## System Architecture
+- **Clean architecture**: SQL → Logical Plan → Physical Plan → Volcano executor
+- **B+Tree index**: OLC readers, B-link pages, latch crabbing, range scan iterator
+- **Buffer pool**: LRU-K, pin/unpin with RAII guards, flush-on-evict
+- **Information schema**: `information_schema.schemas`, `tables`, `columns`, `indexes`
+- **Now supports**: `SHOW DATABASES`, `SHOW TABLES`, `EXPLAIN`
+- **Docs**: [Buffer Pool](docs/buffer_pool.md) · [B+ Tree Index](docs/btree_index.md)
 
-QuillSQL is a relational database system implemented in Rust, supporting standard SQL syntax and transaction processing. The system adopts a modular design, primarily comprising three main modules: SQL parser, query execution engine, and storage engine.
-
-
-### B+ Tree Index
-
-Implemented per textbook B+Tree with production-grade concurrency. Highlights:
-
-- Structure & Concurrency
-  - Latch crabbing on write path: hold parent only when the child is unsafe
-  - Full B-link (high_key + right-sibling next pointer); readers can safely chase right during splits
-  - OLC (optimistic version checks) on read: restart from root if a page changes
-  - Sibling locking in PageId order for redistribute/merge to avoid ABBA deadlocks
-- Correctness & Recovery
-  - Header page atomically switches root to avoid intermediate states on root split/shrink
-  - Parent-guided redirection + leaf-chain hop to avoid misplacing keys across parent ranges
-  - Page header version/type checks; decode failure or version change triggers retry
-- Buffer Pool
-  - Read/WritePageGuard with RAII pin/unpin; drop makes the frame evictable again
-  - LRU-K replacement, inflight_loads to prevent thundering herd, flush dirty before eviction
-  - page_table <-> replacer consistency enforced to prevent accidental eviction
-- Iterator
-  - Leaf-chain based forward scan; compatible with B-link/OLC; no key loss under concurrent splits/merges
-  - Supports range scans and full scans
-- Benchmarks (optional)
-  - Hot-read and range-scan benches (ignored by default). Examples:
-    - Hot read (release):
-      ```bash
-      QUILL_BENCH_BPM=1024 QUILL_BENCH_N=50000 QUILL_BENCH_OPS=500000 \
-      cargo test -p quill-sql --lib storage::index::btree_index::tests::bench_get_hot_read --release -- --nocapture --ignored
-      ```
-    - Full scan (release):
-      ```bash
-      QUILL_BENCH_BPM=1024 QUILL_BENCH_N=30000 QUILL_BENCH_PASSES=20 \
-      cargo test -p quill-sql --lib storage::index::btree_index::tests::bench_range_scan --release -- --nocapture --ignored
-      ```
-
-## Supported SQL Syntax
-
-### 1. Create/Drop Table
-
-create table:
-
-```sql
-CREATE TABLE table_name (
-    [ column_name data_type [index] [ column_constraint [...] ] ]
-    [, ... ]
-   );
-
-   where data_type is:
-    - BOOLEAN(BOOL): true | false
-    - FLOAT(DOUBLE)
-    - INTEGER(INT)
-    - STRING(TEXT, VARCHAR)
-
-   where column_constraint is:
-   [ NOT NULL | NULL | DEFAULT expr ]
-```
-
-drop table:
-
-```sql
-DROP TABLE table_name;
-```
-
-### 2. Insert Into
-
-```sql
-INSERT INTO table_name
-[ ( column_name [, ...] ) ]
-values ( expr [, ...] );
-```
-
-### 3. Select
-
-```sql
-SELECT [* | col_name | function [ [ AS ] output_name [, ...] ]]
-FROM from_item
-[GROUP BY col_name]
-[ORDER BY col_name [asc | desc] [, ...]]
-[LIMIT count]
-[OFFSET count]
-```
-
-where `function` is:
-
-- count(col_name)
-- min(col_name)
-- max(col_name)
-- sum(col_name)
-- avg(col_name)
-
-where `from_item` is:
-
-- table_name
-- table_name `join_type` table_name [`ON` predicate]
-
-where `join_type` is:
-
-- cross join
-- join
-- left join
-- right join
-
-where `on predicate` is:
-
-- column_name = column_name
-
-### 4. Update
-
-```sql
-UPDATE table_name
-SET column_name = expr [, ...]
-[WHERE condition];
-```
-
-where condition is: `column_name = expr`
-
-### 5. Delete
-
-```sql
-DELETE FROM table_name
-[WHERE condition];
-```
-
-where condition is: `column_name = expr`
-
-### 6. Show Table
-
-```sql
-SHOW TABLES;
-```
-
-```sql
-SHOW TABLE `table_name`;
-```
-
-### 7. Transaction
-
-```
-BEGIN;
-
-COMMIT;
-
-ROLLBACK;
-```
-
-## 8. Explain
-
-```
-explain sql;
-```
-
-## Getting Started
+## 🚀 Quick Start
 
 ```bash
-# Start the database server
-cargo run --bin sqldb-server
+cargo run --bin client
 
-# Start the command-line client
-cargo run --bin sqldb-cli
+# or open a persistent DB file
+cargo run --bin client -- --file my.db
 ```
 
-## Acknowledgements and References
+Sample session:
+```sql
+CREATE TABLE t(id INT, v INT DEFAULT 0);
+INSERT INTO t(id, v) VALUES (1, 10), (2, 20), (3, 30);
 
-QuillSQL's design and implementation reference the following excellent projects and courses:
+SELECT id, v FROM t WHERE v > 10 ORDER BY id DESC LIMIT 1;
 
-- [BustubX](https://github.com/systemxlabs/bustubx) - Educational relational database system implemented in Rust
-- [CMU 15-445/645 Database Systems](https://15445.courses.cs.cmu.edu/) - Carnegie Mellon University's database systems course
+SHOW DATABASES;
+SHOW TABLES;
+
+EXPLAIN SELECT id, COUNT(*) FROM t GROUP BY id ORDER BY id;
+```
+
+## 🧱 Supported SQL
+
+- **Data types**
+  - `BOOLEAN`, `INT8/16/32/64`, `UINT8/16/32/64`, `FLOAT32/64`, `VARCHAR(n)`
+
+- **CREATE TABLE**
+  - Column options: `NOT NULL` | `DEFAULT <literal>`
+  - Example:
+    ```sql
+    CREATE TABLE t(
+      id INT64 NOT NULL,
+      v  INT32 DEFAULT 0
+    );
+    ```
+
+- **CREATE INDEX**
+  - Example:
+    ```sql
+    CREATE INDEX idx_t_id ON t(id);
+    ```
+
+- **INSERT**
+  - `INSERT INTO ... VALUES (...)` and `INSERT INTO ... SELECT ...`
+
+- **SELECT**
+- Projection: columns, literals, aliases
+- FROM: table | subquery (`FROM (SELECT ...)`) — alias not yet supported
+- WHERE: comparison/logical operators `= != > >= < <= AND OR`
+- GROUP BY: aggregates `COUNT(expr|*)`, `AVG(expr)`
+- ORDER BY: `ASC|DESC`, supports `NULLS FIRST|LAST`
+- LIMIT/OFFSET
+- JOIN: `INNER JOIN` (with `ON` condition), `CROSS JOIN`
+
+- **UPDATE**
+  - `UPDATE t SET col = expr [, ...] [WHERE predicate]`
+
+- **SHOW**
+- `SHOW DATABASES;` (rewritten to `SELECT schema FROM information_schema.schemas`)
+- `SHOW TABLES;` (rewritten to `SELECT table_name FROM information_schema.tables`)
+
+- **EXPLAIN**
+  - `EXPLAIN <statement>` returns a single column named `plan` with multiple lines showing the logical plan tree
+
+## ⚠️ Current Limitations
+
+- Not yet supported: `DELETE`, `DROP`, `ALTER`, transaction control (BEGIN/COMMIT/ROLLBACK)
+- Not implemented: outer joins (Left/Right/Full), arithmetic expressions, table/subquery aliases
+- `ORDER BY` `DESC` / `NULLS FIRST|LAST` currently affects sorting only (not storage layout)
+
+## 🧪 Testing
+
+```bash
+cargo test -q
+```
+
+Includes sqllogictest-based cases:
+
+- `src/tests/sql_example/create_table.slt`
+- `src/tests/sql_example/create_index.slt`
+- `src/tests/sql_example/insert.slt`
+- `src/tests/sql_example/show_explain.slt`
+
+## 📚 Acknowledgements
+
+- [BustubX](https://github.com/systemxlabs/bustubx)
+- [CMU 15-445/645 Database Systems](https://15445.courses.cs.cmu.edu/)

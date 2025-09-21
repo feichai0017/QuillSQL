@@ -1,9 +1,0 @@
-#V2
-CREATE TABLE t(id INT, v INT);\nINSERT INTO t(id, v) VALUES (1, 10), (2, 20), (3, 30);
-CREATE TABLE t(id INT, v INT);
-INSERT INTO t(id, v) VALUES (1, 10), (2, 20), (3, 30);
-show databases;
-SELECT schema FROM information_schema.schemas WHERE schema = 'public';
-show tables;
-EXPLAIN SELECT id\nFROM t\nWHERE v > 10\nORDER BY id\nLIMIT 2 OFFSET 1;\n-- 期望输出的 plan 列包含这些节点（自上而下）：\n-- Project: id\n--   Limit: 2, offset: 1\n--     Sort: id ASC NULLS LAST\n--       Filter: v > 10\n--         TableScan: public.t
-EXPLAIN SELECT id, COUNT(*) FROM t GROUP BY id ORDER BY id;\n-- 期望包含：Project -> Sort -> Aggregate -> TableScan
