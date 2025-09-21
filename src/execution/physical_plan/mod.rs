@@ -30,9 +30,9 @@ pub use values::PhysicalValues;
 
 use crate::catalog::SchemaRef;
 use crate::{
+    error::QuillSQLResult,
     execution::{ExecutionContext, VolcanoExecutor},
     storage::tuple::Tuple,
-    error::QuillSQLResult,
 };
 
 #[derive(Debug)]

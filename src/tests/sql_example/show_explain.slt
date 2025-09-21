@@ -1,0 +1,37 @@
+statement ok
+CREATE TABLE t(id INT, v INT)
+
+statement ok
+INSERT INTO t(id, v) VALUES (1, 10), (2, 20), (3, 30)
+
+# SHOW DATABASES should at least include 'public'
+query T
+SELECT schema FROM information_schema.schemas WHERE schema = 'public'
+----
+public
+
+# SHOW TABLES should include user table 't' (using information_schema for stability)
+query T
+SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' and table_name = 't'
+----
+t
+
+# EXPLAIN returns lines of plan text
+query T
+EXPLAIN SELECT id FROM t WHERE v > 10 ORDER BY id LIMIT 2 OFFSET 1
+----
+Limit: 2, offset: 1
+  Sort: id ASC NULLS LAST
+    Project: id
+      Filter: (v Gt 10)
+        TableScan: t
+
+query T
+EXPLAIN SELECT id, COUNT(*) FROM t GROUP BY id ORDER BY id
+----
+Sort: id ASC NULLS LAST
+  Project: id, Count
+    Aggregate
+      TableScan: t
+
+

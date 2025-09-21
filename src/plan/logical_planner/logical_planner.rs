@@ -1,9 +1,9 @@
 use crate::error::{QuillSQLError, QuillSQLResult};
 
 use crate::catalog::Catalog;
-use crate::utils::table_ref::TableReference;
 use crate::plan::logical_plan::{LogicalPlan, OrderByExpr};
 use crate::sql::ast;
+use crate::utils::table_ref::TableReference;
 
 pub struct PlannerContext<'a> {
     pub catalog: &'a Catalog,
@@ -37,14 +37,12 @@ impl<'a> LogicalPlanner<'a> {
                 selection,
                 ..
             } => self.plan_update(table, assignments, selection),
+            ast::Statement::Explain { statement, .. } => self.plan_explain(statement),
             _ => unimplemented!(),
         }
     }
 
-    pub fn bind_order_by_expr(
-        &self,
-        order_by: &ast::OrderByExpr,
-    ) -> QuillSQLResult<OrderByExpr> {
+    pub fn bind_order_by_expr(&self, order_by: &ast::OrderByExpr) -> QuillSQLResult<OrderByExpr> {
         let expr = self.bind_expr(&order_by.expr)?;
         Ok(OrderByExpr {
             expr: Box::new(expr),
@@ -53,10 +51,7 @@ impl<'a> LogicalPlanner<'a> {
         })
     }
 
-    pub fn bind_table_name(
-        &self,
-        table_name: &ast::ObjectName,
-    ) -> QuillSQLResult<TableReference> {
+    pub fn bind_table_name(&self, table_name: &ast::ObjectName) -> QuillSQLResult<TableReference> {
         match table_name.0.as_slice() {
             [table] => Ok(TableReference::bare(table.value.clone())),
             [schema, table] => Ok(TableReference::partial(

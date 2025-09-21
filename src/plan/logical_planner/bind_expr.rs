@@ -1,10 +1,10 @@
+use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::expression::{AggregateFunction, BinaryExpr, ColumnExpr, Expr, Literal};
 use crate::function::AggregateFunctionKind;
 use crate::plan::LogicalPlanner;
-use crate::error::{QuillSQLError, QuillSQLResult};
+use crate::sql::ast;
 use crate::utils::scalar::ScalarValue;
 use crate::utils::table_ref::TableReference;
-use crate::sql::ast;
 
 impl LogicalPlanner<'_> {
     pub fn bind_expr(&self, sql: &ast::Expr) -> QuillSQLResult<Expr> {
@@ -115,8 +115,12 @@ impl LogicalPlanner<'_> {
                 name: _,
                 arg: sqlparser::ast::FunctionArgExpr::Expr(arg),
             } => self.bind_expr(arg),
-            ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(arg)) => {
+            ast::FunctionArg::Unnamed(sqlparser::ast::FunctionArgExpr::Expr(arg)) => {
                 self.bind_expr(arg)
+            }
+            ast::FunctionArg::Unnamed(sqlparser::ast::FunctionArgExpr::Wildcard) => {
+                // Treat COUNT(*) etc. as a non-null literal so accumulators count rows
+                Ok(Expr::Literal(Literal { value: 1i64.into() }))
             }
             _ => Err(QuillSQLError::Plan(format!(
                 "The function arg {} is not supported",

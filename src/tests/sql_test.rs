@@ -41,7 +41,7 @@ impl sqllogictest::DB for QuillSQLDB {
     fn run(&mut self, sql: &str) -> Result<DBOutput<Self::ColumnType>, Self::Error> {
         let is_query_sql = {
             let lower_sql = sql.trim_start().to_ascii_lowercase();
-            lower_sql.starts_with("select")
+            lower_sql.starts_with("select") || lower_sql.starts_with("explain")
         };
         let tuples = self.db.run(sql)?;
         if tuples.is_empty() {
