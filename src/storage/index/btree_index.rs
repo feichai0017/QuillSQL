@@ -1030,7 +1030,6 @@ impl BPlusTreeIndex {
 
     fn adjust_root(&self, root_guard: WritePageGuard) -> QuillSQLResult<()> {
         let (root_page, _) = BPlusTreePageCodec::decode(&root_guard.data, self.key_schema.clone())?;
-        let root_id = root_guard.page_id();
 
         if let BPlusTreePage::Internal(root_internal) = root_page {
             if root_internal.header.current_size == 1 {
@@ -1041,7 +1040,7 @@ impl BPlusTreeIndex {
                 drop(root_guard);
                 let _lock = self.header_page_lock.write();
                 self.set_root_page_id(new_root_id)?;
-                self.buffer_pool.delete_page(root_id)?;
+                // Delay old-root physical deallocation to avoid races with concurrent readers
             }
         } else if let BPlusTreePage::Leaf(root_leaf) = root_page {
             if root_leaf.header.current_size == 0 {
@@ -1049,7 +1048,7 @@ impl BPlusTreeIndex {
                 drop(root_guard);
                 let _lock = self.header_page_lock.write();
                 self.set_root_page_id(INVALID_PAGE_ID)?;
-                self.buffer_pool.delete_page(root_id)?;
+                // Delay old-root physical deallocation to avoid races with concurrent readers
             }
         }
         Ok(())
@@ -1092,7 +1091,10 @@ impl BPlusTreeIndex {
                 let (page, _) = decoded.unwrap();
                 match page {
                     BPlusTreePage::Internal(internal) => {
-                        let v1 = internal.header.version;
+                        // Double-read header-only version for OLC
+                        let (hdr1, _) =
+                            BPlusTreeInternalPageCodec::decode_header_only(&current_guard.data)?;
+                        let v1 = hdr1.version;
                         if let Some(ref hk) = internal.high_key {
                             if key >= hk && internal.header.next_page_id != INVALID_PAGE_ID {
                                 let sib = self
@@ -1109,7 +1111,9 @@ impl BPlusTreeIndex {
                             self.key_schema.clone(),
                             key,
                         )?;
-                        let v2 = internal.header.version;
+                        let (hdr2, _) =
+                            BPlusTreeInternalPageCodec::decode_header_only(&current_guard.data)?;
+                        let v2 = hdr2.version;
                         if v1 != v2 {
                             drop(current_guard);
                             restarts += 1;
@@ -1125,9 +1129,13 @@ impl BPlusTreeIndex {
                         drop(current_guard);
                         current_guard = child_guard;
                     }
-                    BPlusTreePage::Leaf(leaf) => {
-                        let v1 = leaf.header.version;
-                        let v2 = leaf.header.version;
+                    BPlusTreePage::Leaf(_leaf) => {
+                        let (h1, _) =
+                            BPlusTreeLeafPageCodec::decode_header_only(&current_guard.data)?;
+                        let v1 = h1.version;
+                        let (h2, _) =
+                            BPlusTreeLeafPageCodec::decode_header_only(&current_guard.data)?;
+                        let v2 = h2.version;
                         if v1 != v2 {
                             drop(current_guard);
                             restarts += 1;

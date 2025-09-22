@@ -86,11 +86,11 @@ impl TreeIndexIterator {
 
         if let Some(guard) = self.current_guard.as_ref() {
             // lightweight OLC on iterator read
-            // Fast path: decode header only and avoid reconstructing full leaf when possible
-            let (header, _) = BPlusTreeLeafPageCodec::decode_header_only(&guard.data)?;
-            let v1 = header.version;
-            if self.cursor >= header.current_size as usize {
-                let next_page_id = header.next_page_id;
+            // Fast path: header-only double-read for OLC
+            let (h1, _) = BPlusTreeLeafPageCodec::decode_header_only(&guard.data)?;
+            let v1 = h1.version;
+            if self.cursor >= h1.current_size as usize {
+                let next_page_id = h1.next_page_id;
                 if next_page_id == INVALID_PAGE_ID {
                     self.current_guard = None;
                     return Ok(None);
@@ -139,7 +139,8 @@ impl TreeIndexIterator {
                 // advance cached offset to next KV
                 self.kv_offset = new_off;
                 // verify version unchanged; otherwise restart iterator lazily
-                let v2 = header.version;
+                let (h2, _) = BPlusTreeLeafPageCodec::decode_header_only(&guard.data)?;
+                let v2 = h2.version;
                 if v1 == v2 {
                     return Ok(Some(rid));
                 } else {
