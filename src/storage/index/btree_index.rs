@@ -17,8 +17,14 @@ use crate::{
     storage::page::{BPlusTreeLeafPage, BPlusTreePage, RecordId},
 };
 
+use crate::storage::codec::BPlusTreePageTypeCodec;
 pub use crate::storage::index::btree_iterator::TreeIndexIterator;
+use crate::storage::page::BPlusTreePageType;
 use crate::storage::tuple::Tuple;
+
+// OLC bounded restart and backoff configuration
+const MAX_OLC_RESTARTS: usize = 64;
+const OLC_BACKOFF_BASE_US: u64 = 50;
 
 #[derive(Debug)]
 pub struct Context<'a> {
@@ -221,8 +227,12 @@ impl BPlusTreeIndex {
                 BPlusTreePageCodec::decode(&current_guard.data, self.key_schema.clone())?;
 
             match page {
-                BPlusTreePage::Internal(internal) => {
-                    let child_page_id = internal.look_up(key);
+                BPlusTreePage::Internal(_internal) => {
+                    let child_page_id = BPlusTreeInternalPageCodec::lookup_child_from_bytes(
+                        &current_guard.data,
+                        self.key_schema.clone(),
+                        key,
+                    )?;
                     if std::env::var("QUILL_DEBUG_FIND").ok().as_deref() == Some("1") {
                         eprintln!(
                             "[FIND] thread={:?} at_internal parent={} -> child={}",
@@ -232,37 +242,21 @@ impl BPlusTreeIndex {
                         );
                     }
                     let child_guard = self.buffer_pool.fetch_page_write(child_page_id)?;
-                    let child_decoded =
-                        BPlusTreePageCodec::decode(&child_guard.data, self.key_schema.clone());
-                    let (child_page, _) = match child_decoded {
-                        Ok(v) => v,
-                        Err(_) => {
-                            // Child may have been deleted/merged. Restart from root with clean context.
-                            if std::env::var("QUILL_DEBUG_FIND").ok().as_deref() == Some("1") {
-                                eprintln!(
-                                    "[FIND] thread={:?} decode_failed parent={} child={} restart_from_root",
-                                    std::thread::current().id(),
-                                    current_guard.page_id(),
-                                    child_page_id
-                                );
-                            }
-                            context.release_all_write_locks();
-                            drop(child_guard);
-                            drop(current_guard);
-                            let root_page_id = self.get_root_page_id()?;
-                            current_guard = self.buffer_pool.fetch_page_write(root_page_id)?;
-                            continue;
+                    // header-only safety check for overflow
+                    let will_overflow = match BPlusTreePageTypeCodec::decode(&child_guard.data)?.0 {
+                        BPlusTreePageType::LeafPage => {
+                            let (hdr, _) =
+                                BPlusTreeLeafPageCodec::decode_header_only(&child_guard.data)?;
+                            hdr.current_size == hdr.max_size
+                        }
+                        BPlusTreePageType::InternalPage => {
+                            let (hdr, _) =
+                                BPlusTreeInternalPageCodec::decode_header_only(&child_guard.data)?;
+                            hdr.current_size == hdr.max_size
                         }
                     };
 
                     if is_insert {
-                        // Classic latch crabbing: release ancestors if child will not overflow
-                        let will_overflow = match &child_page {
-                            BPlusTreePage::Leaf(p) => p.header.current_size == p.header.max_size,
-                            BPlusTreePage::Internal(p) => {
-                                p.header.current_size == p.header.max_size
-                            }
-                        };
                         if !will_overflow {
                             if std::env::var("QUILL_DEBUG_FIND").ok().as_deref() == Some("1") {
                                 eprintln!(
@@ -1077,7 +1071,8 @@ impl BPlusTreeIndex {
     }
 
     fn find_leaf_page_optimistic(&self, key: &Tuple) -> QuillSQLResult<ReadPageGuard> {
-        // OLC + B-link: version-check each step; if changed, restart. Allow right-sibling chase by high_key.
+        // OLC + B-link: version-check each step; if changed, restart with bounded backoff.
+        let mut restarts = 0usize;
         'restart: loop {
             let mut current_guard = self.buffer_pool.fetch_page_read(self.get_root_page_id()?)?;
             loop {
@@ -1085,6 +1080,13 @@ impl BPlusTreeIndex {
                     BPlusTreePageCodec::decode(&current_guard.data, self.key_schema.clone());
                 if decoded.is_err() {
                     drop(current_guard);
+                    restarts += 1;
+                    if restarts > MAX_OLC_RESTARTS {
+                        std::thread::sleep(std::time::Duration::from_micros(
+                            OLC_BACKOFF_BASE_US.saturating_mul(1 << (restarts.min(10) - 1)),
+                        ));
+                        restarts = 0;
+                    }
                     continue 'restart;
                 }
                 let (page, _) = decoded.unwrap();
@@ -1101,10 +1103,22 @@ impl BPlusTreeIndex {
                                 continue;
                             }
                         }
-                        let next_page_id = internal.look_up(key);
+                        // Byte-based child lookup to avoid re-decode costs
+                        let next_page_id = BPlusTreeInternalPageCodec::lookup_child_from_bytes(
+                            &current_guard.data,
+                            self.key_schema.clone(),
+                            key,
+                        )?;
                         let v2 = internal.header.version;
                         if v1 != v2 {
                             drop(current_guard);
+                            restarts += 1;
+                            if restarts > MAX_OLC_RESTARTS {
+                                std::thread::sleep(std::time::Duration::from_micros(
+                                    OLC_BACKOFF_BASE_US.saturating_mul(1 << (restarts.min(10) - 1)),
+                                ));
+                                restarts = 0;
+                            }
                             continue 'restart;
                         }
                         let child_guard = self.buffer_pool.fetch_page_read(next_page_id)?;
@@ -1116,6 +1130,13 @@ impl BPlusTreeIndex {
                         let v2 = leaf.header.version;
                         if v1 != v2 {
                             drop(current_guard);
+                            restarts += 1;
+                            if restarts > MAX_OLC_RESTARTS {
+                                std::thread::sleep(std::time::Duration::from_micros(
+                                    OLC_BACKOFF_BASE_US.saturating_mul(1 << (restarts.min(10) - 1)),
+                                ));
+                                restarts = 0;
+                            }
                             continue 'restart;
                         }
                         return Ok(current_guard);
