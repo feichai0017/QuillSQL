@@ -970,6 +970,17 @@ impl BPlusTreeIndex {
                     to_internal.header.current_size += 1;
                     to_internal.header.version += 1;
                     from_internal.header.version += 1;
+
+                    self.refresh_internal_child_fence(
+                        &parent_page,
+                        to_guard.page_id(),
+                        to_internal,
+                    )?;
+                    self.refresh_internal_child_fence(
+                        &parent_page,
+                        from_guard.page_id(),
+                        from_internal,
+                    )?;
                 }
                 _ => return Err(QuillSQLError::Internal("Mismatched page types".to_string())),
             }
@@ -1008,6 +1019,17 @@ impl BPlusTreeIndex {
                     to_internal.header.current_size += 1;
                     to_internal.header.version += 1;
                     from_internal.header.version += 1;
+
+                    self.refresh_internal_child_fence(
+                        &parent_page,
+                        to_guard.page_id(),
+                        to_internal,
+                    )?;
+                    self.refresh_internal_child_fence(
+                        &parent_page,
+                        from_guard.page_id(),
+                        from_internal,
+                    )?;
                 }
                 _ => return Err(QuillSQLError::Internal("Mismatched page types".to_string())),
             }
@@ -1025,6 +1047,28 @@ impl BPlusTreeIndex {
             .data
             .copy_from_slice(&BPlusTreeInternalPageCodec::encode(&parent_page));
 
+        Ok(())
+    }
+
+    fn refresh_internal_child_fence(
+        &self,
+        parent_page: &BPlusTreeInternalPage,
+        child_page_id: PageId,
+        child_page: &mut BPlusTreeInternalPage,
+    ) -> QuillSQLResult<()> {
+        let Some(child_idx) = parent_page.value_index(child_page_id) else {
+            return Err(QuillSQLError::Internal(
+                "redistribute: child missing from parent".to_string(),
+            ));
+        };
+        let size = parent_page.header.current_size as usize;
+        if child_idx + 1 < size {
+            child_page.high_key = Some(parent_page.key_at(child_idx + 1).clone());
+            child_page.header.next_page_id = parent_page.value_at(child_idx + 1);
+        } else {
+            child_page.high_key = parent_page.high_key.clone();
+            child_page.header.next_page_id = parent_page.header.next_page_id;
+        }
         Ok(())
     }
 
@@ -1622,6 +1666,55 @@ mod tests {
         index.delete(&tuple).unwrap();
         println!("After deleting final key 2:\n{}", index.to_dot().unwrap());
         assert!(index.is_empty().unwrap());
+    }
+
+    #[test]
+    fn test_internal_borrow_from_right_keeps_searchable() {
+        let (_temp_dir, index, key_schema) = create_test_index(64, 2, 3);
+
+        let inserts = [
+            -5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,
+        ];
+        for key in inserts {
+            let tuple = create_tuple_from_key(key, key_schema.clone());
+            let rid = create_rid_from_key(key);
+            index.insert(&tuple, rid).unwrap();
+        }
+
+        let deletes = [-5, -4, -3, -2, -1, 0, 1, 2];
+        for key in deletes {
+            let tuple = create_tuple_from_key(key, key_schema.clone());
+            index.delete(&tuple).unwrap();
+        }
+
+        let root_page_id = index.get_root_page_id().unwrap();
+        let root_guard = index.buffer_pool.fetch_page_read(root_page_id).unwrap();
+        let (root_page, _) =
+            BPlusTreePageCodec::decode(&root_guard.data, key_schema.clone()).unwrap();
+        let (left_internal_id, right_internal_id) =
+            if let BPlusTreePage::Internal(root_internal) = root_page {
+                assert_eq!(root_internal.header.current_size, 2);
+                (root_internal.value_at(0), root_internal.value_at(1))
+            } else {
+                panic!("expected internal root after deletions");
+            };
+        drop(root_guard);
+
+        let left_guard = index.buffer_pool.fetch_page_read(left_internal_id).unwrap();
+        let (left_page, _) =
+            BPlusTreePageCodec::decode(&left_guard.data, key_schema.clone()).unwrap();
+        if let BPlusTreePage::Internal(left_internal) = left_page {
+            assert_eq!(
+                left_internal.high_key,
+                Some(create_tuple_from_key(7, key_schema.clone()))
+            );
+            assert_eq!(left_internal.header.next_page_id, right_internal_id);
+        } else {
+            panic!("expected left child to remain internal");
+        }
+
+        let survivor = create_tuple_from_key(3, key_schema.clone());
+        assert!(index.get(&survivor).unwrap().is_some());
     }
 
     /// TEST: SequentialEdgeMixTest - equivalent to BusTub's mixed insert/delete test
