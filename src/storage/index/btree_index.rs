@@ -1122,7 +1122,7 @@ impl BPlusTreeIndex {
         }
     }
 
-    pub(crate) fn find_first_leaf_page(&self) -> QuillSQLResult<ReadPageGuard> {
+    pub fn find_first_leaf_page(&self) -> QuillSQLResult<ReadPageGuard> {
         let mut current_page_id = self.get_root_page_id()?;
         if current_page_id == INVALID_PAGE_ID {
             return Err(QuillSQLError::Internal("Tree is empty".to_string()));
@@ -1147,7 +1147,7 @@ impl BPlusTreeIndex {
     /// 叶子节点的只读保护器 (ReadPageGuard)。
     ///
     /// 这个函数通过 ReadPageGuard 的 RAII 特性，在遍历时实现了闩锁耦合。
-    pub(crate) fn find_leaf_page_for_iterator(
+    pub fn find_leaf_page_for_iterator(
         &self,
         key: &Tuple,
         start_page_id: PageId,

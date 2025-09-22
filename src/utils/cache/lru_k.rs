@@ -54,7 +54,6 @@ impl Replacer for LRUKReplacer {
     }
 
     // 驱逐 evictable 且具有最大 k-distance 的 frame
-    // 驱逐 evictable 且具有最大 k-distance 的 frame
     fn evict(&mut self) -> Option<FrameId> {
         let mut max_k_distance = 0;
         let mut result = None;

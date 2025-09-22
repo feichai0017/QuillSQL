@@ -3,7 +3,6 @@ use crate::error::QuillSQLResult;
 
 pub mod clock_lru;
 pub mod lru_k;
-pub mod sharded_lru_k;
 pub mod tiny_lfu;
 pub mod window_lfu;
 

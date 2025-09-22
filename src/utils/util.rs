@@ -5,7 +5,6 @@ use crate::plan::logical_plan::LogicalPlan;
 use crate::storage::index::btree_index::BPlusTreeIndex;
 use comfy_table::Cell;
 use std::collections::VecDeque;
-use std::sync::atomic::Ordering;
 
 use crate::storage::page::BPlusTreePage;
 use crate::storage::tuple::Tuple;

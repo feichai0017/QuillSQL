@@ -2,7 +2,6 @@ use bytes::Bytes;
 use dashmap::DashMap;
 use parking_lot::{Mutex, RwLock};
 use std::sync::atomic::Ordering;
-// AtomicUsize removed since we no longer use sharded free-list RR here
 use std::{collections::VecDeque, sync::Arc};
 
 use crate::buffer::page::{self, Page, PageId, ReadPageGuard, WritePageGuard, PAGE_SIZE};
@@ -19,8 +18,9 @@ use crate::storage::{
     page::{BPlusTreeHeaderPage, BPlusTreeInternalPage, BPlusTreeLeafPage, BPlusTreePage},
 };
 
-use crate::utils::cache::sharded_lru_k::ShardedLRUKReplacer;
+use crate::utils::cache::lru_k::LRUKReplacer;
 use crate::utils::cache::tiny_lfu::TinyLFU;
+use crate::utils::cache::Replacer;
 
 pub type FrameId = usize;
 
@@ -29,13 +29,13 @@ pub const BUFFER_POOL_SIZE: usize = 5000;
 #[derive(Debug)]
 pub struct BufferPoolManager {
     pub pool: Vec<Arc<RwLock<Page>>>,
-    pub replacer: Arc<RwLock<ShardedLRUKReplacer>>,
+    pub replacer: Arc<RwLock<LRUKReplacer>>,
     pub disk_scheduler: Arc<DiskScheduler>,
     pub page_table: Arc<DashMap<PageId, FrameId>>,
     pub free_list: Arc<RwLock<VecDeque<FrameId>>>,
     /// Per-page inflight load guards to serialize concurrent loads of the same page
     pub inflight_loads: Arc<DashMap<PageId, Arc<Mutex<()>>>>,
-    /// Optional TinyLFU admission filter (best-effort)
+    /// Optional TinyLFU admission filter
     pub tiny_lfu: Option<Arc<RwLock<TinyLFU>>>,
 }
 impl BufferPoolManager {
@@ -72,7 +72,7 @@ impl BufferPoolManager {
 
         Self {
             pool,
-            replacer: Arc::new(RwLock::new(ShardedLRUKReplacer::new(num_pages))),
+            replacer: Arc::new(RwLock::new(LRUKReplacer::new(num_pages))),
             disk_scheduler,
             page_table: Arc::new(DashMap::new()),
             free_list: Arc::new(RwLock::new(free_list)),
@@ -526,8 +526,9 @@ impl BufferPoolManager {
 #[cfg(test)]
 mod tests {
     use crate::buffer::buffer_pool::BufferPoolManager;
-    use crate::storage::disk_manager::DiskManager; // 假设您有 DiskManager
-    use crate::storage::disk_scheduler::DiskScheduler; // 假设您有 DiskScheduler
+    use crate::storage::disk_manager::DiskManager;
+    use crate::storage::disk_scheduler::DiskScheduler;
+    use crate::utils::cache::Replacer;
     use std::fs;
     use std::sync::Arc;
     use tempfile::TempDir;
