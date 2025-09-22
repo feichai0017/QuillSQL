@@ -17,20 +17,20 @@ use crate::{
     storage::page::{BPlusTreeLeafPage, BPlusTreePage, RecordId},
 };
 
-use crate::storage::tuple::Tuple;
 pub use crate::storage::index::btree_iterator::TreeIndexIterator;
+use crate::storage::tuple::Tuple;
 
 #[derive(Debug)]
 pub struct Context<'a> {
-    /// 存储从根节点到当前节点路径上所有被持有的写保护器。
-    /// 在向下遍历时，如果遇到“安全”的节点，这个队列会被清空，
-    /// 从而释放所有祖先节点的锁。
+    /// Write guards along the path from root to the current node.
+    /// When a child node is safe for the operation, all ancestor locks
+    /// can be released (clear this set) to reduce lock footprint.
     pub write_set: VecDeque<WritePageGuard>,
 
-    /// (可选，用于读操作) 存储读保护器。
+    /// Optional read guards used on read paths for validations/restarts.
     pub read_set: VecDeque<ReadPageGuard>,
 
-    /// Holds the lock on the header page during traversal.
+    /// Holds the header page lock during structural changes (e.g., root switch).
     pub header_lock_guard: Option<RwLockWriteGuard<'a, ()>>,
 }
 
@@ -43,7 +43,7 @@ impl<'a> Context<'a> {
         }
     }
 
-    /// 方便地将一个写保护器添加到路径中。
+    /// Push a write guard onto the traversal path.
     pub fn push_write_guard(&mut self, guard: WritePageGuard) {
         self.write_set.push_back(guard);
     }
@@ -52,13 +52,16 @@ impl<'a> Context<'a> {
         self.read_set.push_back(guard);
     }
 
-    /// 当遇到安全节点时，清空路径并释放所有持有的锁。
+    /// Release all ancestor write locks when it is safe to proceed.
     pub fn release_all_write_locks(&mut self) {
         self.write_set.clear();
         self.header_lock_guard = None;
     }
 }
-// B+树索引
+
+// Production-ready B+ Tree index with OLC readers and latch-crabbing writers.
+// - Header page holds immutable identity; root_page_id changes atomically.
+
 #[derive(Debug)]
 pub struct BPlusTreeIndex {
     pub key_schema: SchemaRef,
@@ -1165,15 +1168,14 @@ impl BPlusTreeIndex {
 
             match page_content {
                 // c. 如果是内部节点...
-                BPlusTreePage::Internal(internal_page) => {
-                    if internal_page.header.current_size > internal_page.min_size() {
-                        // context.release_all_write_locks(); // This line is removed
-                    }
-                    // 找到下一个要遍历的子节点的 page_id。
-                    current_page_id = internal_page.look_up(key);
-                    // 【闩锁耦合的核心】: `current_guard` 在这里离开作用域，
-                    // 它的 Drop 实现会被调用，自动释放当前页面的读锁和 pin。
-                    // 然后循环会用 `current_page_id` 去锁住下一层的节点。
+                BPlusTreePage::Internal(_internal_page) => {
+                    // find next child id using bytes path
+                    current_page_id =
+                        crate::storage::codec::BPlusTreeInternalPageCodec::lookup_child_from_bytes(
+                            &current_guard.data,
+                            self.key_schema.clone(),
+                            key,
+                        )?;
                 }
                 // d. 如果是叶子节点...
                 BPlusTreePage::Leaf(_) => {

@@ -1,3 +1,8 @@
+//! Buffer Pool Manager
+//! - Page table (PageId→FrameId), sharded LRU-K replacer, optional TinyLFU admission
+//! - Read/Write page guards pin/unpin via RAII; flush dirty pages before eviction
+//! - Disk I/O offloaded to async DiskScheduler
+
 use bytes::Bytes;
 use dashmap::DashMap;
 use parking_lot::{Mutex, RwLock};
@@ -325,7 +330,7 @@ impl BufferPoolManager {
         schema: SchemaRef,
     ) -> QuillSQLResult<(ReadPageGuard, TablePage)> {
         let guard = self.fetch_page_read(page_id)?;
-        // 因为 guard 实现了 Deref，可以直接访问 data
+        // Guard exposes `data` directly; decode a typed view on demand
         let (table_page, _) = TablePageCodec::decode(&guard.data, schema)?;
         Ok((guard, table_page))
     }
@@ -361,8 +366,7 @@ impl BufferPoolManager {
         Ok((guard, tree_leaf_page))
     }
 
-    /// Prefetch a page into buffer pool (best-effort). It fetches then immediately drops,
-    /// warming up the cache without holding the pin.
+    /// Best-effort prefetch: fetch+drop to warm the cache without holding the pin.
     pub fn prefetch_page(self: &Arc<Self>, page_id: PageId) -> QuillSQLResult<()> {
         if let Ok(g) = self.fetch_page_read(page_id) {
             drop(g);

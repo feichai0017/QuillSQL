@@ -2,10 +2,12 @@ use crate::buffer::PAGE_SIZE;
 use crate::catalog::SchemaRef;
 use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::storage::codec::{CommonCodec, DecodedData, RidCodec, TupleCodec};
+use crate::storage::page::RecordId;
 use crate::storage::page::{
     BPlusTreeHeaderPage, BPlusTreeInternalPage, BPlusTreeInternalPageHeader, BPlusTreeLeafPage,
     BPlusTreeLeafPageHeader, BPlusTreePage, BPlusTreePageType,
 };
+use crate::storage::tuple::Tuple;
 
 pub struct BPlusTreeHeaderPageCodec;
 
@@ -66,6 +68,11 @@ impl BPlusTreePageCodec {
             }
         }
     }
+
+    /// Decode only the page type header without materializing the entire page.
+    pub fn decode_header(bytes: &[u8]) -> QuillSQLResult<DecodedData<BPlusTreePageType>> {
+        BPlusTreePageTypeCodec::decode(bytes)
+    }
 }
 
 pub struct BPlusTreeLeafPageCodec;
@@ -108,10 +115,8 @@ impl BPlusTreeLeafPageCodec {
             for _ in 0..header.current_size {
                 let (tuple, offset) = TupleCodec::decode(left_bytes, schema.clone())?;
                 left_bytes = &left_bytes[offset..];
-
                 let (rid, offset) = RidCodec::decode(left_bytes)?;
                 left_bytes = &left_bytes[offset..];
-
                 array.push((tuple, rid));
             }
 
@@ -128,6 +133,48 @@ impl BPlusTreeLeafPageCodec {
                 "Index page type must be leaf page".to_string(),
             ))
         }
+    }
+
+    /// Decode only the leaf page header and return (header, bytes_consumed)
+    pub fn decode_header_only(
+        bytes: &[u8],
+    ) -> QuillSQLResult<DecodedData<BPlusTreeLeafPageHeader>> {
+        if bytes.len() != PAGE_SIZE {
+            return Err(QuillSQLError::Storage(format!(
+                "Index page size is not {} instead of {}",
+                PAGE_SIZE,
+                bytes.len()
+            )));
+        }
+        let (page_type, _) = BPlusTreePageTypeCodec::decode(bytes)?;
+        if !matches!(page_type, BPlusTreePageType::LeafPage) {
+            return Err(QuillSQLError::Storage(
+                "Index page type must be leaf page".to_string(),
+            ));
+        }
+        BPlusTreeLeafPageHeaderCodec::decode(bytes)
+    }
+
+    /// Decode one (Tuple, RecordId) starting at `offset` within the page bytes.
+    /// Returns ((tuple, rid), new_offset).
+    pub fn decode_kv_at_offset(
+        bytes: &[u8],
+        schema: SchemaRef,
+        offset: usize,
+    ) -> QuillSQLResult<DecodedData<(Tuple, RecordId)>> {
+        if bytes.len() != PAGE_SIZE {
+            return Err(QuillSQLError::Storage(format!(
+                "Index page size is not {} instead of {}",
+                PAGE_SIZE,
+                bytes.len()
+            )));
+        }
+        let mut left_bytes = &bytes[offset..];
+        let (tuple, t_off) = TupleCodec::decode(left_bytes, schema.clone())?;
+        left_bytes = &left_bytes[t_off..];
+        let (rid, r_off) = RidCodec::decode(left_bytes)?;
+        let consumed = t_off + r_off;
+        Ok(((tuple, rid), offset + consumed))
     }
 }
 
@@ -251,6 +298,115 @@ impl BPlusTreeInternalPageCodec {
                 "Index page type must be internal page".to_string(),
             ))
         }
+    }
+
+    /// Decode only the internal page header without materializing payload.
+    pub fn decode_header_only(
+        bytes: &[u8],
+    ) -> QuillSQLResult<DecodedData<BPlusTreeInternalPageHeader>> {
+        if bytes.len() != PAGE_SIZE {
+            return Err(QuillSQLError::Storage(format!(
+                "Index page size is not {} instead of {}",
+                PAGE_SIZE,
+                bytes.len()
+            )));
+        }
+        let (page_type, _) = BPlusTreePageTypeCodec::decode(bytes)?;
+        if !matches!(page_type, BPlusTreePageType::InternalPage) {
+            return Err(QuillSQLError::Storage(
+                "Index page type must be internal page".to_string(),
+            ));
+        }
+        BPlusTreeInternalPageHeaderCodec::decode(bytes)
+    }
+}
+
+impl BPlusTreeInternalPageCodec {
+    /// Lookup child page id from an internal page byte slice without fully decoding the page.
+    pub fn lookup_child_from_bytes(
+        bytes: &[u8],
+        schema: SchemaRef,
+        search_key: &Tuple,
+    ) -> QuillSQLResult<u32> {
+        if bytes.len() != PAGE_SIZE {
+            return Err(QuillSQLError::Storage(format!(
+                "Index page size is not {} instead of {}",
+                PAGE_SIZE,
+                bytes.len()
+            )));
+        }
+        // Decode type and header
+        let (page_type, _t_off) = BPlusTreePageTypeCodec::decode(bytes)?;
+        if !matches!(page_type, BPlusTreePageType::InternalPage) {
+            return Err(QuillSQLError::Storage(
+                "Index page type must be internal page".to_string(),
+            ));
+        }
+        let (header, h_off) = BPlusTreeInternalPageHeaderCodec::decode(bytes)?;
+        let mut left_bytes = &bytes[h_off..];
+        // Optional high_key
+        let (has_high_key, o1) = CommonCodec::decode_u8(left_bytes)?;
+        left_bytes = &left_bytes[o1..];
+        if has_high_key == 1 {
+            let (_hk, o2) = TupleCodec::decode(left_bytes, schema.clone())?;
+            left_bytes = &left_bytes[o2..];
+        }
+        // Compression flag
+        let (compress_flag, o3) = CommonCodec::decode_u8(left_bytes)?;
+        left_bytes = &left_bytes[o3..];
+
+        let mut result_pid: u32;
+        if compress_flag == 1 {
+            // sentinel
+            let (_lcp, o4) = CommonCodec::decode_u16(left_bytes)?;
+            left_bytes = &left_bytes[o4..];
+            let (suf_len_u32, o5) = CommonCodec::decode_u32(left_bytes)?;
+            left_bytes = &left_bytes[o5..];
+            let suf_len = suf_len_u32 as usize;
+            let suffix = &left_bytes[..suf_len];
+            left_bytes = &left_bytes[suf_len..];
+            let (pid0, o6) = CommonCodec::decode_u32(left_bytes)?;
+            left_bytes = &left_bytes[o6..];
+            result_pid = pid0;
+            let mut prev_key_bytes: Vec<u8> = suffix.to_vec();
+            for _ in 1..header.current_size {
+                let (lcp_u16, o7) = CommonCodec::decode_u16(left_bytes)?;
+                left_bytes = &left_bytes[o7..];
+                let (suf_len_u32, o8) = CommonCodec::decode_u32(left_bytes)?;
+                left_bytes = &left_bytes[o8..];
+                let suf_len = suf_len_u32 as usize;
+                let suffix = &left_bytes[..suf_len];
+                left_bytes = &left_bytes[suf_len..];
+                let keep = (lcp_u16 as usize).min(prev_key_bytes.len());
+                let mut full = Vec::with_capacity(keep + suf_len);
+                full.extend_from_slice(&prev_key_bytes[..keep]);
+                full.extend_from_slice(suffix);
+                let (tuple_i, _off_i) = TupleCodec::decode(&full, schema.clone())?;
+                let (pid_i, o9) = CommonCodec::decode_u32(left_bytes)?;
+                left_bytes = &left_bytes[o9..];
+                if tuple_i <= *search_key {
+                    result_pid = pid_i;
+                }
+                prev_key_bytes = full;
+            }
+        } else {
+            // raw format
+            let (_sentinel, o4) = TupleCodec::decode(left_bytes, schema.clone())?;
+            left_bytes = &left_bytes[o4..];
+            let (pid0, o5) = CommonCodec::decode_u32(left_bytes)?;
+            left_bytes = &left_bytes[o5..];
+            result_pid = pid0;
+            for _ in 1..header.current_size {
+                let (tuple_i, o6) = TupleCodec::decode(left_bytes, schema.clone())?;
+                left_bytes = &left_bytes[o6..];
+                let (pid_i, o7) = CommonCodec::decode_u32(left_bytes)?;
+                left_bytes = &left_bytes[o7..];
+                if tuple_i <= *search_key {
+                    result_pid = pid_i;
+                }
+            }
+        }
+        Ok(result_pid)
     }
 }
 

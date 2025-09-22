@@ -17,6 +17,8 @@ pub struct TreeIndexIterator {
     current_guard: Option<ReadPageGuard>,
     cursor: usize,
     started: bool,
+    // Byte offset to current cursor's KV within the leaf page
+    kv_offset: usize,
 }
 
 impl TreeIndexIterator {
@@ -29,6 +31,7 @@ impl TreeIndexIterator {
             current_guard: None,
             cursor: 0,
             started: false,
+            kv_offset: 0,
         }
     }
 
@@ -44,13 +47,27 @@ impl TreeIndexIterator {
                 Bound::Included(k) | Bound::Excluded(k) => {
                     if self.current_guard.is_none() {
                         let guard = self.index.find_leaf_page_for_iterator(k, root_page_id)?;
-                        let (leaf, _) = BPlusTreeLeafPageCodec::decode(
+                        let (header, hdr_off) =
+                            BPlusTreeLeafPageCodec::decode_header_only(&guard.data)?;
+                        // find initial cursor position
+                        let (full_leaf, _) = BPlusTreeLeafPageCodec::decode(
                             &guard.data,
                             self.index.key_schema.clone(),
                         )?;
-                        self.cursor = leaf
+                        self.cursor = full_leaf
                             .next_closest(k, matches!(self.start_bound, Bound::Included(_)))
-                            .unwrap_or(leaf.header.current_size as usize);
+                            .unwrap_or(header.current_size as usize);
+                        // compute initial kv_offset by advancing from header once
+                        let mut off = hdr_off;
+                        for _ in 0..self.cursor {
+                            let (_, new_off) = BPlusTreeLeafPageCodec::decode_kv_at_offset(
+                                &guard.data,
+                                self.index.key_schema.clone(),
+                                off,
+                            )?;
+                            off = new_off;
+                        }
+                        self.kv_offset = off;
                         self.current_guard = Some(guard);
                     }
                 }
@@ -58,6 +75,10 @@ impl TreeIndexIterator {
                     let guard = self.index.find_first_leaf_page()?;
                     self.current_guard = Some(guard);
                     self.cursor = 0;
+                    let (_, hdr_off) = BPlusTreeLeafPageCodec::decode_header_only(
+                        &self.current_guard.as_ref().unwrap().data,
+                    )?;
+                    self.kv_offset = hdr_off;
                 }
             };
             self.started = true;
@@ -65,11 +86,11 @@ impl TreeIndexIterator {
 
         if let Some(guard) = self.current_guard.as_ref() {
             // lightweight OLC on iterator read
-            let (leaf, _) =
-                BPlusTreeLeafPageCodec::decode(&guard.data, self.index.key_schema.clone())?;
-            let v1 = leaf.header.version;
-            if self.cursor >= leaf.header.current_size as usize {
-                let next_page_id = leaf.header.next_page_id;
+            // Fast path: decode header only and avoid reconstructing full leaf when possible
+            let (header, _) = BPlusTreeLeafPageCodec::decode_header_only(&guard.data)?;
+            let v1 = header.version;
+            if self.cursor >= header.current_size as usize {
+                let next_page_id = header.next_page_id;
                 if next_page_id == INVALID_PAGE_ID {
                     self.current_guard = None;
                     return Ok(None);
@@ -92,36 +113,62 @@ impl TreeIndexIterator {
                         Some(self.index.buffer_pool.fetch_page_read(next_page_id)?);
                 }
                 self.cursor = 0;
+                // reset kv_offset to the start of next leaf
+                let (_nh, nh_off) = BPlusTreeLeafPageCodec::decode_header_only(
+                    &self.current_guard.as_ref().unwrap().data,
+                )?;
+                self.kv_offset = nh_off;
                 return self.next();
             }
 
-            let (key, rid) = leaf.kv_at(self.cursor);
+            // decode key/rid at current cursor using cached offset
+            let ((key, rid), new_off) = BPlusTreeLeafPageCodec::decode_kv_at_offset(
+                &guard.data,
+                self.index.key_schema.clone(),
+                self.kv_offset,
+            )?;
 
             let in_range = match &self.end_bound {
-                Bound::Included(end_key) => key <= end_key,
-                Bound::Excluded(end_key) => key < end_key,
+                Bound::Included(end_key) => &key <= end_key,
+                Bound::Excluded(end_key) => &key < end_key,
                 Bound::Unbounded => true,
             };
 
             if in_range {
                 self.cursor += 1;
+                // advance cached offset to next KV
+                self.kv_offset = new_off;
                 // verify version unchanged; otherwise restart iterator lazily
-                let v2 = leaf.header.version;
+                let v2 = header.version;
                 if v1 == v2 {
-                    return Ok(Some(*rid));
+                    return Ok(Some(rid));
                 } else {
                     // restart from current key to avoid duplicates
                     let restart_key = key.clone();
                     let root = self.index.get_root_page_id()?;
                     let guard = self.index.find_leaf_page_for_iterator(&restart_key, root)?;
                     self.current_guard = Some(guard);
-                    let (leaf2, _) = BPlusTreeLeafPageCodec::decode(
+                    // recompute cursor cheaply using header + linear seek
+                    let (hdr2, hdr2_off) = BPlusTreeLeafPageCodec::decode_header_only(
                         &self.current_guard.as_ref().unwrap().data,
-                        self.index.key_schema.clone(),
                     )?;
-                    self.cursor = leaf2
-                        .next_closest(&restart_key, true)
-                        .unwrap_or(leaf2.header.current_size as usize);
+                    let mut off2 = hdr2_off;
+                    let mut pos2 = 0usize;
+                    while pos2 < hdr2.current_size as usize {
+                        let ((k2, _), new_off2) = BPlusTreeLeafPageCodec::decode_kv_at_offset(
+                            &self.current_guard.as_ref().unwrap().data,
+                            self.index.key_schema.clone(),
+                            off2,
+                        )?;
+                        if &k2 >= &restart_key {
+                            break;
+                        }
+                        off2 = new_off2;
+                        pos2 += 1;
+                    }
+                    self.cursor = pos2;
+                    // set cached offset for the new cursor
+                    self.kv_offset = off2;
                     return self.next();
                 }
             }
