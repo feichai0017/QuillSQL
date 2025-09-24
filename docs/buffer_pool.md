@@ -1,4 +1,4 @@
-# Buffer Pool Manager — Architecture, Features, Optimizations
+# Buffer Pool Manager — Architecture and Streaming Scan
 
 ## 1. Architecture Overview
 
@@ -25,14 +25,13 @@ The Buffer Pool Manager (BPM) is responsible for managing pages in memory, actin
 |        ^   |                      ^   |                         |
 |        |   | (pins/unpins)        |   | (page data)             |
 |        |   v                      |   v                         |
-|  +--------------------+   +---------------------+   +---------------------+
-|  |   Client Thread    |   |  Background Cleaner |   |    Disk Scheduler   |
-|  | (e.g., Executor)   |   | (Optional Thread)   |   |  (I/O Background    |
-|  | - fetch_page_*()   |<->| - Flushes dirty     |<->|    Thread)          |
-|  | - new_page()       |   | - Ages replacer     |   | - read_page()       |
-|  | - unpin_page()     |   +---------------------+   | - write_page()      |
-|  | - new_page()       |   |                       |   | - write_page()      |
-|  +--------------------+                             +---------------------+
+|  +--------------------+            +---------------------+
+|  |   Client Thread    |            |    Disk Scheduler   |
+|  | (e.g., Executor)   |<---------->|  (I/O Background    |
+|  | - fetch_page_*()   |            |    Thread)          |
+|  | - new_page()       |            | - read_page()       |
+|  | - unpin_page()     |            | - write_page()      |
+|  +--------------------+            +---------------------+
 |                                                           |   ^
 |                                                           v   |
 |                                                     +----------------+
@@ -68,8 +67,9 @@ When a guard is acquired (via `fetch_page_read`/`fetch_page_write`), the page's 
 
 -   **Sharded LRU-K Replacer**: The replacer is partitioned into multiple shards, each with its own lock. Accesses are distributed across shards based on `PageId`, significantly reducing lock contention on hot paths like `record_access` and `evict`.
 -   **TinyLFU Admission Filter (Optional)**: An approximate frequency-based filter that helps protect the buffer pool from pollution caused by large, one-time scans. It estimates the access frequency of incoming pages and may deny admission to "cold" pages, forcing them to be used without being cached.
--   **Background Cleaner (Optional)**: A dedicated thread that periodically scans the buffer pool for dirty pages and schedules them for flushing. This helps to smooth out write I/O, reducing latency spikes during eviction or shutdown. It is enabled via the `QUILL_BPM_CLEANER=1` environment variable.
--   **Prefetch API**: The `prefetch_page` method allows other components (like the B+Tree iterator) to hint that a page will be needed soon. The BPM will try to load it into the buffer pool ahead of time, improving performance for predictable access patterns like range scans.
+-   **Sequential Scan Ring Buffer (Bypass)**: For full sequential scans that would otherwise thrash the cache, the iterator switches to a direct I/O ring (`DirectRingBuffer`). It reads and decodes pages through the DiskScheduler with a small in-memory window (readahead), and does not admit these pages into the main buffer pool. This significantly reduces cache pollution for large scans. Control via: `QUILL_STREAM_SCAN` (1/0), `QUILL_STREAM_THRESHOLD` (default ≈ BUFFER_POOL_SIZE/4 frames), `QUILL_STREAM_READAHEAD` (default 2 pages), and per-query planner hint `QUILL_STREAM_HINT`.
+-   **Prefetch API**: The `prefetch_page` method allows components (e.g., B+Tree iterator) to warm the cache opportunistically for predictable patterns such as short range scans.
+-   **Flush-on-evict & explicit flush**: There is no background cleaner thread. Dirty pages are flushed when a victim is chosen, and the engine can call `flush_all_pages()` to guarantee durability or visibility to direct I/O paths.
 
 ## 4. Benchmarking and Performance Tuning
 
@@ -110,10 +110,8 @@ fn benchmark_hot_reads(index: &BPlusTreeIndex, total_keys: i64, num_ops: usize) 
 
 ### 4.2 Tuning Parameters
 
--   **Environment Variables**:
-    -   `QUILL_BPM_CLEANER=1`: Enables the background cleaner thread.
-    -   `QUILL_BPM_SLEEP_MS`: Sets the sleep duration for the cleaner (default: 50ms).
-    -   `QUILL_BPM_DIRTY_PCT`: The dirty page ratio that triggers the cleaner (default: 0.2).
-    -   `QUILL_BPM_BATCH`: The number of dirty pages the cleaner flushes per batch (default: 32).
--   **Admission Policy**: For pure read-heavy benchmarks on a known dataset, the TinyLFU admission policy might initially deny hot pages. It can be configured to be less aggressive or switched to a "count-only" mode to ensure the working set is admitted quickly.
--   **Buffer Pool Size**: The most critical parameter. An undersized pool will lead to high eviction rates (thrashing) and poor performance. Its size should be configured based on the available memory and the expected working set size of the workload.
+-   **Environment Variables (selected)**:
+    -   `QUILL_STREAM_SCAN` / `QUILL_STREAM_THRESHOLD` / `QUILL_STREAM_READAHEAD` / `QUILL_STREAM_HINT`
+-   **Admission Policy**: TinyLFU can be used to prevent one-time scans from polluting the pool. Adjust its aggressiveness based on workload characteristics.
+-   **Streaming Scan**: Ensure that large sequential scans no longer degrade hit ratios. Compare QPS/latency with and without the ring buffer, and tune `QUILL_STREAM_READAHEAD` (typically 2–8).
+-   **Buffer Pool Size**: The most critical lever. Too small → frequent evictions and poor performance. Size it to the expected hot working set.

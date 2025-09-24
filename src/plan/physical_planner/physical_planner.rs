@@ -85,6 +85,7 @@ impl PhysicalPlanner<'_> {
                 table_schema,
                 filters: _,
                 limit: _,
+                streaming_hint,
             }) => {
                 // TODO fix testing
                 if let Some(catalog_table) = self
@@ -103,16 +104,24 @@ impl PhysicalPlanner<'_> {
                             ..,
                         ))
                     } else {
-                        PhysicalPlan::SeqScan(PhysicalSeqScan::new(
-                            table_ref.clone(),
-                            table_schema.clone(),
-                        ))
+                        {
+                            let mut op = PhysicalSeqScan::new(
+                                table_ref.clone(),
+                                table_schema.clone(),
+                            );
+                            op.streaming_hint = *streaming_hint;
+                            PhysicalPlan::SeqScan(op)
+                        }
                     }
                 } else {
-                    PhysicalPlan::SeqScan(PhysicalSeqScan::new(
-                        table_ref.clone(),
-                        table_schema.clone(),
-                    ))
+                    {
+                        let mut op = PhysicalSeqScan::new(
+                            table_ref.clone(),
+                            table_schema.clone(),
+                        );
+                        op.streaming_hint = *streaming_hint;
+                        PhysicalPlan::SeqScan(op)
+                    }
                 }
             }
             LogicalPlan::Limit(Limit {

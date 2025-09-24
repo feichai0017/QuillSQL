@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+  <html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -37,6 +37,7 @@
       <div class="picker">
         <label for="file">Document:</label>
         <select id="file">
+          <option value="architecture.md">architecture.md</option>
           <option value="buffer_pool.md">buffer_pool.md</option>
           <option value="btree_index.md">btree_index.md</option>
         </select>
@@ -82,7 +83,7 @@
           u.searchParams.set('file', currentFile());
           history.replaceState(null, '', u);
         } catch (e) {
-          content.innerHTML = `<div class="error">加载失败：${e}</div>`;
+          content.innerHTML = `<div class="error">Failed to load: ${e}</div>`;
           info.textContent = 'Error';
         }
       }
