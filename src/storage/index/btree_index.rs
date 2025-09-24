@@ -1229,6 +1229,9 @@ impl BPlusTreeIndex {
         start_page_id: PageId,
     ) -> QuillSQLResult<ReadPageGuard> {
         let mut current_page_id = start_page_id;
+        if current_page_id == INVALID_PAGE_ID {
+            return Err(QuillSQLError::Storage("btree: empty tree".to_string()));
+        }
 
         loop {
             // a. 为当前页面获取一个 ReadPageGuard。

@@ -10,7 +10,7 @@ use std::{
 
 use crate::error::{QuillSQLError, QuillSQLResult};
 
-use crate::buffer::{PageId, PAGE_SIZE, INVALID_PAGE_ID};
+use crate::buffer::{PageId, INVALID_PAGE_ID, PAGE_SIZE};
 use crate::storage::codec::{FreelistPageCodec, MetaPageCodec};
 use crate::storage::page::FreelistPage;
 use crate::storage::page::MetaPage;
@@ -99,6 +99,11 @@ impl DiskManager {
     }
 
     pub fn read_page(&self, page_id: PageId) -> QuillSQLResult<[u8; PAGE_SIZE]> {
+        if page_id == crate::buffer::INVALID_PAGE_ID {
+            return Err(QuillSQLError::Storage(
+                "read_page: invalid page id".to_string(),
+            ));
+        }
         let mut guard = self.db_file.lock().unwrap();
         let mut buf = [0; PAGE_SIZE];
 
@@ -113,6 +118,11 @@ impl DiskManager {
     }
 
     pub fn write_page(&self, page_id: PageId, data: &[u8]) -> QuillSQLResult<()> {
+        if page_id == crate::buffer::INVALID_PAGE_ID {
+            return Err(QuillSQLError::Storage(
+                "write_page: invalid page id".to_string(),
+            ));
+        }
         if data.len() != PAGE_SIZE {
             return Err(QuillSQLError::Internal(format!(
                 "Page size is not {}",
@@ -147,6 +157,11 @@ impl DiskManager {
     }
 
     pub fn deallocate_page(&self, page_id: PageId) -> QuillSQLResult<()> {
+        if page_id == crate::buffer::INVALID_PAGE_ID {
+            return Err(QuillSQLError::Storage(
+                "deallocate_page: invalid page id".to_string(),
+            ));
+        }
         // Write an empty page (all zeros) to the deallocated page.
         // But this page is not deallocated, only data will be written with null or zeros.
         let mut guard = self.db_file.lock().unwrap();

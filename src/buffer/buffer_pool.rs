@@ -9,7 +9,9 @@ use parking_lot::{Mutex, RwLock};
 use std::sync::atomic::Ordering;
 use std::{collections::VecDeque, sync::Arc};
 
-use crate::buffer::page::{self, Page, PageId, ReadPageGuard, WritePageGuard, PAGE_SIZE};
+use crate::buffer::page::{
+    self, Page, PageId, ReadPageGuard, WritePageGuard, INVALID_PAGE_ID, PAGE_SIZE,
+};
 
 use crate::catalog::SchemaRef;
 use crate::error::{QuillSQLError, QuillSQLResult};
@@ -120,8 +122,14 @@ impl BufferPoolManager {
 
     /// 获取一个只读页面。
     pub fn fetch_page_read(self: &Arc<Self>, page_id: PageId) -> QuillSQLResult<ReadPageGuard> {
+        if page_id == INVALID_PAGE_ID {
+            return Err(QuillSQLError::Storage(
+                "fetch_page_read: invalid page id".to_string(),
+            ));
+        }
         // Robust retry to tolerate delete/evict races
-        for _ in 0..16 {
+        let mut attempts = 0usize;
+        loop {
             if let Ok(frame_id) = self.get_frame_for_page(page_id) {
                 let page_arc = self.pool[frame_id].clone();
 
@@ -136,22 +144,37 @@ impl BufferPoolManager {
                     return Ok(page::new_read_guard(self.clone(), page_arc));
                 } else {
                     drop(reader);
+                    attempts += 1;
+                    if attempts > 128 {
+                        break;
+                    }
                     std::hint::spin_loop();
                     continue;
                 }
             } else {
+                attempts += 1;
+                if attempts > 128 {
+                    break;
+                }
                 std::hint::spin_loop();
                 continue;
             }
         }
-        Err(QuillSQLError::Internal(
-            "fetch_page_read: failed after retries".to_string(),
-        ))
+        Err(QuillSQLError::Internal(format!(
+            "fetch_page_read: failed after {} retries",
+            attempts
+        )))
     }
 
     /// 获取一个可写页面。
     pub fn fetch_page_write(self: &Arc<Self>, page_id: PageId) -> QuillSQLResult<WritePageGuard> {
-        for _ in 0..16 {
+        if page_id == INVALID_PAGE_ID {
+            return Err(QuillSQLError::Storage(
+                "fetch_page_write: invalid page id".to_string(),
+            ));
+        }
+        let mut attempts = 0usize;
+        loop {
             if let Ok(frame_id) = self.get_frame_for_page(page_id) {
                 let page_arc = self.pool[frame_id].clone();
 
@@ -164,6 +187,10 @@ impl BufferPoolManager {
                         let _ = self.replacer_set_evictable(frame_id, false);
                     } else {
                         drop(reader);
+                        attempts += 1;
+                        if attempts > 128 {
+                            break;
+                        }
                         std::hint::spin_loop();
                         continue;
                     }
@@ -193,13 +220,18 @@ impl BufferPoolManager {
                 }
                 return Ok(guard);
             } else {
+                attempts += 1;
+                if attempts > 128 {
+                    break;
+                }
                 std::hint::spin_loop();
                 continue;
             }
         }
-        Err(QuillSQLError::Internal(
-            "fetch_page_write: failed after retries".to_string(),
-        ))
+        Err(QuillSQLError::Internal(format!(
+            "fetch_page_write: failed after {} retries",
+            attempts
+        )))
     }
 
     /// 完成 unpin 的后续处理：根据旧的 pin_count 决定是否可驱逐，并处理脏位。
@@ -389,16 +421,16 @@ impl BufferPoolManager {
             let frame_id = *frame_id_ref;
             let page_arc = self.pool[frame_id].clone();
 
-            // Lock for reading to copy data, then lock for writing to update dirty flag.
-            let page_data = page_arc.read().data;
-            let data_bytes = Bytes::copy_from_slice(&page_data);
+            // Hold write lock for the whole flush to avoid racing writers clearing dirty bit.
+            let mut guard = page_arc.write();
+            let data_bytes = Bytes::copy_from_slice(&guard.data);
 
             self.disk_scheduler
                 .schedule_write(page_id, data_bytes)?
                 .recv()
                 .map_err(|e| QuillSQLError::Internal(format!("Channel disconnected: {}", e)))??;
 
-            page_arc.write().is_dirty = false;
+            guard.is_dirty = false;
             Ok(true)
         } else {
             Ok(false)
