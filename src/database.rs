@@ -20,7 +20,6 @@ use crate::{
 };
 
 pub struct Database {
-    disk_manager: Arc<DiskManager>,
     pub(crate) buffer_pool: Arc<BufferPoolManager>,
     pub(crate) catalog: Catalog,
     temp_dir: Option<TempDir>,
@@ -37,7 +36,6 @@ impl Database {
         let catalog = Catalog::new(buffer_pool.clone(), disk_manager.clone());
 
         let mut db = Self {
-            disk_manager,
             buffer_pool,
             catalog,
             temp_dir: None,
@@ -62,7 +60,6 @@ impl Database {
         let catalog = Catalog::new(buffer_pool.clone(), disk_manager.clone());
 
         let mut db = Self {
-            disk_manager,
             buffer_pool,
             catalog,
             temp_dir: Some(temp_dir),
