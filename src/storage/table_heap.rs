@@ -247,10 +247,17 @@ impl TableIterator {
 
         let is_full_scan = matches!(start, Bound::Unbounded) && matches!(end, Bound::Unbounded);
 
-        let use_streaming = match streaming_hint {
+        // Requested streaming decision
+        let requested_stream = match streaming_hint {
             Some(true) => true,
             Some(false) => false,
-            None => is_full_scan && (env_stream || approx_pages >= threshold),
+            None => env_stream || approx_pages >= threshold,
+        };
+        // If explicitly hinted true, allow streaming even for ranged scans. Otherwise only for full scan.
+        let use_streaming = if matches!(streaming_hint, Some(true)) {
+            true
+        } else {
+            is_full_scan && requested_stream
         };
 
         let strategy = if use_streaming {
@@ -284,6 +291,15 @@ impl TableIterator {
             return Ok(None);
         }
 
+        // If strategy is Streaming but the bounds are not a full scan, fall back to Cached.
+        let is_full_scan = matches!(self.start_bound, Bound::Unbounded)
+            && matches!(self.end_bound, Bound::Unbounded);
+        if matches!(self.strategy, ScanStrategy::Streaming { .. }) && !is_full_scan {
+            self.strategy = ScanStrategy::Cached;
+            self.started = false;
+            self.cursor = INVALID_RID;
+        }
+
         // Streaming strategy (only supports full scan). For other ranges fallback to Cached.
         if let ScanStrategy::Streaming {
             ring,
@@ -294,23 +310,33 @@ impl TableIterator {
             // Initialize on first call
             if !self.started {
                 self.started = true;
-                let first = self.heap.first_page_id.load(Ordering::SeqCst);
-                if first == INVALID_PAGE_ID {
+                // Determine starting page id based on start_bound
+                let default_first = self.heap.first_page_id.load(Ordering::SeqCst);
+                if default_first == INVALID_PAGE_ID {
                     self.ended = true;
                     return Ok(None);
                 }
                 // Ensure disk visibility for streaming reads
                 self.heap.buffer_pool.flush_all_pages()?;
-                ring.prime(first)?;
-                let (_pid, page) = match ring.next_page()? {
+                let start_pid = match &self.start_bound {
+                    Bound::Included(r) | Bound::Excluded(r) => r.page_id,
+                    Bound::Unbounded => default_first,
+                };
+                ring.prime(start_pid)?;
+                let (pid, page) = match ring.next_page()? {
                     Some(v) => v,
                     None => {
                         self.ended = true;
                         return Ok(None);
                     }
                 };
-                *current_page = Some((first, page));
-                *current_slot = 0;
+                *current_page = Some((pid, page));
+                // Position slot according to start_bound
+                *current_slot = match &self.start_bound {
+                    Bound::Included(r) if r.page_id == pid => r.slot_num as u16,
+                    Bound::Excluded(r) if r.page_id == pid => r.slot_num as u16 + 1,
+                    _ => 0,
+                };
             }
 
             loop {
@@ -328,8 +354,29 @@ impl TableIterator {
                     *current_slot += 1;
                     if !page.header.tuple_infos[slot as usize].meta.is_deleted {
                         let rid = RecordId::new(*pid, slot as u32);
-                        let (_m, t) = page.tuple(slot as u16)?;
-                        return Ok(Some((rid, t)));
+                        // Respect end_bound semantics
+                        match &self.end_bound {
+                            Bound::Unbounded => {
+                                let (_m, t) = page.tuple(slot as u16)?;
+                                return Ok(Some((rid, t)));
+                            }
+                            Bound::Included(end) => {
+                                let (_m, t) = page.tuple(slot as u16)?;
+                                if rid == *end {
+                                    self.ended = true;
+                                }
+                                return Ok(Some((rid, t)));
+                            }
+                            Bound::Excluded(end) => {
+                                if rid == *end {
+                                    self.ended = true;
+                                    return Ok(None);
+                                } else {
+                                    let (_m, t) = page.tuple(slot as u16)?;
+                                    return Ok(Some((rid, t)));
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -663,5 +710,71 @@ mod tests {
             cnt += 1;
         }
         assert_eq!(cnt, rows);
+    }
+
+    #[test]
+    pub fn test_streaming_respects_bounds_and_fallbacks() {
+        // Force-enable streaming globally; iterator should still fallback for ranged scans
+        std::env::set_var("QUILL_STREAM_SCAN", "1");
+        std::env::set_var("QUILL_STREAM_READAHEAD", "2");
+
+        let temp_dir = TempDir::new().unwrap();
+        let temp_path = temp_dir.path().join("test.db");
+
+        let schema = Arc::new(Schema::new(vec![
+            Column::new("a", DataType::Int8, false),
+            Column::new("b", DataType::Int16, false),
+        ]));
+
+        let disk_manager = DiskManager::try_new(temp_path).unwrap();
+        let disk_scheduler = Arc::new(DiskScheduler::new(Arc::new(disk_manager)));
+        let buffer_pool = Arc::new(BufferPoolManager::new(128, disk_scheduler));
+        let table_heap = Arc::new(TableHeap::try_new(schema.clone(), buffer_pool).unwrap());
+
+        let rid1 = table_heap
+            .insert_tuple(
+                &super::TupleMeta {
+                    insert_txn_id: 1,
+                    delete_txn_id: 1,
+                    is_deleted: false,
+                },
+                &Tuple::new(schema.clone(), vec![1i8.into(), 1i16.into()]),
+            )
+            .unwrap();
+        let rid2 = table_heap
+            .insert_tuple(
+                &super::TupleMeta {
+                    insert_txn_id: 2,
+                    delete_txn_id: 2,
+                    is_deleted: false,
+                },
+                &Tuple::new(schema.clone(), vec![2i8.into(), 2i16.into()]),
+            )
+            .unwrap();
+        let rid3 = table_heap
+            .insert_tuple(
+                &super::TupleMeta {
+                    insert_txn_id: 3,
+                    delete_txn_id: 3,
+                    is_deleted: false,
+                },
+                &Tuple::new(schema.clone(), vec![3i8.into(), 3i16.into()]),
+            )
+            .unwrap();
+
+        // Create ranged iterator with streaming hint=true; must fallback and only return rid1..=rid2
+        let mut it = TableIterator::new_with_hint(table_heap.clone(), rid1..=rid2, Some(true));
+
+        let got1 = it.next().unwrap().unwrap();
+        let got2 = it.next().unwrap().unwrap();
+        let got3 = it.next().unwrap();
+
+        assert_eq!(got1.0, rid1);
+        assert_eq!(got2.0, rid2);
+        assert!(got3.is_none());
+
+        // Sanity: ensure rid3 exists but not returned in range
+        let (_m, t3) = table_heap.full_tuple(rid3).unwrap();
+        assert_eq!(t3.data, vec![3i8.into(), 3i16.into()]);
     }
 }
