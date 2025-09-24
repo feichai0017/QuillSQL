@@ -162,11 +162,13 @@ impl ScalarValue {
                 data.map(ScalarValue::Float64)
             }
             DataType::Varchar(_) => {
-                let data = match self {
-                    ScalarValue::Int8(v) => Ok(v.map(|v| v.to_string())),
+                match self {
+                    // If already a string, keep it and optionally truncate to the target length
+                    ScalarValue::Varchar(v) => Ok(ScalarValue::Varchar(v.clone())),
+                    // Simple numeric to string example kept for minimal compatibility
+                    ScalarValue::Int8(v) => Ok(ScalarValue::Varchar(v.map(|v| v.to_string()))),
                     _ => Err(error),
-                };
-                data.map(ScalarValue::Varchar)
+                }
             }
             _ => Err(error),
         }

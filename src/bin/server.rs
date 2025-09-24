@@ -23,6 +23,12 @@ struct SqlResponse {
     rows: Vec<Vec<String>>, // simple strings for frontend consumption
 }
 
+/// Response payload for /api/sql_batch
+#[derive(Serialize)]
+struct SqlBatchResponse {
+    results: Vec<Vec<Vec<String>>>,
+}
+
 #[tokio::main]
 async fn main() {
     env_logger::init();
@@ -45,6 +51,7 @@ async fn main() {
 
     let app = Router::new()
         .route("/api/sql", post(api_sql))
+        .route("/api/sql_batch", post(api_sql_batch))
         .nest_service("/docs", docs_service)
         .fallback_service(static_service)
         .with_state(state);
@@ -87,4 +94,33 @@ async fn api_sql(
         .map(|t| t.data.into_iter().map(|v| format!("{}", v)).collect())
         .collect();
     Ok(Json(SqlResponse { rows }))
+}
+
+/// Execute multiple SQL statements separated by ';' and return all result sets
+async fn api_sql_batch(
+    State(state): State<AppState>,
+    Json(req): Json<SqlRequest>,
+) -> Result<Json<SqlBatchResponse>, (StatusCode, String)> {
+    let mut db = state
+        .db
+        .lock()
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "DB poisoned".to_string()))?;
+    let statements = req
+        .sql
+        .split(';')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .take(100);
+    let mut results: Vec<Vec<Vec<String>>> = Vec::new();
+    for stmt in statements {
+        let tuples = db
+            .run(stmt)
+            .map_err(|e| (StatusCode::BAD_REQUEST, format!("{}", e)))?;
+        let rows: Vec<Vec<String>> = tuples
+            .into_iter()
+            .map(|t| t.data.into_iter().map(|v| format!("{}", v)).collect())
+            .collect();
+        results.push(rows);
+    }
+    Ok(Json(SqlBatchResponse { results }))
 }
