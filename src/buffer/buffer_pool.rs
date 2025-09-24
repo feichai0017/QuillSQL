@@ -420,32 +420,28 @@ impl BufferPoolManager {
     }
 
     pub fn delete_page(&self, page_id: PageId) -> QuillSQLResult<bool> {
-        if let Some((_, frame_id)) = self.page_table.remove(&page_id) {
+        if let Some(frame_ref) = self.page_table.get(&page_id) {
+            let frame_id = *frame_ref;
             let page_arc = self.pool[frame_id].clone();
+            drop(frame_ref);
 
-            // Try to acquire read lock without blocking
-            match page_arc.try_read() {
-                Some(page_reader) => {
-                    if page_reader.get_pin_count() > 0 {
-                        // Cannot delete a pinned page, re-insert to page table and return.
-                        drop(page_reader); // Release read lock first
-                        self.page_table.insert(page_id, frame_id);
-                        return Ok(false);
-                    }
-                    drop(page_reader); // Release read lock
-                }
+            let mut page_writer = match page_arc.try_write() {
+                Some(guard) => guard,
                 None => {
-                    // Failed to acquire read lock, meaning page is likely pinned with write lock
-                    // Re-insert to page table and return false
-                    self.page_table.insert(page_id, frame_id);
+                    // 页面正在被其他读/写操作持有，删除失败且不修改页表
                     return Ok(false);
                 }
+            };
+
+            if page_writer.get_pin_count() > 0 {
+                // 仍有 pin，无需继续，保持映射不变
+                return Ok(false);
             }
 
-            // Reset page memory
-            page_arc.write().destroy();
+            // 现在我们独占地持有页面写锁，可以安全地执行删除流程
+            self.page_table.remove(&page_id);
+            page_writer.destroy();
 
-            // Ensure remover precondition: mark evictable before removing from replacer
             {
                 let mut rep = self.replacer.write();
                 let _ = rep.set_evictable(frame_id, true);
@@ -702,6 +698,58 @@ mod tests {
 
         // 验证页面仍然存在
         assert!(bpm.page_table.get(&page_id).is_some());
+    }
+
+    #[test]
+    fn test_delete_page_concurrent_fetch_preserves_mapping() {
+        use std::sync::mpsc;
+        use std::thread;
+
+        let (_temp_dir, bpm) = setup_test_environment(6);
+
+        let page_id = {
+            let guard = bpm.new_page().unwrap();
+            let pid = guard.page_id();
+            drop(guard);
+            pid
+        };
+
+        // Ensure page exists in buffer pool and can be evicted initially
+        drop(bpm.fetch_page_read(page_id).unwrap());
+        assert!(bpm.page_table.get(&page_id).is_some());
+
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+
+        let bpm_fetch = bpm.clone();
+        let fetcher = thread::spawn(move || {
+            let guard = bpm_fetch.fetch_page_read(page_id).unwrap();
+            ready_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            drop(guard);
+        });
+
+        // Wait until the fetcher has pinned the page
+        ready_rx.recv().unwrap();
+
+        let frame_id = *bpm.page_table.get(&page_id).unwrap();
+        assert_eq!(bpm.pool[frame_id].read().get_pin_count(), 1);
+
+        // delete_page should fail because the page is currently pinned and keep the mapping intact
+        let deleted = bpm.delete_page(page_id).unwrap();
+        assert!(!deleted);
+        assert!(bpm.page_table.get(&page_id).is_some());
+
+        // Release the read guard so complete_unpin can mark it evictable again
+        release_tx.send(()).unwrap();
+        fetcher.join().unwrap();
+
+        let frame_id = *bpm.page_table.get(&page_id).unwrap();
+        assert_eq!(bpm.pool[frame_id].read().get_pin_count(), 0);
+        assert_eq!(bpm.replacer.read().size(), 1);
+
+        // Now delete should succeed because the page is no longer pinned
+        assert!(bpm.delete_page(page_id).unwrap());
     }
 
     #[test]
