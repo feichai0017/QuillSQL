@@ -10,9 +10,10 @@
 - **Clean architecture**: SQL → Logical Plan → Physical Plan → Volcano executor
 - **B+Tree index**: OLC readers, B-link pages, latch crabbing, range scan iterator
 - **Buffer pool**: LRU-K, pin/unpin with RAII guards, flush-on-evict
+- **Streaming scan**: Large sequential scans bypass buffer pool via a small direct I/O ring buffer to avoid cache pollution
 - **Information schema**: `information_schema.schemas`, `tables`, `columns`, `indexes`
 - **Now supports**: `SHOW DATABASES`, `SHOW TABLES`, `EXPLAIN`
-- **Docs**: [Buffer Pool](docs/buffer_pool.md) · [B+ Tree Index](docs/btree_index.md)
+- **Docs**: [Architecture](docs/architecture.md) · [Buffer Pool](docs/buffer_pool.md) · [B+ Tree Index](docs/btree_index.md)
 
 ## 🚀 Quick Start
 
@@ -27,6 +28,10 @@ cargo run --bin server
 
 # specify data file and listening addr
 QUILL_DB_FILE=my.db QUILL_HTTP_ADDR=0.0.0.0:8080 cargo run --bin server --release
+
+# batch API (optional)
+curl -XPOST http://127.0.0.1:8080/api/sql_batch -H 'content-type: application/json' \
+     -d '{"sql": "SHOW TABLES; EXPLAIN SELECT 1;"}'
 ```
 
 Sample session:
@@ -96,6 +101,26 @@ EXPLAIN SELECT id, COUNT(*) FROM t GROUP BY id ORDER BY id;
 ```bash
 cargo test -q
 ```
+
+## ⚙️ Configuration (Environment Variables)
+
+Service
+- PORT: Bind port (takes precedence over QUILL_HTTP_ADDR’s port)
+- QUILL_HTTP_ADDR: Listen address (default 0.0.0.0:8080 when PORT is not set)
+- RUST_LOG: Log level (e.g., info, debug)
+
+Database file
+- QUILL_DB_FILE: Path to the database file; if unset, a temporary DB is used (data is cleaned up on process exit)
+
+Streaming sequential scan (Ring Buffer / Bypass)
+- QUILL_STREAM_SCAN: Force enable(1)/disable(0) streaming scan; defaults to auto
+- QUILL_STREAM_THRESHOLD: Page threshold to trigger streaming; default BUFFER_POOL_SIZE/4
+- QUILL_STREAM_READAHEAD: Readahead window size; default 2
+- QUILL_STREAM_HINT: Per-query hint for SeqScan (1/0), overrides auto decision
+
+Debugging
+- QUILL_DEBUG_LOCK=1|2: Print lock/page acquisition debug logs
+
 ## 📦 Docker
 
 ```bash

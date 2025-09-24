@@ -5,15 +5,16 @@ use crate::error::QuillSQLError;
 use crate::storage::table_heap::TableIterator;
 use crate::utils::table_ref::TableReference;
 use crate::{
+    error::QuillSQLResult,
     execution::{ExecutionContext, VolcanoExecutor},
     storage::tuple::Tuple,
-    error::QuillSQLResult,
 };
 
 #[derive(Debug)]
 pub struct PhysicalSeqScan {
     pub table: TableReference,
     pub table_schema: SchemaRef,
+    pub streaming_hint: Option<bool>,
 
     iterator: Mutex<Option<TableIterator>>,
 }
@@ -23,6 +24,7 @@ impl PhysicalSeqScan {
         PhysicalSeqScan {
             table,
             table_schema,
+            streaming_hint: None,
             iterator: Mutex::new(None),
         }
     }
@@ -31,7 +33,12 @@ impl PhysicalSeqScan {
 impl VolcanoExecutor for PhysicalSeqScan {
     fn init(&self, context: &mut ExecutionContext) -> QuillSQLResult<()> {
         let table_heap = context.catalog.table_heap(&self.table)?;
-        *self.iterator.lock().unwrap() = Some(TableIterator::new(table_heap, ..));
+        let iter = if let Some(h) = self.streaming_hint {
+            TableIterator::new_with_hint(table_heap, .., Some(h))
+        } else {
+            TableIterator::new(table_heap, ..)
+        };
+        *self.iterator.lock().unwrap() = Some(iter);
         Ok(())
     }
 

@@ -1,4 +1,5 @@
 use crate::catalog::{Column, Schema};
+use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::expression::{columnize_expr, Alias, ColumnExpr, Expr, ExprTrait};
 use crate::plan::logical_plan::{
     build_join_schema, project_schema, EmptyRelation, Filter, Join, LogicalPlan, Project,
@@ -6,7 +7,6 @@ use crate::plan::logical_plan::{
 };
 use crate::plan::logical_plan::{Aggregate, JoinType};
 use crate::plan::LogicalPlanner;
-use crate::error::{QuillSQLError, QuillSQLResult};
 use std::sync::Arc;
 use std::vec;
 
@@ -269,11 +269,20 @@ impl LogicalPlanner<'_> {
                 // TODO handle alias
                 let table_ref = self.bind_table_name(name)?;
                 let schema = self.context.catalog.table_heap(&table_ref)?.schema.clone();
+                // Optional hint to force streaming: env QUILL_STREAM_HINT=1
+                let hint = std::env::var("QUILL_STREAM_HINT")
+                    .ok()
+                    .and_then(|v| match v.as_str() {
+                        "1" | "true" | "on" => Some(true),
+                        "0" | "false" | "off" => Some(false),
+                        _ => None,
+                    });
                 Ok(LogicalPlan::TableScan(TableScan {
                     table_ref,
                     table_schema: schema,
                     filters: vec![],
                     limit: None,
+                    streaming_hint: hint,
                 }))
             }
             sqlparser::ast::TableFactor::NestedJoin {

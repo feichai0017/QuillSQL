@@ -1,4 +1,4 @@
-# B+ Tree Index — Architecture, Features, Optimizations
+# B+ Tree Index — Architecture and Concurrency
 
 ## 1. Architecture Overview
 
@@ -113,10 +113,8 @@ fn benchmark_range_scan(index: Arc<BPlusTreeIndex>, num_keys: i64, num_passes: u
 ```
 
 ### 4.2 Performance Notes
--   **Hot Reads**: Performance on hot-spot reads depends heavily on the Buffer Pool's ability to keep the upper levels of the tree and the hot leaf pages in memory. The TinyLFU admission policy in the BPM might initially penalize newly hot data, so for read-heavy benchmarks, warming up the cache or using a count-only admission policy is recommended.
--   **Tuning**:
-    -   For pure read workloads, disable the BPM's background cleaner (`QUILL_BPM_CLEANER=0`).
-    -   Increase the Buffer Pool size for workloads with large working sets or frequent large scans.
+-   **Hot Reads**: Performance on hot-spot reads depends on keeping upper levels and hot leaves resident in the buffer pool. Warm up the cache for read-heavy benchmarks. Protect hot pages from pollution by enabling TinyLFU admission.
+-   **Large Range Scans**: Prefer table SeqScan with ring buffer (bypass) when scanning most of the table. For index scans over very large ranges, consider future Bitmap Heap Scan rather than bypassing the pool for leaves.
 
 ## 5. Future Work
 -   Stronger OLC with bounded retries and telemetry.

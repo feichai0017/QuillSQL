@@ -1,6 +1,6 @@
 use crate::catalog::SchemaRef;
-use crate::utils::table_ref::TableReference;
 use crate::expression::Expr;
+use crate::utils::table_ref::TableReference;
 
 #[derive(derive_new::new, Debug, Clone)]
 pub struct TableScan {
@@ -8,6 +8,8 @@ pub struct TableScan {
     pub table_schema: SchemaRef,
     pub filters: Vec<Expr>,
     pub limit: Option<usize>,
+    /// Optional hint: prefer streaming seqscan (bypass buffer pool)
+    pub streaming_hint: Option<bool>,
 }
 
 impl std::fmt::Display for TableScan {
