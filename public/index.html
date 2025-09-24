@@ -5,73 +5,121 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>QuillSQL Console</title>
     <style>
-      :root { --bg: #0b1020; --panel: #10172a; --panel-2:#0e1526; --border: #28334f; --text: #e6e9ef; --muted: #9aa4bf; --accent: #ed6a5a; --accent-2:#ff936f; }
-      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin: 0; background: var(--bg); color: var(--text); }
-      .nav { background: linear-gradient(180deg, #0d1324, #0b1020); border-bottom: 1px solid var(--border); }
-      .nav-inner { max-width: 1080px; margin: 0 auto; padding: 10px 16px; display: flex; align-items: center; gap: 12px; }
-      .nav img { width: 28px; height: 28px; border-radius: 4px; }
-      .nav .brand { font-size: 16px; font-weight: 700; letter-spacing: 0.2px; }
-      .nav .spacer { flex: 1; }
-      .nav a { color: var(--muted); text-decoration: none; font-size: 13px; margin-left: 14px; }
-      .nav a:hover { color: var(--text); }
-      .container { max-width: 1080px; margin: 0 auto; padding: 18px 16px 28px; }
-      .bar { display: flex; gap: 8px; align-items: center; margin: 12px 0; flex-wrap: wrap; }
-      textarea { width: 100%; height: 200px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; background: var(--panel); border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 12px; }
-      button { padding: 8px 14px; cursor: pointer; background: var(--accent); color: #fff; border: none; border-radius: 6px; }
-      button.secondary { background: #263252; }
-      select, input[type="text"] { background: var(--panel-2); border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 6px 8px; }
-      .status { margin-left: auto; font-size: 12px; color: var(--muted); }
-      .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px; margin-top: 12px; }
-      table { border-collapse: collapse; width: 100%; }
-      th { background: #0b1428; }
-      td, th { border: 1px solid var(--border); padding: 8px 10px; font-size: 13px; }
-      .error { color: #ff6b6b; white-space: pre-wrap; }
-      .hint { font-size: 12px; color: var(--muted); margin-top: 8px; }
-      .links { margin-top: 12px; display: flex; gap: 12px; }
+      :root {
+        --bg: #1e1e1e; --panel: #252526; --panel-dark: #2d2d30; --border: #3e3e42; --text: #cccccc; --text-bright: #ffffff;
+        --muted: #6c6c6c; --accent: #007acc; --accent-hover: #1177bb; --success: #4fc3f7; --warning: #ffb74d; --error: #f44336;
+        --sql-keyword: #569cd6; --sql-string: #ce9178; --sql-comment: #6a9955; --sql-operator: #d4d4d4;
+      }
+      * { box-sizing: border-box; }
+      body { font-family: 'SF Mono', Monaco, Inconsolata, 'Roboto Mono', Consolas, 'Courier New', monospace; margin: 0; background: var(--bg); color: var(--text); height: 100vh; overflow: hidden; }
+      .layout { display: flex; flex-direction: column; height: 100vh; }
+      
+      /* Header */
+      .header { background: var(--panel-dark); border-bottom: 1px solid var(--border); padding: 8px 16px; display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
+      .header img { width: 24px; height: 24px; border-radius: 3px; }
+      .header .brand { font-size: 14px; font-weight: 600; color: var(--text-bright); }
+      .header .spacer { flex: 1; }
+      .header .connection { font-size: 11px; color: var(--muted); background: var(--panel); padding: 4px 8px; border-radius: 4px; }
+      .header a { color: var(--accent); text-decoration: none; font-size: 12px; margin-left: 12px; }
+      .header a:hover { color: var(--accent-hover); }
+      
+      /* Main Content */
+      .main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+      .query-panel { background: var(--panel); border-bottom: 1px solid var(--border); padding: 12px; flex-shrink: 0; }
+      .query-header { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; font-size: 12px; color: var(--muted); }
+      .query-header .status { margin-left: auto; }
+      .sql-editor { width: 100%; height: 120px; background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 4px; padding: 8px; font-family: inherit; font-size: 13px; resize: vertical; }
+      .controls { display: flex; gap: 6px; align-items: center; margin-top: 8px; flex-wrap: wrap; }
+      button { padding: 6px 12px; background: var(--accent); color: var(--text-bright); border: none; border-radius: 4px; font-size: 12px; cursor: pointer; }
+      button:hover { background: var(--accent-hover); }
+      button.secondary { background: var(--panel-dark); border: 1px solid var(--border); }
+      button.secondary:hover { background: var(--border); }
+      select, input[type="text"] { background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 4px; padding: 4px 6px; font-size: 12px; }
+      
+      /* Results Panel */
+      .results-panel { flex: 1; display: flex; flex-direction: column; background: var(--panel); }
+      .results-header { padding: 8px 12px; border-bottom: 1px solid var(--border); font-size: 12px; color: var(--muted); background: var(--panel-dark); }
+      .results-content { flex: 1; overflow: auto; padding: 12px; }
+      table { border-collapse: collapse; width: 100%; font-size: 12px; background: var(--bg); }
+      th { background: var(--panel-dark); color: var(--text-bright); font-weight: 600; text-align: left; padding: 8px; border: 1px solid var(--border); }
+      td { padding: 6px 8px; border: 1px solid var(--border); color: var(--text); }
+      tr:nth-child(even) { background: rgba(255,255,255,0.02); }
+      tr:hover { background: rgba(255,255,255,0.05); }
+      .result-block { margin-bottom: 16px; }
+      .result-block .stmt { font-size: 11px; color: var(--sql-keyword); background: var(--panel-dark); padding: 4px 8px; border-radius: 3px 3px 0 0; border: 1px solid var(--border); border-bottom: none; }
+      .error { color: var(--error); background: rgba(244,67,54,0.1); padding: 8px; border-radius: 4px; white-space: pre-wrap; font-size: 12px; }
+      .success { color: var(--success); font-size: 12px; }
+      .empty-state { text-align: center; color: var(--muted); font-size: 12px; padding: 40px; }
+      
+      /* Footer */
+      .footer { background: var(--panel-dark); border-top: 1px solid var(--border); padding: 6px 12px; font-size: 11px; color: var(--muted); display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
+      .footer .config { display: flex; align-items: center; gap: 6px; }
+      .footer input { width: 300px; }
+      
+      /* SQL Syntax Highlighting (basic) */
+      .sql-keyword { color: var(--sql-keyword); font-weight: 600; }
+      .sql-string { color: var(--sql-string); }
+      .sql-comment { color: var(--sql-comment); font-style: italic; }
+      
+      /* Scrollbars */
+      ::-webkit-scrollbar { width: 8px; height: 8px; }
+      ::-webkit-scrollbar-track { background: var(--panel); }
+      ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+      ::-webkit-scrollbar-thumb:hover { background: #4a4a4a; }
     </style>
   </head>
   <body>
-    <div class="nav">
-      <div class="nav-inner">
+    <div class="layout">
+      <div class="header">
         <img src="/rust-db.png" alt="logo" />
-        <div class="brand">QuillSQL</div>
+        <div class="brand">QuillSQL Console</div>
+        <div class="connection">Connected: Local DB</div>
         <div class="spacer"></div>
-        <a href="/docs.html?file=buffer_pool.md" target="_blank">Buffer Pool</a>
-        <a href="/docs.html?file=btree_index.md" target="_blank">B+Tree</a>
+        <a href="/docs.html?file=buffer_pool.md" target="_blank">Docs</a>
         <a href="https://github.com/eric/quillsql" target="_blank">GitHub</a>
       </div>
-    </div>
-
-    <div class="container">
-
-      <div class="bar">
-        <button id="run">Run (Ctrl+Enter)</button>
-        <select id="exampleSel">
-          <option value="basic">Examples: Basic</option>
-          <option value="index">Examples: Index</option>
-          <option value="join">Examples: Join & Aggregate</option>
-          <option value="update">Examples: Update</option>
-          <option value="logic">Examples: Logic / Show / Explain</option>
-        </select>
-        <button id="applyExample" class="secondary">Apply</button>
-        <button id="clear" class="secondary">Clear Output</button>
-        <span class="status" id="status"></span>
+      
+      <div class="main">
+        <div class="query-panel">
+          <div class="query-header">
+            SQL Query Editor
+            <span class="status" id="status"></span>
+          </div>
+          <textarea id="sql" class="sql-editor" placeholder="-- Enter your SQL query here
+SELECT * FROM information_schema.tables;
+SHOW DATABASES;"></textarea>
+          <div class="controls">
+            <button id="run">▶ Execute (Ctrl+Enter)</button>
+            <select id="exampleSel">
+              <option value="">Choose Example...</option>
+              <option value="basic">Basic Operations</option>
+              <option value="index">Index Usage</option>
+              <option value="join">Joins & Aggregates</option>
+              <option value="update">Updates</option>
+              <option value="schema">Schema Info</option>
+            </select>
+            <button id="applyExample" class="secondary">Load Example</button>
+            <button id="clear" class="secondary">Clear Results</button>
+            <button id="format" class="secondary">Format SQL</button>
+          </div>
+        </div>
+        
+        <div class="results-panel">
+          <div class="results-header">Query Results</div>
+          <div class="results-content">
+            <div id="result" class="empty-state">Execute a query to see results here</div>
+          </div>
+        </div>
       </div>
-
-      <textarea id="sql" placeholder="-- write SQL here\nSHOW DATABASES;\nSHOW TABLES;\nEXPLAIN SELECT 1;"></textarea>
-
-      <div class="bar">
-        <input id="apiBase" type="text" style="min-width:320px" placeholder="API base, e.g. /api/sql or https://host/api/sql" />
-        <button id="saveApiBase" class="secondary">Save Endpoint</button>
-        <span class="hint">避免在 Vercel 上将 /api/sql 反代到自身，建议填入你的后端地址。</span>
+      
+      <div class="footer">
+        <div class="config">
+          <label>API Endpoint:</label>
+          <input id="apiBase" type="text" placeholder="/api/sql or https://your-backend.com/api/sql" />
+          <button id="saveApiBase" class="secondary">Save</button>
+        </div>
+        <span>QuillSQL v0.1.0 | Persistent storage via QUILL_DB_FILE</span>
       </div>
-
-      <div id="result" class="panel"></div>
-      <div class="links">
-        <a href="/docs.html?file=buffer_pool.md" target="_blank">Buffer Pool 文档</a>
-        <a href="/docs.html?file=btree_index.md" target="_blank">B+Tree 文档</a>
-      </div>
-      <div class="hint">数据文件: QUILL_DB_FILE 环境变量控制; 默认临时 DB。生产部署请将数据库放在你控制的后端主机或卷里。</div>
     </div>
 
     <script>
@@ -79,6 +127,7 @@
       const exampleSel = document.getElementById('exampleSel');
       const applyExample = document.getElementById('applyExample');
       const clearBtn = document.getElementById('clear');
+      const formatBtn = document.getElementById('format');
       const sqlTA = document.getElementById('sql');
       const status = document.getElementById('status');
       const result = document.getElementById('result');
@@ -92,48 +141,48 @@
       apiBaseInput.value = getApiBase();
 
       function renderRows(rows) {
-        if (!rows || rows.length === 0) { result.innerHTML = '<div>OK (no rows)</div>'; return; }
+        if (!rows || rows.length === 0) { return '<div class="success">✓ Query executed successfully (0 rows)</div>'; }
         const cols = Math.max(...rows.map(r => r.length));
-        const th = Array.from({length: cols}, (_, i) => `<th>col${i+1}</th>`).join('');
+        const th = Array.from({length: cols}, (_, i) => `<th>Column ${i+1}</th>`).join('');
         const trs = rows.map(r => `<tr>${r.map(c => `<td>${c}</td>`).join('')}</tr>`).join('');
-        result.innerHTML = `<table><thead><tr>${th}</tr></thead><tbody>${trs}</tbody></table>`;
+        return `<table><thead><tr>${th}</tr></thead><tbody>${trs}</tbody></table>`;
       }
 
       async function runSQL() {
-        status.textContent = 'Running...';
+        status.textContent = '⏳ Executing...';
         result.innerHTML = '';
         try {
-          // Split by ';' and run sequentially (max 100 statements)
           const api = getApiBase();
           const statements = sqlTA.value
             .split(';')
             .map(s => s.trim())
             .filter(s => s.length > 0)
             .slice(0, 100);
+          
+          if (statements.length === 0) {
+            result.innerHTML = '<div class="empty-state">No SQL statements to execute</div>';
+            return;
+          }
+          
           let out = '';
-          for (const stmt of statements) {
+          for (const [i, stmt] of statements.entries()) {
             const res = await fetch(api, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ sql: stmt }) });
             if (!res.ok) {
               const err = await res.text();
-              out += `<div class='error'><b>${stmt}</b>\n${err}</div>`;
+              out += `<div class="result-block"><div class="stmt">Statement ${i+1}: ${stmt}</div><div class="error">❌ ${err}</div></div>`;
               break;
             } else {
               const data = await res.json();
               const rows = data.rows || [];
-              if (rows.length === 0) out += `<div>OK</div>`;
-              else {
-                const cols = Math.max(...rows.map(r => r.length));
-                const th = Array.from({length: cols}, (_, i) => `<th>col${i+1}</th>`).join('');
-                const trs = rows.map(r => `<tr>${r.map(c => `<td>${c}</td>`).join('')}</tr>`).join('');
-                out += `<div class='panel'><div style='margin-bottom:6px'><b>${stmt}</b></div><table><thead><tr>${th}</tr></thead><tbody>${trs}</tbody></table></div>`;
-              }
+              const resultHtml = renderRows(rows);
+              out += `<div class="result-block"><div class="stmt">Statement ${i+1}: ${stmt}</div>${resultHtml}</div>`;
             }
           }
-          result.innerHTML = out || '<div>OK</div>';
+          result.innerHTML = out || '<div class="success">✓ All queries completed</div>';
         } catch (e) {
-          result.innerHTML = `<div class='error'>${e}</div>`;
+          result.innerHTML = `<div class="error">❌ Connection Error: ${e}</div>`;
         } finally {
-          status.textContent = '';
+          status.textContent = '✓ Ready';
         }
       }
 
@@ -141,28 +190,68 @@
       sqlTA.addEventListener('keydown', (e) => {
         if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) runSQL();
       });
-      clearBtn.addEventListener('click', () => { result.innerHTML = ''; });
+      clearBtn.addEventListener('click', () => { result.innerHTML = '<div class="empty-state">Execute a query to see results here</div>'; });
+      formatBtn.addEventListener('click', () => {
+        // Basic SQL formatting
+        const formatted = sqlTA.value
+          .replace(/\s+/g, ' ')
+          .replace(/\s*;\s*/g, ';\n')
+          .replace(/\b(SELECT|FROM|WHERE|ORDER BY|GROUP BY|HAVING|INSERT|UPDATE|DELETE|CREATE|ALTER|DROP)\b/gi, '\n$1')
+          .replace(/^\s+/gm, '')
+          .trim();
+        sqlTA.value = formatted;
+      });
       applyExample.addEventListener('click', () => {
         const pick = exampleSel.value;
         if (pick === 'basic') {
-          sqlTA.value = `CREATE TABLE t(id INT32 NOT NULL, v INT32 DEFAULT 0);\nINSERT INTO t(id, v) VALUES (1, 10), (2, 20), (3, 30);\nSELECT id, v FROM t WHERE v > 10 ORDER BY id DESC LIMIT 1;\nSHOW DATABASES;\nSHOW TABLES;\nEXPLAIN SELECT id, COUNT(*) FROM t GROUP BY id ORDER BY id;`;
+          sqlTA.value = `-- Basic table operations
+CREATE TABLE users(id INT32 NOT NULL, name VARCHAR(50), age INT32 DEFAULT 0);
+INSERT INTO users(id, name, age) VALUES (1, 'Alice', 25), (2, 'Bob', 30), (3, 'Charlie', 35);
+SELECT id, name, age FROM users WHERE age > 25 ORDER BY age DESC;`;
         } else if (pick === 'index') {
-          sqlTA.value = `CREATE TABLE items(id INT32 NOT NULL, price INT32 NOT NULL, cat INT32 DEFAULT 0);\nCREATE INDEX idx_items_id ON items(id);\nINSERT INTO items(id, price, cat) VALUES (1, 100, 1), (2, 250, 2), (3, 120, 1), (4, 410, 3);\nSELECT id, price FROM items WHERE id = 3;`;
+          sqlTA.value = `-- Index usage demonstration
+CREATE TABLE products(id INT32 NOT NULL, name VARCHAR(100), price INT32, category_id INT32);
+CREATE INDEX idx_products_category ON products(category_id);
+CREATE INDEX idx_products_price ON products(price);
+INSERT INTO products VALUES (1, 'Laptop', 1200, 1), (2, 'Mouse', 25, 1), (3, 'Book', 15, 2);
+SELECT * FROM products WHERE category_id = 1;`;
         } else if (pick === 'join') {
-          sqlTA.value = `CREATE TABLE a(id INT32 NOT NULL, v INT32);\nCREATE TABLE b(id INT32 NOT NULL, w INT32);\nINSERT INTO a(id,v) VALUES (1,10),(2,20),(3,30);\nINSERT INTO b(id,w) VALUES (2,5),(3,7);\nSELECT a.id, v, w FROM a INNER JOIN b ON a.id = b.id ORDER BY a.id;\nSELECT id, COUNT(*) FROM a GROUP BY id ORDER BY id;`;
+          sqlTA.value = `-- Joins and aggregation
+CREATE TABLE customers(id INT32, name VARCHAR(50));
+CREATE TABLE orders(id INT32, customer_id INT32, amount INT32);
+INSERT INTO customers VALUES (1, 'Alice'), (2, 'Bob'), (3, 'Charlie');
+INSERT INTO orders VALUES (101, 1, 100), (102, 1, 200), (103, 2, 150);
+SELECT c.name, COUNT(o.id) as order_count, SUM(o.amount) as total 
+FROM customers c INNER JOIN orders o ON c.id = o.customer_id 
+GROUP BY c.id, c.name ORDER BY total DESC;`;
         } else if (pick === 'update') {
-          sqlTA.value = `CREATE TABLE u(id INT32 NOT NULL, v INT32 DEFAULT 0);\nINSERT INTO u(id,v) VALUES (1,0),(2,0),(3,0);\nUPDATE u SET v = 100 WHERE id >= 2;\nSELECT * FROM u ORDER BY id;`;
-        } else if (pick === 'logic') {
-          sqlTA.value = `-- From sql tests\nSHOW DATABASES;\nSHOW TABLES;\nCREATE TABLE t1(a INT8, b INT16, c INT32);\nCREATE INDEX idx_t1_ab ON t1(a, c);\nINSERT INTO t1(a,b,c) VALUES (1,2,3),(4,5,6),(7,8,9);\nSELECT a, c FROM t1 WHERE a = 4;\nEXPLAIN SELECT a, COUNT(*) FROM t1 GROUP BY a ORDER BY a;`;
+          sqlTA.value = `-- Update operations
+CREATE TABLE inventory(id INT32, name VARCHAR(50), quantity INT32, price INT32);
+INSERT INTO inventory VALUES (1, 'Widget A', 100, 10), (2, 'Widget B', 50, 20);
+UPDATE inventory SET price = price * 1.1 WHERE quantity > 75;
+UPDATE inventory SET quantity = quantity - 10 WHERE id = 1;
+SELECT * FROM inventory ORDER BY id;`;
+        } else if (pick === 'schema') {
+          sqlTA.value = `-- Schema information queries
+SHOW DATABASES;
+SHOW TABLES;
+SELECT * FROM information_schema.tables;
+SELECT * FROM information_schema.columns WHERE table_name = 'users';
+EXPLAIN SELECT * FROM users WHERE age > 25;`;
         }
       });
 
       saveApiBaseBtn.addEventListener('click', () => {
         const v = apiBaseInput.value.trim();
-        if (v) setApiBase(v);
+        if (v) {
+          setApiBase(v);
+          status.textContent = '✓ Endpoint saved';
+          setTimeout(() => status.textContent = '✓ Ready', 2000);
+        }
       });
+      
+      // Initialize
+      status.textContent = '✓ Ready';
     </script>
   </body>
   </html>
-
-

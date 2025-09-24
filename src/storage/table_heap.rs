@@ -78,7 +78,7 @@ impl TableHeap {
             
             // Initialize the new page.
             let new_table_page = TablePage::new(self.schema.clone(), INVALID_PAGE_ID);
-            let encoded_new_page = TablePageCodec::encode(&new_table_page);
+            let _ = TablePageCodec::encode(&new_table_page);
             // new_page_guard is already a write guard, so we can modify its data.
             // We'll let it drop at the end of the *next* loop iteration (or when the function returns).
             // But for now, we must write our changes to it.
