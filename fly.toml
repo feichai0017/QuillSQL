@@ -1,4 +1,4 @@
-app = "quillsql-backend"         # 自定义
+app = "quillsql"         # 自定义
 primary_region = "sin"           # 选最近区域
 
 [build]

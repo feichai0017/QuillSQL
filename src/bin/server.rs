@@ -1,10 +1,4 @@
-use axum::{
-    extract::State,
-    http::StatusCode,
-    response::Html,
-    routing::{get, post},
-    Json, Router,
-};
+use axum::{extract::State, http::StatusCode, routing::post, Json, Router};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -45,12 +39,11 @@ async fn main() {
     };
 
     // Static services
-    let static_service = tower_http::services::ServeDir::new("public")
-        .not_found_service(axum::routing::get(index_html));
+    let static_service =
+        tower_http::services::ServeDir::new("public").append_index_html_on_directories(true);
     let docs_service = tower_http::services::ServeDir::new("docs");
 
     let app = Router::new()
-        .route("/", get(index_html))
         .route("/api/sql", post(api_sql))
         .nest_service("/docs", docs_service)
         .fallback_service(static_service)
@@ -75,12 +68,6 @@ async fn main() {
     )
     .await
     .expect("server error");
-}
-
-/// Simple index fallback when no file exists
-async fn index_html() -> Html<&'static str> {
-    // Lightweight redirect to the static index file to avoid compile-time include path issues
-    Html("<!doctype html><html><head><meta http-equiv=refresh content='0;url=/index.html'></head><body></body></html>")
 }
 
 /// Execute SQL and return rows of strings
