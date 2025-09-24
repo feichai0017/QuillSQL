@@ -291,14 +291,7 @@ impl TableIterator {
             return Ok(None);
         }
 
-        // If strategy is Streaming but the bounds are not a full scan, fall back to Cached.
-        let is_full_scan = matches!(self.start_bound, Bound::Unbounded)
-            && matches!(self.end_bound, Bound::Unbounded);
-        if matches!(self.strategy, ScanStrategy::Streaming { .. }) && !is_full_scan {
-            self.strategy = ScanStrategy::Cached;
-            self.started = false;
-            self.cursor = INVALID_RID;
-        }
+        // Streaming now supports bounded scans; no unconditional fallback required here.
 
         // Streaming strategy (only supports full scan). For other ranges fallback to Cached.
         if let ScanStrategy::Streaming {
