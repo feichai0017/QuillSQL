@@ -7,7 +7,7 @@ primary_region = "sin"           # 选最近区域
 [env]
   PORT = "8080"
   RUST_LOG = "info"
-  QUILL_DB_FILE = "/data/quill.db"   # 使用卷持久化
+  # QUILL_DB_FILE = "/data/quill.db"  
 
 [http_service]
   internal_port = 8080

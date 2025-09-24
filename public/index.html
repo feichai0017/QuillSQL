@@ -135,6 +135,18 @@
         return `<table><thead><tr>${th}</tr></thead><tbody>${trs}</tbody></table>`;
       }
 
+      function renderResult(rows) {
+        if (!rows || rows.length === 0) {
+          return '<div class="success">✓ Query executed successfully (0 rows)</div>';
+        }
+        const singleCol = rows.every(r => r.length === 1);
+        if (singleCol) {
+          const text = rows.map(r => r[0]).join('\n');
+          return `<pre style="background:#0f1117;border:1px solid var(--border);padding:10px;border-radius:6px;white-space:pre-wrap;">${text.replace(/[&<>]/g, s => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[s]))}</pre>`;
+        }
+        return renderTable(rows);
+      }
+
       function friendlyError(text) {
         const t = String(text || '');
         if (/Not\s*support|not\s*supported|NotSupport/i.test(t)) {
@@ -171,7 +183,7 @@
               const results = Array.isArray(data.results) ? data.results : [];
               for (let i = 0; i < Math.min(results.length, statements.length); i++) {
                 const rows = results[i] || [];
-                const body = rows.length ? renderTable(rows) : '<div class="success">✓ Query executed successfully (0 rows)</div>';
+                const body = rows.length ? renderResult(rows) : '<div class="success">✓ Query executed successfully (0 rows)</div>';
                 out += `<div class="result-block"><div class="stmt">Statement ${i+1}: ${statements[i]}</div>${body}<div class="rows-info">${rows.length} rows</div></div>`;
               }
               usedBatch = true;
@@ -188,7 +200,7 @@
               } else {
                 const data = await res.json();
                 const rows = data.rows || [];
-                const body = rows.length ? renderTable(rows) : '<div class="success">✓ Query executed successfully (0 rows)</div>';
+                const body = rows.length ? renderResult(rows) : '<div class="success">✓ Query executed successfully (0 rows)</div>';
                 out += `<div class="result-block"><div class="stmt">Statement ${i+1}: ${stmt}</div>${body}<div class="rows-info">${rows.length} rows</div></div>`;
               }
             }
