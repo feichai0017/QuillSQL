@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>QuillSQL Docs</title>
+    <style>
+      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin: 24px; }
+      pre { white-space: pre-wrap; }
+      .err { color: #c00; }
+      .hint { color: #666; font-size: 12px; }
+      a { text-decoration: none; }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script>
+      const qs = new URLSearchParams(location.search);
+      const file = qs.get('file') || 'buffer_pool.md';
+      fetch(`/docs/${file}`)
+        .then(r => r.ok ? r.text() : Promise.reject(r.status + ' ' + r.statusText))
+        .then(text => {
+          document.getElementById('app').innerHTML = `<h1>${file}</h1><pre>${text.replace(/[&<>]/g, s => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[s]))}</pre>`;
+        })
+        .catch(e => {
+          document.getElementById('app').innerHTML = `<div class='err'>加载失败: ${e}</div><div class='hint'>请确认文件位于 /docs/${file}</div>`;
+        });
+    </script>
+  </body>
+  </html>
+
+

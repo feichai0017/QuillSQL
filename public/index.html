@@ -5,40 +5,76 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>QuillSQL Console</title>
     <style>
-      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin: 24px; }
-      h1 { font-size: 20px; margin-bottom: 12px; }
-      .bar { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
-      textarea { width: 100%; height: 140px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
-      button { padding: 8px 14px; cursor: pointer; }
-      .status { margin-left: auto; font-size: 12px; color: #666; }
-      table { border-collapse: collapse; width: 100%; margin-top: 12px; }
-      td, th { border: 1px solid #ddd; padding: 6px 8px; font-size: 13px; }
-      .error { color: #c00; white-space: pre-wrap; }
-      .hint { font-size: 12px; color: #666; margin-top: 8px; }
-      .docs { margin-top: 16px; }
+      :root { --bg: #0b1020; --panel: #131a2b; --border: #2a3553; --text: #e6e9ef; --muted: #9aa4bf; --accent: #5d8cff; }
+      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin: 0; background: var(--bg); color: var(--text); }
+      .container { max-width: 1080px; margin: 0 auto; padding: 24px; }
+      .header { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+      .header img { width: 36px; height: 36px; border-radius: 4px; }
+      .title { font-size: 20px; font-weight: 600; }
+      .bar { display: flex; gap: 8px; align-items: center; margin: 12px 0; flex-wrap: wrap; }
+      textarea { width: 100%; height: 180px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; background: var(--panel); border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 12px; }
+      button { padding: 8px 14px; cursor: pointer; background: var(--accent); color: #fff; border: none; border-radius: 6px; }
+      button.secondary { background: #2b3352; }
+      select, input[type="text"] { background: var(--panel); border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 6px 8px; }
+      .status { margin-left: auto; font-size: 12px; color: var(--muted); }
+      .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px; margin-top: 12px; }
+      table { border-collapse: collapse; width: 100%; }
+      td, th { border: 1px solid var(--border); padding: 8px 10px; font-size: 13px; }
+      .error { color: #ff6b6b; white-space: pre-wrap; }
+      .hint { font-size: 12px; color: var(--muted); margin-top: 8px; }
+      .links { margin-top: 12px; display: flex; gap: 12px; }
     </style>
   </head>
   <body>
-    <h1>QuillSQL Console</h1>
-    <div class="bar">
-      <button id="run">Run (Ctrl+Enter)</button>
-      <button id="examples">Examples</button>
-      <span class="status" id="status"></span>
-    </div>
-    <textarea id="sql" placeholder="-- write SQL here\nSHOW DATABASES;\nSHOW TABLES;\nEXPLAIN SELECT 1;"></textarea>
-    <div class="hint">数据文件: QUILL_DB_FILE 环境变量控制; 默认临时 DB。</div>
-    <div id="result"></div>
-    <div class="docs">
-      <a href="/docs/buffer_pool.md" target="_blank">Buffer Pool 文档</a> ·
-      <a href="/docs/btree_index.md" target="_blank">B+Tree 文档</a>
+    <div class="container">
+      <div class="header">
+        <img src="/rust-db.png" alt="logo" />
+        <div class="title">QuillSQL Console</div>
+      </div>
+
+      <div class="bar">
+        <button id="run">Run (Ctrl+Enter)</button>
+        <select id="exampleSel">
+          <option value="basic">Examples: Basic</option>
+          <option value="index">Examples: Index</option>
+          <option value="join">Examples: Join & Aggregate</option>
+          <option value="update">Examples: Update</option>
+        </select>
+        <button id="applyExample" class="secondary">Apply</button>
+        <span class="status" id="status"></span>
+      </div>
+
+      <textarea id="sql" placeholder="-- write SQL here\nSHOW DATABASES;\nSHOW TABLES;\nEXPLAIN SELECT 1;"></textarea>
+
+      <div class="bar">
+        <input id="apiBase" type="text" style="min-width:320px" placeholder="API base, e.g. /api/sql or https://host/api/sql" />
+        <button id="saveApiBase" class="secondary">Save Endpoint</button>
+        <span class="hint">避免在 Vercel 上将 /api/sql 反代到自身，建议填入你的后端地址。</span>
+      </div>
+
+      <div id="result" class="panel"></div>
+      <div class="links">
+        <a href="/docs.html?file=buffer_pool.md" target="_blank">Buffer Pool 文档</a>
+        <a href="/docs.html?file=btree_index.md" target="_blank">B+Tree 文档</a>
+      </div>
+      <div class="hint">数据文件: QUILL_DB_FILE 环境变量控制; 默认临时 DB。生产部署请将数据库放在你控制的后端主机或卷里。</div>
     </div>
 
     <script>
       const runBtn = document.getElementById('run');
-      const examplesBtn = document.getElementById('examples');
+      const exampleSel = document.getElementById('exampleSel');
+      const applyExample = document.getElementById('applyExample');
       const sqlTA = document.getElementById('sql');
       const status = document.getElementById('status');
       const result = document.getElementById('result');
+      const apiBaseInput = document.getElementById('apiBase');
+      const saveApiBaseBtn = document.getElementById('saveApiBase');
+
+      // API base configurable
+      const defaultApi = '/api/sql';
+      const getApiBase = () => (localStorage.getItem('apiBase') || defaultApi);
+      const setApiBase = (v) => localStorage.setItem('apiBase', v);
+      apiBaseInput.value = getApiBase();
 
       function renderRows(rows) {
         if (!rows || rows.length === 0) { result.innerHTML = '<div>OK (no rows)</div>'; return; }
@@ -52,17 +88,33 @@
         status.textContent = 'Running...';
         result.innerHTML = '';
         try {
-          const res = await fetch('/api/sql', {
-            method: 'POST', headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ sql: sqlTA.value })
-          });
-          if (!res.ok) {
-            const err = await res.text();
-            result.innerHTML = `<div class='error'>${err}</div>`;
-          } else {
-            const data = await res.json();
-            renderRows(data.rows);
+          // Split by ';' and run sequentially (max 100 statements)
+          const api = getApiBase();
+          const statements = sqlTA.value
+            .split(';')
+            .map(s => s.trim())
+            .filter(s => s.length > 0)
+            .slice(0, 100);
+          let out = '';
+          for (const stmt of statements) {
+            const res = await fetch(api, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ sql: stmt }) });
+            if (!res.ok) {
+              const err = await res.text();
+              out += `<div class='error'><b>${stmt}</b>\n${err}</div>`;
+              break;
+            } else {
+              const data = await res.json();
+              const rows = data.rows || [];
+              if (rows.length === 0) out += `<div>OK</div>`;
+              else {
+                const cols = Math.max(...rows.map(r => r.length));
+                const th = Array.from({length: cols}, (_, i) => `<th>col${i+1}</th>`).join('');
+                const trs = rows.map(r => `<tr>${r.map(c => `<td>${c}</td>`).join('')}</tr>`).join('');
+                out += `<div class='panel'><div style='margin-bottom:6px'><b>${stmt}</b></div><table><thead><tr>${th}</tr></thead><tbody>${trs}</tbody></table></div>`;
+              }
+            }
           }
+          result.innerHTML = out || '<div>OK</div>';
         } catch (e) {
           result.innerHTML = `<div class='error'>${e}</div>`;
         } finally {
@@ -74,8 +126,22 @@
       sqlTA.addEventListener('keydown', (e) => {
         if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) runSQL();
       });
-      examplesBtn.addEventListener('click', () => {
-        sqlTA.value = `CREATE TABLE t(id INT32 NOT NULL, v INT32 DEFAULT 0);\nINSERT INTO t(id, v) VALUES (1, 10), (2, 20), (3, 30);\nSELECT id, v FROM t WHERE v > 10 ORDER BY id DESC LIMIT 1;\nSHOW DATABASES;\nSHOW TABLES;\nEXPLAIN SELECT id, COUNT(*) FROM t GROUP BY id ORDER BY id;`;
+      applyExample.addEventListener('click', () => {
+        const pick = exampleSel.value;
+        if (pick === 'basic') {
+          sqlTA.value = `CREATE TABLE t(id INT32 NOT NULL, v INT32 DEFAULT 0);\nINSERT INTO t(id, v) VALUES (1, 10), (2, 20), (3, 30);\nSELECT id, v FROM t WHERE v > 10 ORDER BY id DESC LIMIT 1;\nSHOW DATABASES;\nSHOW TABLES;\nEXPLAIN SELECT id, COUNT(*) FROM t GROUP BY id ORDER BY id;`;
+        } else if (pick === 'index') {
+          sqlTA.value = `CREATE TABLE items(id INT32 NOT NULL, price INT32 NOT NULL, cat INT32 DEFAULT 0);\nCREATE INDEX idx_items_id ON items(id);\nINSERT INTO items(id, price, cat) VALUES (1, 100, 1), (2, 250, 2), (3, 120, 1), (4, 410, 3);\nSELECT id, price FROM items WHERE id = 3;`;
+        } else if (pick === 'join') {
+          sqlTA.value = `CREATE TABLE a(id INT32 NOT NULL, v INT32);\nCREATE TABLE b(id INT32 NOT NULL, w INT32);\nINSERT INTO a(id,v) VALUES (1,10),(2,20),(3,30);\nINSERT INTO b(id,w) VALUES (2,5),(3,7);\nSELECT a.id, v, w FROM a INNER JOIN b ON a.id = b.id ORDER BY a.id;\nSELECT id, COUNT(*) FROM a GROUP BY id ORDER BY id;`;
+        } else if (pick === 'update') {
+          sqlTA.value = `CREATE TABLE u(id INT32 NOT NULL, v INT32 DEFAULT 0);\nINSERT INTO u(id,v) VALUES (1,0),(2,0),(3,0);\nUPDATE u SET v = 100 WHERE id >= 2;\nSELECT * FROM u ORDER BY id;`;
+        }
+      });
+
+      saveApiBaseBtn.addEventListener('click', () => {
+        const v = apiBaseInput.value.trim();
+        if (v) setApiBase(v);
       });
     </script>
   </body>
