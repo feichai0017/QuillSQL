@@ -21,6 +21,12 @@ cargo run --bin client
 
 # or open a persistent DB file
 cargo run --bin client -- --file my.db
+
+# start web server (http://127.0.0.1:8080)
+cargo run --bin server
+
+# specify data file and listening addr
+QUILL_DB_FILE=my.db QUILL_HTTP_ADDR=0.0.0.0:8080 cargo run --bin server --release
 ```
 
 Sample session:
@@ -90,6 +96,19 @@ EXPLAIN SELECT id, COUNT(*) FROM t GROUP BY id ORDER BY id;
 ```bash
 cargo test -q
 ```
+## 📦 Docker
+
+```bash
+# build
+docker build -t quillsql:latest .
+
+# run (ephemeral in-memory DB)
+docker run --rm -p 8080:8080 quillsql:latest
+
+# run with persistent file mounted
+docker run --rm -p 8080:8080 -e QUILL_DB_FILE=/data/my.db -v $(pwd)/data:/data quillsql:latest
+```
+
 
 Includes sqllogictest-based cases:
 

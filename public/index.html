@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>QuillSQL Console</title>
+    <style>
+      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin: 24px; }
+      h1 { font-size: 20px; margin-bottom: 12px; }
+      .bar { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+      textarea { width: 100%; height: 140px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+      button { padding: 8px 14px; cursor: pointer; }
+      .status { margin-left: auto; font-size: 12px; color: #666; }
+      table { border-collapse: collapse; width: 100%; margin-top: 12px; }
+      td, th { border: 1px solid #ddd; padding: 6px 8px; font-size: 13px; }
+      .error { color: #c00; white-space: pre-wrap; }
+      .hint { font-size: 12px; color: #666; margin-top: 8px; }
+      .docs { margin-top: 16px; }
+    </style>
+  </head>
+  <body>
+    <h1>QuillSQL Console</h1>
+    <div class="bar">
+      <button id="run">Run (Ctrl+Enter)</button>
+      <button id="examples">Examples</button>
+      <span class="status" id="status"></span>
+    </div>
+    <textarea id="sql" placeholder="-- write SQL here\nSHOW DATABASES;\nSHOW TABLES;\nEXPLAIN SELECT 1;"></textarea>
+    <div class="hint">数据文件: QUILL_DB_FILE 环境变量控制; 默认临时 DB。</div>
+    <div id="result"></div>
+    <div class="docs">
+      <a href="/docs/buffer_pool.md" target="_blank">Buffer Pool 文档</a> ·
+      <a href="/docs/btree_index.md" target="_blank">B+Tree 文档</a>
+    </div>
+
+    <script>
+      const runBtn = document.getElementById('run');
+      const examplesBtn = document.getElementById('examples');
+      const sqlTA = document.getElementById('sql');
+      const status = document.getElementById('status');
+      const result = document.getElementById('result');
+
+      function renderRows(rows) {
+        if (!rows || rows.length === 0) { result.innerHTML = '<div>OK (no rows)</div>'; return; }
+        const cols = Math.max(...rows.map(r => r.length));
+        const th = Array.from({length: cols}, (_, i) => `<th>col${i+1}</th>`).join('');
+        const trs = rows.map(r => `<tr>${r.map(c => `<td>${c}</td>`).join('')}</tr>`).join('');
+        result.innerHTML = `<table><thead><tr>${th}</tr></thead><tbody>${trs}</tbody></table>`;
+      }
+
+      async function runSQL() {
+        status.textContent = 'Running...';
+        result.innerHTML = '';
+        try {
+          const res = await fetch('/api/sql', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ sql: sqlTA.value })
+          });
+          if (!res.ok) {
+            const err = await res.text();
+            result.innerHTML = `<div class='error'>${err}</div>`;
+          } else {
+            const data = await res.json();
+            renderRows(data.rows);
+          }
+        } catch (e) {
+          result.innerHTML = `<div class='error'>${e}</div>`;
+        } finally {
+          status.textContent = '';
+        }
+      }
+
+      runBtn.addEventListener('click', runSQL);
+      sqlTA.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) runSQL();
+      });
+      examplesBtn.addEventListener('click', () => {
+        sqlTA.value = `CREATE TABLE t(id INT32 NOT NULL, v INT32 DEFAULT 0);\nINSERT INTO t(id, v) VALUES (1, 10), (2, 20), (3, 30);\nSELECT id, v FROM t WHERE v > 10 ORDER BY id DESC LIMIT 1;\nSHOW DATABASES;\nSHOW TABLES;\nEXPLAIN SELECT id, COUNT(*) FROM t GROUP BY id ORDER BY id;`;
+      });
+    </script>
+  </body>
+  </html>
+
+

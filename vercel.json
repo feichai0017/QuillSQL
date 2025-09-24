@@ -1,0 +1,17 @@
+{
+    "version": 2,
+    "rewrites": [
+        {
+            "source": "/",
+            "destination": "/public/index.html"
+        },
+        {
+            "source": "/docs/(.*)",
+            "destination": "/docs/$1"
+        },
+        {
+            "source": "/api/sql",
+            "destination": "https://quill-sql.vercel.app/api/sql"
+        }
+    ]
+}

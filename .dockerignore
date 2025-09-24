@@ -1,0 +1,12 @@
+target
+.git
+.github
+**/*.rs.bk
+**/*.swp
+**/*.swo
+**/.DS_Store
+**/node_modules
+**/tmp
+**/target
+
+
