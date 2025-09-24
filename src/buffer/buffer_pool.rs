@@ -43,6 +43,7 @@ pub struct BufferPoolManager {
     /// Optional TinyLFU admission filter
     pub tiny_lfu: Option<Arc<RwLock<TinyLFU>>>,
 }
+
 impl BufferPoolManager {
     #[inline]
     fn replacer_set_evictable(&self, frame_id: FrameId, evictable: bool) -> QuillSQLResult<()> {
@@ -420,50 +421,95 @@ impl BufferPoolManager {
     }
 
     pub fn delete_page(&self, page_id: PageId) -> QuillSQLResult<bool> {
-        if let Some(frame_ref) = self.page_table.get(&page_id) {
-            let frame_id = *frame_ref;
-            let page_arc = self.pool[frame_id].clone();
-            drop(frame_ref);
-
-            let mut page_writer = match page_arc.try_write() {
-                Some(guard) => guard,
-                None => {
-                    // 页面正在被其他读/写操作持有，删除失败且不修改页表
-                    return Ok(false);
-                }
-            };
-
-            if page_writer.get_pin_count() > 0 {
-                // 仍有 pin，无需继续，保持映射不变
-                return Ok(false);
-            }
-
-            // 现在我们独占地持有页面写锁，可以安全地执行删除流程
-            self.page_table.remove(&page_id);
-            page_writer.destroy();
-
-            {
-                let mut rep = self.replacer.write();
-                let _ = rep.set_evictable(frame_id, true);
-                let _ = rep.remove(frame_id);
-            }
-
-            self.free_list.write().push_back(frame_id);
-
-            self.disk_scheduler
-                .schedule_deallocate(page_id)?
-                .recv()
-                .map_err(|e| QuillSQLError::Internal(format!("Channel disconnected: {}", e)))??;
-
-            Ok(true)
+        let (lock_arc, created_here) = if let Some(g) = self.inflight_loads.get(&page_id) {
+            (g.clone(), false)
         } else {
-            // Page not in buffer pool, but we should still try to deallocate from disk.
-            self.disk_scheduler
-                .schedule_deallocate(page_id)?
-                .recv()
-                .map_err(|e| QuillSQLError::Internal(format!("Channel disconnected: {}", e)))??;
-            Ok(true)
-        }
+            let arc = Arc::new(Mutex::new(()));
+            self.inflight_loads.insert(page_id, arc.clone());
+            (arc, true)
+        };
+
+        let mut inflight_lock = Some(lock_arc.lock());
+        let mut cleanup = |bpm: &BufferPoolManager| {
+            if let Some(g) = inflight_lock.take() {
+                drop(g);
+            }
+            if created_here {
+                bpm.inflight_loads.remove(&page_id);
+            }
+        };
+
+        let result = (|| {
+            loop {
+                if let Some(frame_ref) = self.page_table.get(&page_id) {
+                    let frame_id = *frame_ref;
+                    let page_arc = self.pool[frame_id].clone();
+                    drop(frame_ref);
+
+                    let mut page_writer = match page_arc.try_write() {
+                        Some(guard) => guard,
+                        None => {
+                            // 页面正在被其他读/写操作持有，删除失败且不修改页表
+                            return Ok(false);
+                        }
+                    };
+
+                    if page_writer.page_id() != page_id {
+                        // Frame was reused for another page; clean the stale mapping and retry
+                        drop(page_writer);
+                        let _ = self
+                            .page_table
+                            .remove_if(&page_id, |_, fid| *fid == frame_id);
+                        continue;
+                    }
+
+                    if page_writer.get_pin_count() > 0 {
+                        // 仍有 pin，无需继续，保持映射不变
+                        return Ok(false);
+                    }
+
+                    if self
+                        .page_table
+                        .remove_if(&page_id, |_, fid| *fid == frame_id)
+                        .is_none()
+                    {
+                        continue;
+                    }
+
+                    page_writer.destroy();
+                    drop(page_writer);
+
+                    {
+                        let mut rep = self.replacer.write();
+                        let _ = rep.set_evictable(frame_id, true);
+                        let _ = rep.remove(frame_id);
+                    }
+
+                    self.free_list.write().push_back(frame_id);
+
+                    self.disk_scheduler
+                        .schedule_deallocate(page_id)?
+                        .recv()
+                        .map_err(|e| {
+                            QuillSQLError::Internal(format!("Channel disconnected: {}", e))
+                        })??;
+
+                    return Ok(true);
+                } else {
+                    // Page not in buffer pool, but we should still try to deallocate from disk.
+                    self.disk_scheduler
+                        .schedule_deallocate(page_id)?
+                        .recv()
+                        .map_err(|e| {
+                            QuillSQLError::Internal(format!("Channel disconnected: {}", e))
+                        })??;
+                    return Ok(true);
+                }
+            }
+        })();
+
+        cleanup(self);
+        result
     }
 
     fn allocate_frame(&self) -> QuillSQLResult<FrameId> {
@@ -750,6 +796,31 @@ mod tests {
 
         // Now delete should succeed because the page is no longer pinned
         assert!(bpm.delete_page(page_id).unwrap());
+    }
+
+    #[test]
+    fn test_delete_page_stale_mapping_does_not_remove_new_page() {
+        let (_temp_dir, bpm) = setup_test_environment(6);
+
+        let page_a = bpm.new_page().unwrap().page_id();
+        let page_b = bpm.new_page().unwrap().page_id();
+
+        drop(bpm.fetch_page_read(page_a).unwrap());
+        drop(bpm.fetch_page_read(page_b).unwrap());
+
+        let frame_a = *bpm.page_table.get(&page_a).unwrap();
+        let frame_b = *bpm.page_table.get(&page_b).unwrap();
+        assert_ne!(frame_a, frame_b);
+
+        // Simulate a race where the page table temporarily points page_a at page_b's frame
+        bpm.page_table.insert(page_a, frame_b);
+
+        assert!(bpm.delete_page(page_a).unwrap());
+        assert!(bpm.page_table.get(&page_a).is_none());
+
+        let frame_b_after = *bpm.page_table.get(&page_b).unwrap();
+        assert_eq!(frame_b_after, frame_b);
+        assert_eq!(bpm.pool[frame_b_after].read().page_id(), page_b);
     }
 
     #[test]
