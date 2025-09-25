@@ -1,7 +1,10 @@
 use super::disk_manager::DiskManager;
 use crate::buffer::PageId;
+use crate::config::{IOSchedulerConfig, IOStrategy};
 use crate::error::{QuillSQLError, QuillSQLResult};
 use bytes::{Bytes, BytesMut};
+#[cfg(target_os = "linux")]
+use std::os::fd::AsRawFd;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::thread;
@@ -18,6 +21,7 @@ pub enum DiskResponse {
     Allocate { page_id: PageId },
     Error(QuillSQLError),
 }
+// IOStrategy and IOSchedulerConfig moved to crate::config
 
 // Type alias for the sender part of the result channel
 pub type DiskCommandResultSender<T> = Sender<QuillSQLResult<T>>;
@@ -25,11 +29,16 @@ pub type DiskCommandResultSender<T> = Sender<QuillSQLResult<T>>;
 pub type DiskCommandResultReceiver<T> = Receiver<QuillSQLResult<T>>;
 
 // Commands sent from BufferPoolManager to the DiskScheduler task
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum DiskRequest {
     ReadPage {
         page_id: PageId,
         result_sender: DiskCommandResultSender<BytesMut>,
+    },
+    /// Read arbitrary pages by id order; returns buffers in the same order
+    ReadPages {
+        page_ids: Vec<PageId>,
+        result_sender: DiskCommandResultSender<Vec<BytesMut>>,
     },
     WritePage {
         page_id: PageId,
@@ -50,30 +59,164 @@ pub enum DiskRequest {
 #[derive(Debug)]
 pub struct DiskScheduler {
     request_sender: Sender<DiskRequest>,
-    // Keep handle Option for Drop implementation
-    background_thread: Option<thread::JoinHandle<()>>,
+    // Dispatcher thread receives all requests and forwards to workers
+    dispatcher_thread: Option<thread::JoinHandle<()>>,
+    // Worker threads execute actual I/O tasks concurrently
+    worker_threads: Vec<thread::JoinHandle<()>>,
+    /// Centralized runtime configuration
+    pub config: IOSchedulerConfig,
 }
 
 impl DiskScheduler {
     pub fn new(disk_manager: Arc<DiskManager>) -> Self {
+        Self::new_with_config(disk_manager, IOSchedulerConfig::default())
+    }
+
+    pub fn new_with_config(disk_manager: Arc<DiskManager>, config: IOSchedulerConfig) -> Self {
+        let worker_count = config.workers;
         let (request_sender, request_receiver) = mpsc::channel::<DiskRequest>();
 
-        let background_thread = thread::Builder::new()
-            .name("disk-scheduler-io-thread".to_string())
+        // Create per-worker channels
+        let mut worker_senders = Vec::with_capacity(worker_count);
+        let mut worker_threads = Vec::with_capacity(worker_count);
+        for i in 0..worker_count {
+            let (tx, rx) = mpsc::channel::<DiskRequest>();
+            worker_senders.push(tx);
+            let dm = disk_manager.clone();
+            let handle = thread::Builder::new()
+                .name(format!("disk-scheduler-worker-{}", i))
+                .spawn(move || {
+                    Self::io_worker_loop(rx, dm);
+                })
+                .expect("Failed to spawn DiskScheduler worker thread");
+            worker_threads.push(handle);
+        }
+
+        // Spawn dispatcher thread to forward requests in round-robin
+        let dispatcher_thread = thread::Builder::new()
+            .name("disk-scheduler-dispatcher".to_string())
             .spawn(move || {
-                Self::io_worker_loop(request_receiver, disk_manager);
+                Self::dispatcher_loop(request_receiver, worker_senders);
             })
-            .expect("Failed to spawn DiskScheduler I/O thread");
+            .expect("Failed to spawn DiskScheduler dispatcher thread");
 
         DiskScheduler {
             request_sender,
-            background_thread: Some(background_thread),
+            dispatcher_thread: Some(dispatcher_thread),
+            worker_threads,
+            config,
         }
+    }
+
+    /// Create scheduler with explicit strategy. IoUring currently logs and
+    /// falls back to thread-pool to preserve compatibility.
+    pub fn new_with_strategy(disk_manager: Arc<DiskManager>, strategy: IOStrategy) -> Self {
+        match strategy {
+            IOStrategy::ThreadPool { workers } => {
+                let mut cfg = IOSchedulerConfig::default();
+                if let Some(w) = workers {
+                    cfg.workers = w;
+                }
+                Self::new_with_config(disk_manager, cfg)
+            }
+            IOStrategy::IoUring { queue_depth } => {
+                Self::new_with_iouring(disk_manager, queue_depth)
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn new_with_iouring(disk_manager: Arc<DiskManager>) -> Self {
+        eprintln!("WARN: IoUring selected on non-Linux platform; falling back to thread-pool");
+        Self::new(disk_manager)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn new_with_iouring(disk_manager: Arc<DiskManager>, queue_depth: Option<usize>) -> Self {
+        let mut config = IOSchedulerConfig::default();
+        if let Some(q) = queue_depth {
+            config.iouring_queue_depth = q;
+        }
+        let worker_count = config.workers;
+
+        let (request_sender, request_receiver) = mpsc::channel::<DiskRequest>();
+
+        let mut worker_senders = Vec::with_capacity(worker_count);
+        let mut worker_threads = Vec::with_capacity(worker_count);
+        for i in 0..worker_count {
+            let (tx, rx) = mpsc::channel::<DiskRequest>();
+            worker_senders.push(tx);
+            let dm = disk_manager.clone();
+            let handle = thread::Builder::new()
+                .name(format!("disk-scheduler-iouring-worker-{}", i))
+                .spawn(move || {
+                    Self::io_uring_worker_loop(rx, dm);
+                })
+                .expect("Failed to spawn DiskScheduler io_uring worker thread");
+            worker_threads.push(handle);
+        }
+
+        let dispatcher_thread = thread::Builder::new()
+            .name("disk-scheduler-dispatcher".to_string())
+            .spawn(move || {
+                Self::dispatcher_loop(request_receiver, worker_senders);
+            })
+            .expect("Failed to spawn DiskScheduler dispatcher thread");
+
+        DiskScheduler {
+            request_sender,
+            dispatcher_thread: Some(dispatcher_thread),
+            worker_threads,
+            config,
+        }
+    }
+
+    // Dispatcher: forwards incoming requests to worker queues
+    fn dispatcher_loop(receiver: Receiver<DiskRequest>, worker_senders: Vec<Sender<DiskRequest>>) {
+        log::debug!("DiskScheduler dispatcher thread started.");
+        let mut rr_idx: usize = 0;
+        while let Ok(request) = receiver.recv() {
+            match request {
+                DiskRequest::Shutdown => {
+                    log::debug!("Dispatcher received Shutdown. Broadcasting to workers...");
+                    for tx in &worker_senders {
+                        let _ = tx.send(DiskRequest::Shutdown);
+                    }
+                    break;
+                }
+                other => {
+                    if worker_senders.is_empty() {
+                        log::error!("No worker_senders available to handle request");
+                        break;
+                    }
+                    // Try to send to a live worker; attempt up to N times
+                    let n = worker_senders.len();
+                    let mut attempts = 0usize;
+                    let mut sent = false;
+                    while attempts < n {
+                        let idx = rr_idx % n;
+                        rr_idx = rr_idx.wrapping_add(1);
+                        if worker_senders[idx].send(other.clone()).is_ok() {
+                            sent = true;
+                            break;
+                        }
+                        attempts += 1;
+                    }
+                    if !sent {
+                        log::error!("All worker_senders are closed; dropping request");
+                        break;
+                    }
+                }
+            }
+        }
+        log::debug!("DiskScheduler dispatcher thread finished.");
     }
 
     // The background worker loop that processes disk requests
     fn io_worker_loop(receiver: Receiver<DiskRequest>, disk_manager: Arc<DiskManager>) {
-        println!("DEBUG: Disk I/O worker thread started.");
+        log::debug!("Disk I/O worker thread started.");
+        #[cfg(target_os = "linux")]
+        let file = disk_manager.try_clone_db_file().ok();
         while let Ok(request) = receiver.recv() {
             // Loop until channel closes or Shutdown
             match request {
@@ -81,14 +224,55 @@ impl DiskScheduler {
                     page_id,
                     result_sender,
                 } => {
+                    #[cfg(target_os = "linux")]
+                    let result = if let Some(f) = &file {
+                        disk_manager.read_page_at_unlocked(f, page_id)
+                    } else {
+                        disk_manager.read_page(page_id)
+                    };
+                    #[cfg(not(target_os = "linux"))]
                     let result = disk_manager.read_page(page_id);
                     // Convert [u8; 4096] to BytesMut before sending
                     let bytes_result = result.map(|data| BytesMut::from(&data[..]));
                     if result_sender.send(bytes_result).is_err() {
-                        eprintln!(
-                            "ERROR: DiskScheduler failed to send ReadPage result for {}",
+                        log::error!(
+                            "DiskScheduler failed to send ReadPage result for {}",
                             page_id
                         );
+                    }
+                }
+                // ReadPagesContiguous merged into ReadPages
+                DiskRequest::ReadPages {
+                    page_ids,
+                    result_sender,
+                } => {
+                    let mut pages = Vec::with_capacity(page_ids.len());
+                    for pid in page_ids.into_iter() {
+                        let result = {
+                            #[cfg(target_os = "linux")]
+                            {
+                                if let Some(f) = &file {
+                                    disk_manager.read_page_at_unlocked(f, pid)
+                                } else {
+                                    disk_manager.read_page(pid)
+                                }
+                            }
+                            #[cfg(not(target_os = "linux"))]
+                            {
+                                disk_manager.read_page(pid)
+                            }
+                        };
+                        match result.map(|data| BytesMut::from(&data[..])) {
+                            Ok(b) => pages.push(b),
+                            Err(e) => {
+                                let _ = result_sender.send(Err(e));
+                                pages.clear();
+                                break;
+                            }
+                        }
+                    }
+                    if !pages.is_empty() {
+                        let _ = result_sender.send(Ok(pages));
                     }
                 }
                 DiskRequest::WritePage {
@@ -97,18 +281,31 @@ impl DiskScheduler {
                     result_sender,
                 } => {
                     // Pass slice from Bytes
+                    #[cfg(target_os = "linux")]
+                    let result = if let Some(f) = &file {
+                        disk_manager
+                            .write_page_at_unlocked(f, page_id, &data)
+                            .or_else(|_| {
+                                // fallback to locked path on error
+                                disk_manager.write_page(page_id, &data)
+                            })
+                    } else {
+                        disk_manager.write_page(page_id, &data)
+                    };
+                    #[cfg(not(target_os = "linux"))]
                     let result = disk_manager.write_page(page_id, &data);
                     if result_sender.send(result).is_err() {
-                        eprintln!(
-                            "ERROR: DiskScheduler failed to send WritePage result for {}",
+                        log::error!(
+                            "DiskScheduler failed to send WritePage result for {}",
                             page_id
                         );
                     }
                 }
+                // WritePagesContiguous removed
                 DiskRequest::AllocatePage { result_sender } => {
                     let result = disk_manager.allocate_page();
                     if result_sender.send(result).is_err() {
-                        eprintln!("ERROR: DiskScheduler failed to send AllocatePage result");
+                        log::error!("DiskScheduler failed to send AllocatePage result");
                     }
                 }
                 DiskRequest::DeallocatePage {
@@ -117,24 +314,202 @@ impl DiskScheduler {
                 } => {
                     let result = disk_manager.deallocate_page(page_id);
                     if result_sender.send(result).is_err() {
-                        eprintln!(
-                            "ERROR: DiskScheduler failed to send DeallocatePage result for {}",
+                        log::error!(
+                            "DiskScheduler failed to send DeallocatePage result for {}",
                             page_id
                         );
                     }
                 }
                 DiskRequest::Shutdown => {
-                    println!("DEBUG: Disk I/O worker thread received Shutdown signal.");
+                    log::debug!("Disk I/O worker thread received Shutdown signal.");
                     break; // Exit loop
                 }
             }
         }
-        println!("DEBUG: Disk I/O worker thread finished.");
+        log::debug!("Disk I/O worker thread finished.");
+    }
+
+    #[cfg(target_os = "linux")]
+    fn io_uring_worker_loop(receiver: Receiver<DiskRequest>, disk_manager: Arc<DiskManager>) {
+        use crate::buffer::PAGE_SIZE;
+        use crate::storage::page::META_PAGE_SIZE;
+        use bytes::BytesMut;
+        use io_uring::{opcode, types, IoUring};
+        use std::io;
+
+        log::debug!("Disk I/O io_uring worker thread started.");
+        let entries = self::IOSchedulerConfig::default().iouring_queue_depth as u32;
+        let mut ring = IoUring::new(entries).expect("io_uring init failed");
+
+        // Clone a dedicated File for this worker to get a stable fd
+        let file = disk_manager
+            .try_clone_db_file()
+            .expect("clone db file for io_uring failed");
+        let fd = file.as_raw_fd();
+
+        while let Ok(request) = receiver.recv() {
+            match request {
+                DiskRequest::ReadPage {
+                    page_id,
+                    result_sender,
+                } => {
+                    let mut buf = vec![0u8; PAGE_SIZE];
+                    let offset = (*META_PAGE_SIZE + (page_id - 1) as usize * PAGE_SIZE) as u64;
+                    let read_e =
+                        opcode::Read::new(types::Fd(fd), buf.as_mut_ptr(), PAGE_SIZE as u32)
+                            .offset(offset)
+                            .build();
+                    unsafe { ring.submission().push(&read_e) }.expect("submit read sqe");
+                    ring.submit_and_wait(1).expect("submit_and_wait read");
+                    let cqe = ring.completion().next().expect("cqe read");
+                    let res = cqe.result();
+                    if res < 0 {
+                        let err = io::Error::from_raw_os_error(-res);
+                        let _ = result_sender.send(Err(QuillSQLError::Storage(format!(
+                            "io_uring read failed: {}",
+                            err
+                        ))));
+                        continue;
+                    }
+                    if res as usize != PAGE_SIZE {
+                        let _ = result_sender.send(Err(QuillSQLError::Storage(format!(
+                            "short read: {} bytes",
+                            res
+                        ))));
+                        continue;
+                    }
+                    let bytes = BytesMut::from(&buf[..]);
+                    let _ = result_sender.send(Ok(bytes));
+                }
+                // ReadPagesContiguous merged into ReadPages
+                DiskRequest::ReadPages {
+                    page_ids,
+                    result_sender,
+                } => {
+                    use crate::buffer::PAGE_SIZE;
+                    use crate::storage::page::META_PAGE_SIZE;
+                    if page_ids.is_empty() {
+                        let _ = result_sender.send(Ok(vec![]));
+                        continue;
+                    }
+                    // Detect contiguity
+                    let mut is_contig = true;
+                    for w in page_ids.windows(2) {
+                        if w[1] != w[0] + 1 {
+                            is_contig = false;
+                            break;
+                        }
+                    }
+                    let mut submit_read = |pid: PageId, raws: &mut Vec<Vec<u8>>| {
+                        let mut buf = vec![0u8; PAGE_SIZE];
+                        let offset = (*META_PAGE_SIZE + (pid - 1) as usize * PAGE_SIZE) as u64;
+                        let e =
+                            opcode::Read::new(types::Fd(fd), buf.as_mut_ptr(), PAGE_SIZE as u32)
+                                .offset(offset)
+                                .build();
+                        unsafe { ring.submission().push(&e) }.expect("submit read sqe");
+                        raws.push(buf);
+                    };
+
+                    let mut raw_bufs: Vec<Vec<u8>> = Vec::with_capacity(page_ids.len());
+                    if is_contig {
+                        // Submit in order
+                        for pid in page_ids.iter().copied() {
+                            submit_read(pid, &mut raw_bufs);
+                        }
+                        ring.submit_and_wait(raw_bufs.len())
+                            .expect("submit_and_wait reads");
+                    } else {
+                        for pid in page_ids.iter().copied() {
+                            submit_read(pid, &mut raw_bufs);
+                        }
+                        ring.submit_and_wait(raw_bufs.len())
+                            .expect("submit_and_wait reads");
+                    }
+                    let mut ok = true;
+                    for _ in 0..raw_bufs.len() {
+                        if let Some(cqe) = ring.completion().next() {
+                            if cqe.result() < 0 {
+                                ok = false;
+                            }
+                        } else {
+                            ok = false;
+                        }
+                    }
+                    if ok {
+                        let mut out = Vec::with_capacity(raw_bufs.len());
+                        for buf in raw_bufs.into_iter() {
+                            out.push(BytesMut::from(&buf[..]));
+                        }
+                        let _ = result_sender.send(Ok(out));
+                    } else {
+                        let _ = result_sender.send(Err(QuillSQLError::Storage(
+                            "iouring batch read failed".into(),
+                        )));
+                    }
+                }
+                DiskRequest::WritePage {
+                    page_id,
+                    data,
+                    result_sender,
+                } => {
+                    let offset = (*META_PAGE_SIZE + (page_id - 1) as usize * PAGE_SIZE) as u64;
+                    let ptr = data.as_ptr();
+                    // submit write + fdatasync in a small batch; require two CQEs
+                    let write_e = opcode::Write::new(types::Fd(fd), ptr, PAGE_SIZE as u32)
+                        .offset(offset)
+                        .build();
+                    let fsync_e = opcode::Fsync::new(types::Fd(fd))
+                        .flags(types::FsyncFlags::DATASYNC)
+                        .build();
+                    unsafe { ring.submission().push(&write_e) }.expect("submit write sqe");
+                    unsafe { ring.submission().push(&fsync_e) }.expect("submit fsync sqe");
+                    ring.submit_and_wait(2).expect("submit write+fdatasync");
+                    // collect two CQEs
+                    let mut ok = true;
+                    for _ in 0..2 {
+                        if let Some(cqe) = ring.completion().next() {
+                            let res = cqe.result();
+                            if res < 0 {
+                                ok = false;
+                            }
+                        } else {
+                            ok = false;
+                        }
+                    }
+                    if !ok {
+                        let _ = result_sender.send(Err(QuillSQLError::Storage(
+                            "io_uring write+fdatasync failed".to_string(),
+                        )));
+                        continue;
+                    }
+                    let _ = result_sender.send(Ok(()));
+                }
+                // WritePagesContiguous removed
+                DiskRequest::AllocatePage { result_sender } => {
+                    let _ = result_sender.send(disk_manager.allocate_page());
+                }
+                DiskRequest::DeallocatePage {
+                    page_id,
+                    result_sender,
+                } => {
+                    let _ = result_sender.send(disk_manager.deallocate_page(page_id));
+                }
+                DiskRequest::Shutdown => {
+                    log::debug!("Disk I/O io_uring worker received Shutdown signal.");
+                    break;
+                }
+            }
+        }
+        log::debug!("Disk I/O io_uring worker thread finished.");
     }
 
     // --- Public methods to send requests ---
 
-    pub fn schedule_read(&self, page_id: PageId) -> QuillSQLResult<DiskCommandResultReceiver<BytesMut>> {
+    pub fn schedule_read(
+        &self,
+        page_id: PageId,
+    ) -> QuillSQLResult<DiskCommandResultReceiver<BytesMut>> {
         let (tx, rx) = mpsc::channel();
         self.request_sender
             .send(DiskRequest::ReadPage {
@@ -161,22 +536,47 @@ impl DiskScheduler {
         Ok(rx)
     }
 
+    pub fn schedule_read_pages(
+        &self,
+        page_ids: Vec<PageId>,
+    ) -> QuillSQLResult<DiskCommandResultReceiver<Vec<BytesMut>>> {
+        let (tx, rx) = mpsc::channel();
+        self.request_sender
+            .send(DiskRequest::ReadPages {
+                page_ids,
+                result_sender: tx,
+            })
+            .map_err(|e| {
+                QuillSQLError::Internal(format!("Failed to send ReadPages request: {}", e))
+            })?;
+        Ok(rx)
+    }
+
+    // removed schedule_write_pages_contiguous
+
     pub fn schedule_allocate(&self) -> QuillSQLResult<Receiver<QuillSQLResult<PageId>>> {
         let (tx, rx) = mpsc::channel();
         self.request_sender
             .send(DiskRequest::AllocatePage { result_sender: tx })
-            .map_err(|e| QuillSQLError::Internal(format!("Failed to send Allocate request: {}", e)))?;
+            .map_err(|e| {
+                QuillSQLError::Internal(format!("Failed to send Allocate request: {}", e))
+            })?;
         Ok(rx)
     }
 
-    pub fn schedule_deallocate(&self, page_id: PageId) -> QuillSQLResult<DiskCommandResultReceiver<()>> {
+    pub fn schedule_deallocate(
+        &self,
+        page_id: PageId,
+    ) -> QuillSQLResult<DiskCommandResultReceiver<()>> {
         let (tx, rx) = mpsc::channel();
         self.request_sender
             .send(DiskRequest::DeallocatePage {
                 page_id,
                 result_sender: tx,
             })
-            .map_err(|e| QuillSQLError::Internal(format!("Failed to send Deallocate request: {}", e)))?;
+            .map_err(|e| {
+                QuillSQLError::Internal(format!("Failed to send Deallocate request: {}", e))
+            })?;
         Ok(rx)
     }
 }
@@ -188,15 +588,18 @@ impl Drop for DiskScheduler {
         // Send shutdown signal. Ignore error if channel already closed.
         let _ = self.request_sender.send(DiskRequest::Shutdown);
 
-        // Wait for the background thread to finish
-        if let Some(handle) = self.background_thread.take() {
+        // Join dispatcher first
+        if let Some(handle) = self.dispatcher_thread.take() {
             if let Err(e) = handle.join() {
-                eprintln!("ERROR: Disk I/O worker thread panicked: {:?}", e);
-            } else {
-                // println!("DEBUG: Disk I/O worker thread joined successfully.");
+                log::error!("Disk dispatcher thread panicked: {:?}", e);
             }
-        } else {
-            println!("WARN: Background thread handle already taken on Drop.");
+        }
+
+        // Then join all workers
+        for handle in self.worker_threads.drain(..) {
+            if let Err(e) = handle.join() {
+                log::error!("Disk worker thread panicked: {:?}", e);
+            }
         }
     }
 }
@@ -206,8 +609,8 @@ impl Drop for DiskScheduler {
 mod tests {
     use super::DiskManager;
     use super::*;
-    use crate::error::QuillSQLResult;
     use crate::buffer::PAGE_SIZE;
+    use crate::error::QuillSQLResult;
     use bytes::{Bytes, BytesMut};
     use std::sync::Arc;
     use std::thread;
@@ -446,6 +849,88 @@ mod tests {
         assert_eq!(read_content.len(), large_string.len());
         assert_eq!(&read_content[0..10], &large_string[0..10]); // 检查前缀
 
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_iouring_allocate_write_read() -> QuillSQLResult<()> {
+        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+        let dm = Arc::new(DiskManager::try_new(temp_dir.path().join("test.db")).unwrap());
+        let scheduler = Arc::new(DiskScheduler::new_with_strategy(
+            dm.clone(),
+            IOStrategy::IoUring {
+                queue_depth: Some(256),
+            },
+        ));
+
+        // allocate
+        let rx_alloc = scheduler.schedule_allocate()?;
+        let page_id = rx_alloc
+            .recv()
+            .map_err(|e| QuillSQLError::Internal(format!("RecvError: {}", e)))??;
+
+        // write
+        let mut data = BytesMut::zeroed(PAGE_SIZE);
+        data[..4].copy_from_slice(&[1, 2, 3, 4]);
+        scheduler
+            .schedule_write(page_id, data.freeze())?
+            .recv()
+            .map_err(|e| QuillSQLError::Internal(format!("RecvError: {}", e)))??;
+
+        // read
+        let read = scheduler
+            .schedule_read(page_id)?
+            .recv()
+            .map_err(|e| QuillSQLError::Internal(format!("RecvError: {}", e)))??;
+        assert_eq!(&read[..4], &[1, 2, 3, 4]);
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_iouring_concurrent_reads() -> QuillSQLResult<()> {
+        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+        let dm = Arc::new(DiskManager::try_new(temp_dir.path().join("test.db")).unwrap());
+        let scheduler = Arc::new(DiskScheduler::new_with_strategy(
+            dm.clone(),
+            IOStrategy::IoUring {
+                queue_depth: Some(256),
+            },
+        ));
+
+        let page_id = scheduler
+            .schedule_allocate()?
+            .recv()
+            .map_err(|e| QuillSQLError::Internal(format!("RecvError: {}", e)))??;
+
+        scheduler
+            .schedule_write(page_id, {
+                let mut b = BytesMut::zeroed(PAGE_SIZE);
+                b[..13].copy_from_slice(b"Hello, World!");
+                b.freeze()
+            })?
+            .recv()
+            .map_err(|e| QuillSQLError::Internal(format!("RecvError: {}", e)))??;
+
+        let mut handles = vec![];
+        for _ in 0..8u32 {
+            let s = scheduler.clone();
+            handles.push(thread::spawn(move || {
+                let data = s
+                    .schedule_read(page_id)
+                    .map_err(|e| e.to_string())
+                    .and_then(|rx| rx.recv().map_err(|e| e.to_string()))
+                    .and_then(|res| res.map_err(|e| e.to_string()))?;
+                if &data[..13] != b"Hello, World!" {
+                    return Err("mismatch".into());
+                }
+                Ok::<(), String>(())
+            }));
+        }
+        for h in handles {
+            h.join().unwrap().unwrap();
+        }
         Ok(())
     }
 }
