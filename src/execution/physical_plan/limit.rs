@@ -3,9 +3,9 @@ use std::sync::Arc;
 
 use crate::catalog::SchemaRef;
 use crate::{
+    error::QuillSQLResult,
     execution::{ExecutionContext, VolcanoExecutor},
     storage::tuple::Tuple,
-    error::QuillSQLResult,
 };
 
 use super::PhysicalPlan;

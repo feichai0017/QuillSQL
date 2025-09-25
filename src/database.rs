@@ -4,11 +4,11 @@ use tempfile::TempDir;
 
 use crate::buffer::BUFFER_POOL_SIZE;
 use crate::catalog::load_catalog_data;
-use crate::utils::util::{pretty_format_logical_plan, pretty_format_physical_plan};
 use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::optimizer::LogicalOptimizer;
 use crate::plan::logical_plan::LogicalPlan;
 use crate::plan::PhysicalPlanner;
+use crate::utils::util::{pretty_format_logical_plan, pretty_format_physical_plan};
 use crate::{
     buffer::BufferPoolManager,
     catalog::Catalog,
@@ -28,10 +28,7 @@ impl Database {
     pub fn new_on_disk(db_path: &str) -> QuillSQLResult<Self> {
         let disk_manager = Arc::new(DiskManager::try_new(db_path)?);
         let disk_scheduler = Arc::new(DiskScheduler::new(disk_manager.clone()));
-        let buffer_pool = Arc::new(BufferPoolManager::new(
-            BUFFER_POOL_SIZE,
-            disk_scheduler,
-        ));
+        let buffer_pool = Arc::new(BufferPoolManager::new(BUFFER_POOL_SIZE, disk_scheduler));
 
         let catalog = Catalog::new(buffer_pool.clone(), disk_manager.clone());
 
@@ -52,10 +49,7 @@ impl Database {
                 QuillSQLError::Internal("Invalid temp path".to_string()),
             )?)?);
         let disk_scheduler = Arc::new(DiskScheduler::new(disk_manager.clone()));
-        let buffer_pool = Arc::new(BufferPoolManager::new(
-            BUFFER_POOL_SIZE,
-            disk_scheduler,
-        ));
+        let buffer_pool = Arc::new(BufferPoolManager::new(BUFFER_POOL_SIZE, disk_scheduler));
 
         let catalog = Catalog::new(buffer_pool.clone(), disk_manager.clone());
 

@@ -1,10 +1,10 @@
 use crate::catalog::SchemaRef;
 use crate::error::QuillSQLError;
-use crate::utils::scalar::ScalarValue;
 use crate::execution::physical_plan::PhysicalPlan;
 use crate::execution::{ExecutionContext, VolcanoExecutor};
 use crate::expression::{Expr, ExprTrait};
 use crate::function::Accumulator;
+use crate::utils::scalar::ScalarValue;
 use crate::{error::QuillSQLResult, storage::tuple::Tuple};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};

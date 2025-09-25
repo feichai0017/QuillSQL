@@ -105,20 +105,15 @@ impl PhysicalPlanner<'_> {
                         ))
                     } else {
                         {
-                            let mut op = PhysicalSeqScan::new(
-                                table_ref.clone(),
-                                table_schema.clone(),
-                            );
+                            let mut op =
+                                PhysicalSeqScan::new(table_ref.clone(), table_schema.clone());
                             op.streaming_hint = *streaming_hint;
                             PhysicalPlan::SeqScan(op)
                         }
                     }
                 } else {
                     {
-                        let mut op = PhysicalSeqScan::new(
-                            table_ref.clone(),
-                            table_schema.clone(),
-                        );
+                        let mut op = PhysicalSeqScan::new(table_ref.clone(), table_schema.clone());
                         op.streaming_hint = *streaming_hint;
                         PhysicalPlan::SeqScan(op)
                     }

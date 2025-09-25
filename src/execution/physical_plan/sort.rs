@@ -7,9 +7,9 @@ use crate::error::QuillSQLError;
 use crate::expression::ExprTrait;
 use crate::plan::logical_plan::OrderByExpr;
 use crate::{
+    error::QuillSQLResult,
     execution::{ExecutionContext, VolcanoExecutor},
     storage::tuple::Tuple,
-    error::QuillSQLResult,
 };
 
 use super::PhysicalPlan;

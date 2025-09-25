@@ -1,9 +1,9 @@
 use crate::catalog::{Column, DataType, Schema};
-use crate::utils::scalar::ScalarValue;
+use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::expression::{Expr, ExprTrait};
 use crate::function::AggregateFunctionKind;
-use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::storage::tuple::Tuple;
+use crate::utils::scalar::ScalarValue;
 use std::fmt::Debug;
 
 #[derive(Clone, PartialEq, Eq, Debug)]

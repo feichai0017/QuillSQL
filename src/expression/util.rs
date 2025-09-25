@@ -1,6 +1,6 @@
 use crate::catalog::SchemaRef;
-use crate::expression::{Alias, Cast, ColumnExpr, Expr};
 use crate::error::QuillSQLResult;
+use crate::expression::{Alias, Cast, ColumnExpr, Expr};
 
 /// Convert an expression into Column expression
 pub fn columnize_expr(e: &Expr, input_schema: &SchemaRef) -> QuillSQLResult<Expr> {

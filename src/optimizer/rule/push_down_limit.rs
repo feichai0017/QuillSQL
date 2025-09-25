@@ -47,10 +47,10 @@ impl LogicalOptimizerRule for PushDownLimit {
 
 #[cfg(test)]
 mod tests {
+    use crate::database::Database;
     use crate::optimizer::rule::PushDownLimit;
     use crate::optimizer::LogicalOptimizer;
     use crate::plan::logical_plan::{LogicalPlan, Sort};
-    use crate::database::Database;
     use std::sync::Arc;
 
     fn build_optimizer() -> LogicalOptimizer {

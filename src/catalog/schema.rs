@@ -1,8 +1,8 @@
 use super::column::{Column, ColumnRef};
 use crate::catalog::DataType;
-use crate::utils::table_ref::TableReference;
-use crate::error::QuillSQLResult;
 use crate::error::QuillSQLError;
+use crate::error::QuillSQLResult;
+use crate::utils::table_ref::TableReference;
 use std::sync::{Arc, LazyLock};
 
 pub type SchemaRef = Arc<Schema>;

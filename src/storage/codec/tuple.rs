@@ -54,9 +54,9 @@ impl TupleCodec {
 #[cfg(test)]
 mod tests {
     use crate::catalog::{Column, DataType, Schema};
-    use crate::utils::scalar::ScalarValue;
     use crate::storage::codec::TupleCodec;
     use crate::storage::tuple::Tuple;
+    use crate::utils::scalar::ScalarValue;
     use std::sync::Arc;
 
     #[test]

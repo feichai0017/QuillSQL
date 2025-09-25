@@ -1,5 +1,5 @@
-use crate::plan::logical_plan::{CreateIndex, LogicalPlan};
 use crate::error::{QuillSQLError, QuillSQLResult};
+use crate::plan::logical_plan::{CreateIndex, LogicalPlan};
 
 use super::LogicalPlanner;
 

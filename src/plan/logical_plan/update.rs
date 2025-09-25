@@ -1,6 +1,6 @@
 use crate::catalog::SchemaRef;
-use crate::utils::table_ref::TableReference;
 use crate::expression::Expr;
+use crate::utils::table_ref::TableReference;
 use std::collections::HashMap;
 
 #[derive(derive_new::new, Debug, Clone)]

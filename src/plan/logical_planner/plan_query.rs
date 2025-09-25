@@ -1,6 +1,6 @@
-use crate::utils::scalar::ScalarValue;
-use crate::expression::Expr;
 use crate::error::{QuillSQLError, QuillSQLResult};
+use crate::expression::Expr;
+use crate::utils::scalar::ScalarValue;
 use std::sync::Arc;
 
 use crate::plan::logical_plan::{Limit, LogicalPlan, Sort};

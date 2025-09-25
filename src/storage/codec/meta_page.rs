@@ -1,6 +1,6 @@
+use crate::error::QuillSQLResult;
 use crate::storage::codec::{CommonCodec, DecodedData};
 use crate::storage::page::MetaPage;
-use crate::error::QuillSQLResult;
 
 pub struct MetaPageCodec;
 

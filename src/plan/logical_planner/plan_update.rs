@@ -1,6 +1,6 @@
+use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::plan::logical_plan::{LogicalPlan, Update};
 use crate::plan::LogicalPlanner;
-use crate::error::{QuillSQLError, QuillSQLResult};
 use std::collections::HashMap;
 
 impl<'a> LogicalPlanner<'a> {

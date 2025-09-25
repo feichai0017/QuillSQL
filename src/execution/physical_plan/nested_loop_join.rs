@@ -5,10 +5,10 @@ use crate::catalog::SchemaRef;
 use crate::expression::{Expr, ExprTrait};
 use crate::utils::scalar::ScalarValue;
 use crate::{
+    error::QuillSQLResult,
     execution::{ExecutionContext, VolcanoExecutor},
     plan::logical_plan::JoinType,
     storage::tuple::Tuple,
-    error::QuillSQLResult,
 };
 
 use super::PhysicalPlan;

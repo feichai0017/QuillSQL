@@ -1,6 +1,6 @@
 use crate::storage::page::RecordId;
-use crate::utils::table_ref::TableReference;
 use crate::transaction::{Transaction, TransactionId};
+use crate::utils::table_ref::TableReference;
 use std::collections::HashMap;
 
 #[derive(Debug)]

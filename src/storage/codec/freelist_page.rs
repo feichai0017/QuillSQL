@@ -1,7 +1,7 @@
 use crate::buffer::PAGE_SIZE;
+use crate::error::QuillSQLResult;
 use crate::storage::codec::{CommonCodec, DecodedData};
 use crate::storage::page::{FreelistPage, FreelistPageHeader};
-use crate::error::QuillSQLResult;
 
 pub struct FreelistPageHeaderCodec;
 

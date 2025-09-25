@@ -1,9 +1,9 @@
 use crate::catalog::Schema;
 use crate::catalog::{Column, DataType};
-use crate::utils::scalar::ScalarValue;
 use crate::error::QuillSQLResult;
 use crate::expression::{Expr, ExprTrait};
 use crate::storage::tuple::Tuple;
+use crate::utils::scalar::ScalarValue;
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Alias {

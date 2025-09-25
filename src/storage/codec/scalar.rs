@@ -1,7 +1,7 @@
 use crate::catalog::DataType;
-use crate::utils::scalar::ScalarValue;
-use crate::storage::codec::{CommonCodec, DecodedData};
 use crate::error::QuillSQLResult;
+use crate::storage::codec::{CommonCodec, DecodedData};
+use crate::utils::scalar::ScalarValue;
 
 pub struct ScalarValueCodec;
 

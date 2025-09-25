@@ -1,5 +1,5 @@
-use crate::storage::codec::DecodedData;
 use crate::error::{QuillSQLError, QuillSQLResult};
+use crate::storage::codec::DecodedData;
 use core::f32;
 use std::f64;
 

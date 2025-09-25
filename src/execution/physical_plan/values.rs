@@ -1,12 +1,12 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::catalog::SchemaRef;
-use crate::utils::scalar::ScalarValue;
 use crate::expression::{Expr, ExprTrait};
 use crate::storage::tuple::{Tuple, EMPTY_TUPLE};
+use crate::utils::scalar::ScalarValue;
 use crate::{
-    execution::{ExecutionContext, VolcanoExecutor},
     error::QuillSQLResult,
+    execution::{ExecutionContext, VolcanoExecutor},
 };
 
 #[derive(Debug)]

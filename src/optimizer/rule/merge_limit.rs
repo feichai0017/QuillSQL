@@ -1,7 +1,7 @@
+use crate::error::QuillSQLResult;
 use crate::optimizer::logical_optimizer::ApplyOrder;
 use crate::optimizer::LogicalOptimizerRule;
 use crate::plan::logical_plan::{Limit, LogicalPlan};
-use crate::error::QuillSQLResult;
 use std::cmp::min;
 use std::sync::Arc;
 

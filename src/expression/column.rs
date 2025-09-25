@@ -1,10 +1,10 @@
 use crate::catalog::Schema;
 use crate::catalog::{Column, DataType};
-use crate::utils::scalar::ScalarValue;
-use crate::utils::table_ref::TableReference;
 use crate::error::QuillSQLResult;
 use crate::expression::ExprTrait;
 use crate::storage::tuple::Tuple;
+use crate::utils::scalar::ScalarValue;
+use crate::utils::table_ref::TableReference;
 
 /// A named reference to a qualified field in a schema.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]

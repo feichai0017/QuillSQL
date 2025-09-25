@@ -6,9 +6,9 @@ use crate::error::QuillSQLError;
 use crate::expression::{Expr, ExprTrait};
 use crate::utils::scalar::ScalarValue;
 use crate::{
+    error::QuillSQLResult,
     execution::{ExecutionContext, VolcanoExecutor},
     storage::tuple::Tuple,
-    error::QuillSQLResult,
 };
 
 use super::PhysicalPlan;

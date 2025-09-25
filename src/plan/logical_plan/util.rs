@@ -1,8 +1,8 @@
 use crate::catalog::{ColumnRef, Schema};
+use crate::error::QuillSQLResult;
 use crate::expression::{Expr, ExprTrait};
 use crate::plan::logical_plan::JoinType;
 use crate::plan::logical_plan::LogicalPlan;
-use crate::error::QuillSQLResult;
 use std::sync::Arc;
 
 pub fn build_join_schema(

@@ -1,4 +1,4 @@
-use crate::buffer::{PageId, PAGE_SIZE, INVALID_PAGE_ID};
+use crate::buffer::{PageId, INVALID_PAGE_ID, PAGE_SIZE};
 use crate::storage::codec::{CommonCodec, FreelistPageHeaderCodec};
 use std::sync::LazyLock;
 

@@ -1,8 +1,8 @@
 use crate::catalog::{Column, DataType, Schema};
-use crate::utils::scalar::ScalarValue;
-use crate::expression::{Expr, ExprTrait};
 use crate::error::{QuillSQLError, QuillSQLResult};
+use crate::expression::{Expr, ExprTrait};
 use crate::storage::tuple::Tuple;
+use crate::utils::scalar::ScalarValue;
 
 /// Cast expression
 #[derive(Clone, PartialEq, Eq, Debug)]

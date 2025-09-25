@@ -2,9 +2,9 @@ use crate::catalog::SchemaRef;
 use crate::utils::table_ref::TableReference;
 use crate::{
     catalog::Schema,
+    error::QuillSQLResult,
     execution::{ExecutionContext, VolcanoExecutor},
     storage::tuple::Tuple,
-    error::QuillSQLResult,
 };
 use std::sync::Arc;
 

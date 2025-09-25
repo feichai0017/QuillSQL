@@ -1,7 +1,7 @@
+use crate::error::QuillSQLResult;
 use crate::optimizer::logical_optimizer::ApplyOrder;
 use crate::optimizer::LogicalOptimizerRule;
 use crate::plan::logical_plan::{EmptyRelation, LogicalPlan};
-use crate::error::QuillSQLResult;
 
 pub struct EliminateLimit;
 
@@ -42,10 +42,10 @@ impl LogicalOptimizerRule for EliminateLimit {
 
 #[cfg(test)]
 mod tests {
+    use crate::database::Database;
     use crate::optimizer::rule::EliminateLimit;
     use crate::optimizer::LogicalOptimizer;
     use crate::plan::logical_plan::LogicalPlan;
-    use crate::database::Database;
     use std::sync::Arc;
 
     fn build_optimizer() -> LogicalOptimizer {

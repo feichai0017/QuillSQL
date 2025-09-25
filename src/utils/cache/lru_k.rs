@@ -1,6 +1,6 @@
 use super::Replacer;
-use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::buffer::FrameId;
+use crate::error::{QuillSQLError, QuillSQLResult};
 use std::collections::{HashMap, LinkedList};
 
 #[derive(Debug)]

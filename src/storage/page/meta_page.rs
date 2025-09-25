@@ -1,6 +1,6 @@
 use crate::buffer::{PageId, INVALID_PAGE_ID};
-use crate::storage::codec::MetaPageCodec;
 use crate::error::{QuillSQLError, QuillSQLResult};
+use crate::storage::codec::MetaPageCodec;
 use std::sync::LazyLock;
 
 pub static EMPTY_META_PAGE: MetaPage = MetaPage {

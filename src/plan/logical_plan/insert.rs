@@ -1,6 +1,6 @@
 use crate::catalog::SchemaRef;
-use crate::utils::table_ref::TableReference;
 use crate::plan::logical_plan::LogicalPlan;
+use crate::utils::table_ref::TableReference;
 use std::sync::Arc;
 
 #[derive(derive_new::new, Debug, Clone)]

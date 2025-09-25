@@ -16,9 +16,9 @@ pub use util::*;
 
 use crate::catalog::Schema;
 use crate::catalog::{Column, DataType};
-use crate::utils::scalar::ScalarValue;
-use crate::storage::tuple::Tuple;
 use crate::error::QuillSQLResult;
+use crate::storage::tuple::Tuple;
+use crate::utils::scalar::ScalarValue;
 
 pub trait ExprTrait {
     /// Get the data type of this expression, given the schema of the input

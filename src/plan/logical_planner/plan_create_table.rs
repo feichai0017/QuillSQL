@@ -2,9 +2,9 @@ use crate::error::{QuillSQLError, QuillSQLResult};
 use std::collections::HashSet;
 
 use crate::catalog::{Column, DataType};
-use crate::utils::scalar::ScalarValue;
 use crate::expression::Expr;
 use crate::plan::logical_plan::{CreateTable, LogicalPlan};
+use crate::utils::scalar::ScalarValue;
 
 use super::LogicalPlanner;
 

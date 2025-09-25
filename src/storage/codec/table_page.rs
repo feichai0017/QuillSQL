@@ -1,9 +1,9 @@
 use crate::buffer::PAGE_SIZE;
 use crate::catalog::SchemaRef;
-use crate::utils::util::page_bytes_to_array;
+use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::storage::codec::{CommonCodec, DecodedData};
 use crate::storage::page::{RecordId, TablePage, TablePageHeader, TupleInfo, TupleMeta};
-use crate::error::{QuillSQLError, QuillSQLResult};
+use crate::utils::util::page_bytes_to_array;
 
 pub struct TablePageCodec;
 

@@ -1,10 +1,10 @@
 use crate::catalog::Schema;
 use crate::catalog::{Column, DataType};
-use crate::utils::scalar::ScalarValue;
+use crate::error::QuillSQLError;
 use crate::error::QuillSQLResult;
 use crate::expression::{Expr, ExprTrait};
 use crate::storage::tuple::Tuple;
-use crate::error::QuillSQLError;
+use crate::utils::scalar::ScalarValue;
 use std::cmp::Ordering;
 
 /// Binary expression

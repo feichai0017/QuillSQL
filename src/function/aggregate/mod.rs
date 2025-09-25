@@ -5,8 +5,8 @@ pub use avg::AvgAccumulator;
 pub use count::CountAccumulator;
 use std::fmt::Debug;
 
-use crate::utils::scalar::ScalarValue;
 use crate::error::QuillSQLResult;
+use crate::utils::scalar::ScalarValue;
 use strum::{EnumIter, IntoEnumIterator};
 
 #[derive(Clone, PartialEq, Eq, Debug, EnumIter)]

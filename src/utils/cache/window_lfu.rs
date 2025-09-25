@@ -1,6 +1,6 @@
 use super::Replacer; // 引入定义的 trait
-use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::buffer::FrameId;
+use crate::error::{QuillSQLError, QuillSQLResult};
 use std::collections::HashMap;
 use std::time::{Duration, Instant}; // 使用真实时间
 
@@ -47,7 +47,7 @@ impl Replacer for WindowLFUReplacer {
             // 如果缓存已满，不能直接添加，需要先驱逐
             // BufferPoolManager 应该保证在调用 record_access 前已确保有空间
             if self.node_store.len() >= self.capacity {
-                 // 通常不应在这里失败，BPM 应该先调用 evict
+                // 通常不应在这里失败，BPM 应该先调用 evict
                 return Err(QuillSQLError::Internal(format!(
                     "WindowLFU capacity {} reached when accessing new frame {}",
                     self.capacity, frame_id
@@ -75,13 +75,14 @@ impl Replacer for WindowLFUReplacer {
                 continue;
             }
 
-            let effective_frequency = if now.duration_since(node.last_access_time) <= self.window_duration {
-                // 在窗口内，使用原始频率
-                node.frequency
-            } else {
-                // 超出窗口，频率视为最低 (0)
-                0
-            };
+            let effective_frequency =
+                if now.duration_since(node.last_access_time) <= self.window_duration {
+                    // 在窗口内，使用原始频率
+                    node.frequency
+                } else {
+                    // 超出窗口，频率视为最低 (0)
+                    0
+                };
 
             let current_priority = (effective_frequency, node.last_access_time);
 
@@ -92,7 +93,9 @@ impl Replacer for WindowLFUReplacer {
                 }
                 Some(min_p) => {
                     // 比较优先级：先比频率（越小越优先），再比时间（越早越优先）
-                    if effective_frequency < min_p.0 || (effective_frequency == min_p.0 && node.last_access_time < min_p.1) {
+                    if effective_frequency < min_p.0
+                        || (effective_frequency == min_p.0 && node.last_access_time < min_p.1)
+                    {
                         min_priority = Some(current_priority);
                         victim_frame = Some(frame_id);
                     }
@@ -117,7 +120,7 @@ impl Replacer for WindowLFUReplacer {
             } else if !set_evictable && was_evictable {
                 // 检查确保 current_size 不会小于 0
                 if self.current_size > 0 {
-                     self.current_size -= 1;
+                    self.current_size -= 1;
                 } else {
                     // Log warning or handle error: trying to decrease size below zero
                     eprintln!("Warning: Attempted to decrease WindowLFUReplacer size below zero for frame {}", frame_id);
@@ -135,11 +138,11 @@ impl Replacer for WindowLFUReplacer {
     fn remove(&mut self, frame_id: FrameId) {
         if let Some(node) = self.node_store.remove(&frame_id) {
             if node.is_evictable {
-                 if self.current_size > 0 {
-                     self.current_size -= 1;
-                 } else {
-                     eprintln!("Warning: Attempted to decrease WindowLFUReplacer size below zero during remove for frame {}", frame_id);
-                 }
+                if self.current_size > 0 {
+                    self.current_size -= 1;
+                } else {
+                    eprintln!("Warning: Attempted to decrease WindowLFUReplacer size below zero during remove for frame {}", frame_id);
+                }
             }
         }
     }
@@ -161,7 +164,6 @@ impl WindowLFUReplacer {
         }
     }
 }
-
 
 // --- 测试用例 ---
 #[cfg(test)]
@@ -241,7 +243,6 @@ mod tests {
         replacer.record_access(3).unwrap(); // freq=1, time=t3 (now frame 1 and 2 are out of window)
         replacer.set_evictable(3, true).unwrap();
 
-
         // Frame 1 和 2 都超出了窗口，频率视为 0
         // Frame 1 的 last_access_time 最早，应该被驱逐
         assert_eq!(replacer.evict(), Some(1));
@@ -253,7 +254,7 @@ mod tests {
         assert_eq!(replacer.evict(), Some(3));
     }
 
-     #[test]
+    #[test]
     fn test_window_lfu_set_evictable() {
         let mut replacer = WindowLFUReplacer::new(3);
 
@@ -279,7 +280,7 @@ mod tests {
         assert_eq!(replacer.size(), 0);
     }
 
-     #[test]
+    #[test]
     fn test_window_lfu_remove() {
         let mut replacer = WindowLFUReplacer::new(3);
         replacer.record_access(1).unwrap();

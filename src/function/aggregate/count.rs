@@ -1,6 +1,6 @@
-use crate::utils::scalar::ScalarValue;
-use crate::function::aggregate::Accumulator;
 use crate::error::QuillSQLResult;
+use crate::function::aggregate::Accumulator;
+use crate::utils::scalar::ScalarValue;
 
 #[derive(Debug, Clone)]
 pub struct CountAccumulator {

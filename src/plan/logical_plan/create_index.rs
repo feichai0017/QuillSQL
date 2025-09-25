@@ -1,6 +1,6 @@
 use crate::catalog::SchemaRef;
-use crate::utils::table_ref::TableReference;
 use crate::plan::logical_plan::OrderByExpr;
+use crate::utils::table_ref::TableReference;
 
 #[derive(derive_new::new, Debug, Clone)]
 pub struct CreateIndex {
