@@ -29,6 +29,21 @@ struct SqlBatchResponse {
     results: Vec<Vec<Vec<String>>>,
 }
 
+/// Remove single-line SQL comments beginning with `--`.
+/// This intentionally does NOT strip inline comments inside string literals.
+fn strip_sql_comments(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for line in input.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("--") {
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
 #[tokio::main]
 async fn main() {
     env_logger::init();
@@ -86,8 +101,9 @@ async fn api_sql(
         .db
         .lock()
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "DB poisoned".to_string()))?;
+    let cleaned = strip_sql_comments(&req.sql);
     let tuples = db
-        .run(&req.sql)
+        .run(&cleaned)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("{}", e)))?;
     let rows = tuples
         .into_iter()
@@ -105,8 +121,8 @@ async fn api_sql_batch(
         .db
         .lock()
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "DB poisoned".to_string()))?;
-    let statements = req
-        .sql
+    let cleaned = strip_sql_comments(&req.sql);
+    let statements = cleaned
         .split(';')
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
