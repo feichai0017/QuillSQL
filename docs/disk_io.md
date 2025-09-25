@@ -14,10 +14,10 @@
 
 ## 3. io_uring Backend (Linux)
 
-- Each worker owns an `IoUring` instance with configurable `queue_depth`.
-- Batch Submission: Multiple SQEs (read/write) are queued once, then `submit_and_wait(k)` reduces syscall overhead.
-- Durable Writes: `Write` linked with `Fdatasync` using `IO_LINK` ensures fsync after the write completes.
-- Error Handling: Completion (`CQE`) is checked for negative errno and exact byte count (`PAGE_SIZE`) on reads.
+- Each worker owns an `IoUring` instance with configurable `queue_depth`; requests are submitted asynchronously and completions are drained in batches to keep the queue warm.
+- Read batching: multi-page reads share a `BatchState` aggregator so pages can finish out of order while the caller still receives an ordered vector.
+- Writes hold their payload in-flight until the CQE arrives; optional `fdatasync` is tracked via a shared `WriteState` so callers only see a single result when the link chain completes.
+- Error Handling: CQEs convert errno/short-read conditions into `QuillSQLError` that flows back through the original result channel.
 
 ## 4. Configuration
 
@@ -27,6 +27,7 @@
 - `config::IOSchedulerConfig` consolidates runtime knobs:
   - `workers`: default to CPU cores.
   - `iouring_queue_depth` (Linux-only): default 256.
+  - `fsync_on_write`: `true` keeps durable writes, `false` skips `fdatasync` for latency-sensitive workloads.
 
 ## 5. Concurrency & Safety
 
@@ -45,5 +46,4 @@
 - Queue-depth aware batching policies and CQE bulk harvesting.
 - Optional group commit (accumulate writes, fsync once per group) behind a config flag.
 - Metrics hooks (queue length, submit/complete QPS, p95/p99, error codes).
-
 

@@ -11,6 +11,8 @@ pub struct IOSchedulerConfig {
     /// IoUring queue depth (Linux only). Ignored on non-Linux.
     #[cfg(target_os = "linux")]
     pub iouring_queue_depth: usize,
+    /// Whether the IO backend should force an fsync/fdatasync after writes.
+    pub fsync_on_write: bool,
 }
 
 impl IOSchedulerConfig {
@@ -27,6 +29,7 @@ impl Default for IOSchedulerConfig {
             workers: Self::default_workers(),
             #[cfg(target_os = "linux")]
             iouring_queue_depth: 256,
+            fsync_on_write: true,
         }
     }
 }
