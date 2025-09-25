@@ -6,28 +6,42 @@
     <title>QuillSQL Console</title>
     <style>
       :root {
-        --bg: #1e1e1e; --panel: #252526; --panel-dark: #2d2d30; --border: #3e3e42; --text: #cccccc; --text-bright: #ffffff;
-        --muted: #9aa4bf; --accent: #007acc; --accent-hover: #1177bb; --success: #4fc3f7; --warning: #ffb74d; --error: #f45d48;
-        --sql-keyword: #569cd6; --sql-string: #ce9178; --sql-comment: #6a9955;
+        --bg: #0b0f19; --panel: #111826; --panel-dark: #0e1422; --border: #1f2937; --text: #cbd5e1; --text-bright: #e2e8f0;
+        --muted: #8b9bb3; --accent: #00e5ff; --accent-hover: #00c4e6; --success: #22d3ee; --warning: #f59e0b; --error: #ef4444;
+        --sql-keyword: #60a5fa; --sql-string: #f472b6; --sql-comment: #34d399; --grid: rgba(148,163,184,0.08);
       }
       * { box-sizing: border-box; }
-      body { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace; margin: 0; background: var(--bg); color: var(--text); height: 100vh; overflow: hidden; }
+      body { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace; margin: 0; background: var(--bg); color: var(--text); height: 100vh; overflow: hidden; position: relative; }
+      body::before {
+        content: ""; position: absolute; inset: 0; pointer-events: none; opacity: 0.65;
+        background:
+          linear-gradient(180deg, rgba(0,229,255,0.06), transparent 25%, transparent 75%, rgba(0,229,255,0.04)) ,
+          radial-gradient(800px 400px at 10% -10%, rgba(0,229,255,0.12), transparent 60%),
+          radial-gradient(800px 400px at 110% 110%, rgba(168,85,247,0.10), transparent 60%),
+          repeating-linear-gradient(0deg, transparent, transparent 22px, var(--grid) 23px),
+          repeating-linear-gradient(90deg, transparent, transparent 22px, var(--grid) 23px);
+        mask-image: radial-gradient(1200px 600px at 50% -20%, black 30%, transparent 70%);
+      }
+      body::after {
+        content: ""; position: absolute; inset: 0; pointer-events: none;
+        background: radial-gradient(1200px 600px at 50% -10%, rgba(0,0,0,0.25), transparent 60%);
+      }
       .layout { display: flex; flex-direction: column; height: 100vh; }
 
       /* Header */
-      .header { background: var(--panel-dark); border-bottom: 1px solid var(--border); padding: 8px 12px; display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+      .header { background: rgba(14,20,34,0.8); backdrop-filter: blur(6px); border-bottom: 1px solid var(--border); padding: 10px 14px; display: flex; align-items: center; gap: 10px; flex-shrink: 0; box-shadow: inset 0 -1px 0 rgba(255,255,255,0.04); }
       .header img { width: 24px; height: 24px; border-radius: 4px; object-fit: contain; }
-      .header .brand { font-size: 14px; font-weight: 600; color: var(--text-bright); }
+      .header .brand { font-size: 14px; font-weight: 700; color: var(--text-bright); letter-spacing: 0.3px; }
       .header .spacer { flex: 1; }
-      .header a { color: var(--accent); text-decoration: none; font-size: 12px; margin-left: 12px; }
-      .header a:hover { color: var(--accent-hover); }
+      .header a { color: var(--text-bright); text-decoration: none; font-size: 12px; margin-left: 10px; padding: 6px 10px; border: 1px solid rgba(0,229,255,0.18); border-radius: 999px; background: linear-gradient(180deg, rgba(0,229,255,0.08), rgba(0,229,255,0.04)); box-shadow: 0 0 0 1px rgba(0,229,255,0.06) inset; transition: all .15s ease; }
+      .header a:hover { color: var(--text-bright); border-color: rgba(0,229,255,0.35); box-shadow: 0 0 16px rgba(0,229,255,0.12), 0 0 0 1px rgba(0,229,255,0.12) inset; }
 
       /* Main */
       .main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
-      .query-panel { background: var(--panel); border-bottom: 1px solid var(--border); padding: 12px; flex-shrink: 0; }
+      .query-panel { background: rgba(17,24,38,0.8); border-bottom: 1px solid var(--border); padding: 12px; flex-shrink: 0; }
       .query-header { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; font-size: 12px; color: var(--muted); }
       .query-header .status { margin-left: auto; }
-      .sql-editor { width: 100%; height: 120px; background: #1b1b1b; border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 10px; font-size: 13px; resize: vertical; }
+      .sql-editor { width: 100%; height: 120px; background: #0f172a; border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 10px; font-size: 13px; resize: vertical; box-shadow: 0 4px 20px rgba(0,0,0,0.25) inset; }
       .controls { display: flex; gap: 6px; align-items: center; margin-top: 8px; flex-wrap: wrap; }
       button { padding: 6px 12px; background: var(--accent); color: var(--text-bright); border: none; border-radius: 4px; font-size: 12px; cursor: pointer; }
       button:hover { background: var(--accent-hover); }
@@ -36,11 +50,11 @@
       select, input[type="text"] { background: #1b1b1b; border: 1px solid var(--border); color: var(--text); border-radius: 4px; padding: 4px 6px; font-size: 12px; }
 
       /* Results */
-      .results-panel { flex: 1; display: flex; flex-direction: column; background: var(--panel); }
-      .results-header { padding: 8px 12px; border-bottom: 1px solid var(--border); font-size: 12px; color: var(--muted); background: var(--panel-dark); }
+      .results-panel { flex: 1; display: flex; flex-direction: column; background: rgba(17,24,38,0.8); }
+      .results-header { padding: 8px 12px; border-bottom: 1px solid var(--border); font-size: 12px; color: var(--muted); background: rgba(14,20,34,0.8); }
       .results-content { flex: 1; overflow: auto; padding: 12px; }
-      table { border-collapse: collapse; width: 100%; font-size: 12px; background: #151515; }
-      th { background: #111217; color: var(--text-bright); font-weight: 600; text-align: left; padding: 8px; border: 1px solid var(--border); }
+      table { border-collapse: collapse; width: 100%; font-size: 12px; background: #0b1224; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+      th { background: #0d1326; color: var(--text-bright); font-weight: 600; text-align: left; padding: 8px; border: 1px solid var(--border); }
       td { padding: 6px 8px; border: 1px solid var(--border); color: var(--text); }
       tr:nth-child(even) { background: rgba(255,255,255,0.03); }
       tr:hover { background: rgba(255,255,255,0.05); }
@@ -52,9 +66,9 @@
       .empty-state { text-align: center; color: var(--muted); font-size: 12px; padding: 40px; }
 
       /* Footer */
-      .footer { background: var(--panel-dark); border-top: 1px solid var(--border); padding: 6px 12px; font-size: 11px; color: var(--muted); display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
+      .footer { background: rgba(14,20,34,0.8); backdrop-filter: blur(6px); border-top: 1px solid var(--border); padding: 6px 12px; font-size: 11px; color: var(--muted); display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
       .footer .config { display: flex; align-items: center; gap: 6px; }
-      .footer input { width: 320px; }
+      .footer input { width: 320px; background: #0f172a; border: 1px solid var(--border); color: var(--text); border-radius: 6px; }
 
       ::-webkit-scrollbar { width: 8px; height: 8px; }
       ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
