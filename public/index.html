@@ -33,6 +33,11 @@
       .header img { width: 24px; height: 24px; border-radius: 4px; object-fit: contain; }
       .header .brand { font-size: 14px; font-weight: 700; color: var(--text-bright); letter-spacing: 0.3px; }
       .header .spacer { flex: 1; }
+      .header .term-dots { display: flex; gap: 6px; align-items: center; margin-left: 6px; }
+      .header .dot { width: 10px; height: 10px; border-radius: 50%; box-shadow: 0 0 0 1px rgba(0,0,0,0.35) inset, 0 0 8px rgba(255,255,255,0.05); }
+      .header .dot.red { background: #ef4444; }
+      .header .dot.yellow { background: #f59e0b; }
+      .header .dot.green { background: #22c55e; }
       .header a { color: var(--text-bright); text-decoration: none; font-size: 12px; margin-left: 10px; padding: 6px 10px; border: 1px solid rgba(0,229,255,0.18); border-radius: 999px; background: linear-gradient(180deg, rgba(0,229,255,0.08), rgba(0,229,255,0.04)); box-shadow: 0 0 0 1px rgba(0,229,255,0.06) inset; transition: all .15s ease; }
       .header a:hover { color: var(--text-bright); border-color: rgba(0,229,255,0.35); box-shadow: 0 0 16px rgba(0,229,255,0.12), 0 0 0 1px rgba(0,229,255,0.12) inset; }
 
@@ -79,10 +84,9 @@
       <div class="header">
         <img src="/rust-db.png" alt="logo" />
         <div class="brand">QuillSQL Console</div>
+        <div class="term-dots"><span class="dot red"></span><span class="dot yellow"></span><span class="dot green"></span></div>
         <div class="spacer"></div>
-        <a href="/docs.html?file=buffer_pool.md" target="_blank">Buffer Pool</a>
-        <a href="/docs.html?file=btree_index.md" target="_blank">B+Tree</a>
-        <a href="/docs.html?file=disk_io.md" target="_blank">Disk I/O</a>
+        <a href="/docs.html" target="_blank">Docs</a>
         <a href="https://github.com/feichai0017/quillsql" target="_blank">GitHub</a>
       </div>
 
