@@ -126,7 +126,7 @@ impl DiskScheduler {
     }
 
     #[cfg(not(target_os = "linux"))]
-    fn new_with_iouring(disk_manager: Arc<DiskManager>) -> Self {
+    fn new_with_iouring(disk_manager: Arc<DiskManager>, _queue_depth: Option<usize>) -> Self {
         eprintln!("WARN: IoUring selected on non-Linux platform; falling back to thread-pool");
         Self::new(disk_manager)
     }
@@ -429,7 +429,8 @@ impl DiskScheduler {
                     let mut ok = true;
                     for _ in 0..raw_bufs.len() {
                         if let Some(cqe) = ring.completion().next() {
-                            if cqe.result() < 0 {
+                            let res = cqe.result();
+                            if res < 0 || res as usize != PAGE_SIZE {
                                 ok = false;
                             }
                         } else {
@@ -456,9 +457,12 @@ impl DiskScheduler {
                     let offset = (*META_PAGE_SIZE + (page_id - 1) as usize * PAGE_SIZE) as u64;
                     let ptr = data.as_ptr();
                     // submit write + fdatasync in a small batch; require two CQEs
+                    // Ensure write completes before fsync by SQE ordering and links
                     let write_e = opcode::Write::new(types::Fd(fd), ptr, PAGE_SIZE as u32)
                         .offset(offset)
                         .build();
+                    // Link fsync to write so fsync runs after write completes
+                    let write_e = write_e.flags(io_uring::squeue::Flags::IO_LINK);
                     let fsync_e = opcode::Fsync::new(types::Fd(fd))
                         .flags(types::FsyncFlags::DATASYNC)
                         .build();

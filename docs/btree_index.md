@@ -69,6 +69,10 @@ When modifying siblings (during merge or redistribution), deadlocks are possible
 
 -   **Parent-Guided Redirection**: During an insert or delete, after a writer has descended to a leaf, it re-validates its position using the parent (if a latch is still held). If a concurrent split has moved the target key range to a different sibling, the writer can jump directly to the correct page instead of traversing the leaf chain, preventing race conditions.
 -   **Iterator**: The iterator performs a forward scan by following the leaf chain (`next_page_id`). It uses a lightweight form of OLC, checking the leaf page version to detect concurrent modifications and restart if necessary to ensure it doesn't miss keys.
+    -   Sequential Scan Optimization (RingBuffer): For large range scans, the iterator switches to a "synchronous batch fetch + local ring buffer" mode. It fills a small `RingBuffer<BytesMut>` with consecutive leaf pages (by following `next_page_id`) and then decodes KVs locally without holding page guards for long. This reduces buffer pool pollution and syscall/lock overhead.
+    -   Two Iteration Modes:
+        -   Guard Mode: Keep a `ReadPageGuard` and decode per step; prefetch next leaf best-effort.
+        -   Bytes Mode: After switching, decode from `BytesMut` buffers in the local ring; when a leaf is exhausted, pop next bytes from the ring or refill by following the chain.
 -   **Prefix Compression**: Keys in internal nodes are prefix-compressed to save space. Each key is stored as `(lcp, suffix_len, suffix)`. This reduces the size of internal pages, increasing the tree's fanout and reducing its height, which improves cache performance and reduces I/O.
 -   **Split/Merge Safety**:
     -   **Split**: When a node splits, the new right sibling is written first. Then, the B-link pointer and separator key are published atomically by updating the left sibling and parent. This ensures readers can always navigate the structure correctly.
@@ -115,6 +119,13 @@ fn benchmark_range_scan(index: Arc<BPlusTreeIndex>, num_keys: i64, num_passes: u
 ### 4.2 Performance Notes
 -   **Hot Reads**: Performance on hot-spot reads depends on keeping upper levels and hot leaves resident in the buffer pool. Warm up the cache for read-heavy benchmarks. Protect hot pages from pollution by enabling TinyLFU admission.
 -   **Large Range Scans**: Prefer table SeqScan with ring buffer (bypass) when scanning most of the table. For index scans over very large ranges, consider future Bitmap Heap Scan rather than bypassing the pool for leaves.
+
+### 4.3 Configuration
+-   `config::BTreeConfig` controls iterator behavior:
+    -   `seq_batch_enable` (bool): enable batch mode with local ring buffer.
+    -   `seq_window` (usize): number of leaf pages to prefill into the ring per refill.
+    -   `prefetch_enable`/`prefetch_window`: guard-mode prefetch hints to buffer pool.
+  Defaults are conservative; increase `seq_window` for long scans to reduce I/O hop.
 
 ## 5. Future Work
 -   Stronger OLC with bounded retries and telemetry.
