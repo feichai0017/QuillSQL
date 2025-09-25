@@ -17,6 +17,7 @@ use crate::{
     storage::page::{BPlusTreeLeafPage, BPlusTreePage, RecordId},
 };
 
+use crate::config::BTreeConfig;
 use crate::storage::codec::BPlusTreePageTypeCodec;
 pub use crate::storage::index::btree_iterator::TreeIndexIterator;
 use crate::storage::page::BPlusTreePageType;
@@ -76,6 +77,7 @@ pub struct BPlusTreeIndex {
     pub leaf_max_size: u32,
     pub header_page_id: PageId,
     pub header_page_lock: Arc<RwLock<()>>,
+    pub config: BTreeConfig,
 }
 
 impl Index for BPlusTreeIndex {
@@ -121,7 +123,20 @@ impl BPlusTreeIndex {
             leaf_max_size,
             header_page_id,
             header_page_lock: Arc::new(RwLock::new(())),
+            config: BTreeConfig::default(),
         }
+    }
+
+    pub fn new_with_config(
+        key_schema: SchemaRef,
+        buffer_pool: Arc<BufferPoolManager>,
+        internal_max_size: u32,
+        leaf_max_size: u32,
+        config: BTreeConfig,
+    ) -> Self {
+        let mut me = Self::new(key_schema, buffer_pool, internal_max_size, leaf_max_size);
+        me.config = config;
+        me
     }
 
     pub fn open(
@@ -139,7 +154,27 @@ impl BPlusTreeIndex {
             leaf_max_size,
             header_page_id,
             header_page_lock: Arc::new(RwLock::new(())),
+            config: BTreeConfig::default(),
         }
+    }
+
+    pub fn open_with_config(
+        key_schema: SchemaRef,
+        buffer_pool: Arc<BufferPoolManager>,
+        internal_max_size: u32,
+        leaf_max_size: u32,
+        header_page_id: PageId,
+        config: BTreeConfig,
+    ) -> Self {
+        let mut me = Self::open(
+            key_schema,
+            buffer_pool,
+            internal_max_size,
+            leaf_max_size,
+            header_page_id,
+        );
+        me.config = config;
+        me
     }
 
     pub fn get_root_page_id(&self) -> QuillSQLResult<PageId> {
@@ -204,7 +239,7 @@ impl BPlusTreeIndex {
         is_insert: bool,
         mut context: Context<'a>,
     ) -> QuillSQLResult<(WritePageGuard, Context<'a>)> {
-        if std::env::var("QUILL_DEBUG_FIND").ok().as_deref() == Some("1") {
+        if self.config.debug_find_level >= 1 {
             eprintln!(
                 "[FIND] thread={:?} begin is_insert={} key={}",
                 std::thread::current().id(),
@@ -233,7 +268,7 @@ impl BPlusTreeIndex {
                         self.key_schema.clone(),
                         key,
                     )?;
-                    if std::env::var("QUILL_DEBUG_FIND").ok().as_deref() == Some("1") {
+                    if self.config.debug_find_level >= 1 {
                         eprintln!(
                             "[FIND] thread={:?} at_internal parent={} -> child={}",
                             std::thread::current().id(),
@@ -270,7 +305,7 @@ impl BPlusTreeIndex {
                             drop(current_guard);
                             current_guard = child_guard;
                             continue;
-                        } else if std::env::var("QUILL_DEBUG_FIND").ok().as_deref() == Some("1") {
+                        } else if self.config.debug_find_level >= 1 {
                             eprintln!(
                                 "[FIND] thread={:?} hold_parent due_to_full child={} write_set_len={}",
                                 std::thread::current().id(),
@@ -280,7 +315,7 @@ impl BPlusTreeIndex {
                         }
                     }
 
-                    if std::env::var("QUILL_DEBUG_FIND").ok().as_deref() == Some("2") {
+                    if self.config.debug_find_level >= 2 {
                         eprintln!(
                             "[FIND DEBUG] hold-parent: parent={}, child={}, write_set_len={}",
                             current_guard.page_id(),
@@ -292,7 +327,7 @@ impl BPlusTreeIndex {
                     current_guard = child_guard;
                 }
                 BPlusTreePage::Leaf(_) => {
-                    if std::env::var("QUILL_DEBUG_FIND").ok().as_deref() == Some("1") {
+                    if self.config.debug_find_level >= 1 {
                         eprintln!(
                             "[FIND] thread={:?} reached_leaf leaf_page_id={} write_set_len={}",
                             std::thread::current().id(),
@@ -309,7 +344,7 @@ impl BPlusTreeIndex {
     /// 公共 API: 插入一个键值对，使用闩锁耦合实现高并发。
     pub fn insert(&self, key: &Tuple, rid: RecordId) -> QuillSQLResult<()> {
         let mut context = Context::new();
-        if std::env::var("QUILL_DEBUG_INSERT").ok().as_deref() == Some("1") {
+        if self.config.debug_insert_level >= 1 {
             eprintln!(
                 "[INSERT] thread={:?} start key={}",
                 std::thread::current().id(),
@@ -322,7 +357,7 @@ impl BPlusTreeIndex {
             let _lock = self.header_page_lock.write();
             let root_now = self.get_root_page_id()?;
             if root_now == INVALID_PAGE_ID {
-                if std::env::var("QUILL_DEBUG_INSERT").ok().as_deref() == Some("1") {
+                if self.config.debug_insert_level >= 1 {
                     eprintln!(
                         "[INSERT] thread={:?} start_new_tree key={}",
                         std::thread::current().id(),
@@ -337,7 +372,7 @@ impl BPlusTreeIndex {
 
         // Split-before-insert loop: ensure we never insert into a full node.
         loop {
-            if std::env::var("QUILL_DEBUG_INSERT").ok().as_deref() == Some("1") {
+            if self.config.debug_insert_level >= 1 {
                 eprintln!(
                     "[INSERT] thread={:?} find_leaf_pessimistic key={}",
                     std::thread::current().id(),
@@ -395,7 +430,7 @@ impl BPlusTreeIndex {
                 if *key < next_first_key {
                     break;
                 }
-                if std::env::var("QUILL_DEBUG_INSERT").ok().as_deref() == Some("1") {
+                if self.config.debug_insert_level >= 1 {
                     eprintln!(
                         "[INSERT] thread={:?} redirect_to_sibling: from_leaf={} -> next_leaf={} key={} last_key={} next_first_key={}",
                         std::thread::current().id(),
@@ -418,7 +453,7 @@ impl BPlusTreeIndex {
 
             // Update if key exists
             if let Some(existing_rid) = leaf_page.look_up_mut(key) {
-                if std::env::var("QUILL_DEBUG_INSERT").ok().as_deref() == Some("1") {
+                if self.config.debug_insert_level >= 1 {
                     eprintln!(
                         "[INSERT] thread={:?} update leaf_page_id={} key={} old_rid={:?} new_rid={:?}",
                         std::thread::current().id(),
@@ -1269,7 +1304,7 @@ impl BPlusTreeIndex {
         mut page_guard: WritePageGuard,
         context: &mut Context<'a>,
     ) -> QuillSQLResult<()> {
-        if std::env::var("QUILL_DEBUG_SPLIT").ok().as_deref() == Some("2") {
+        if self.config.debug_split_level >= 2 {
             eprintln!(
                 "[SPLIT DEBUG] splitting page={}, write_set_len={}",
                 page_guard.page_id(),
@@ -1278,7 +1313,7 @@ impl BPlusTreeIndex {
         }
         loop {
             let page_id = page_guard.page_id();
-            if std::env::var("QUILL_DEBUG_SPLIT").ok().as_deref() == Some("2") {
+            if self.config.debug_split_level >= 2 {
                 eprintln!(
                     "[SPLIT DEBUG] splitting page={}, write_set_len={}",
                     page_id,
@@ -1303,7 +1338,7 @@ impl BPlusTreeIndex {
                     let new_data = BPlusTreeLeafPageCodec::encode(&new_leaf);
                     new_page_guard.data.copy_from_slice(&new_data);
                     leaf_page.header.version += 1;
-                    if std::env::var("QUILL_DEBUG_SPLIT").ok().as_deref() == Some("2") {
+                    if self.config.debug_split_level >= 2 {
                         if new_leaf.header.current_size > 0 {
                             eprintln!(
                                 "[SPLIT DEBUG] leaf_split left={} right={} sep_key={}",
@@ -1361,7 +1396,7 @@ impl BPlusTreeIndex {
                     // B-link: publish right sibling pointer for readers to chase
                     internal_page.header.next_page_id = new_page_id;
                     internal_page.header.version += 1;
-                    if std::env::var("QUILL_DEBUG_SPLIT").ok().as_deref() == Some("2") {
+                    if self.config.debug_split_level >= 2 {
                         eprintln!(
                             "[SPLIT DEBUG] internal_split left={} right={} promote_key={}",
                             page_id, new_page_id, middle_key
@@ -1377,7 +1412,7 @@ impl BPlusTreeIndex {
 
             // 若当前分裂页是根（无父在 write_set），则创建新的根
             if page_guard.page_id() == self.get_root_page_id()? {
-                if std::env::var("QUILL_DEBUG_SPLIT").ok().as_deref() == Some("2") {
+                if self.config.debug_split_level >= 2 {
                     eprintln!(
                         "[SPLIT DEBUG] root-split: old_root={}, new_right={}",
                         page_id, new_page_id

@@ -2,10 +2,13 @@ use std::ops::{Bound, RangeBounds};
 use std::sync::Arc;
 
 use crate::buffer::{ReadPageGuard, INVALID_PAGE_ID};
+use crate::config::BTreeConfig;
 use crate::error::QuillSQLResult;
 use crate::storage::codec::BPlusTreeLeafPageCodec;
 use crate::storage::page::RecordId;
 use crate::storage::tuple::Tuple;
+use crate::utils::ring_buffer::RingBuffer;
+use bytes::BytesMut;
 
 use super::btree_index::BPlusTreeIndex;
 
@@ -19,11 +22,27 @@ pub struct TreeIndexIterator {
     started: bool,
     // Byte offset to current cursor's KV within the leaf page
     kv_offset: usize,
+    // Optional: current leaf bytes when using batch path
+    current_bytes: Option<BytesMut>,
+    // Unified ring buffer for upcoming leaf bytes
+    batch_buf: RingBuffer<BytesMut>,
+    batch_enabled: bool,
+    batch_window: usize,
 }
 
 impl TreeIndexIterator {
-    /// Create a new iterator over a range
+    /// Create a new iterator over a range (reads config from index)
     pub fn new<R: RangeBounds<Tuple>>(index: Arc<BPlusTreeIndex>, range: R) -> Self {
+        Self::new_with_config(index.clone(), range, index.config)
+    }
+
+    /// Create a new iterator with explicit configuration
+    pub fn new_with_config<R: RangeBounds<Tuple>>(
+        index: Arc<BPlusTreeIndex>,
+        range: R,
+        cfg: BTreeConfig,
+    ) -> Self {
+        let cap = cfg.seq_window.max(1);
         Self {
             index,
             start_bound: range.start_bound().cloned(),
@@ -32,6 +51,10 @@ impl TreeIndexIterator {
             cursor: 0,
             started: false,
             kv_offset: 0,
+            current_bytes: None,
+            batch_buf: RingBuffer::with_capacity(cap),
+            batch_enabled: cfg.seq_batch_enable,
+            batch_window: cfg.seq_window,
         }
     }
 
@@ -84,7 +107,54 @@ impl TreeIndexIterator {
             self.started = true;
         }
 
-        if let Some(guard) = self.current_guard.as_ref() {
+        // Two modes: guard-mode (buffer pool) vs bytes-mode (batch path)
+        if let Some(bytes) = self.current_bytes.as_ref() {
+            // Batch bytes-mode
+            let (h1, _) = BPlusTreeLeafPageCodec::decode_header_only(bytes)?;
+            if self.cursor >= h1.current_size as usize {
+                // advance to next leaf: use batch buffer
+                if let Some(next_bytes) = self.batch_buf.pop() {
+                    // decode header to compute kv_offset start
+                    let (_nh, nh_off) = BPlusTreeLeafPageCodec::decode_header_only(&next_bytes)?;
+                    self.current_bytes = Some(next_bytes);
+                    self.kv_offset = nh_off;
+                    self.cursor = 0;
+                } else if h1.next_page_id != INVALID_PAGE_ID {
+                    // refill batch from next pid synchronously
+                    self.fill_batch_from(h1.next_page_id)?;
+                    if let Some(next_bytes) = self.batch_buf.pop() {
+                        let (_nh, nh_off) =
+                            BPlusTreeLeafPageCodec::decode_header_only(&next_bytes)?;
+                        self.current_bytes = Some(next_bytes);
+                        self.kv_offset = nh_off;
+                        self.cursor = 0;
+                    } else {
+                        self.current_bytes = None;
+                        return Ok(None);
+                    }
+                } else {
+                    self.current_bytes = None;
+                    return Ok(None);
+                }
+                return self.next();
+            }
+            // decode KV at current cursor using cached offset
+            let ((key, rid), new_off) = BPlusTreeLeafPageCodec::decode_kv_at_offset(
+                bytes,
+                self.index.key_schema.clone(),
+                self.kv_offset,
+            )?;
+            let in_range = match &self.end_bound {
+                Bound::Included(end_key) => &key <= end_key,
+                Bound::Excluded(end_key) => &key < end_key,
+                Bound::Unbounded => true,
+            };
+            if in_range {
+                self.cursor += 1;
+                self.kv_offset = new_off;
+                return Ok(Some(rid));
+            }
+        } else if let Some(guard) = self.current_guard.as_ref() {
             // lightweight OLC on iterator read
             // Fast path: header-only double-read for OLC
             let (h1, _) = BPlusTreeLeafPageCodec::decode_header_only(&guard.data)?;
@@ -94,6 +164,19 @@ impl TreeIndexIterator {
                 if next_page_id == INVALID_PAGE_ID {
                     self.current_guard = None;
                     return Ok(None);
+                }
+                // Switch to batch mode if enabled
+                if self.batch_enabled {
+                    self.fill_batch_from(next_page_id)?;
+                    if let Some(next_bytes) = self.batch_buf.pop() {
+                        let (_nh, nh_off) =
+                            BPlusTreeLeafPageCodec::decode_header_only(&next_bytes)?;
+                        self.current_bytes = Some(next_bytes);
+                        self.current_guard = None; // leave guard-mode
+                        self.kv_offset = nh_off;
+                        self.cursor = 0;
+                        return self.next();
+                    }
                 }
                 // prefetch next-next leaf to warm cache (best-effort)
                 if let Ok((next_g, next_leaf)) = self
@@ -176,5 +259,19 @@ impl TreeIndexIterator {
         }
 
         Ok(None)
+    }
+
+    /// Synchronously fill batch buffer by following the next_page_id chain.
+    fn fill_batch_from(&mut self, mut pid: crate::buffer::PageId) -> QuillSQLResult<()> {
+        while self.batch_buf.len() < self.batch_window && pid != INVALID_PAGE_ID {
+            let guard = self.index.buffer_pool.fetch_page_read(pid)?;
+            let (leaf, _) =
+                BPlusTreeLeafPageCodec::decode(&guard.data, self.index.key_schema.clone())?;
+            let next_pid = leaf.header.next_page_id;
+            let bytes = BytesMut::from(&guard.data[..]);
+            self.batch_buf.push(bytes);
+            pid = next_pid;
+        }
+        Ok(())
     }
 }

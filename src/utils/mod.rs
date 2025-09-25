@@ -1,5 +1,7 @@
-pub mod cache;
-pub mod util;
 pub mod bitmap;
-pub mod table_ref;
+pub mod cache;
 pub mod scalar;
+pub mod table_ref;
+pub mod util;
+
+pub mod ring_buffer;

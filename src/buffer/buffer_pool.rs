@@ -25,6 +25,7 @@ use crate::storage::{
     page::{BPlusTreeHeaderPage, BPlusTreeInternalPage, BPlusTreeLeafPage, BPlusTreePage},
 };
 
+use crate::config::BufferPoolConfig;
 use crate::utils::cache::lru_k::LRUKReplacer;
 use crate::utils::cache::tiny_lfu::TinyLFU;
 use crate::utils::cache::Replacer;
@@ -71,6 +72,17 @@ impl BufferPoolManager {
     }
 
     pub fn new(num_pages: usize, disk_scheduler: Arc<DiskScheduler>) -> Self {
+        Self::new_with_config(
+            BufferPoolConfig {
+                buffer_pool_size: num_pages,
+                ..Default::default()
+            },
+            disk_scheduler,
+        )
+    }
+
+    pub fn new_with_config(config: BufferPoolConfig, disk_scheduler: Arc<DiskScheduler>) -> Self {
+        let num_pages = config.buffer_pool_size;
         let mut free_list = VecDeque::with_capacity(num_pages);
         let mut pool = vec![];
         for i in 0..num_pages {
@@ -85,10 +97,14 @@ impl BufferPoolManager {
             page_table: Arc::new(DashMap::new()),
             free_list: Arc::new(RwLock::new(free_list)),
             inflight_loads: Arc::new(DashMap::new()),
-            tiny_lfu: Some(Arc::new(RwLock::new(TinyLFU::new(
-                num_pages.next_power_of_two(),
-                4,
-            )))),
+            tiny_lfu: if config.tiny_lfu_enable {
+                Some(Arc::new(RwLock::new(TinyLFU::new(
+                    num_pages.next_power_of_two(),
+                    config.tiny_lfu_counters,
+                ))))
+            } else {
+                None
+            },
         }
     }
 
@@ -194,7 +210,7 @@ impl BufferPoolManager {
                         std::hint::spin_loop();
                         continue;
                     }
-                    if std::env::var("QUILL_DEBUG_LOCK").ok().as_deref() == Some("2") {
+                    if false {
                         eprintln!(
                             "[LOCK DEBUG] thread={:?} attempt write page_id={}",
                             std::thread::current().id(),
@@ -204,7 +220,7 @@ impl BufferPoolManager {
                 }
 
                 let guard = page::new_write_guard(self.clone(), page_arc.clone());
-                if std::env::var("QUILL_DEBUG_LOCK").ok().as_deref() == Some("2") {
+                if false {
                     if let Some(r) = page_arc.try_read() {
                         eprintln!(
                             "[LOCK DEBUG] thread={:?} acquired write page_id={}",

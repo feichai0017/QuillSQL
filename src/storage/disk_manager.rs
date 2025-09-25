@@ -252,6 +252,57 @@ impl DiskManager {
         let meta = guard.metadata()?;
         Ok(meta.len())
     }
+
+    #[cfg(target_os = "linux")]
+    pub fn try_clone_db_file(&self) -> QuillSQLResult<File> {
+        let guard = self.db_file.lock().unwrap();
+        let cloned = guard.try_clone()?;
+        Ok(cloned)
+    }
+
+    /// Linux only: page read without taking the global file mutex, using positional I/O on a cloned fd.
+    #[cfg(target_os = "linux")]
+    pub fn read_page_at_unlocked(
+        &self,
+        file: &File,
+        page_id: PageId,
+    ) -> QuillSQLResult<[u8; PAGE_SIZE]> {
+        use std::os::unix::fs::FileExt;
+        if page_id == crate::buffer::INVALID_PAGE_ID {
+            return Err(QuillSQLError::Storage(
+                "read_page: invalid page id".to_string(),
+            ));
+        }
+        let mut buf = [0u8; PAGE_SIZE];
+        let offset = (*META_PAGE_SIZE + (page_id - 1) as usize * PAGE_SIZE) as u64;
+        file.read_at(&mut buf, offset)?;
+        Ok(buf)
+    }
+
+    /// Linux only: page write without taking the global file mutex, using positional I/O on a cloned fd.
+    #[cfg(target_os = "linux")]
+    pub fn write_page_at_unlocked(
+        &self,
+        file: &File,
+        page_id: PageId,
+        data: &[u8],
+    ) -> QuillSQLResult<()> {
+        use std::os::unix::fs::FileExt;
+        if page_id == crate::buffer::INVALID_PAGE_ID {
+            return Err(QuillSQLError::Storage(
+                "write_page: invalid page id".to_string(),
+            ));
+        }
+        if data.len() != PAGE_SIZE {
+            return Err(QuillSQLError::Internal(format!(
+                "Page size is not {}",
+                PAGE_SIZE
+            )));
+        }
+        let offset = (*META_PAGE_SIZE + (page_id - 1) as usize * PAGE_SIZE) as u64;
+        file.write_at(data, offset)?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

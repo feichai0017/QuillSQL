@@ -8,8 +8,8 @@ use std::ops::RangeBounds;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
-use crate::storage::scan::DirectRingBuffer;
 use crate::storage::tuple::Tuple;
+use crate::utils::ring_buffer::RingBuffer;
 
 #[derive(Debug)]
 pub struct TableHeap {
@@ -206,11 +206,10 @@ pub struct TableIterator {
 enum ScanStrategy {
     /// Existing behavior: go through buffer pool (page_table/LRU-K)
     Cached,
-    /// Streaming with direct disk ring buffer
+    /// Streaming with generic ring buffer holding decoded tuples
     Streaming {
-        ring: DirectRingBuffer,
-        current_page: Option<(u32, TablePage)>,
-        current_slot: u16,
+        ring: RingBuffer<(RecordId, Tuple)>,
+        next_pid: u32,
     },
 }
 
@@ -261,15 +260,20 @@ impl TableIterator {
         };
 
         let strategy = if use_streaming {
-            let ring = DirectRingBuffer::new(
-                heap.schema.clone(),
-                heap.buffer_pool.disk_scheduler.clone(),
-                readahead,
-            );
+            // Build initial ring by decoding from buffer pool pages
+            // Use tuple-buffered ring: approximate tuples per page as 1024 to avoid frequent refills
+            let ring_cap = readahead.max(1).saturating_mul(1024);
+            let ring = RingBuffer::with_capacity(ring_cap);
+            // We keep construction minimal here; pages are pulled in next()
+            // Determine starting page id based on start_bound
+            let default_first = heap.first_page_id.load(Ordering::SeqCst);
+            let start_pid = match &start {
+                Bound::Included(r) | Bound::Excluded(r) => r.page_id,
+                Bound::Unbounded => default_first,
+            };
             ScanStrategy::Streaming {
                 ring,
-                current_page: None,
-                current_slot: 0,
+                next_pid: start_pid,
             }
         } else {
             ScanStrategy::Cached
@@ -293,94 +297,69 @@ impl TableIterator {
 
         // Streaming now supports bounded scans; no unconditional fallback required here.
 
+        // Clone refs needed by streaming helper before borrowing self.strategy mutably
+        let heap_arc = self.heap.clone();
+        let schema = self.heap.schema.clone();
+        let start_bound_cloned = self.start_bound.clone();
+
         // Streaming strategy (only supports full scan). For other ranges fallback to Cached.
-        if let ScanStrategy::Streaming {
-            ring,
-            current_page,
-            current_slot,
-        } = &mut self.strategy
-        {
+        if let ScanStrategy::Streaming { ring, next_pid } = &mut self.strategy {
             // Initialize on first call
             if !self.started {
                 self.started = true;
-                // Determine starting page id based on start_bound
-                let default_first = self.heap.first_page_id.load(Ordering::SeqCst);
-                if default_first == INVALID_PAGE_ID {
+                if *next_pid == INVALID_PAGE_ID {
                     self.ended = true;
                     return Ok(None);
                 }
                 // Ensure disk visibility for streaming reads
                 self.heap.buffer_pool.flush_all_pages()?;
-                let start_pid = match &self.start_bound {
-                    Bound::Included(r) | Bound::Excluded(r) => r.page_id,
-                    Bound::Unbounded => default_first,
-                };
-                ring.prime(start_pid)?;
-                let (pid, page) = match ring.next_page()? {
-                    Some(v) => v,
-                    None => {
-                        self.ended = true;
-                        return Ok(None);
-                    }
-                };
-                *current_page = Some((pid, page));
-                // Position slot according to start_bound
-                *current_slot = match &self.start_bound {
-                    Bound::Included(r) if r.page_id == pid => r.slot_num as u16,
-                    Bound::Excluded(r) if r.page_id == pid => r.slot_num as u16 + 1,
-                    _ => 0,
-                };
+                fill_stream_ring(
+                    &heap_arc,
+                    schema.clone(),
+                    &start_bound_cloned,
+                    ring,
+                    next_pid,
+                    true,
+                )?;
             }
 
             loop {
-                let (pid, page) = match current_page.as_mut() {
-                    Some(v) => v,
-                    None => {
+                if let Some((rid, tuple)) = ring.pop() {
+                    // Respect end bound
+                    match &self.end_bound {
+                        Bound::Unbounded => return Ok(Some((rid, tuple))),
+                        Bound::Included(end) => {
+                            if rid == *end {
+                                self.ended = true;
+                            }
+                            return Ok(Some((rid, tuple)));
+                        }
+                        Bound::Excluded(end) => {
+                            if rid == *end {
+                                self.ended = true;
+                                return Ok(None);
+                            }
+                            return Ok(Some((rid, tuple)));
+                        }
+                    }
+                } else {
+                    if *next_pid == INVALID_PAGE_ID {
                         self.ended = true;
                         return Ok(None);
                     }
-                };
-
-                // find next visible tuple from current_slot
-                while (*current_slot as usize) < page.header.num_tuples as usize {
-                    let slot = *current_slot;
-                    *current_slot += 1;
-                    if !page.header.tuple_infos[slot as usize].meta.is_deleted {
-                        let rid = RecordId::new(*pid, slot as u32);
-                        // Respect end_bound semantics
-                        match &self.end_bound {
-                            Bound::Unbounded => {
-                                let (_m, t) = page.tuple(slot as u16)?;
-                                return Ok(Some((rid, t)));
-                            }
-                            Bound::Included(end) => {
-                                let (_m, t) = page.tuple(slot as u16)?;
-                                if rid == *end {
-                                    self.ended = true;
-                                }
-                                return Ok(Some((rid, t)));
-                            }
-                            Bound::Excluded(end) => {
-                                if rid == *end {
-                                    self.ended = true;
-                                    return Ok(None);
-                                } else {
-                                    let (_m, t) = page.tuple(slot as u16)?;
-                                    return Ok(Some((rid, t)));
-                                }
-                            }
-                        }
+                    fill_stream_ring(
+                        &heap_arc,
+                        schema.clone(),
+                        &start_bound_cloned,
+                        ring,
+                        next_pid,
+                        false,
+                    )?;
+                    if ring.is_empty() {
+                        self.ended = true;
+                        return Ok(None);
                     }
                 }
-
-                // move to next page
-                if let Some((next_pid, next_page)) = ring.next_page()? {
-                    *current_page = Some((next_pid, next_page));
-                } else {
-                    self.ended = true;
-                    return Ok(None);
-                }
-                *current_slot = 0;
             }
         }
 
@@ -471,6 +450,40 @@ impl TableIterator {
             }
         }
     }
+}
+
+fn fill_stream_ring(
+    heap: &Arc<TableHeap>,
+    schema: SchemaRef,
+    start_bound: &Bound<RecordId>,
+    ring: &mut RingBuffer<(RecordId, Tuple)>,
+    next_pid: &mut u32,
+    is_first: bool,
+) -> QuillSQLResult<()> {
+    let mut pid = *next_pid;
+    while ring.len() < ring.capacity() && pid != INVALID_PAGE_ID {
+        let (g, page) = heap.buffer_pool.fetch_table_page(pid, schema.clone())?;
+        drop(g);
+        let start_slot = if is_first {
+            match start_bound {
+                Bound::Included(r) if r.page_id == pid => r.slot_num as usize,
+                Bound::Excluded(r) if r.page_id == pid => r.slot_num as usize + 1,
+                _ => 0,
+            }
+        } else {
+            0
+        };
+        for slot in start_slot..page.header.num_tuples as usize {
+            if !page.header.tuple_infos[slot].meta.is_deleted {
+                let rid = RecordId::new(pid, slot as u32);
+                let (_m, t) = page.tuple(slot as u16)?;
+                ring.push((rid, t));
+            }
+        }
+        pid = page.header.next_page_id;
+    }
+    *next_pid = pid;
+    Ok(())
 }
 
 #[cfg(test)]

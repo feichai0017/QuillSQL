@@ -13,7 +13,7 @@
 - **Streaming scan**: Large sequential scans bypass buffer pool via a small direct I/O ring buffer to avoid cache pollution
 - **Information schema**: `information_schema.schemas`, `tables`, `columns`, `indexes`
 - **Now supports**: `SHOW DATABASES`, `SHOW TABLES`, `EXPLAIN`
-- **Docs**: [Architecture](docs/architecture.md) · [Buffer Pool](docs/buffer_pool.md) · [B+ Tree Index](docs/btree_index.md)
+- **Docs**: [Architecture](docs/architecture.md) · [Buffer Pool](docs/buffer_pool.md) · [B+ Tree Index](docs/btree_index.md) · [Disk I/O](docs/disk_io.md)
 
 ## 🚀 Quick Start
 
@@ -102,24 +102,48 @@ EXPLAIN SELECT id, COUNT(*) FROM t GROUP BY id ORDER BY id;
 cargo test -q
 ```
 
-## ⚙️ Configuration (Environment Variables)
+## ⚙️ Configuration
 
-Service
-- PORT: Bind port (takes precedence over QUILL_HTTP_ADDR’s port)
+Minimal environment variables
+- PORT: Bind port (overrides QUILL_HTTP_ADDR’s port)
 - QUILL_HTTP_ADDR: Listen address (default 0.0.0.0:8080 when PORT is not set)
+- QUILL_DB_FILE: Path to the database file (if unset, a temporary DB is used)
 - RUST_LOG: Log level (e.g., info, debug)
 
-Database file
-- QUILL_DB_FILE: Path to the database file; if unset, a temporary DB is used (data is cleaned up on process exit)
+Programmatic configs (preferred)
+- Centralized in `crate::config` and passed into components at construction.
+- Key structs: `IOStrategy`, `IOSchedulerConfig`, `BufferPoolConfig`, `BTreeConfig`, `TableScanConfig`.
 
-Streaming sequential scan (Ring Buffer / Bypass)
-- QUILL_STREAM_SCAN: Force enable(1)/disable(0) streaming scan; defaults to auto
-- QUILL_STREAM_THRESHOLD: Page threshold to trigger streaming; default BUFFER_POOL_SIZE/4
-- QUILL_STREAM_READAHEAD: Readahead window size; default 2
-- QUILL_STREAM_HINT: Per-query hint for SeqScan (1/0), overrides auto decision
+Example (Rust)
+```rust
+use std::sync::Arc;
+use quillsql::config::{IOStrategy, IOSchedulerConfig, BufferPoolConfig, BTreeConfig, TableScanConfig};
+use quillsql::storage::disk_manager::DiskManager;
+use quillsql::storage::disk_scheduler::DiskScheduler;
+use quillsql::buffer::buffer_pool::BufferPoolManager;
 
-Debugging
-- QUILL_DEBUG_LOCK=1|2: Print lock/page acquisition debug logs
+// Disk I/O backend: ThreadPool or Linux io_uring
+let dm = Arc::new(DiskManager::try_new("my.db").unwrap());
+let scheduler = Arc::new(DiskScheduler::new_with_strategy(
+    dm.clone(),
+    IOStrategy::IoUring { queue_depth: Some(256) }, // or ThreadPool { workers: Some(n) }
+));
+
+// Buffer pool
+let bpm = Arc::new(BufferPoolManager::new_with_config(
+    BufferPoolConfig { buffer_pool_size: 5000, ..Default::default() },
+    scheduler.clone(),
+));
+
+// B+Tree iterator tuning (batch window & prefetch)
+let btree_cfg = BTreeConfig { seq_batch_enable: true, seq_window: 32, ..Default::default() };
+// Table scan tuning (streaming readahead)
+let table_scan_cfg = TableScanConfig { stream_scan_enable: true, readahead_pages: 4, ..Default::default() };
+```
+
+Notes
+- io_uring is Linux-only; non-Linux will fall back to the thread pool.
+- Streaming/RingBuffer optimizations are controlled via `BTreeConfig` / `TableScanConfig` instead of env vars.
 
 ## 📦 Docker
 
