@@ -51,3 +51,11 @@ io-uring = { version = "0.6", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 io-uring = { version = "0.6" }
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+rand_chacha = "0.9"
+
+[[bench]]
+name = "storage_bench"
+harness = false
