@@ -59,6 +59,13 @@ async fn main() {
             sync_on_flush: std::env::var("QUILL_WAL_SYNC_ON_FLUSH")
                 .ok()
                 .and_then(|v| parse_env_bool(&v)),
+            writer_interval_ms: std::env::var("QUILL_WAL_WRITER_INTERVAL_MS")
+                .ok()
+                .and_then(|v| match v.parse::<u64>() {
+                    Ok(0) => Some(None),
+                    Ok(ms) => Some(Some(ms)),
+                    Err(_) => None,
+                }),
         },
     };
 

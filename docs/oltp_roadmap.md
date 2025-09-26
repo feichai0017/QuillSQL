@@ -23,6 +23,9 @@ This document catalogs the components we must build to evolve QuillSQL from a si
 - `BufferPoolManager::flush_page` (`src/buffer/buffer_pool.rs:447`) 会在刷脏页前检查 `page_lsn ≤ durable_lsn`，违背写前法则会被拒绝，从而要求调用方先通过 `WalManager::flush` 落盘日志。
 - `Database::flush` (`src/database.rs:125`) 负责先调用 WAL 落盘，再刷新缓冲池；数据库在构造时会把 `WalManager` 注入缓冲池（`Database::new_on_disk_with_options`）。
 - CLI 与 Server 入口提供配置项（命令行参数或 `QUILL_WAL_*` 环境变量）覆盖 WAL 目录、段大小、同步策略，便于部署时指定日志存储位置。
+- 支持周期性后台 WAL 写线程：当配置 `writer_interval_ms` 时，`WalManager::start_background_flush` 会派生 walwriter 线程，以 Postgres 式周期刷写减轻前台刷盘压力。
+- 当数据库持有 `DiskScheduler`、`IoUring` 时，WAL 写入也委托给调度器处理，通过新的 `DiskRequest::WriteWal` 路径统一 I/O 底层（线程池/io_uring），避免前台线程直接阻塞在文件写上。
+- 新增 `WalReader`，可通过调度器从段文件顺序读取帧，为后续实现 WAL 重放/恢复流程打下基础。
 - 表堆写路径（`src/storage/table_heap.rs`）会在插入/更新时生成 `PageWrite` WAL 记录，记录整页镜像并更新 `page_lsn`，确保崩溃后可按页重放。
 
 ## 4. Undo Logging & Rollback

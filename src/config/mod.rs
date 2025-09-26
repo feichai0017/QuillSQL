@@ -62,6 +62,7 @@ pub struct WalConfig {
     pub directory: PathBuf,
     pub segment_size: u64,
     pub sync_on_flush: bool,
+    pub writer_interval_ms: Option<u64>,
 }
 
 impl Default for WalConfig {
@@ -70,6 +71,7 @@ impl Default for WalConfig {
             directory: PathBuf::from("wal"),
             segment_size: 16 * 1024 * 1024, // 16 MiB segments by default
             sync_on_flush: true,
+            writer_interval_ms: Some(50),
         }
     }
 }

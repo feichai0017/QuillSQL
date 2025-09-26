@@ -1,6 +1,7 @@
 use log::debug;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 use tempfile::TempDir;
 
 use crate::buffer::BUFFER_POOL_SIZE;
@@ -27,6 +28,7 @@ pub struct WalOptions {
     pub directory: Option<PathBuf>,
     pub segment_size: Option<u64>,
     pub sync_on_flush: Option<bool>,
+    pub writer_interval_ms: Option<Option<u64>>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -51,9 +53,19 @@ impl Database {
     ) -> QuillSQLResult<Self> {
         let disk_manager = Arc::new(DiskManager::try_new(db_path)?);
         let disk_scheduler = Arc::new(DiskScheduler::new(disk_manager.clone()));
-        let buffer_pool = Arc::new(BufferPoolManager::new(BUFFER_POOL_SIZE, disk_scheduler));
+        let buffer_pool = Arc::new(BufferPoolManager::new(
+            BUFFER_POOL_SIZE,
+            disk_scheduler.clone(),
+        ));
 
-        let wal_manager = Arc::new(WalManager::new(wal_config_for_path(db_path, &options.wal))?);
+        let wal_config = wal_config_for_path(db_path, &options.wal);
+        let wal_manager = Arc::new(WalManager::new_with_scheduler(
+            wal_config.clone(),
+            disk_scheduler.clone(),
+        )?);
+        if let Some(interval) = wal_config.writer_interval_ms {
+            wal_manager.start_background_flush(Duration::from_millis(interval))?;
+        }
         buffer_pool.set_wal_manager(wal_manager.clone());
 
         let catalog = Catalog::new(buffer_pool.clone(), disk_manager.clone());
@@ -80,12 +92,19 @@ impl Database {
                 QuillSQLError::Internal("Invalid temp path".to_string()),
             )?)?);
         let disk_scheduler = Arc::new(DiskScheduler::new(disk_manager.clone()));
-        let buffer_pool = Arc::new(BufferPoolManager::new(BUFFER_POOL_SIZE, disk_scheduler));
+        let buffer_pool = Arc::new(BufferPoolManager::new(
+            BUFFER_POOL_SIZE,
+            disk_scheduler.clone(),
+        ));
 
-        let wal_manager = Arc::new(WalManager::new(wal_config_for_temp(
-            temp_dir.path(),
-            &options.wal,
-        ))?);
+        let wal_config = wal_config_for_temp(temp_dir.path(), &options.wal);
+        let wal_manager = Arc::new(WalManager::new_with_scheduler(
+            wal_config.clone(),
+            disk_scheduler.clone(),
+        )?);
+        if let Some(interval) = wal_config.writer_interval_ms {
+            wal_manager.start_background_flush(Duration::from_millis(interval))?;
+        }
         buffer_pool.set_wal_manager(wal_manager.clone());
 
         let catalog = Catalog::new(buffer_pool.clone(), disk_manager.clone());
@@ -167,6 +186,9 @@ fn wal_config_for_path(db_path: &str, overrides: &WalOptions) -> WalConfig {
     if let Some(sync) = overrides.sync_on_flush {
         config.sync_on_flush = sync;
     }
+    if let Some(interval) = overrides.writer_interval_ms.clone() {
+        config.writer_interval_ms = interval;
+    }
     config
 }
 
@@ -191,6 +213,9 @@ fn wal_config_for_temp(temp_root: &Path, overrides: &WalOptions) -> WalConfig {
     }
     if let Some(sync) = overrides.sync_on_flush {
         config.sync_on_flush = sync;
+    }
+    if let Some(interval) = overrides.writer_interval_ms.clone() {
+        config.writer_interval_ms = interval;
     }
     config
 }

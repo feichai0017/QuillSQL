@@ -16,6 +16,11 @@ struct Args {
     wal_segment_size: Option<u64>,
     #[clap(long, help = "Whether WAL flush should fsync (true/false)")]
     wal_sync_on_flush: Option<bool>,
+    #[clap(
+        long,
+        help = "Background WAL writer interval in milliseconds (0 to disable)"
+    )]
+    wal_writer_interval_ms: Option<u64>,
 }
 
 fn main() {
@@ -26,6 +31,13 @@ fn main() {
         directory: args.wal_dir,
         segment_size: args.wal_segment_size,
         sync_on_flush: args.wal_sync_on_flush,
+        writer_interval_ms: args.wal_writer_interval_ms.map(|val| {
+            if val == 0 {
+                None
+            } else {
+                Some(val)
+            }
+        }),
     };
     let db_options = DatabaseOptions { wal: wal_options };
 

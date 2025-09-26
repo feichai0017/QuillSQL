@@ -795,11 +795,15 @@ mod tests {
     fn test_flush_requires_durable_wal() {
         let (temp_dir, bpm) = setup_test_environment(4);
         let wal_dir = temp_dir.path().join("wal");
+        let scheduler = bpm.disk_scheduler.clone();
         let wal = Arc::new(
-            WalManager::new(WalConfig {
-                directory: wal_dir.clone(),
-                ..WalConfig::default()
-            })
+            WalManager::new_with_scheduler(
+                WalConfig {
+                    directory: wal_dir.clone(),
+                    ..WalConfig::default()
+                },
+                scheduler,
+            )
             .expect("wal manager"),
         );
         bpm.set_wal_manager(wal.clone());

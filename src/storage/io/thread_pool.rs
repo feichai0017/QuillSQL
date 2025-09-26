@@ -1,4 +1,4 @@
-use std::{collections::VecDeque, sync::Arc};
+use std::{collections::VecDeque, fs::OpenOptions, path::Path, sync::Arc};
 
 use bytes::{Bytes, BytesMut};
 use log as _; // preserve existing logging usage
@@ -270,6 +270,29 @@ fn handle_request(disk_manager: &DiskManager, file: &WorkerFile, request: DiskRe
                 );
             }
         }
+        DiskRequest::WriteWal {
+            path,
+            offset,
+            bytes,
+            sync,
+            result_sender,
+        } => {
+            let result = perform_wal_write(&path, offset, &bytes, sync);
+            if result_sender.send(result).is_err() {
+                log::error!("DiskScheduler failed to send WriteWal result");
+            }
+        }
+        DiskRequest::ReadWal {
+            path,
+            offset,
+            len,
+            result_sender,
+        } => {
+            let result = perform_wal_read(&path, offset, len);
+            if result_sender.send(result).is_err() {
+                log::error!("DiskScheduler failed to send ReadWal result");
+            }
+        }
         DiskRequest::Shutdown => {
             log::debug!("DiskScheduler worker received Shutdown request");
         }
@@ -337,6 +360,40 @@ fn perform_write(
     data: &[u8],
 ) -> QuillSQLResult<()> {
     disk_manager.write_page(page_id, data)
+}
+
+fn perform_wal_write(path: &Path, offset: u64, bytes: &[u8], sync: bool) -> QuillSQLResult<()> {
+    use std::io::{Seek, SeekFrom, Write};
+    let mut file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .read(true)
+        .open(path)?;
+    if !bytes.is_empty() {
+        file.seek(SeekFrom::Start(offset))?;
+        file.write_all(bytes)?;
+    }
+    if sync {
+        file.sync_all()?;
+    }
+    Ok(())
+}
+
+fn perform_wal_read(path: &Path, offset: u64, len: usize) -> QuillSQLResult<Vec<u8>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = OpenOptions::new().read(true).open(path)?;
+    file.seek(SeekFrom::Start(offset))?;
+    let mut buf = vec![0u8; len];
+    let mut read_total = 0usize;
+    while read_total < len {
+        let n = file.read(&mut buf[read_total..])?;
+        if n == 0 {
+            buf.truncate(read_total);
+            break;
+        }
+        read_total += n;
+    }
+    Ok(buf)
 }
 
 /// ThreadPool backend (kept for future direct usage of IOBackend trait).

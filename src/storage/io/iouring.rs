@@ -3,18 +3,21 @@ use bytes::{Bytes, BytesMut};
 #[cfg(target_os = "linux")]
 use io_uring::{opcode, types, IoUring};
 #[cfg(target_os = "linux")]
+use std::collections::{hash_map::Entry, HashMap};
+#[cfg(target_os = "linux")]
+use std::fs::{self, File, OpenOptions};
+#[cfg(target_os = "linux")]
 use std::io;
 #[cfg(target_os = "linux")]
 use std::os::fd::AsRawFd;
+#[cfg(target_os = "linux")]
+use std::path::{Path, PathBuf};
 #[cfg(target_os = "linux")]
 use std::sync::mpsc::{self, Receiver, Sender};
 #[cfg(target_os = "linux")]
 use std::sync::Arc;
 #[cfg(target_os = "linux")]
 use std::thread;
-
-#[cfg(target_os = "linux")]
-use std::collections::HashMap;
 
 #[cfg(target_os = "linux")]
 use crate::buffer::{PageId, PAGE_SIZE};
@@ -55,6 +58,17 @@ enum PendingKind {
     Fsync {
         state: *mut WriteState,
     },
+    WalRead {
+        buffer: Vec<u8>,
+        sender: DiskResultSender<Vec<u8>>,
+        expected: usize,
+    },
+}
+
+#[cfg(target_os = "linux")]
+struct WalFileHandle {
+    _file: File,
+    fd: i32,
 }
 
 #[cfg(target_os = "linux")]
@@ -325,6 +339,162 @@ fn queue_write(
 }
 
 #[cfg(target_os = "linux")]
+fn queue_wal_write(
+    ring: &mut IoUring,
+    pending: &mut HashMap<u64, PendingEntry>,
+    token_counter: &mut u64,
+    wal_handles: &mut HashMap<PathBuf, WalFileHandle>,
+    path: PathBuf,
+    offset: u64,
+    data: Bytes,
+    sender: DiskResultSender<()>,
+    sync: bool,
+) -> QuillSQLResult<()> {
+    if data.is_empty() && !sync {
+        if let Err(err) = sender.send(Ok(())) {
+            log::error!("io_uring WAL send failed: {}", err);
+        }
+        return Ok(());
+    }
+
+    let fd = match ensure_wal_handle(wal_handles, &path) {
+        Ok(fd) => fd,
+        Err(err) => {
+            log::error!("ensure_wal_handle failed: {}", err);
+            let _ = sender.send(Err(err));
+            return Ok(());
+        }
+    };
+
+    let pending_ops = (if data.is_empty() { 0 } else { 1 }) + if sync { 1 } else { 0 };
+    if pending_ops == 0 {
+        if let Err(err) = sender.send(Ok(())) {
+            log::error!("io_uring WAL send failed: {}", err);
+        }
+        return Ok(());
+    }
+
+    let state_ptr = Box::into_raw(Box::new(WriteState::new(sender, pending_ops as u8)));
+
+    if !data.is_empty() {
+        let write_token = next_token(token_counter);
+        let write_entry = opcode::Write::new(types::Fd(fd), data.as_ptr(), data.len() as u32)
+            .offset(offset)
+            .build()
+            .user_data(write_token);
+        push_sqe(ring, write_entry);
+        pending.insert(
+            write_token,
+            PendingEntry {
+                kind: PendingKind::Write {
+                    _data: data.clone(),
+                    state: state_ptr,
+                },
+            },
+        );
+    }
+
+    if sync {
+        let fsync_token = next_token(token_counter);
+        let fsync_entry = opcode::Fsync::new(types::Fd(fd))
+            .flags(types::FsyncFlags::DATASYNC)
+            .build()
+            .user_data(fsync_token);
+        push_sqe(ring, fsync_entry);
+        pending.insert(
+            fsync_token,
+            PendingEntry {
+                kind: PendingKind::Fsync { state: state_ptr },
+            },
+        );
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn queue_wal_read(
+    ring: &mut IoUring,
+    pending: &mut HashMap<u64, PendingEntry>,
+    token_counter: &mut u64,
+    wal_handles: &mut HashMap<PathBuf, WalFileHandle>,
+    path: PathBuf,
+    offset: u64,
+    len: usize,
+    sender: DiskResultSender<Vec<u8>>,
+) -> QuillSQLResult<()> {
+    if len == 0 {
+        let _ = sender.send(Ok(Vec::new()));
+        return Ok(());
+    }
+    let fd = ensure_wal_handle(wal_handles, &path)?;
+    let mut buffer = vec![0u8; len];
+    let token = next_token(token_counter);
+    let read_entry = opcode::Read::new(types::Fd(fd), buffer.as_mut_ptr(), len as u32)
+        .offset(offset)
+        .build()
+        .user_data(token);
+    push_sqe(ring, read_entry);
+    pending.insert(
+        token,
+        PendingEntry {
+            kind: PendingKind::WalRead {
+                buffer,
+                sender,
+                expected: len,
+            },
+        },
+    );
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn ensure_wal_handle(
+    wal_handles: &mut HashMap<PathBuf, WalFileHandle>,
+    path: &Path,
+) -> QuillSQLResult<i32> {
+    match wal_handles.entry(path.to_path_buf()) {
+        Entry::Occupied(entry) => Ok(entry.get().fd),
+        Entry::Vacant(entry) => {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            let file = OpenOptions::new()
+                .create(true)
+                .write(true)
+                .read(true)
+                .open(path)?;
+            let fd = file.as_raw_fd();
+            entry.insert(WalFileHandle { _file: file, fd });
+            Ok(fd)
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn parse_wal_read_result(
+    code: i32,
+    mut buffer: Vec<u8>,
+    expected: usize,
+) -> QuillSQLResult<Vec<u8>> {
+    if code < 0 {
+        let err = io::Error::from_raw_os_error(-code);
+        return Err(QuillSQLError::Storage(format!(
+            "io_uring wal read failed: {}",
+            err
+        )));
+    }
+    let actual = code as usize;
+    if actual > expected {
+        return Err(QuillSQLError::Storage(format!(
+            "io_uring wal read returned {actual} bytes (expected ≤ {expected})"
+        )));
+    }
+    buffer.truncate(actual);
+    Ok(buffer)
+}
+
+#[cfg(target_os = "linux")]
 fn handle_request_direct(
     request: DiskRequest,
     ring: &mut IoUring,
@@ -333,6 +503,7 @@ fn handle_request_direct(
     fd: i32,
     disk_manager: &Arc<DiskManager>,
     fsync_on_write: bool,
+    wal_handles: &mut HashMap<PathBuf, WalFileHandle>,
 ) {
     match request {
         DiskRequest::ReadPage {
@@ -357,6 +528,42 @@ fn handle_request_direct(
             result_sender,
             fsync_on_write,
         ),
+        DiskRequest::WriteWal {
+            path,
+            offset,
+            bytes,
+            sync,
+            result_sender,
+        } => {
+            let _ = queue_wal_write(
+                ring,
+                pending,
+                token_counter,
+                wal_handles,
+                path,
+                offset,
+                bytes,
+                result_sender,
+                sync,
+            );
+        }
+        DiskRequest::ReadWal {
+            path,
+            offset,
+            len,
+            result_sender,
+        } => {
+            let _ = queue_wal_read(
+                ring,
+                pending,
+                token_counter,
+                wal_handles,
+                path,
+                offset,
+                len,
+                result_sender,
+            );
+        }
         DiskRequest::AllocatePage { result_sender } => {
             let _ = result_sender.send(disk_manager.allocate_page());
         }
@@ -428,6 +635,16 @@ fn drain_completions(
                     if finished {
                         drop(Box::from_raw(state));
                     }
+                }
+            }
+            PendingKind::WalRead {
+                buffer,
+                sender,
+                expected,
+            } => {
+                let outcome = parse_wal_read_result(result_code, buffer, expected);
+                if let Err(err) = sender.send(outcome) {
+                    log::error!("io_uring wal read result send failed: {}", err);
                 }
             }
         }
@@ -542,6 +759,7 @@ fn io_uring_worker_loop(
     let fd = file.as_raw_fd();
 
     let mut pending: HashMap<u64, PendingEntry> = HashMap::new();
+    let mut wal_handles: HashMap<PathBuf, WalFileHandle> = HashMap::new();
     let mut token_counter: u64 = 1;
     let mut shutdown = false;
 
@@ -599,6 +817,42 @@ fn io_uring_worker_loop(
                         fsync_on_write,
                     );
                 }
+                DiskRequest::WriteWal {
+                    path,
+                    offset,
+                    bytes,
+                    sync,
+                    result_sender,
+                } => {
+                    let _ = queue_wal_write(
+                        &mut ring,
+                        &mut pending,
+                        &mut token_counter,
+                        &mut wal_handles,
+                        path,
+                        offset,
+                        bytes,
+                        result_sender,
+                        sync,
+                    );
+                }
+                DiskRequest::ReadWal {
+                    path,
+                    offset,
+                    len,
+                    result_sender,
+                } => {
+                    let _ = queue_wal_read(
+                        &mut ring,
+                        &mut pending,
+                        &mut token_counter,
+                        &mut wal_handles,
+                        path,
+                        offset,
+                        len,
+                        result_sender,
+                    );
+                }
                 DiskRequest::AllocatePage { result_sender } => {
                     let _ = result_sender.send(disk_manager.allocate_page());
                 }
@@ -639,6 +893,7 @@ fn io_uring_worker_loop(
                             fd,
                             &disk_manager,
                             fsync_on_write,
+                            &mut wal_handles,
                         );
                     }
                 },
