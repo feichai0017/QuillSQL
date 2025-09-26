@@ -1,13 +1,16 @@
 use log::debug;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tempfile::TempDir;
 
 use crate::buffer::BUFFER_POOL_SIZE;
 use crate::catalog::load_catalog_data;
+use crate::config::WalConfig;
 use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::optimizer::LogicalOptimizer;
 use crate::plan::logical_plan::LogicalPlan;
 use crate::plan::PhysicalPlanner;
+use crate::recovery::WalManager;
 use crate::utils::util::{pretty_format_logical_plan, pretty_format_physical_plan};
 use crate::{
     buffer::BufferPoolManager,
@@ -19,22 +22,46 @@ use crate::{
     storage::tuple::Tuple,
 };
 
+#[derive(Debug, Default, Clone)]
+pub struct WalOptions {
+    pub directory: Option<PathBuf>,
+    pub segment_size: Option<u64>,
+    pub sync_on_flush: Option<bool>,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct DatabaseOptions {
+    pub wal: WalOptions,
+}
+
 pub struct Database {
     pub(crate) buffer_pool: Arc<BufferPoolManager>,
     pub(crate) catalog: Catalog,
+    pub(crate) wal_manager: Arc<WalManager>,
     temp_dir: Option<TempDir>,
 }
 impl Database {
     pub fn new_on_disk(db_path: &str) -> QuillSQLResult<Self> {
+        Self::new_on_disk_with_options(db_path, DatabaseOptions::default())
+    }
+
+    pub fn new_on_disk_with_options(
+        db_path: &str,
+        options: DatabaseOptions,
+    ) -> QuillSQLResult<Self> {
         let disk_manager = Arc::new(DiskManager::try_new(db_path)?);
         let disk_scheduler = Arc::new(DiskScheduler::new(disk_manager.clone()));
         let buffer_pool = Arc::new(BufferPoolManager::new(BUFFER_POOL_SIZE, disk_scheduler));
+
+        let wal_manager = Arc::new(WalManager::new(wal_config_for_path(db_path, &options.wal))?);
+        buffer_pool.set_wal_manager(wal_manager.clone());
 
         let catalog = Catalog::new(buffer_pool.clone(), disk_manager.clone());
 
         let mut db = Self {
             buffer_pool,
             catalog,
+            wal_manager,
             temp_dir: None,
         };
         load_catalog_data(&mut db)?;
@@ -42,6 +69,10 @@ impl Database {
     }
 
     pub fn new_temp() -> QuillSQLResult<Self> {
+        Self::new_temp_with_options(DatabaseOptions::default())
+    }
+
+    pub fn new_temp_with_options(options: DatabaseOptions) -> QuillSQLResult<Self> {
         let temp_dir = TempDir::new()?;
         let temp_path = temp_dir.path().join("test.db");
         let disk_manager =
@@ -51,11 +82,18 @@ impl Database {
         let disk_scheduler = Arc::new(DiskScheduler::new(disk_manager.clone()));
         let buffer_pool = Arc::new(BufferPoolManager::new(BUFFER_POOL_SIZE, disk_scheduler));
 
+        let wal_manager = Arc::new(WalManager::new(wal_config_for_temp(
+            temp_dir.path(),
+            &options.wal,
+        ))?);
+        buffer_pool.set_wal_manager(wal_manager.clone());
+
         let catalog = Catalog::new(buffer_pool.clone(), disk_manager.clone());
 
         let mut db = Self {
             buffer_pool,
             catalog,
+            wal_manager,
             temp_dir: Some(temp_dir),
         };
         load_catalog_data(&mut db)?;
@@ -112,6 +150,47 @@ impl Database {
     }
 
     pub fn flush(&self) -> QuillSQLResult<()> {
+        let _ = self.wal_manager.flush(None)?;
         self.buffer_pool.flush_all_pages()
     }
+}
+
+fn wal_config_for_path(db_path: &str, overrides: &WalOptions) -> WalConfig {
+    let mut config = WalConfig::default();
+    config.directory = overrides
+        .directory
+        .clone()
+        .unwrap_or_else(|| wal_directory_from_path(db_path));
+    if let Some(size) = overrides.segment_size {
+        config.segment_size = size;
+    }
+    if let Some(sync) = overrides.sync_on_flush {
+        config.sync_on_flush = sync;
+    }
+    config
+}
+
+fn wal_directory_from_path(db_path: &str) -> PathBuf {
+    let mut base = PathBuf::from(db_path);
+    base.set_extension("wal");
+    if base.extension().is_none() {
+        PathBuf::from(format!("{}.wal", db_path))
+    } else {
+        base
+    }
+}
+
+fn wal_config_for_temp(temp_root: &Path, overrides: &WalOptions) -> WalConfig {
+    let mut config = WalConfig::default();
+    config.directory = overrides
+        .directory
+        .clone()
+        .unwrap_or_else(|| temp_root.join("wal"));
+    if let Some(size) = overrides.segment_size {
+        config.segment_size = size;
+    }
+    if let Some(sync) = overrides.sync_on_flush {
+        config.sync_on_flush = sync;
+    }
+    config
 }

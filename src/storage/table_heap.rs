@@ -1,4 +1,4 @@
-use crate::buffer::{AtomicPageId, INVALID_PAGE_ID};
+use crate::buffer::{AtomicPageId, PageId, WritePageGuard, INVALID_PAGE_ID};
 use crate::catalog::SchemaRef;
 use crate::storage::codec::TablePageCodec;
 use crate::storage::page::{RecordId, TablePage, TupleMeta, INVALID_RID};
@@ -8,6 +8,7 @@ use std::ops::RangeBounds;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
+use crate::recovery::wal_record::{PageWritePayload, WalRecordPayload};
 use crate::storage::tuple::Tuple;
 use crate::utils::ring_buffer::RingBuffer;
 
@@ -33,6 +34,7 @@ impl TableHeap {
         // Use DerefMut to get a mutable reference and update the page data.
         // This also marks the page as dirty automatically.
         first_page_guard.data.copy_from_slice(&encoded_data);
+        first_page_guard.page_lsn = table_page.lsn();
 
         // The first_page_guard is dropped here, automatically unpinning the page.
         Ok(Self {
@@ -42,6 +44,36 @@ impl TableHeap {
             last_page_id: AtomicU32::new(first_page_id),
         })
     }
+
+    fn write_back_page(
+        &self,
+        page_id: PageId,
+        guard: &mut WritePageGuard,
+        table_page: &mut TablePage,
+    ) -> QuillSQLResult<()> {
+        let prev_lsn = guard.page_lsn;
+        if let Some(wal) = self.buffer_pool.wal_manager() {
+            let mut page_image = Vec::new();
+            let lsn = wal.append_record_with(|lsn| {
+                table_page.set_lsn(lsn);
+                page_image = TablePageCodec::encode(table_page);
+                WalRecordPayload::PageWrite(PageWritePayload {
+                    page_id,
+                    prev_page_lsn: prev_lsn,
+                    page_image: page_image.clone(),
+                })
+            })?;
+            guard.data.copy_from_slice(&page_image);
+            guard.page_lsn = lsn;
+        } else {
+            table_page.set_lsn(prev_lsn);
+            let encoded = TablePageCodec::encode(table_page);
+            guard.data.copy_from_slice(&encoded);
+            guard.page_lsn = table_page.lsn();
+        }
+        Ok(())
+    }
+
     /// Inserts a tuple into the table.
     ///
     /// This function inserts the given tuple into the table. If the last page in the table
@@ -62,25 +94,23 @@ impl TableHeap {
             let mut current_page_guard = self.buffer_pool.fetch_page_write(current_page_id)?;
             let mut table_page =
                 TablePageCodec::decode(&current_page_guard.data, self.schema.clone())?.0;
+            table_page.set_lsn(current_page_guard.page_lsn);
 
             // If there's space, insert the tuple.
             if table_page.next_tuple_offset(tuple).is_ok() {
                 let slot_id = table_page.insert_tuple(meta, tuple)?;
 
-                // Encode the modified page back into the guard's buffer.
-                let encoded_data = TablePageCodec::encode(&table_page);
-                current_page_guard.data.copy_from_slice(&encoded_data);
-
+                self.write_back_page(current_page_id, &mut current_page_guard, &mut table_page)?;
                 return Ok(RecordId::new(current_page_id, slot_id as u32));
             }
 
             // If the page is full, allocate a new one and link it.
-            let new_page_guard = self.buffer_pool.new_page()?;
+            let mut new_page_guard = self.buffer_pool.new_page()?;
             let new_page_id = new_page_guard.page_id();
 
             // Initialize the new page.
-            let new_table_page = TablePage::new(self.schema.clone(), INVALID_PAGE_ID);
-            let _ = TablePageCodec::encode(&new_table_page);
+            let mut new_table_page = TablePage::new(self.schema.clone(), INVALID_PAGE_ID);
+            self.write_back_page(new_page_id, &mut new_page_guard, &mut new_table_page)?;
             // new_page_guard is already a write guard, so we can modify its data.
             // We'll let it drop at the end of the *next* loop iteration (or when the function returns).
             // But for now, we must write our changes to it.
@@ -88,8 +118,7 @@ impl TableHeap {
 
             // Update the old page to point to the new one.
             table_page.header.next_page_id = new_page_id;
-            let encoded_old_page = TablePageCodec::encode(&table_page);
-            current_page_guard.data.copy_from_slice(&encoded_old_page);
+            self.write_back_page(current_page_id, &mut current_page_guard, &mut table_page)?;
 
             // The `current_page_guard` will be dropped here, saving the changes.
             drop(current_page_guard);
@@ -103,23 +132,21 @@ impl TableHeap {
     pub fn update_tuple(&self, rid: RecordId, tuple: Tuple) -> QuillSQLResult<()> {
         let mut page_guard = self.buffer_pool.fetch_page_write(rid.page_id)?;
         let mut table_page = TablePageCodec::decode(&page_guard.data, self.schema.clone())?.0;
+        table_page.set_lsn(page_guard.page_lsn);
 
         table_page.update_tuple(tuple, rid.slot_num as u16)?;
 
-        let encoded_data = TablePageCodec::encode(&table_page);
-        page_guard.data.copy_from_slice(&encoded_data);
-        Ok(())
+        self.write_back_page(rid.page_id, &mut page_guard, &mut table_page)
     }
 
     pub fn update_tuple_meta(&self, meta: TupleMeta, rid: RecordId) -> QuillSQLResult<()> {
         let mut page_guard = self.buffer_pool.fetch_page_write(rid.page_id)?;
         let mut table_page = TablePageCodec::decode(&page_guard.data, self.schema.clone())?.0;
+        table_page.set_lsn(page_guard.page_lsn);
 
         table_page.update_tuple_meta(meta, rid.slot_num as u16)?;
 
-        let encoded_data = TablePageCodec::encode(&table_page);
-        page_guard.data.copy_from_slice(&encoded_data);
-        Ok(())
+        self.write_back_page(rid.page_id, &mut page_guard, &mut table_page)
     }
 
     pub fn full_tuple(&self, rid: RecordId) -> QuillSQLResult<(TupleMeta, Tuple)> {

@@ -4,7 +4,7 @@
 //! - Disk I/O offloaded to async DiskScheduler
 
 use bytes::Bytes;
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 use parking_lot::{Mutex, RwLock};
 use std::sync::atomic::Ordering;
 use std::{collections::VecDeque, sync::Arc};
@@ -26,6 +26,7 @@ use crate::storage::{
 };
 
 use crate::config::BufferPoolConfig;
+use crate::recovery::WalManager;
 use crate::utils::cache::lru_k::LRUKReplacer;
 use crate::utils::cache::tiny_lfu::TinyLFU;
 use crate::utils::cache::Replacer;
@@ -45,6 +46,10 @@ pub struct BufferPoolManager {
     pub inflight_loads: Arc<DashMap<PageId, Arc<Mutex<()>>>>,
     /// Optional TinyLFU admission filter
     pub tiny_lfu: Option<Arc<RwLock<TinyLFU>>>,
+    /// Dirty page tracking for checkpoints and background writers
+    pub dirty_pages: Arc<DashSet<PageId>>,
+    /// Optional WAL manager to enforce write-ahead rule on flush
+    pub wal_manager: Arc<RwLock<Option<Arc<WalManager>>>>,
 }
 
 impl BufferPoolManager {
@@ -105,7 +110,17 @@ impl BufferPoolManager {
             } else {
                 None
             },
+            dirty_pages: Arc::new(DashSet::new()),
+            wal_manager: Arc::new(RwLock::new(None)),
         }
+    }
+
+    pub fn set_wal_manager(&self, wal_manager: Arc<WalManager>) {
+        *self.wal_manager.write() = Some(wal_manager);
+    }
+
+    pub fn wal_manager(&self) -> Option<Arc<WalManager>> {
+        self.wal_manager.read().clone()
     }
 
     /// 创建一个新页面。
@@ -264,6 +279,7 @@ impl BufferPoolManager {
                 if let Some(mut p) = self.pool[frame_id].try_write() {
                     p.is_dirty = true;
                 }
+                self.dirty_pages.insert(page_id);
             }
             if old_pin_count == 1 {
                 self.replacer_set_evictable(frame_id, true)?;
@@ -439,6 +455,26 @@ impl BufferPoolManager {
 
             // Hold write lock for the whole flush to avoid racing writers clearing dirty bit.
             let mut guard = page_arc.write();
+            if !guard.is_dirty {
+                self.dirty_pages.remove(&page_id);
+                return Ok(false);
+            }
+
+            if let Some(wal) = self.wal_manager.read().clone() {
+                let durable_lsn = wal.durable_lsn();
+                if guard.page_lsn > durable_lsn {
+                    let target = guard.page_lsn;
+                    wal.flush(Some(target))?;
+                    if wal.durable_lsn() < target {
+                        return Err(QuillSQLError::Internal(format!(
+                            "Flush of page {} blocked: page_lsn={} > durable_lsn={}",
+                            page_id,
+                            guard.page_lsn,
+                            wal.durable_lsn()
+                        )));
+                    }
+                }
+            }
             let data_bytes = Bytes::copy_from_slice(&guard.data);
 
             self.disk_scheduler
@@ -447,6 +483,7 @@ impl BufferPoolManager {
                 .map_err(|e| QuillSQLError::Internal(format!("Channel disconnected: {}", e)))??;
 
             guard.is_dirty = false;
+            self.dirty_pages.remove(&page_id);
             Ok(true)
         } else {
             Ok(false)
@@ -454,16 +491,12 @@ impl BufferPoolManager {
     }
 
     pub fn flush_all_pages(&self) -> QuillSQLResult<()> {
-        let page_ids: Vec<PageId> = self.page_table.iter().map(|e| *e.key()).collect();
-        for page_id in page_ids {
-            if self.page_table.contains_key(&page_id) {
-                if let Some(frame_id_ref) = self.page_table.get(&page_id) {
-                    let frame_id = *frame_id_ref;
-                    if self.pool[frame_id].read().is_dirty {
-                        self.flush_page(page_id)?;
-                    }
-                }
-            }
+        if let Some(wal) = self.wal_manager.read().clone() {
+            wal.flush(None)?;
+        }
+        let dirty_ids: Vec<PageId> = self.dirty_pages.iter().map(|entry| *entry.key()).collect();
+        for page_id in dirty_ids {
+            let _ = self.flush_page(page_id)?;
         }
         Ok(())
     }
@@ -525,6 +558,7 @@ impl BufferPoolManager {
                     }
 
                     page_writer.destroy();
+                    self.dirty_pages.remove(&page_id);
                     drop(page_writer);
 
                     {
@@ -620,6 +654,11 @@ impl BufferPoolManager {
 #[cfg(test)]
 mod tests {
     use crate::buffer::buffer_pool::BufferPoolManager;
+    use crate::config::WalConfig;
+    use crate::recovery::wal_record::{
+        TransactionPayload, TransactionRecordKind, WalRecordPayload,
+    };
+    use crate::recovery::WalManager;
     use crate::storage::disk_manager::DiskManager;
     use crate::storage::disk_scheduler::DiskScheduler;
     use crate::utils::cache::Replacer;
@@ -750,6 +789,57 @@ mod tests {
         }
 
         assert!(found, "Test data was not written to disk correctly");
+    }
+
+    #[test]
+    fn test_flush_requires_durable_wal() {
+        let (temp_dir, bpm) = setup_test_environment(4);
+        let wal_dir = temp_dir.path().join("wal");
+        let wal = Arc::new(
+            WalManager::new(WalConfig {
+                directory: wal_dir.clone(),
+                ..WalConfig::default()
+            })
+            .expect("wal manager"),
+        );
+        bpm.set_wal_manager(wal.clone());
+
+        let page_id;
+        let lsn;
+        {
+            let mut guard = bpm.new_page().expect("new page");
+            page_id = guard.page_id();
+            guard.data[0..4].copy_from_slice(b"walu");
+            lsn = wal
+                .append_record_with(|_| {
+                    WalRecordPayload::Transaction(TransactionPayload {
+                        marker: TransactionRecordKind::Begin,
+                        txn_id: 1,
+                    })
+                })
+                .expect("append wal record");
+            guard.page_lsn = lsn;
+        }
+
+        let flushed = bpm
+            .flush_page(page_id)
+            .expect("flush should auto-flush wal");
+        assert!(flushed, "page should flush once wal is durable");
+        assert!(wal.durable_lsn() >= lsn, "wal durable lsn should advance");
+
+        let wal_files: Vec<_> = std::fs::read_dir(&wal_dir)
+            .expect("wal directory")
+            .filter_map(|entry| entry.ok())
+            .collect();
+        assert!(
+            !wal_files.is_empty(),
+            "wal flush should create segment file"
+        );
+        let total_size: u64 = wal_files
+            .iter()
+            .map(|entry| entry.metadata().map(|m| m.len()).unwrap_or(0))
+            .sum();
+        assert!(total_size > 0, "wal segment should contain data");
     }
 
     #[test]

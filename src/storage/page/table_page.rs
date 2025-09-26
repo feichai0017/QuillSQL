@@ -1,6 +1,7 @@
 use crate::buffer::{PageId, INVALID_PAGE_ID, PAGE_SIZE};
 use crate::catalog::SchemaRef;
 use crate::error::{QuillSQLError, QuillSQLResult};
+use crate::recovery::Lsn;
 use crate::storage::codec::{TablePageHeaderCodec, TablePageHeaderTupleInfoCodec, TupleCodec};
 use crate::storage::tuple::Tuple;
 use crate::transaction::TransactionId;
@@ -31,9 +32,9 @@ pub static EMPTY_TUPLE_INFO: LazyLock<TupleInfo> = LazyLock::new(|| TupleInfo {
  *
  * Header format (size in bytes):
  * ```text
- *  ----------------------------------------------------------------------------
- *  | NextPageId (4)| NumTuples(2) | NumDeletedTuples(2) |
- *  ----------------------------------------------------------------------------
+ *  --------------------------------------------------------------------------------
+ *  | LSN (8) | NextPageId (4) | NumTuples(2) | NumDeletedTuples(2) |
+ *  --------------------------------------------------------------------------------
  *  ----------------------------------------------------------------
  *  | Tuple_1 offset+size + TupleMeta | Tuple_2 offset+size + TupleMeta | ... |
  *  ----------------------------------------------------------------
@@ -53,6 +54,7 @@ pub struct TablePageHeader {
     pub num_tuples: u16,
     pub num_deleted_tuples: u16,
     pub tuple_infos: Vec<TupleInfo>,
+    pub lsn: Lsn,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -95,6 +97,7 @@ impl TablePage {
                 num_tuples: 0,
                 num_deleted_tuples: 0,
                 tuple_infos: Vec::new(),
+                lsn: 0,
             },
             data: [0; PAGE_SIZE],
         }
@@ -256,6 +259,16 @@ impl TablePage {
         }
 
         None
+    }
+}
+
+impl TablePage {
+    pub fn set_lsn(&mut self, lsn: Lsn) {
+        self.header.lsn = lsn;
+    }
+
+    pub fn lsn(&self) -> Lsn {
+        self.header.lsn
     }
 }
 

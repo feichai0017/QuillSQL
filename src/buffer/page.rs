@@ -1,4 +1,5 @@
 use crate::buffer::BufferPoolManager;
+use crate::recovery::Lsn;
 use derive_with::With;
 use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::mem::{self, ManuallyDrop};
@@ -18,6 +19,7 @@ pub struct Page {
     pub data: [u8; PAGE_SIZE],
     pub pin_count: AtomicU32, // 使用原子操作，避免锁竞争
     pub is_dirty: bool,
+    pub page_lsn: Lsn,
 }
 
 impl Page {
@@ -27,6 +29,7 @@ impl Page {
             data: [0; PAGE_SIZE],
             pin_count: AtomicU32::new(0), // set by caller with proper ordering
             is_dirty: false,
+            page_lsn: 0,
         }
     }
 
@@ -36,6 +39,7 @@ impl Page {
             data: [0; PAGE_SIZE],
             pin_count: AtomicU32::new(0),
             is_dirty: false,
+            page_lsn: 0,
         }
     }
 
@@ -55,6 +59,7 @@ impl Page {
         self.data = [0; PAGE_SIZE];
         self.pin_count.store(0, Ordering::Relaxed);
         self.is_dirty = false;
+        self.page_lsn = 0;
     }
 
     // 原子操作：增加pin_count（Acquire 以发布可见性给随后读）
@@ -70,6 +75,14 @@ impl Page {
     // 原子操作：获取当前pin_count（Acquire 保守读取）
     pub fn get_pin_count(&self) -> u32 {
         self.pin_count.load(Ordering::Acquire)
+    }
+
+    pub fn lsn(&self) -> Lsn {
+        self.page_lsn
+    }
+
+    pub fn set_lsn(&mut self, lsn: Lsn) {
+        self.page_lsn = lsn;
     }
 }
 
