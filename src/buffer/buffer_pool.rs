@@ -1,5 +1,5 @@
 //! Buffer Pool Manager
-//! - Page table (PageId→FrameId), sharded LRU-K replacer, optional TinyLFU admission
+//! - Page table (PageId→FrameId), LRU-K replacer, optional TinyLFU admission
 //! - Read/Write page guards pin/unpin via RAII; flush dirty pages before eviction
 //! - Disk I/O offloaded to async DiskScheduler
 
@@ -121,6 +121,10 @@ impl BufferPoolManager {
 
     pub fn wal_manager(&self) -> Option<Arc<WalManager>> {
         self.wal_manager.read().clone()
+    }
+
+    pub fn dirty_page_ids(&self) -> Vec<PageId> {
+        self.dirty_pages.iter().map(|entry| *entry.key()).collect()
     }
 
     /// 创建一个新页面。
@@ -797,12 +801,14 @@ mod tests {
         let wal_dir = temp_dir.path().join("wal");
         let scheduler = bpm.disk_scheduler.clone();
         let wal = Arc::new(
-            WalManager::new_with_scheduler(
+            WalManager::new(
                 WalConfig {
                     directory: wal_dir.clone(),
                     ..WalConfig::default()
                 },
                 scheduler,
+                None,
+                None,
             )
             .expect("wal manager"),
         );
@@ -815,13 +821,14 @@ mod tests {
             page_id = guard.page_id();
             guard.data[0..4].copy_from_slice(b"walu");
             lsn = wal
-                .append_record_with(|_| {
+                .append_record_with(|_ctx| {
                     WalRecordPayload::Transaction(TransactionPayload {
                         marker: TransactionRecordKind::Begin,
                         txn_id: 1,
                     })
                 })
-                .expect("append wal record");
+                .expect("append wal record")
+                .end_lsn;
             guard.page_lsn = lsn;
         }
 

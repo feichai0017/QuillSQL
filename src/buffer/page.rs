@@ -157,6 +157,15 @@ impl WritePageGuard {
     pub fn pin_count(&self) -> u32 {
         self.guard.get_pin_count()
     }
+
+    pub fn overwrite(&mut self, data: &[u8], new_lsn: Option<Lsn>) {
+        debug_assert_eq!(data.len(), PAGE_SIZE);
+        self.guard.data.copy_from_slice(data);
+        if let Some(lsn) = new_lsn {
+            self.guard.page_lsn = lsn;
+        }
+        self.guard.is_dirty = true;
+    }
 }
 
 impl Drop for WritePageGuard {

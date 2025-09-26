@@ -111,7 +111,7 @@ impl BPlusTreeIndex {
             root_page_id: INVALID_PAGE_ID,
         };
         let encoded = BPlusTreeHeaderPageCodec::encode(&header_page);
-        header_page_guard.data.copy_from_slice(&encoded);
+        header_page_guard.overwrite(&encoded, None);
         drop(header_page_guard);
 
         Self {
@@ -190,7 +190,7 @@ impl BPlusTreeIndex {
             root_page_id: page_id,
         };
         let encoded = BPlusTreeHeaderPageCodec::encode(&header_page);
-        header_guard.data.copy_from_slice(&encoded);
+        header_guard.overwrite(&encoded, None);
         Ok(())
     }
 
@@ -466,7 +466,7 @@ impl BPlusTreeIndex {
                 *existing_rid = rid;
                 leaf_page.header.version += 1;
                 let encoded = BPlusTreeLeafPageCodec::encode(&leaf_page);
-                leaf_guard.data.copy_from_slice(&encoded);
+                leaf_guard.overwrite(&encoded, None);
                 local_ctx.release_all_write_locks();
                 return Ok(());
             }
@@ -513,7 +513,7 @@ impl BPlusTreeIndex {
             leaf_page.insert(key.clone(), rid);
             leaf_page.header.version += 1;
             let encoded = BPlusTreeLeafPageCodec::encode(&leaf_page);
-            leaf_guard.data.copy_from_slice(&encoded);
+            leaf_guard.overwrite(&encoded, None);
             local_ctx.release_all_write_locks();
             return Ok(());
         }
@@ -612,9 +612,8 @@ impl BPlusTreeIndex {
 
             leaf_page.delete(key);
             leaf_page.header.version += 1;
-            leaf_guard
-                .data
-                .copy_from_slice(&BPlusTreeLeafPageCodec::encode(&leaf_page));
+            let encoded = BPlusTreeLeafPageCodec::encode(&leaf_page);
+            leaf_guard.overwrite(&encoded, None);
 
             // If the node is underflowing, handle it.
             if leaf_page.header.current_size < leaf_page.min_size() {
@@ -654,9 +653,8 @@ impl BPlusTreeIndex {
                             if node_idx > 0 {
                                 parent_page.array[node_idx].0 = leaf_page.key_at(0).clone();
                                 parent_page.header.version += 1;
-                                parent_guard.data.copy_from_slice(
-                                    &BPlusTreeInternalPageCodec::encode(&parent_page),
-                                );
+                                let encoded = BPlusTreeInternalPageCodec::encode(&parent_page);
+                                parent_guard.overwrite(&encoded, None);
                             }
                         }
                         // push back to maintain path for later releases
@@ -936,12 +934,10 @@ impl BPlusTreeIndex {
         }
         parent_page.header.version += 1;
 
-        left_guard
-            .data
-            .copy_from_slice(&BPlusTreePageCodec::encode(&left_page));
-        parent_guard
-            .data
-            .copy_from_slice(&BPlusTreeInternalPageCodec::encode(&parent_page));
+        let left_encoded = BPlusTreePageCodec::encode(&left_page);
+        left_guard.overwrite(&left_encoded, None);
+        let parent_encoded = BPlusTreeInternalPageCodec::encode(&parent_page);
+        parent_guard.overwrite(&parent_encoded, None);
         drop(left_guard);
         drop(right_guard);
         self.buffer_pool.delete_page(right_page_id)?;
@@ -1072,15 +1068,12 @@ impl BPlusTreeIndex {
 
         parent_page.header.version += 1;
 
-        from_guard
-            .data
-            .copy_from_slice(&BPlusTreePageCodec::encode(&from_page));
-        to_guard
-            .data
-            .copy_from_slice(&BPlusTreePageCodec::encode(&to_page));
-        parent_guard
-            .data
-            .copy_from_slice(&BPlusTreeInternalPageCodec::encode(&parent_page));
+        let from_encoded = BPlusTreePageCodec::encode(&from_page);
+        from_guard.overwrite(&from_encoded, None);
+        let to_encoded = BPlusTreePageCodec::encode(&to_page);
+        to_guard.overwrite(&to_encoded, None);
+        let parent_encoded = BPlusTreeInternalPageCodec::encode(&parent_page);
+        parent_guard.overwrite(&parent_encoded, None);
 
         Ok(())
     }
@@ -1140,7 +1133,7 @@ impl BPlusTreeIndex {
         let mut leaf_page = BPlusTreeLeafPage::new(self.key_schema.clone(), self.leaf_max_size);
         leaf_page.insert(key.clone(), rid);
         let encoded_data = BPlusTreeLeafPageCodec::encode(&leaf_page);
-        root_guard.data.copy_from_slice(&encoded_data);
+        root_guard.overwrite(&encoded_data, None);
         // 更新根节点 ID（先释放页锁，再更新 header，避免锁序反转）。
         // 约定：调用方已持有 header_page_lock。
         drop(root_guard);
@@ -1336,7 +1329,7 @@ impl BPlusTreeIndex {
                     new_leaf.header.next_page_id = leaf_page.header.next_page_id;
                     leaf_page.header.next_page_id = new_page_id;
                     let new_data = BPlusTreeLeafPageCodec::encode(&new_leaf);
-                    new_page_guard.data.copy_from_slice(&new_data);
+                    new_page_guard.overwrite(&new_data, None);
                     leaf_page.header.version += 1;
                     if self.config.debug_split_level >= 2 {
                         if new_leaf.header.current_size > 0 {
@@ -1392,7 +1385,7 @@ impl BPlusTreeIndex {
                     // - Right's next pointer inherits left's next
                     new_internal.header.next_page_id = old_next;
                     let new_data = BPlusTreeInternalPageCodec::encode(&new_internal);
-                    new_page_guard.data.copy_from_slice(&new_data);
+                    new_page_guard.overwrite(&new_data, None);
                     // B-link: publish right sibling pointer for readers to chase
                     internal_page.header.next_page_id = new_page_id;
                     internal_page.header.version += 1;
@@ -1408,7 +1401,7 @@ impl BPlusTreeIndex {
 
             // 写回修改后的旧页面和新页面（保持子页锁直到父更新完成）
             let old_page_data = BPlusTreePageCodec::encode(&page);
-            page_guard.data.copy_from_slice(&old_page_data);
+            page_guard.overwrite(&old_page_data, None);
 
             // 若当前分裂页是根（无父在 write_set），则创建新的根
             if page_guard.page_id() == self.get_root_page_id()? {
@@ -1427,7 +1420,7 @@ impl BPlusTreeIndex {
                 new_root_page.insert(middle_key, new_page_id);
 
                 let encoded = BPlusTreeInternalPageCodec::encode(&new_root_page);
-                new_root_guard.data.copy_from_slice(&encoded);
+                new_root_guard.overwrite(&encoded, None);
 
                 // Avoid deadlock: release child page latches before taking header lock
                 drop(new_page_guard);
@@ -1469,7 +1462,7 @@ impl BPlusTreeIndex {
             parent_page.header.version += 1;
 
             let encoded = BPlusTreeInternalPageCodec::encode(&parent_page);
-            parent_guard.data.copy_from_slice(&encoded);
+            parent_guard.overwrite(&encoded, None);
 
             if parent_page.is_full() {
                 // 子页到父的结构已一致，现在可释放子页锁，继续向上分裂父

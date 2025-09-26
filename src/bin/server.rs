@@ -66,6 +66,25 @@ async fn main() {
                     Ok(ms) => Some(Some(ms)),
                     Err(_) => None,
                 }),
+            buffer_capacity: std::env::var("QUILL_WAL_BUFFER_CAPACITY")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok()),
+            flush_coalesce_bytes: std::env::var("QUILL_WAL_FLUSH_COALESCE_BYTES")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok()),
+            synchronous_commit: std::env::var("QUILL_WAL_SYNCHRONOUS_COMMIT")
+                .ok()
+                .and_then(|v| parse_env_bool(&v)),
+            checkpoint_interval_ms: std::env::var("QUILL_WAL_CHECKPOINT_INTERVAL_MS")
+                .ok()
+                .and_then(|v| match v.parse::<u64>() {
+                    Ok(0) => Some(None),
+                    Ok(ms) => Some(Some(ms)),
+                    Err(_) => None,
+                }),
+            retain_segments: std::env::var("QUILL_WAL_RETAIN_SEGMENTS")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok()),
         },
     };
 

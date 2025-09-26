@@ -21,6 +21,20 @@ struct Args {
         help = "Background WAL writer interval in milliseconds (0 to disable)"
     )]
     wal_writer_interval_ms: Option<u64>,
+    #[clap(long, help = "Maximum WAL records to buffer before auto-flush")]
+    wal_buffer_capacity: Option<usize>,
+    #[clap(long, help = "Flush WAL when pending bytes reach this threshold")]
+    wal_flush_coalesce_bytes: Option<usize>,
+    #[clap(long, help = "Whether transaction commit waits for WAL durability")]
+    wal_synchronous_commit: Option<bool>,
+    #[clap(
+        long,
+        help = "Checkpoint interval in milliseconds (0 to disable)",
+        value_name = "MS"
+    )]
+    wal_checkpoint_interval_ms: Option<u64>,
+    #[clap(long, help = "Number of WAL segments to retain on disk")]
+    wal_retain_segments: Option<usize>,
 }
 
 fn main() {
@@ -38,6 +52,17 @@ fn main() {
                 Some(val)
             }
         }),
+        buffer_capacity: args.wal_buffer_capacity,
+        flush_coalesce_bytes: args.wal_flush_coalesce_bytes,
+        synchronous_commit: args.wal_synchronous_commit,
+        checkpoint_interval_ms: args.wal_checkpoint_interval_ms.map(|val| {
+            if val == 0 {
+                None
+            } else {
+                Some(val)
+            }
+        }),
+        retain_segments: args.wal_retain_segments,
     };
     let db_options = DatabaseOptions { wal: wal_options };
 

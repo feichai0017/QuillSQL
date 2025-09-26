@@ -8,7 +8,11 @@ use std::ops::RangeBounds;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
-use crate::recovery::wal_record::{PageWritePayload, WalRecordPayload};
+use crate::recovery::wal_record::{
+    HeapDeletePayload, HeapInsertPayload, HeapRecordPayload, HeapUpdatePayload, PageWritePayload,
+    RelationIdent, TupleMetaRepr, WalRecordPayload,
+};
+use crate::storage::codec::TupleCodec;
 use crate::storage::tuple::Tuple;
 use crate::utils::ring_buffer::RingBuffer;
 
@@ -54,8 +58,8 @@ impl TableHeap {
         let prev_lsn = guard.page_lsn;
         if let Some(wal) = self.buffer_pool.wal_manager() {
             let mut page_image = Vec::new();
-            let lsn = wal.append_record_with(|lsn| {
-                table_page.set_lsn(lsn);
+            let result = wal.append_record_with(|ctx| {
+                table_page.set_lsn(ctx.end_lsn);
                 page_image = TablePageCodec::encode(table_page);
                 WalRecordPayload::PageWrite(PageWritePayload {
                     page_id,
@@ -63,13 +67,24 @@ impl TableHeap {
                     page_image: page_image.clone(),
                 })
             })?;
-            guard.data.copy_from_slice(&page_image);
-            guard.page_lsn = lsn;
+            guard.overwrite(&page_image, Some(result.end_lsn));
         } else {
             table_page.set_lsn(prev_lsn);
             let encoded = TablePageCodec::encode(table_page);
-            guard.data.copy_from_slice(&encoded);
-            guard.page_lsn = table_page.lsn();
+            guard.overwrite(&encoded, Some(table_page.lsn()));
+        }
+        Ok(())
+    }
+
+    fn relation_ident(&self) -> RelationIdent {
+        RelationIdent {
+            root_page_id: self.first_page_id.load(Ordering::SeqCst),
+        }
+    }
+
+    fn append_heap_record(&self, payload: HeapRecordPayload) -> QuillSQLResult<()> {
+        if let Some(wal) = self.buffer_pool.wal_manager() {
+            wal.append_record_with(|_| WalRecordPayload::Heap(payload.clone()))?;
         }
         Ok(())
     }
@@ -98,8 +113,17 @@ impl TableHeap {
 
             // If there's space, insert the tuple.
             if table_page.next_tuple_offset(tuple).is_ok() {
+                let tuple_bytes = TupleCodec::encode(tuple);
                 let slot_id = table_page.insert_tuple(meta, tuple)?;
-
+                let relation = self.relation_ident();
+                let tuple_meta = TupleMetaRepr::from(*meta);
+                self.append_heap_record(HeapRecordPayload::Insert(HeapInsertPayload {
+                    relation,
+                    page_id: current_page_id,
+                    slot_id,
+                    tuple_meta,
+                    tuple_data: tuple_bytes,
+                }))?;
                 self.write_back_page(current_page_id, &mut current_page_guard, &mut table_page)?;
                 return Ok(RecordId::new(current_page_id, slot_id as u32));
             }
@@ -134,8 +158,22 @@ impl TableHeap {
         let mut table_page = TablePageCodec::decode(&page_guard.data, self.schema.clone())?.0;
         table_page.set_lsn(page_guard.page_lsn);
 
+        let slot = rid.slot_num as u16;
+        let (old_meta, old_tuple) = table_page.tuple(slot)?;
+        let old_tuple_bytes = TupleCodec::encode(&old_tuple);
+        let new_tuple_bytes = TupleCodec::encode(&tuple);
         table_page.update_tuple(tuple, rid.slot_num as u16)?;
-
+        let new_meta = table_page.header.tuple_infos[slot as usize].meta;
+        let relation = self.relation_ident();
+        self.append_heap_record(HeapRecordPayload::Update(HeapUpdatePayload {
+            relation,
+            page_id: rid.page_id,
+            slot_id: slot,
+            new_tuple_meta: TupleMetaRepr::from(new_meta),
+            new_tuple_data: new_tuple_bytes,
+            old_tuple_meta: Some(TupleMetaRepr::from(old_meta)),
+            old_tuple_data: Some(old_tuple_bytes),
+        }))?;
         self.write_back_page(rid.page_id, &mut page_guard, &mut table_page)
     }
 
@@ -144,8 +182,33 @@ impl TableHeap {
         let mut table_page = TablePageCodec::decode(&page_guard.data, self.schema.clone())?.0;
         table_page.set_lsn(page_guard.page_lsn);
 
-        table_page.update_tuple_meta(meta, rid.slot_num as u16)?;
-
+        let slot = rid.slot_num as u16;
+        let (old_meta, old_tuple) = table_page.tuple(slot)?;
+        let old_tuple_bytes = TupleCodec::encode(&old_tuple);
+        table_page.update_tuple_meta(meta, slot)?;
+        let relation = self.relation_ident();
+        let payload = if meta.is_deleted && !old_meta.is_deleted {
+            HeapRecordPayload::Delete(HeapDeletePayload {
+                relation,
+                page_id: rid.page_id,
+                slot_id: slot,
+                old_tuple_meta: TupleMetaRepr::from(old_meta),
+                old_tuple_data: Some(old_tuple_bytes),
+            })
+        } else {
+            let (_, current_tuple) = table_page.tuple(slot)?;
+            let new_tuple_bytes = TupleCodec::encode(&current_tuple);
+            HeapRecordPayload::Update(HeapUpdatePayload {
+                relation,
+                page_id: rid.page_id,
+                slot_id: slot,
+                new_tuple_meta: TupleMetaRepr::from(meta),
+                new_tuple_data: new_tuple_bytes,
+                old_tuple_meta: Some(TupleMetaRepr::from(old_meta)),
+                old_tuple_data: Some(old_tuple_bytes),
+            })
+        };
+        self.append_heap_record(payload)?;
         self.write_back_page(rid.page_id, &mut page_guard, &mut table_page)
     }
 
