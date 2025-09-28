@@ -38,19 +38,19 @@ use crate::{
 #[derive(Debug)]
 pub enum PhysicalPlan {
     Empty(PhysicalEmpty),
-    CreateTable(PhysicalCreateTable),
-    CreateIndex(PhysicalCreateIndex),
-    Project(PhysicalProject),
-    Filter(PhysicalFilter),
+    Values(PhysicalValues),
     SeqScan(PhysicalSeqScan),
     IndexScan(PhysicalIndexScan),
     Limit(PhysicalLimit),
-    Insert(PhysicalInsert),
-    Values(PhysicalValues),
-    NestedLoopJoin(PhysicalNestedLoopJoin),
     Sort(PhysicalSort),
-    Aggregate(PhysicalAggregate),
     Update(PhysicalUpdate),
+    Insert(PhysicalInsert),
+    Project(PhysicalProject),
+    Filter(PhysicalFilter),
+    NestedLoopJoin(PhysicalNestedLoopJoin),
+    Aggregate(PhysicalAggregate),
+    CreateTable(PhysicalCreateTable),
+    CreateIndex(PhysicalCreateIndex),
 }
 
 impl PhysicalPlan {

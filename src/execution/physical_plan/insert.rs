@@ -108,27 +108,24 @@ impl VolcanoExecutor for PhysicalInsert {
                 is_deleted: false,
             };
             let rid = table_heap.insert_tuple(&meta, &tuple)?;
-            context.txn_mgr.record_row_lock(
-                context.txn.id(),
-                self.table.clone(),
-                rid,
-                LockMode::Exclusive,
-            );
+            let mut index_links = Vec::new();
 
             let indexes = context.catalog.table_indexes(&self.table)?;
             for index in indexes {
                 if let Ok(key_tuple) = tuple.project_with_schema(index.key_schema.clone()) {
                     let root_page_id = index.get_root_page_id()?;
                     index.insert(&key_tuple, rid)?;
+                    index_links.push((index.clone(), key_tuple));
                     let new_root_page_id = index.get_root_page_id()?;
                     if new_root_page_id != root_page_id {
-                        // The root page ID has changed, which means a split propagated to the root.
-                        // With the new header page model, we no longer need to update the catalog here,
-                        // as the header_page_id is immutable. The root_page_id is updated within
-                        // the header page automatically.
+                        // root change comment
                     }
                 }
             }
+
+            context
+                .txn
+                .push_insert_undo(table_heap.clone(), rid, index_links);
 
             self.insert_rows.fetch_add(1, Ordering::SeqCst);
         }

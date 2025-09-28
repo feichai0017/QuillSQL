@@ -47,6 +47,11 @@ impl<'a> ExecutionContext<'a> {
             .map_err(|e| QuillSQLError::Execution(format!("lock error: {}", e)))?;
         Ok(())
     }
+
+    pub fn lock_row_shared(&mut self, table: &TableReference, rid: crate::storage::page::RecordId) {
+        self.txn_mgr
+            .record_row_lock(self.txn.id(), table.clone(), rid, LockMode::Shared);
+    }
 }
 
 pub struct ExecutionEngine<'a> {

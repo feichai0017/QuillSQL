@@ -17,6 +17,7 @@ struct HeldLocks {
     tables: Vec<(TableReference, LockMode)>,
     rows: Vec<(TableReference, RecordId, LockMode)>,
     row_keys: HashSet<(TableReference, RecordId)>,
+    shared_rows: HashSet<(TableReference, RecordId)>,
 }
 
 pub struct TransactionManager {
@@ -169,6 +170,7 @@ impl TransactionManager {
 
         self.active_txns.remove(&txn_id);
         self.release_all_locks(txn_id);
+        txn.clear_undo();
         self.finish_commit(txn, append.end_lsn)
     }
 
@@ -184,6 +186,8 @@ impl TransactionManager {
             TransactionState::Running | TransactionState::Tainted => {}
         }
 
+        txn.apply_undo()?;
+
         let txn_id = txn.id();
         let append = self.wal.append_record_with(|_| {
             WalRecordPayload::Transaction(TransactionPayload {
@@ -196,6 +200,7 @@ impl TransactionManager {
 
         self.active_txns.remove(&txn_id);
         self.release_all_locks(txn_id);
+        txn.clear_undo();
         self.finish_commit(txn, append.end_lsn)
     }
 
@@ -227,21 +232,34 @@ impl TransactionManager {
         rid: RecordId,
         mode: LockMode,
     ) {
-        if let Some(mut entry) = self.held_locks.get_mut(&txn_id) {
-            if entry.row_keys.insert((table.clone(), rid)) {
-                entry.rows.push((table, rid, mode));
-            }
-        } else {
-            let mut new_entry = HeldLocks::default();
-            new_entry.row_keys.insert((table.clone(), rid));
-            new_entry.rows.push((table, rid, mode));
-            self.held_locks.insert(txn_id, new_entry);
+        let mut entry = self
+            .held_locks
+            .entry(txn_id)
+            .or_insert_with(HeldLocks::default);
+        if entry.row_keys.insert((table.clone(), rid)) {
+            entry.rows.push((table, rid, mode));
         }
+    }
+
+    pub fn record_shared_row_lock(
+        &self,
+        txn_id: TransactionId,
+        table: TableReference,
+        rid: RecordId,
+    ) {
+        let mut entry = self
+            .held_locks
+            .entry(txn_id)
+            .or_insert_with(HeldLocks::default);
+        entry.shared_rows.insert((table, rid));
     }
 
     fn release_all_locks(&self, txn_id: TransactionId) {
         if let Some((_, mut held)) = self.held_locks.remove(&txn_id) {
             for (table, rid, _) in held.rows.drain(..).rev() {
+                let _ = self.lock_manager.unlock_row_raw(txn_id, table, rid);
+            }
+            for (table, rid) in held.shared_rows.drain() {
                 let _ = self.lock_manager.unlock_row_raw(txn_id, table, rid);
             }
             for (table, _) in held.tables.drain(..).rev() {

@@ -409,6 +409,63 @@ impl TableHeap {
         }
         Ok(())
     }
+
+    pub fn recover_restore_tuple(
+        &self,
+        rid: RecordId,
+        meta: TupleMeta,
+        tuple: &Tuple,
+    ) -> QuillSQLResult<()> {
+        let bytes = TupleCodec::encode(tuple);
+        self.recover_set_tuple_bytes(rid, &bytes)?;
+        self.recover_set_tuple_meta(rid, meta)
+    }
+
+    pub fn recover_delete_tuple(
+        &self,
+        rid: RecordId,
+        txn_id: crate::transaction::TransactionId,
+    ) -> QuillSQLResult<()> {
+        let mut meta = self.tuple_meta(rid)?;
+        if meta.is_deleted {
+            return Ok(());
+        }
+        meta.is_deleted = true;
+        meta.delete_txn_id = txn_id;
+        self.recover_set_tuple_meta(rid, meta)
+    }
+
+    pub fn delete_tuple(
+        &self,
+        rid: RecordId,
+        txn_id: crate::transaction::TransactionId,
+    ) -> QuillSQLResult<()> {
+        let mut page_guard = self.buffer_pool.fetch_page_write(rid.page_id)?;
+        let mut table_page = TablePageCodec::decode(&page_guard.data, self.schema.clone())?.0;
+        table_page.set_lsn(page_guard.page_lsn);
+
+        let slot = rid.slot_num as u16;
+        let (mut meta, tuple) = table_page.tuple(slot)?;
+        if meta.is_deleted {
+            return Ok(());
+        }
+        meta.is_deleted = true;
+        meta.delete_txn_id = txn_id;
+        table_page.update_tuple_meta(meta, slot)?;
+        let old_tuple_bytes = TupleCodec::encode(&tuple);
+
+        let relation = self.relation_ident();
+        let payload = HeapRecordPayload::Delete(HeapDeletePayload {
+            relation,
+            page_id: rid.page_id,
+            slot_id: slot,
+            op_txn_id: txn_id,
+            old_tuple_meta: TupleMetaRepr::from(meta),
+            old_tuple_data: Some(old_tuple_bytes),
+        });
+        self.append_heap_record(payload)?;
+        self.write_back_page(rid.page_id, &mut page_guard, &mut table_page)
+    }
 }
 
 #[derive(Debug)]
