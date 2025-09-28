@@ -1,0 +1,19 @@
+statement ok
+create table d1 (
+    id int primary key,
+    value int
+)
+
+statement ok
+insert into d1 values (1, 10), (2, 20), (3, 30)
+
+statement ok
+delete from d1 where id = 2
+
+query
+select * from d1 order by id
+----
+1 10
+3 30
+
+

@@ -1,6 +1,7 @@
 mod aggregate;
 mod create_index;
 mod create_table;
+mod delete;
 mod empty_relation;
 mod filter;
 mod insert;
@@ -16,6 +17,7 @@ mod values;
 pub use aggregate::Aggregate;
 pub use create_index::CreateIndex;
 pub use create_table::CreateTable;
+pub use delete::Delete;
 pub use empty_relation::EmptyRelation;
 pub use filter::Filter;
 pub use insert::Insert;
@@ -29,7 +31,8 @@ pub use util::*;
 pub use values::Values;
 
 use crate::catalog::{
-    SchemaRef, EMPTY_SCHEMA_REF, INSERT_OUTPUT_SCHEMA_REF, UPDATE_OUTPUT_SCHEMA_REF,
+    SchemaRef, DELETE_OUTPUT_SCHEMA_REF, EMPTY_SCHEMA_REF, INSERT_OUTPUT_SCHEMA_REF,
+    UPDATE_OUTPUT_SCHEMA_REF,
 };
 use crate::error::{QuillSQLError, QuillSQLResult};
 use std::sync::Arc;
@@ -49,6 +52,7 @@ pub enum LogicalPlan {
     EmptyRelation(EmptyRelation),
     Aggregate(Aggregate),
     Update(Update),
+    Delete(Delete),
 }
 
 impl LogicalPlan {
@@ -67,6 +71,7 @@ impl LogicalPlan {
             LogicalPlan::EmptyRelation(EmptyRelation { schema, .. }) => schema,
             LogicalPlan::Aggregate(Aggregate { schema, .. }) => schema,
             LogicalPlan::Update(_) => &UPDATE_OUTPUT_SCHEMA_REF,
+            LogicalPlan::Delete(_) => &DELETE_OUTPUT_SCHEMA_REF,
         }
     }
 
@@ -84,6 +89,7 @@ impl LogicalPlan {
             | LogicalPlan::TableScan(_)
             | LogicalPlan::Values(_)
             | LogicalPlan::Update(_)
+            | LogicalPlan::Delete(_)
             | LogicalPlan::EmptyRelation(_) => vec![],
         }
     }
@@ -232,6 +238,7 @@ impl LogicalPlan {
             | LogicalPlan::TableScan(_)
             | LogicalPlan::Values(_)
             | LogicalPlan::Update(_)
+            | LogicalPlan::Delete(_)
             | LogicalPlan::EmptyRelation(_) => Ok(self.clone()),
         }
     }
@@ -253,6 +260,7 @@ impl std::fmt::Display for LogicalPlan {
             LogicalPlan::EmptyRelation(v) => write!(f, "{v}"),
             LogicalPlan::Aggregate(v) => write!(f, "{v}"),
             LogicalPlan::Update(v) => write!(f, "{v}"),
+            LogicalPlan::Delete(v) => write!(f, "{v}"),
         }
     }
 }

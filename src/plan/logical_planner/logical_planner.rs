@@ -37,6 +37,35 @@ impl<'a> LogicalPlanner<'a> {
                 selection,
                 ..
             } => self.plan_update(table, assignments, selection),
+            ast::Statement::Delete {
+                tables,
+                from,
+                using,
+                selection,
+                returning,
+            } => {
+                if !tables.is_empty() {
+                    return Err(QuillSQLError::Plan(
+                        "DELETE with table aliases is not supported".to_string(),
+                    ));
+                }
+                if using.is_some() {
+                    return Err(QuillSQLError::Plan(
+                        "DELETE USING clause is not supported".to_string(),
+                    ));
+                }
+                if returning.is_some() {
+                    return Err(QuillSQLError::Plan(
+                        "DELETE RETURNING is not supported".to_string(),
+                    ));
+                }
+                if from.len() != 1 {
+                    return Err(QuillSQLError::Plan(
+                        "DELETE must target exactly one table".to_string(),
+                    ));
+                }
+                self.plan_delete(&from[0], selection)
+            }
             ast::Statement::Explain { statement, .. } => self.plan_explain(statement),
             _ => unimplemented!(),
         }

@@ -52,6 +52,22 @@ impl<'a> ExecutionContext<'a> {
         self.txn_mgr
             .record_row_lock(self.txn.id(), table.clone(), rid, LockMode::Shared);
     }
+
+    pub fn lock_row_exclusive(
+        &mut self,
+        table: &TableReference,
+        rid: crate::storage::page::RecordId,
+    ) -> QuillSQLResult<()> {
+        if !self
+            .txn_mgr
+            .try_acquire_row_lock(self.txn, table.clone(), rid, LockMode::Exclusive)?
+        {
+            return Err(QuillSQLError::Execution(
+                "failed to acquire row exclusive lock".to_string(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 pub struct ExecutionEngine<'a> {

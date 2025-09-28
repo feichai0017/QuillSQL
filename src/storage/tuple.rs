@@ -1,9 +1,9 @@
-use crate::catalog::{SchemaRef, EMPTY_SCHEMA_REF};
-use crate::error::QuillSQLError;
-use crate::storage::page::TupleMeta;
+use crate::catalog::{Schema, SchemaRef, EMPTY_SCHEMA_REF};
+use crate::error::{QuillSQLError, QuillSQLResult};
+use crate::storage::page::{RecordId, TupleMeta};
 use crate::transaction::TransactionId;
+use crate::utils::scalar::ScalarValue;
 use crate::utils::table_ref::TableReference;
-use crate::{catalog::Schema, error::QuillSQLResult, utils::scalar::ScalarValue};
 use std::cmp::Ordering;
 use std::fmt::{Display, Formatter};
 use std::sync::{Arc, LazyLock};
@@ -88,6 +88,17 @@ impl Tuple {
         let idx = self.schema.index_of(relation, name)?;
         self.value(idx)
     }
+
+    pub fn as_rid(&self) -> QuillSQLResult<RecordId> {
+        if self.data.len() < 2 {
+            return Err(QuillSQLError::Execution(
+                "RID tuple must have at least two columns".to_string(),
+            ));
+        }
+        let page_id = value_as_u32(&self.data[0])?;
+        let slot_num = value_as_u32(&self.data[1])?;
+        Ok(RecordId::new(page_id, slot_num))
+    }
 }
 
 impl Ord for Tuple {
@@ -146,4 +157,28 @@ mod tests {
         assert_eq!(tuple1.partial_cmp(&tuple4).unwrap(), Ordering::Less);
         assert_eq!(tuple1.partial_cmp(&tuple5).unwrap(), Ordering::Greater);
     }
+}
+
+fn value_as_u32(value: &ScalarValue) -> QuillSQLResult<u32> {
+    let num = match value {
+        ScalarValue::Int16(Some(v)) => *v as i32,
+        ScalarValue::Int32(Some(v)) => *v,
+        ScalarValue::Int64(Some(v)) => *v as i32,
+        ScalarValue::UInt16(Some(v)) => *v as i32,
+        ScalarValue::UInt32(Some(v)) => *v as i32,
+        ScalarValue::UInt64(Some(v)) => *v as i32,
+        ScalarValue::Int8(Some(v)) => *v as i32,
+        ScalarValue::UInt8(Some(v)) => *v as i32,
+        _ => {
+            return Err(QuillSQLError::Execution(
+                "RID column must be integer".to_string(),
+            ))
+        }
+    };
+    if num < 0 {
+        return Err(QuillSQLError::Execution(
+            "RID column must be positive".to_string(),
+        ));
+    }
+    Ok(num as u32)
 }
