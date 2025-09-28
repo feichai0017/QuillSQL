@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -96,16 +96,17 @@
             SQL Query Editor
             <span class="status" id="status"></span>
           </div>
-          <textarea id="sql" class="sql-editor" placeholder="-- 仅展示已实现的语法：INT/BOOLEAN/VARCHAR、SELECT/INSERT/UPDATE、INNER/CROSS JOIN、COUNT/AVG、ORDER BY、LIMIT/OFFSET、信息模式查询"></textarea>
+          <textarea id="sql" class="sql-editor" placeholder="-- Supported (subset):\n-- Data types: BOOLEAN, INT8/16/32/64, UINT8/16/32/64, FLOAT32/64, VARCHAR(n)\n-- Statements: CREATE TABLE, CREATE INDEX, SELECT, INSERT, UPDATE, SHOW, EXPLAIN\n-- Tip: Use idempotent demos like CREATE TABLE IF NOT EXISTS and SELECT"></textarea>
           <div class="controls">
             <button id="run">▶ Execute (Ctrl+Enter)</button>
             <select id="exampleSel">
               <option value="">Choose Example...</option>
-              <option value="basic">Basic Operations</option>
-              <option value="index">Index Usage</option>
-              <option value="join">Joins & Aggregates</option>
-              <option value="update">Updates</option>
+              <option value="basic">Basic (Idempotent)</option>
+              <option value="write">Write Demo (Insert/Update)</option>
+              <option value="read">Read-only Demo</option>
+              <option value="explain">Explain Plan</option>
               <option value="schema">Schema Info</option>
+              <option value="aggregate">Aggregates & Join</option>
             </select>
             <button id="applyExample" class="secondary">Load Example</button>
             <button id="clear" class="secondary">Clear Results</button>
@@ -170,7 +171,7 @@
       function friendlyError(text) {
         const t = String(text || '');
         if (/Not\s*support|not\s*supported|NotSupport/i.test(t)) {
-          return `不支持的语句或数据类型\n\n${t}`;
+          return `Unsupported statement or data type\n\n${t}`;
         }
         return t;
       }
@@ -250,15 +251,17 @@
       applyExample.addEventListener('click', () => {
         const pick = exampleSel.value;
         if (pick === 'basic') {
-          sqlTA.value = `-- Basic table operations\nCREATE TABLE users(id INT NOT NULL, name VARCHAR(50), age INT DEFAULT 0);\nINSERT INTO users(id, name, age) VALUES (1, 'Alice', 25), (2, 'Bob', 30), (3, 'Carol', 35);\nSELECT id, name, age FROM users WHERE age > 25 ORDER BY age DESC;`;
-        } else if (pick === 'index') {
-          sqlTA.value = `-- Index usage\nCREATE TABLE products(id INT NOT NULL, name VARCHAR(100), price INT, category_id INT);\nCREATE INDEX idx_products_category ON products(category_id);\nINSERT INTO products VALUES (1, 'Laptop', 1200, 1), (2, 'Mouse', 25, 1), (3, 'Book', 15, 2);\nSELECT id, name FROM products WHERE category_id = 1;`;
-        } else if (pick === 'join') {
-          sqlTA.value = `-- Supported joins + aggregates (COUNT/AVG)\nCREATE TABLE customers(id INT, name VARCHAR(50));\nCREATE TABLE orders(id INT, customer_id INT, amount INT);\nINSERT INTO customers VALUES (1, 'Alice'), (2, 'Bob');\nINSERT INTO orders VALUES (101, 1, 100), (102, 1, 200), (103, 2, 150);\nSELECT c.name, COUNT(o.id) AS cnt, AVG(o.amount) AS avg_amount\nFROM customers c INNER JOIN orders o ON c.id = o.customer_id\nGROUP BY c.name ORDER BY c.name;`;
-        } else if (pick === 'update') {
-          sqlTA.value = `-- Update operations\nCREATE TABLE inventory(id INT, name VARCHAR(50), quantity INT, price INT);\nINSERT INTO inventory VALUES (1, 'Widget A', 100, 10), (2, 'Widget B', 50, 20);\nUPDATE inventory SET price = 11 WHERE id = 1;\nSELECT * FROM inventory ORDER BY id;`;
+          sqlTA.value = `-- Idempotent basic demo\nCREATE TABLE IF NOT EXISTS demo(id INT32, v INT32 DEFAULT 0);\nSELECT id, v FROM demo ORDER BY id LIMIT 10;`;
+        } else if (pick === 'write') {
+          sqlTA.value = `-- Write demo (non-idempotent if persisted)\n-- Re-running may insert duplicate rows when using persistent storage.\nCREATE TABLE IF NOT EXISTS people(id INT32, name VARCHAR(50), age INT32 DEFAULT 0);\nINSERT INTO people(id, name, age) VALUES (1, 'Alice', 25), (2, 'Bob', 30);\nUPDATE people SET age = 26 WHERE id = 1;\nSELECT * FROM people ORDER BY id;`;
+        } else if (pick === 'read') {
+          sqlTA.value = `-- Read-only demo\nSHOW DATABASES;\nSHOW TABLES;\nSELECT table_name FROM information_schema.tables ORDER BY table_name LIMIT 10;`;
+        } else if (pick === 'explain') {
+          sqlTA.value = `-- Explain plan demo\nEXPLAIN SELECT 1;\nEXPLAIN SELECT 1 AS a UNION ALL SELECT 2 AS a;`;
         } else if (pick === 'schema') {
           sqlTA.value = `-- Information schema\nSHOW DATABASES;\nSHOW TABLES;\nSELECT table_name FROM information_schema.tables ORDER BY table_name LIMIT 10;`;
+        } else if (pick === 'aggregate') {
+          sqlTA.value = `-- Aggregates & Join (non-idempotent if persisted)\nCREATE TABLE customers(id INT32, name VARCHAR(50));\nCREATE TABLE orders(id INT32, customer_id INT32, amount INT32);\nINSERT INTO customers VALUES (1, 'Alice'), (2, 'Bob');\nINSERT INTO orders VALUES (101, 1, 100), (102, 1, 200), (103, 2, 150);\nSELECT c.name, COUNT(o.id) AS cnt, AVG(o.amount) AS avg_amount\nFROM customers c INNER JOIN orders o ON c.id = o.customer_id\nGROUP BY c.name ORDER BY c.name;`;
         }
       });
 
