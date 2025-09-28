@@ -11,9 +11,18 @@
 - **B+Tree index**: OLC readers, B-link pages, latch crabbing, range scan iterator
 - **Buffer pool**: LRU-K, pin/unpin with RAII guards, flush-on-evict
 - **Streaming scan**: Large sequential scans bypass buffer pool via a small direct I/O ring buffer to avoid cache pollution
+- **WAL & Recovery (ARIES-inspired)**: FPW + PageDelta, DPT, chained CLR, per-transaction undo chains, idempotent replays
 - **Information schema**: `information_schema.schemas`, `tables`, `columns`, `indexes`
 - **Now supports**: `SHOW DATABASES`, `SHOW TABLES`, `EXPLAIN`
 - **Docs**: [Architecture](docs/architecture.md) · [Buffer Pool](docs/buffer_pool.md) · [B+ Tree Index](docs/btree_index.md) · [Disk I/O](docs/disk_io.md) · [WAL & Recovery](docs/wal.md)
+
+---
+
+## 🎓 Teaching & Research Friendly
+
+- Clear module boundaries, suitable for classroom assignments and research prototypes. Inspired by CMU 15-445 BusTub with strengthened WAL/Recovery, observability, and centralized configuration.
+- Pluggable pieces: buffer pool, index, WAL, and recovery are decoupled for side-by-side experiments.
+- Readability-first: simple, pragmatic code with minimal hot-path allocations.
 
 ## 🚀 Quick Start
 
@@ -104,15 +113,15 @@ cargo test -q
 
 ## ⚙️ Configuration
 
-Minimal environment variables
-- PORT: Bind port (overrides QUILL_HTTP_ADDR’s port)
-- QUILL_HTTP_ADDR: Listen address (default 0.0.0.0:8080 when PORT is not set)
-- QUILL_DB_FILE: Path to the database file (if unset, a temporary DB is used)
-- RUST_LOG: Log level (e.g., info, debug)
+Programmatic configs（推荐，集中化）
+- 构造 `DatabaseOptions { wal: WalOptions { .. } }` 并传入 `Database::new_*_with_options(..)`；WAL/扫描等均由 `crate::config` 统一管理。
+- 关键结构：`IOStrategy`、`IOSchedulerConfig`、`BufferPoolConfig`、`BTreeConfig`、`TableScanConfig`、`WalConfig`/`WalOptions`。
 
-Programmatic configs (preferred)
-- Centralized in `crate::config` and passed into components at construction.
-- Key structs: `IOStrategy`, `IOSchedulerConfig`, `BufferPoolConfig`, `BTreeConfig`, `TableScanConfig`.
+Minimal environment variables（仅保留基础运行项）
+- PORT：端口（覆盖 `QUILL_HTTP_ADDR` 的端口部分）
+- QUILL_HTTP_ADDR：监听地址（默认 `0.0.0.0:8080`）
+- QUILL_DB_FILE：数据文件路径（未设置则使用临时 DB）
+- RUST_LOG：日志级别（如 info, debug）
 
 Example (Rust)
 ```rust
@@ -139,6 +148,10 @@ let bpm = Arc::new(BufferPoolManager::new_with_config(
 let btree_cfg = BTreeConfig { seq_batch_enable: true, seq_window: 32, ..Default::default() };
 // Table scan tuning (streaming readahead)
 let table_scan_cfg = TableScanConfig { stream_scan_enable: true, readahead_pages: 4, ..Default::default() };
+
+// WAL config (centralized)
+use quillsql::config::WalConfig;
+let wal_cfg = WalConfig { segment_size: 16 * 1024 * 1024, sync_on_flush: true, ..Default::default() };
 ```
 
 Notes
