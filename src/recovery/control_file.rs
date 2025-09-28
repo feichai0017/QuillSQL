@@ -31,6 +31,7 @@ struct ControlFileData {
     max_assigned_lsn: Lsn,
     last_checkpoint_lsn: Lsn,
     last_record_start: Lsn,
+    checkpoint_redo_start: Lsn,
 }
 
 impl ControlFileData {
@@ -43,6 +44,7 @@ impl ControlFileData {
             max_assigned_lsn: 0,
             last_checkpoint_lsn: 0,
             last_record_start: 0,
+            checkpoint_redo_start: 0,
         }
     }
 }
@@ -53,6 +55,7 @@ pub struct ControlFileSnapshot {
     pub max_assigned_lsn: Lsn,
     pub last_checkpoint_lsn: Lsn,
     pub last_record_start: Lsn,
+    pub checkpoint_redo_start: Lsn,
 }
 
 #[derive(Debug)]
@@ -67,6 +70,7 @@ pub struct WalInitState {
     pub max_assigned_lsn: Lsn,
     pub last_checkpoint_lsn: Lsn,
     pub last_record_start: Lsn,
+    pub checkpoint_redo_start: Lsn,
 }
 
 impl WalInitState {
@@ -108,6 +112,7 @@ impl ControlFileManager {
             max_assigned_lsn: data.max_assigned_lsn,
             last_checkpoint_lsn: data.last_checkpoint_lsn,
             last_record_start: data.last_record_start,
+            checkpoint_redo_start: data.checkpoint_redo_start,
         };
 
         let manager = Self {
@@ -128,6 +133,7 @@ impl ControlFileManager {
         max_assigned_lsn: Lsn,
         last_checkpoint_lsn: Lsn,
         last_record_start: Lsn,
+        checkpoint_redo_start: Lsn,
     ) -> QuillSQLResult<()> {
         {
             let mut guard = self.inner.lock();
@@ -135,6 +141,7 @@ impl ControlFileManager {
             guard.max_assigned_lsn = max_assigned_lsn;
             guard.last_checkpoint_lsn = last_checkpoint_lsn;
             guard.last_record_start = last_record_start;
+            guard.checkpoint_redo_start = checkpoint_redo_start;
         }
         self.persist()
     }
@@ -146,6 +153,7 @@ impl ControlFileManager {
             max_assigned_lsn: guard.max_assigned_lsn,
             last_checkpoint_lsn: guard.last_checkpoint_lsn,
             last_record_start: guard.last_record_start,
+            checkpoint_redo_start: guard.checkpoint_redo_start,
         }
     }
 

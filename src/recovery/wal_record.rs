@@ -199,6 +199,7 @@ pub struct TransactionPayload {
 pub struct ClrPayload {
     pub txn_id: TransactionId,
     pub undone_lsn: Lsn,
+    pub undo_next_lsn: Lsn,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -520,10 +521,11 @@ fn encode_transaction(body: &TransactionPayload) -> (u8, Vec<u8>) {
 
 fn encode_clr(body: &ClrPayload) -> Vec<u8> {
     // CLR (rmid=Clr, info=0)
-    // body: txn_id(8) + undone_lsn(8)
-    let mut buf = Vec::with_capacity(16);
+    // body: txn_id(8) + undone_lsn(8) + undo_next_lsn(8)
+    let mut buf = Vec::with_capacity(24);
     buf.extend_from_slice(&body.txn_id.to_le_bytes());
     buf.extend_from_slice(&body.undone_lsn.to_le_bytes());
+    buf.extend_from_slice(&body.undo_next_lsn.to_le_bytes());
     buf
 }
 
@@ -539,7 +541,7 @@ fn decode_transaction(bytes: &[u8], info: u8) -> QuillSQLResult<TransactionPaylo
 }
 
 fn decode_clr(bytes: &[u8]) -> QuillSQLResult<ClrPayload> {
-    if bytes.len() < 16 {
+    if bytes.len() < 24 {
         return Err(QuillSQLError::Internal("CLR body too small".to_string()));
     }
     let mut arr = [0u8; 8];
@@ -547,7 +549,13 @@ fn decode_clr(bytes: &[u8]) -> QuillSQLResult<ClrPayload> {
     let txn_id = u64::from_le_bytes(arr);
     arr.copy_from_slice(&bytes[8..16]);
     let undone_lsn = u64::from_le_bytes(arr);
-    Ok(ClrPayload { txn_id, undone_lsn })
+    arr.copy_from_slice(&bytes[16..24]);
+    let undo_next_lsn = u64::from_le_bytes(arr);
+    Ok(ClrPayload {
+        txn_id,
+        undone_lsn,
+        undo_next_lsn,
+    })
 }
 
 fn encode_checkpoint(body: &CheckpointPayload) -> Vec<u8> {
@@ -1159,6 +1167,7 @@ mod tests {
         let payload = ClrPayload {
             txn_id: 11,
             undone_lsn: 1234,
+            undo_next_lsn: 0,
         };
         let rec = WalRecordPayload::Clr(payload.clone());
         let bytes = rec.encode(200, 150);

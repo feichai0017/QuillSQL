@@ -93,17 +93,18 @@ impl WalManager {
             config.flush_coalesce_bytes
         };
         let mut storage = WalStorage::new(config, scheduler)?;
-        let (durable_ptr, next_ptr, checkpoint_ptr, last_record_start) =
+        let (durable_ptr, next_ptr, checkpoint_ptr, last_record_start, redo_start) =
             if let Some(state) = init_state {
                 (
                     state.durable_lsn,
                     state.max_assigned_lsn,
                     state.last_checkpoint_lsn,
                     state.last_record_start,
+                    state.checkpoint_redo_start,
                 )
             } else {
                 let (next_offset, last_start) = storage.recover_offsets()?;
-                (next_offset, next_offset, last_start, last_start)
+                (next_offset, next_offset, last_start, last_start, 0)
             };
         Ok(Self {
             next_lsn: AtomicU64::new(next_ptr),
@@ -122,7 +123,7 @@ impl WalManager {
             control_file,
             flush_lock: Mutex::new(()),
             flush_cond: Condvar::new(),
-            checkpoint_redo_start: AtomicU64::new(0),
+            checkpoint_redo_start: AtomicU64::new(redo_start),
             touched_pages: DashSet::new(),
         })
     }
@@ -188,7 +189,12 @@ impl WalManager {
     }
 
     pub fn log_checkpoint(&self, payload: CheckpointPayload) -> QuillSQLResult<Lsn> {
-        let redo_start = payload.last_lsn;
+        let redo_start = payload
+            .dpt
+            .iter()
+            .map(|(_, lsn)| *lsn)
+            .min()
+            .unwrap_or(payload.last_lsn);
         let result = self.append_record_with(|_| WalRecordPayload::Checkpoint(payload.clone()))?;
         self.last_checkpoint
             .store(result.start_lsn, Ordering::Release);
@@ -197,6 +203,15 @@ impl WalManager {
         self.flush(Some(result.end_lsn))?;
         // Reset FPW epoch
         self.touched_pages.clear();
+        if let Some(ctrl) = &self.control_file {
+            ctrl.update(
+                self.durable_lsn(),
+                self.max_assigned_lsn(),
+                self.last_checkpoint_lsn(),
+                self.last_record_start.load(Ordering::Acquire),
+                self.checkpoint_redo_start.load(Ordering::Acquire),
+            )?;
+        }
         Ok(result.end_lsn)
     }
 
@@ -226,7 +241,7 @@ impl WalManager {
     }
 
     pub fn flush(&self, target: Option<Lsn>) -> QuillSQLResult<Lsn> {
-        let recycle_lsn = self.checkpoint_redo_start.load(Ordering::Acquire);
+        let recycle_lsn = self.last_checkpoint.load(Ordering::Acquire);
 
         let new_durable = {
             let mut guard = self.state.lock();
@@ -279,6 +294,7 @@ impl WalManager {
                 self.max_assigned_lsn(),
                 self.last_checkpoint_lsn(),
                 self.last_record_start.load(Ordering::Acquire),
+                self.checkpoint_redo_start.load(Ordering::Acquire),
             )?;
         }
         Ok(())
@@ -326,6 +342,11 @@ impl WalManager {
     /// Returns true if this is the first touch of the page since last checkpoint.
     pub fn fpw_first_touch(&self, page_id: PageId) -> bool {
         self.touched_pages.insert(page_id)
+    }
+
+    /// Returns the control file manager if configured (used during recovery to read snapshot info).
+    pub fn control_file(&self) -> Option<Arc<ControlFileManager>> {
+        self.control_file.as_ref().map(Arc::clone)
     }
 }
 
