@@ -5,7 +5,7 @@ use std::sync::Arc;
 use crate::catalog::SchemaRef;
 use crate::error::QuillSQLResult;
 use crate::execution::physical_plan::PhysicalPlan;
-use crate::{catalog::Catalog, storage::tuple::Tuple};
+use crate::{catalog::Catalog, storage::tuple::Tuple, transaction::Transaction};
 pub trait VolcanoExecutor {
     fn init(&self, _context: &mut ExecutionContext) -> QuillSQLResult<()> {
         Ok(())
@@ -16,15 +16,21 @@ pub trait VolcanoExecutor {
     fn output_schema(&self) -> SchemaRef;
 }
 
-#[derive(derive_new::new)]
 pub struct ExecutionContext<'a> {
     pub catalog: &'a mut Catalog,
+    pub txn: &'a mut Transaction,
+}
+
+impl<'a> ExecutionContext<'a> {
+    pub fn new(catalog: &'a mut Catalog, txn: &'a mut Transaction) -> Self {
+        Self { catalog, txn }
+    }
 }
 
 pub struct ExecutionEngine<'a> {
     pub context: ExecutionContext<'a>,
 }
-impl ExecutionEngine<'_> {
+impl<'a> ExecutionEngine<'a> {
     pub fn execute(&mut self, plan: Arc<PhysicalPlan>) -> QuillSQLResult<Vec<Tuple>> {
         plan.init(&mut self.context)?;
         let mut result = Vec::new();

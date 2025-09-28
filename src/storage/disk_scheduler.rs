@@ -5,6 +5,7 @@ use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::storage::io::thread_pool;
 use crate::storage::io::IOBackend; // trait facade
 use bytes::{Bytes, BytesMut};
+use std::path::PathBuf;
 #[cfg(target_os = "linux")]
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
@@ -52,6 +53,19 @@ pub enum DiskRequest {
     DeallocatePage {
         page_id: PageId,
         result_sender: DiskCommandResultSender<()>,
+    },
+    WriteWal {
+        path: PathBuf,
+        offset: u64,
+        bytes: Bytes,
+        sync: bool,
+        result_sender: DiskCommandResultSender<()>,
+    },
+    ReadWal {
+        path: PathBuf,
+        offset: u64,
+        len: usize,
+        result_sender: DiskCommandResultSender<Vec<u8>>,
     },
     Shutdown,
 }
@@ -197,6 +211,48 @@ impl DiskScheduler {
             })
             .map_err(|e| {
                 QuillSQLError::Internal(format!("Failed to send Deallocate request: {}", e))
+            })?;
+        Ok(rx)
+    }
+
+    pub fn schedule_wal_write(
+        &self,
+        path: PathBuf,
+        offset: u64,
+        bytes: Bytes,
+        sync: bool,
+    ) -> QuillSQLResult<DiskCommandResultReceiver<()>> {
+        let (tx, rx) = mpsc::channel();
+        self.request_sender
+            .send(DiskRequest::WriteWal {
+                path,
+                offset,
+                bytes,
+                sync,
+                result_sender: tx,
+            })
+            .map_err(|e| {
+                QuillSQLError::Internal(format!("Failed to send WAL write request: {}", e))
+            })?;
+        Ok(rx)
+    }
+
+    pub fn schedule_wal_read(
+        &self,
+        path: PathBuf,
+        offset: u64,
+        len: usize,
+    ) -> QuillSQLResult<DiskCommandResultReceiver<Vec<u8>>> {
+        let (tx, rx) = mpsc::channel();
+        self.request_sender
+            .send(DiskRequest::ReadWal {
+                path,
+                offset,
+                len,
+                result_sender: tx,
+            })
+            .map_err(|e| {
+                QuillSQLError::Internal(format!("Failed to send WAL read request: {}", e))
             })?;
         Ok(rx)
     }

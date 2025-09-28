@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use quill_sql::database::Database;
+use quill_sql::database::{Database, DatabaseOptions};
 
 /// Shared app state holding a Database protected by a mutex
 #[derive(Clone)]
@@ -48,11 +48,13 @@ fn strip_sql_comments(input: &str) -> String {
 async fn main() {
     env_logger::init();
 
-    // Build database (in-memory temp by default); enable file path via QUILL_DB_FILE
+    // Build database (in-memory temp by default); WAL config centralized via DatabaseOptions/WalConfig defaults
+    let db_options = DatabaseOptions::default();
+
     let db = if let Ok(path) = std::env::var("QUILL_DB_FILE") {
-        Database::new_on_disk(&path).expect("open db file")
+        Database::new_on_disk_with_options(&path, db_options.clone()).expect("open db file")
     } else {
-        Database::new_temp().expect("open temp db")
+        Database::new_temp_with_options(db_options).expect("open temp db")
     };
 
     let state = AppState {
@@ -91,6 +93,8 @@ async fn main() {
     .await
     .expect("server error");
 }
+
+// no env parsing for WAL in server; configuration centralized in DatabaseOptions
 
 /// Execute SQL and return rows of strings
 async fn api_sql(

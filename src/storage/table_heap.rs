@@ -1,5 +1,5 @@
-use crate::buffer::{AtomicPageId, INVALID_PAGE_ID};
-use crate::catalog::SchemaRef;
+use crate::buffer::{AtomicPageId, PageId, WritePageGuard, INVALID_PAGE_ID};
+use crate::catalog::{SchemaRef, EMPTY_SCHEMA_REF};
 use crate::storage::codec::TablePageCodec;
 use crate::storage::page::{RecordId, TablePage, TupleMeta, INVALID_RID};
 use crate::{buffer::BufferPoolManager, error::QuillSQLResult};
@@ -8,6 +8,11 @@ use std::ops::RangeBounds;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
+use crate::recovery::wal_record::{
+    HeapDeletePayload, HeapInsertPayload, HeapRecordPayload, HeapUpdatePayload, PageDeltaPayload,
+    PageWritePayload, RelationIdent, TupleMetaRepr, WalRecordPayload,
+};
+use crate::storage::codec::TupleCodec;
 use crate::storage::tuple::Tuple;
 use crate::utils::ring_buffer::RingBuffer;
 
@@ -33,6 +38,7 @@ impl TableHeap {
         // Use DerefMut to get a mutable reference and update the page data.
         // This also marks the page as dirty automatically.
         first_page_guard.data.copy_from_slice(&encoded_data);
+        first_page_guard.page_lsn = table_page.lsn();
 
         // The first_page_guard is dropped here, automatically unpinning the page.
         Ok(Self {
@@ -42,6 +48,84 @@ impl TableHeap {
             last_page_id: AtomicU32::new(first_page_id),
         })
     }
+
+    fn write_back_page(
+        &self,
+        page_id: PageId,
+        guard: &mut WritePageGuard,
+        table_page: &mut TablePage,
+    ) -> QuillSQLResult<()> {
+        let prev_lsn = guard.page_lsn;
+        if let Some(wal) = self.buffer_pool.wal_manager() {
+            // FPW: if first touch since checkpoint, force full-page image
+            if wal.fpw_first_touch(page_id) {
+                let new_image = TablePageCodec::encode(table_page);
+                let result = wal.append_record_with(|ctx| {
+                    table_page.set_lsn(ctx.end_lsn);
+                    WalRecordPayload::PageWrite(PageWritePayload {
+                        page_id,
+                        prev_page_lsn: prev_lsn,
+                        page_image: new_image.clone(),
+                    })
+                })?;
+                guard.overwrite(&new_image, Some(result.end_lsn));
+                return Ok(());
+            }
+            // Encode new page image
+            let new_image = TablePageCodec::encode(table_page);
+            // Compute minimal contiguous diff with current buffer page bytes
+            let old = &guard.data;
+            let (start, end) =
+                if let Some((s, e)) = crate::utils::util::find_contiguous_diff(old, &new_image) {
+                    (s, e)
+                } else {
+                    return Ok(());
+                };
+            let diff_len = end - start;
+            // Threshold: centralized default PAGE_SIZE/16 (env removed)
+            let delta_threshold = crate::buffer::PAGE_SIZE / 16;
+            let result = if diff_len <= delta_threshold {
+                wal.append_record_with(|ctx| {
+                    table_page.set_lsn(ctx.end_lsn);
+                    WalRecordPayload::PageDelta(PageDeltaPayload {
+                        page_id,
+                        prev_page_lsn: prev_lsn,
+                        offset: start as u16,
+                        data: new_image[start..end].to_vec(),
+                    })
+                })?
+            } else {
+                wal.append_record_with(|ctx| {
+                    table_page.set_lsn(ctx.end_lsn);
+                    WalRecordPayload::PageWrite(PageWritePayload {
+                        page_id,
+                        prev_page_lsn: prev_lsn,
+                        page_image: new_image.clone(),
+                    })
+                })?
+            };
+            guard.overwrite(&new_image, Some(result.end_lsn));
+        } else {
+            table_page.set_lsn(prev_lsn);
+            let encoded = TablePageCodec::encode(table_page);
+            guard.overwrite(&encoded, Some(table_page.lsn()));
+        }
+        Ok(())
+    }
+
+    fn relation_ident(&self) -> RelationIdent {
+        RelationIdent {
+            root_page_id: self.first_page_id.load(Ordering::SeqCst),
+        }
+    }
+
+    fn append_heap_record(&self, payload: HeapRecordPayload) -> QuillSQLResult<()> {
+        if let Some(wal) = self.buffer_pool.wal_manager() {
+            wal.append_record_with(|_| WalRecordPayload::Heap(payload.clone()))?;
+        }
+        Ok(())
+    }
+
     /// Inserts a tuple into the table.
     ///
     /// This function inserts the given tuple into the table. If the last page in the table
@@ -62,25 +146,33 @@ impl TableHeap {
             let mut current_page_guard = self.buffer_pool.fetch_page_write(current_page_id)?;
             let mut table_page =
                 TablePageCodec::decode(&current_page_guard.data, self.schema.clone())?.0;
+            table_page.set_lsn(current_page_guard.page_lsn);
 
             // If there's space, insert the tuple.
             if table_page.next_tuple_offset(tuple).is_ok() {
+                let tuple_bytes = TupleCodec::encode(tuple);
                 let slot_id = table_page.insert_tuple(meta, tuple)?;
-
-                // Encode the modified page back into the guard's buffer.
-                let encoded_data = TablePageCodec::encode(&table_page);
-                current_page_guard.data.copy_from_slice(&encoded_data);
-
+                let relation = self.relation_ident();
+                let tuple_meta = TupleMetaRepr::from(*meta);
+                self.append_heap_record(HeapRecordPayload::Insert(HeapInsertPayload {
+                    relation,
+                    page_id: current_page_id,
+                    slot_id,
+                    op_txn_id: meta.insert_txn_id,
+                    tuple_meta,
+                    tuple_data: tuple_bytes,
+                }))?;
+                self.write_back_page(current_page_id, &mut current_page_guard, &mut table_page)?;
                 return Ok(RecordId::new(current_page_id, slot_id as u32));
             }
 
             // If the page is full, allocate a new one and link it.
-            let new_page_guard = self.buffer_pool.new_page()?;
+            let mut new_page_guard = self.buffer_pool.new_page()?;
             let new_page_id = new_page_guard.page_id();
 
             // Initialize the new page.
-            let new_table_page = TablePage::new(self.schema.clone(), INVALID_PAGE_ID);
-            let _ = TablePageCodec::encode(&new_table_page);
+            let mut new_table_page = TablePage::new(self.schema.clone(), INVALID_PAGE_ID);
+            self.write_back_page(new_page_id, &mut new_page_guard, &mut new_table_page)?;
             // new_page_guard is already a write guard, so we can modify its data.
             // We'll let it drop at the end of the *next* loop iteration (or when the function returns).
             // But for now, we must write our changes to it.
@@ -88,8 +180,7 @@ impl TableHeap {
 
             // Update the old page to point to the new one.
             table_page.header.next_page_id = new_page_id;
-            let encoded_old_page = TablePageCodec::encode(&table_page);
-            current_page_guard.data.copy_from_slice(&encoded_old_page);
+            self.write_back_page(current_page_id, &mut current_page_guard, &mut table_page)?;
 
             // The `current_page_guard` will be dropped here, saving the changes.
             drop(current_page_guard);
@@ -103,23 +194,63 @@ impl TableHeap {
     pub fn update_tuple(&self, rid: RecordId, tuple: Tuple) -> QuillSQLResult<()> {
         let mut page_guard = self.buffer_pool.fetch_page_write(rid.page_id)?;
         let mut table_page = TablePageCodec::decode(&page_guard.data, self.schema.clone())?.0;
+        table_page.set_lsn(page_guard.page_lsn);
 
+        let slot = rid.slot_num as u16;
+        let (old_meta, old_tuple) = table_page.tuple(slot)?;
+        let old_tuple_bytes = TupleCodec::encode(&old_tuple);
+        let new_tuple_bytes = TupleCodec::encode(&tuple);
         table_page.update_tuple(tuple, rid.slot_num as u16)?;
-
-        let encoded_data = TablePageCodec::encode(&table_page);
-        page_guard.data.copy_from_slice(&encoded_data);
-        Ok(())
+        let new_meta = table_page.header.tuple_infos[slot as usize].meta;
+        let relation = self.relation_ident();
+        self.append_heap_record(HeapRecordPayload::Update(HeapUpdatePayload {
+            relation,
+            page_id: rid.page_id,
+            slot_id: slot,
+            op_txn_id: new_meta.insert_txn_id, // best-effort; op id carried separately if needed
+            new_tuple_meta: TupleMetaRepr::from(new_meta),
+            new_tuple_data: new_tuple_bytes,
+            old_tuple_meta: Some(TupleMetaRepr::from(old_meta)),
+            old_tuple_data: Some(old_tuple_bytes),
+        }))?;
+        self.write_back_page(rid.page_id, &mut page_guard, &mut table_page)
     }
 
     pub fn update_tuple_meta(&self, meta: TupleMeta, rid: RecordId) -> QuillSQLResult<()> {
         let mut page_guard = self.buffer_pool.fetch_page_write(rid.page_id)?;
         let mut table_page = TablePageCodec::decode(&page_guard.data, self.schema.clone())?.0;
+        table_page.set_lsn(page_guard.page_lsn);
 
-        table_page.update_tuple_meta(meta, rid.slot_num as u16)?;
-
-        let encoded_data = TablePageCodec::encode(&table_page);
-        page_guard.data.copy_from_slice(&encoded_data);
-        Ok(())
+        let slot = rid.slot_num as u16;
+        let (old_meta, old_tuple) = table_page.tuple(slot)?;
+        let old_tuple_bytes = TupleCodec::encode(&old_tuple);
+        table_page.update_tuple_meta(meta, slot)?;
+        let relation = self.relation_ident();
+        let payload = if meta.is_deleted && !old_meta.is_deleted {
+            HeapRecordPayload::Delete(HeapDeletePayload {
+                relation,
+                page_id: rid.page_id,
+                slot_id: slot,
+                op_txn_id: meta.delete_txn_id,
+                old_tuple_meta: TupleMetaRepr::from(old_meta),
+                old_tuple_data: Some(old_tuple_bytes),
+            })
+        } else {
+            let (_, current_tuple) = table_page.tuple(slot)?;
+            let new_tuple_bytes = TupleCodec::encode(&current_tuple);
+            HeapRecordPayload::Update(HeapUpdatePayload {
+                relation,
+                page_id: rid.page_id,
+                slot_id: slot,
+                op_txn_id: meta.insert_txn_id,
+                new_tuple_meta: TupleMetaRepr::from(meta),
+                new_tuple_data: new_tuple_bytes,
+                old_tuple_meta: Some(TupleMetaRepr::from(old_meta)),
+                old_tuple_data: Some(old_tuple_bytes),
+            })
+        };
+        self.append_heap_record(payload)?;
+        self.write_back_page(rid.page_id, &mut page_guard, &mut table_page)
     }
 
     pub fn full_tuple(&self, rid: RecordId) -> QuillSQLResult<(TupleMeta, Tuple)> {
@@ -189,6 +320,94 @@ impl TableHeap {
         }
         Ok(None)
     }
+
+    /// Construct a lightweight TableHeap view for recovery operations.
+    /// This instance uses an empty schema and does not rely on first/last page ids.
+    pub fn recovery_view(buffer_pool: Arc<BufferPoolManager>) -> Self {
+        Self {
+            schema: EMPTY_SCHEMA_REF.clone(),
+            buffer_pool,
+            first_page_id: AtomicU32::new(0),
+            last_page_id: AtomicU32::new(0),
+        }
+    }
+
+    /// Recovery-only API: set tuple meta without emitting WAL.
+    /// Only used by RecoveryManager during UNDO.
+    pub fn recover_set_tuple_meta(&self, rid: RecordId, meta: TupleMeta) -> QuillSQLResult<()> {
+        let mut guard = self.buffer_pool.fetch_page_write(rid.page_id)?;
+        let (mut header, hdr_len) =
+            crate::storage::codec::TablePageHeaderCodec::decode(&guard.data)?;
+        if (rid.slot_num as usize) >= header.tuple_infos.len() {
+            return Ok(());
+        }
+        let info = &mut header.tuple_infos[rid.slot_num as usize];
+        if info.meta.is_deleted != meta.is_deleted {
+            if meta.is_deleted {
+                header.num_deleted_tuples = header.num_deleted_tuples.saturating_add(1);
+            } else {
+                header.num_deleted_tuples = header.num_deleted_tuples.saturating_sub(1);
+            }
+        }
+        info.meta = meta;
+        let new_header = crate::storage::codec::TablePageHeaderCodec::encode(&header);
+        let copy_len = std::cmp::min(hdr_len, new_header.len());
+        guard.data[0..copy_len].copy_from_slice(&new_header[..copy_len]);
+        Ok(())
+    }
+
+    /// Recovery-only API: set tuple raw bytes without emitting WAL.
+    /// If size mismatches, repack tuple area and update offsets.
+    pub fn recover_set_tuple_bytes(&self, rid: RecordId, new_bytes: &[u8]) -> QuillSQLResult<()> {
+        let mut guard = self.buffer_pool.fetch_page_write(rid.page_id)?;
+        let (mut header, _hdr_len) =
+            crate::storage::codec::TablePageHeaderCodec::decode(&guard.data)?;
+        if (rid.slot_num as usize) >= header.tuple_infos.len() {
+            return Ok(());
+        }
+        let slot = rid.slot_num as usize;
+        let info = &mut header.tuple_infos[slot];
+        let off = info.offset as usize;
+        let sz = info.size as usize;
+        if new_bytes.len() == sz {
+            if off + sz <= crate::buffer::PAGE_SIZE {
+                guard.data[off..off + sz].copy_from_slice(new_bytes);
+            }
+            return Ok(());
+        }
+        let n = header.tuple_infos.len();
+        let mut tuples: Vec<Vec<u8>> = Vec::with_capacity(n);
+        for i in 0..n {
+            let inf = &header.tuple_infos[i];
+            let s = &guard.data[inf.offset as usize..(inf.offset + inf.size) as usize];
+            if i == slot {
+                tuples.push(new_bytes.to_vec());
+            } else {
+                tuples.push(s.to_vec());
+            }
+        }
+        let mut tail = crate::buffer::PAGE_SIZE;
+        for i in 0..n {
+            let sz = tuples[i].len();
+            tail = tail.saturating_sub(sz);
+            header.tuple_infos[i].offset = tail as u16;
+            header.tuple_infos[i].size = sz as u16;
+        }
+        let new_header = crate::storage::codec::TablePageHeaderCodec::encode(&header);
+        for b in guard.data.iter_mut() {
+            *b = 0;
+        }
+        let hdr_copy = std::cmp::min(new_header.len(), crate::buffer::PAGE_SIZE);
+        guard.data[0..hdr_copy].copy_from_slice(&new_header[..hdr_copy]);
+        for i in 0..n {
+            let off = header.tuple_infos[i].offset as usize;
+            let sz = header.tuple_infos[i].size as usize;
+            if off + sz <= crate::buffer::PAGE_SIZE {
+                guard.data[off..off + sz].copy_from_slice(&tuples[i][..sz]);
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
@@ -226,17 +445,11 @@ impl TableIterator {
         let start = range.start_bound().cloned();
         let end = range.end_bound().cloned();
 
-        // Decide strategy: enable streaming if (env=1) or approx pages >= threshold and full scan
-        let env_stream = std::env::var("QUILL_STREAM_SCAN").ok().as_deref() == Some("1");
+        // Centralized config (remove env): use TableScanConfig defaults
+        let cfg = crate::config::TableScanConfig::default();
         let pool_quarter = (heap.buffer_pool.pool.len().max(1) / 4) as u32;
-        let threshold: u32 = std::env::var("QUILL_STREAM_THRESHOLD")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(pool_quarter.max(1));
-        let readahead: usize = std::env::var("QUILL_STREAM_READAHEAD")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(2);
+        let threshold: u32 = cfg.stream_threshold_pages.unwrap_or(pool_quarter.max(1));
+        let readahead: usize = cfg.readahead_pages;
 
         let approx_pages = heap
             .last_page_id
@@ -250,7 +463,7 @@ impl TableIterator {
         let requested_stream = match streaming_hint {
             Some(true) => true,
             Some(false) => false,
-            None => env_stream || approx_pages >= threshold,
+            None => cfg.stream_scan_enable || approx_pages >= threshold,
         };
         // If explicitly hinted true, allow streaming even for ranged scans. Otherwise only for full scan.
         let use_streaming = if matches!(streaming_hint, Some(true)) {
@@ -494,6 +707,7 @@ mod tests {
 
     use crate::buffer::BufferPoolManager;
     use crate::catalog::{Column, DataType, Schema};
+    use crate::storage::codec::TupleCodec;
     use crate::storage::disk_manager::DiskManager;
     use crate::storage::disk_scheduler::DiskScheduler;
     use crate::storage::page::EMPTY_TUPLE_META;
@@ -782,5 +996,80 @@ mod tests {
         // Sanity: ensure rid3 exists but not returned in range
         let (_m, t3) = table_heap.full_tuple(rid3).unwrap();
         assert_eq!(t3.data, vec![3i8.into(), 3i16.into()]);
+    }
+
+    #[test]
+    pub fn test_recover_set_tuple_meta_and_bytes() {
+        let temp_dir = TempDir::new().unwrap();
+        let temp_path = temp_dir.path().join("test.db");
+
+        let schema = Arc::new(Schema::new(vec![
+            Column::new("a", DataType::Int8, false),
+            Column::new("b", DataType::Int16, false),
+        ]));
+        let disk_manager = DiskManager::try_new(temp_path).unwrap();
+        let disk_scheduler = Arc::new(DiskScheduler::new(Arc::new(disk_manager)));
+        let buffer_pool = Arc::new(BufferPoolManager::new(128, disk_scheduler));
+        let table_heap = TableHeap::try_new(schema.clone(), buffer_pool.clone()).unwrap();
+
+        // Insert a row
+        let rid = table_heap
+            .insert_tuple(
+                &EMPTY_TUPLE_META,
+                &Tuple::new(schema.clone(), vec![1i8.into(), 10i16.into()]),
+            )
+            .unwrap();
+
+        // Change bytes via recovery API
+        let new_tuple = Tuple::new(schema.clone(), vec![2i8.into(), 20i16.into()]);
+        let new_bytes = TupleCodec::encode(&new_tuple);
+        table_heap
+            .recover_set_tuple_bytes(rid, &new_bytes)
+            .expect("recover bytes");
+
+        // Verify tuple data changed
+        let (_m, t) = table_heap.full_tuple(rid).unwrap();
+        assert_eq!(t.data, vec![2i8.into(), 20i16.into()]);
+
+        // Mark deleted via recovery API and verify
+        let mut meta = table_heap.tuple_meta(rid).unwrap();
+        meta.is_deleted = true;
+        table_heap
+            .recover_set_tuple_meta(rid, meta)
+            .expect("recover meta");
+        let m2 = table_heap.tuple_meta(rid).unwrap();
+        assert!(m2.is_deleted);
+    }
+
+    #[test]
+    pub fn test_recover_repack_on_size_mismatch() {
+        let temp_dir = TempDir::new().unwrap();
+        let temp_path = temp_dir.path().join("test.db");
+
+        let schema = Arc::new(Schema::new(vec![
+            Column::new("a", DataType::Int8, false),
+            Column::new("b", DataType::Int16, false),
+        ]));
+        let disk_manager = DiskManager::try_new(temp_path).unwrap();
+        let disk_scheduler = Arc::new(DiskScheduler::new(Arc::new(disk_manager)));
+        let buffer_pool = Arc::new(BufferPoolManager::new(128, disk_scheduler));
+        let table_heap = TableHeap::try_new(schema.clone(), buffer_pool.clone()).unwrap();
+
+        let rid = table_heap
+            .insert_tuple(
+                &EMPTY_TUPLE_META,
+                &Tuple::new(schema.clone(), vec![1i8.into(), 10i16.into()]),
+            )
+            .unwrap();
+
+        // Create a tuple with different encoded length and recover-set it
+        let larger_tuple = Tuple::new(schema.clone(), vec![99i8.into(), 300i16.into()]);
+        let larger_bytes = TupleCodec::encode(&larger_tuple);
+        table_heap
+            .recover_set_tuple_bytes(rid, &larger_bytes)
+            .expect("recover larger bytes");
+
+        let (_m, t2) = table_heap.full_tuple(rid).unwrap();
+        assert_eq!(t2.data, vec![99i8.into(), 300i16.into()]);
     }
 }

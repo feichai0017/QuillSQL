@@ -40,6 +40,7 @@ pub struct TablePageHeaderCodec;
 impl TablePageHeaderCodec {
     pub fn encode(header: &TablePageHeader) -> Vec<u8> {
         let mut bytes = Vec::new();
+        bytes.extend(CommonCodec::encode_u64(header.lsn));
         bytes.extend(CommonCodec::encode_u32(header.next_page_id));
         bytes.extend(CommonCodec::encode_u16(header.num_tuples));
         bytes.extend(CommonCodec::encode_u16(header.num_deleted_tuples));
@@ -51,6 +52,9 @@ impl TablePageHeaderCodec {
 
     pub fn decode(bytes: &[u8]) -> QuillSQLResult<DecodedData<TablePageHeader>> {
         let mut left_bytes = bytes;
+
+        let (lsn, offset) = CommonCodec::decode_u64(left_bytes)?;
+        left_bytes = &left_bytes[offset..];
 
         let (next_page_id, offset) = CommonCodec::decode_u32(left_bytes)?;
         left_bytes = &left_bytes[offset..];
@@ -69,6 +73,7 @@ impl TablePageHeaderCodec {
         }
         Ok((
             TablePageHeader {
+                lsn,
                 next_page_id,
                 num_tuples,
                 num_deleted_tuples,
@@ -175,6 +180,7 @@ mod tests {
         };
 
         let mut table_page = TablePage::new(schema.clone(), INVALID_PAGE_ID);
+        table_page.set_lsn(42);
         table_page.insert_tuple(&tuple1_meta, &tuple1).unwrap();
         table_page.insert_tuple(&tuple2_meta, &tuple2).unwrap();
 

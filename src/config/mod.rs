@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 #[derive(Debug, Clone, Copy)]
 pub enum IOStrategy {
     ThreadPool { workers: Option<usize> },
@@ -51,6 +53,35 @@ impl Default for BufferPoolConfig {
             tiny_lfu_enable: true,
             tiny_lfu_counters: 4,
             admission_enable: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct WalConfig {
+    pub directory: PathBuf,
+    pub segment_size: u64,
+    pub sync_on_flush: bool,
+    pub writer_interval_ms: Option<u64>,
+    pub buffer_capacity: usize,
+    pub flush_coalesce_bytes: usize,
+    pub synchronous_commit: bool,
+    pub checkpoint_interval_ms: Option<u64>,
+    pub retain_segments: usize,
+}
+
+impl Default for WalConfig {
+    fn default() -> Self {
+        WalConfig {
+            directory: PathBuf::from("wal"),
+            segment_size: 16 * 1024 * 1024, // 16 MiB segments by default
+            sync_on_flush: true,
+            writer_interval_ms: Some(50),
+            buffer_capacity: 256,
+            flush_coalesce_bytes: 2 * 1024 * 1024,
+            synchronous_commit: true,
+            checkpoint_interval_ms: Some(5000),
+            retain_segments: 8,
         }
     }
 }
