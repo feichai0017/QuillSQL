@@ -294,11 +294,12 @@ impl Catalog {
             .indexes
             .insert(index_name.clone(), b_plus_tree_index.clone());
         // register for background maintenance
+        let table_heap = catalog_table.table.clone();
         global_index_registry().register(
             table_ref.clone(),
             index_name.clone(),
             b_plus_tree_index.clone(),
-            catalog_table.table.clone(),
+            table_heap,
         );
 
         // update system table
@@ -407,12 +408,8 @@ impl Catalog {
         catalog_table.indexes.insert(idx_name.clone(), index);
         // register as well
         if let Some(idx) = catalog_table.indexes.get(&idx_name) {
-            global_index_registry().register(
-                table_ref.clone(),
-                idx_name,
-                idx.clone(),
-                catalog_table.table.clone(),
-            );
+            let table_heap = catalog_table.table.clone();
+            global_index_registry().register(table_ref.clone(), idx_name, idx.clone(), table_heap);
         }
         Ok(())
     }

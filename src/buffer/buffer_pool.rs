@@ -26,6 +26,7 @@ use crate::storage::{
 };
 
 use crate::config::BufferPoolConfig;
+use crate::recovery::Lsn;
 use crate::recovery::WalManager;
 use crate::utils::cache::lru_k::LRUKReplacer;
 use crate::utils::cache::tiny_lfu::TinyLFU;
@@ -48,6 +49,8 @@ pub struct BufferPoolManager {
     pub tiny_lfu: Option<Arc<RwLock<TinyLFU>>>,
     /// Dirty page tracking for checkpoints and background writers
     pub dirty_pages: Arc<DashSet<PageId>>,
+    /// Dirty page table: page id -> first dirty LSN (recLSN)
+    pub dirty_page_table: DashMap<PageId, Lsn>,
     /// Optional WAL manager to enforce write-ahead rule on flush
     pub wal_manager: Arc<RwLock<Option<Arc<WalManager>>>>,
 }
@@ -112,6 +115,7 @@ impl BufferPoolManager {
             },
             dirty_pages: Arc::new(DashSet::new()),
             wal_manager: Arc::new(RwLock::new(None)),
+            dirty_page_table: DashMap::new(),
         }
     }
 
@@ -125,6 +129,19 @@ impl BufferPoolManager {
 
     pub fn dirty_page_ids(&self) -> Vec<PageId> {
         self.dirty_pages.iter().map(|entry| *entry.key()).collect()
+    }
+
+    pub fn dirty_page_table_snapshot(&self) -> Vec<(PageId, Lsn)> {
+        self.dirty_page_table
+            .iter()
+            .map(|entry| (*entry.key(), *entry.value()))
+            .collect()
+    }
+
+    #[inline]
+    fn note_dirty_page(&self, page_id: PageId, rec_lsn: Lsn) {
+        self.dirty_pages.insert(page_id);
+        self.dirty_page_table.entry(page_id).or_insert(rec_lsn);
     }
 
     /// 创建一个新页面。
@@ -276,6 +293,7 @@ impl BufferPoolManager {
         page_id: PageId,
         is_dirty: bool,
         old_pin_count: u32,
+        rec_lsn_hint: Option<Lsn>,
     ) -> QuillSQLResult<()> {
         if let Some(frame_id_ref) = self.page_table.get(&page_id) {
             let frame_id = *frame_id_ref;
@@ -283,7 +301,8 @@ impl BufferPoolManager {
                 if let Some(mut p) = self.pool[frame_id].try_write() {
                     p.is_dirty = true;
                 }
-                self.dirty_pages.insert(page_id);
+                let lsn = rec_lsn_hint.unwrap_or_else(|| self.pool[frame_id].read().page_lsn);
+                self.note_dirty_page(page_id, lsn);
             }
             if old_pin_count == 1 {
                 self.replacer_set_evictable(frame_id, true)?;

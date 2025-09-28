@@ -105,6 +105,7 @@ impl TableHeap {
                 })?
             };
             guard.overwrite(&new_image, Some(result.end_lsn));
+            // WritePageGuard will capture recLSN via dirty-page table
         } else {
             table_page.set_lsn(prev_lsn);
             let encoded = TablePageCodec::encode(table_page);

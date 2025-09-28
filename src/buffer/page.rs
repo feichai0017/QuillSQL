@@ -121,7 +121,7 @@ impl Drop for ReadPageGuard {
         unsafe {
             ManuallyDrop::drop(&mut self.guard);
         }
-        if let Err(e) = self.bpm.complete_unpin(page_id, is_dirty, old_pin) {
+        if let Err(e) = self.bpm.complete_unpin(page_id, is_dirty, old_pin, None) {
             eprintln!("Warning: Failed to complete_unpin page {}: {}", page_id, e);
         }
     }
@@ -135,6 +135,8 @@ pub struct WritePageGuard {
     bpm: Arc<BufferPoolManager>,
     _page: Arc<RwLock<Page>>,
     guard: ManuallyDrop<RwLockWriteGuard<'static, Page>>,
+    /// Page LSN captured when we first dirtied in this guard's lifetime; used for recLSN.
+    first_dirty_lsn: Option<Lsn>,
 }
 
 impl Deref for WritePageGuard {
@@ -163,6 +165,9 @@ impl WritePageGuard {
         self.guard.data.copy_from_slice(data);
         if let Some(lsn) = new_lsn {
             self.guard.page_lsn = lsn;
+            if self.first_dirty_lsn.is_none() {
+                self.first_dirty_lsn = Some(lsn);
+            }
         }
         self.guard.is_dirty = true;
     }
@@ -174,10 +179,21 @@ impl Drop for WritePageGuard {
         let old_pin = self.guard.unpin();
         let page_id = self.guard.page_id;
         let is_dirty = self.guard.is_dirty;
+        let lsn = self.guard.page_lsn;
         unsafe {
             ManuallyDrop::drop(&mut self.guard);
         }
-        if let Err(e) = self.bpm.complete_unpin(page_id, is_dirty, old_pin) {
+        let rec_lsn_hint = if self.first_dirty_lsn.is_some() {
+            self.first_dirty_lsn
+        } else if is_dirty {
+            Some(lsn)
+        } else {
+            None
+        };
+        if let Err(e) = self
+            .bpm
+            .complete_unpin(page_id, is_dirty, old_pin, rec_lsn_hint)
+        {
             eprintln!("Warning: Failed to complete_unpin page {}: {}", page_id, e);
         }
     }
@@ -211,6 +227,7 @@ pub(crate) fn new_write_guard(
         bpm,
         _page: page,
         guard: ManuallyDrop::new(static_guard),
+        first_dirty_lsn: None,
     }
 }
 

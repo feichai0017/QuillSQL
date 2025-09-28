@@ -415,6 +415,7 @@ fn spawn_checkpoint_worker(
         .spawn(move || {
             while !stop_flag.load(Ordering::Relaxed) {
                 let dirty_pages = bp.dirty_page_ids();
+                let dpt_snapshot = bp.dirty_page_table_snapshot();
                 let active_txns = txn_mgr.active_transactions();
                 let last_lsn = wal.max_assigned_lsn();
 
@@ -426,7 +427,7 @@ fn spawn_checkpoint_worker(
                         last_lsn,
                         dirty_pages,
                         active_transactions: active_txns,
-                        dpt: vec![],
+                        dpt: dpt_snapshot,
                     };
                     if let Err(e) = wal.log_checkpoint(payload) {
                         warn!("Checkpoint write failed: {}", e);
