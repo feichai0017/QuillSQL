@@ -113,15 +113,15 @@ cargo test -q
 
 ## ⚙️ Configuration
 
-Programmatic configs（推荐，集中化）
-- 构造 `DatabaseOptions { wal: WalOptions { .. } }` 并传入 `Database::new_*_with_options(..)`；WAL/扫描等均由 `crate::config` 统一管理。
-- 关键结构：`IOStrategy`、`IOSchedulerConfig`、`BufferPoolConfig`、`BTreeConfig`、`TableScanConfig`、`WalConfig`/`WalOptions`。
+Programmatic configs (centralized)
+- Build `DatabaseOptions { wal: WalOptions { .. } }` and pass it to `Database::new_*_with_options(..)`; WAL/scan are centrally managed by `crate::config`.
+- Key structs: `IOStrategy`, `IOSchedulerConfig`, `BufferPoolConfig`, `BTreeConfig`, `TableScanConfig`, `WalConfig`/`WalOptions`.
 
-Minimal environment variables（仅保留基础运行项）
-- PORT：端口（覆盖 `QUILL_HTTP_ADDR` 的端口部分）
-- QUILL_HTTP_ADDR：监听地址（默认 `0.0.0.0:8080`）
-- QUILL_DB_FILE：数据文件路径（未设置则使用临时 DB）
-- RUST_LOG：日志级别（如 info, debug）
+Minimal environment variables (runtime only)
+- PORT: bind port (overrides the port of `QUILL_HTTP_ADDR`)
+- QUILL_HTTP_ADDR: listen address (default `0.0.0.0:8080`)
+- QUILL_DB_FILE: path to database file (uses a temp DB if unset)
+- RUST_LOG: log level (e.g., info, debug)
 
 Example (Rust)
 ```rust
