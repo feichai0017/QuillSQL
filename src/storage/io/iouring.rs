@@ -352,7 +352,7 @@ fn queue_wal_write(
 ) -> QuillSQLResult<()> {
     if data.is_empty() && !sync {
         if let Err(err) = sender.send(Ok(())) {
-            log::error!("io_uring WAL send failed: {}", err);
+            log::error!("send WAL write completion result failed: {}", err);
         }
         return Ok(());
     }

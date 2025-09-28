@@ -307,7 +307,7 @@ impl RecoveryManager {
         page_id: u32,
         slot_idx: usize,
         _old_meta: crate::recovery::wal_record::TupleMetaRepr,
-        old_bytes: &Vec<u8>,
+        old_bytes: &[u8],
     ) -> QuillSQLResult<()> {
         if let Some(bpm) = &self.buffer_pool {
             let heap = TableHeap::recovery_view(bpm.clone());
@@ -337,7 +337,7 @@ impl RecoveryManager {
             let info = &header.tuple_infos[i];
             let slice = &page_bytes[info.offset as usize..(info.offset + info.size) as usize];
             if i == slot_idx {
-                tuples_bytes.push(old_bytes.clone());
+                tuples_bytes.push(old_bytes.to_vec());
             } else {
                 tuples_bytes.push(slice.to_vec());
             }
