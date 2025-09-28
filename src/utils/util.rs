@@ -198,12 +198,16 @@ pub fn find_contiguous_diff(a: &[u8], b: &[u8]) -> Option<(usize, usize)> {
 
 /// Apply a delta to dst at given offset, returns false if OOB.
 pub fn apply_delta_checked(dst: &mut [u8], offset: usize, data: &[u8]) -> bool {
-    let end = offset.saturating_add(data.len());
-    if end > dst.len() {
+    if offset >= dst.len() {
         return false;
     }
-    dst[offset..end].copy_from_slice(data);
-    true
+    match offset.checked_add(data.len()) {
+        Some(end) if end <= dst.len() => {
+            dst[offset..end].copy_from_slice(data);
+            true
+        }
+        _ => false,
+    }
 }
 
 pub fn extract_id_from_filename(entry: &std::path::PathBuf) -> QuillSQLResult<u128> {

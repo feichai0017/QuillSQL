@@ -207,15 +207,23 @@ impl RecoveryManager {
         }
         let mut page_bytes = buf.to_vec();
         let start = payload.offset as usize;
-        let end = start + payload.data.len();
-        if end > PAGE_SIZE {
+        if start >= PAGE_SIZE {
             return Err(crate::error::QuillSQLError::Internal(format!(
-                "PageDelta out of bounds: offset={} len={} page_size={}",
-                start,
-                payload.data.len(),
-                PAGE_SIZE
+                "PageDelta start out of bounds: offset={} page_size={}",
+                start, PAGE_SIZE
             )));
         }
+        let end = match start.checked_add(payload.data.len()) {
+            Some(e) if e <= PAGE_SIZE => e,
+            _ => {
+                return Err(crate::error::QuillSQLError::Internal(format!(
+                    "PageDelta out of bounds: offset={} len={} page_size={}",
+                    start,
+                    payload.data.len(),
+                    PAGE_SIZE
+                )))
+            }
+        };
         page_bytes[start..end].copy_from_slice(&payload.data);
         let rxw = self
             .disk_scheduler

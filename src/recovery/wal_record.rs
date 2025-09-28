@@ -21,7 +21,9 @@ use crate::recovery::Lsn;
 use crate::storage::page::TupleMeta;
 use crate::transaction::TransactionId;
 
-pub const WAL_MAGIC: u32 = 0x5157_414c; // "QWAL"
+// Magic number for WAL files: ASCII "QWAL" in little-endian byte order.
+// [0x4c, 0x41, 0x57, 0x51] == b"QWAL" (LE) => 0x5157_414c
+pub const WAL_MAGIC: u32 = 0x5157_414c; // "QWAL" (LE)
 pub const WAL_VERSION_V1: u16 = 1;
 pub const WAL_VERSION: u16 = 2;
 pub const WAL_HEADER_LEN: usize = 4 + 2 + 8 + 8 + 1 + 1 + 4;
