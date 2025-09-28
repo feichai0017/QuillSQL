@@ -513,6 +513,7 @@
             <option value="">Choose Example...</option>
             <option value="basic">Basic (Idempotent)</option>
             <option value="write">Write Demo (Insert/Update)</option>
+            <option value="delete">Delete Demo</option>
             <option value="read">Read-only Demo</option>
             <option value="explain">Explain Plan</option>
             <option value="schema">Schema Info</option>
@@ -676,6 +677,8 @@
         sqlTA.value = `-- Idempotent basic demo\nCREATE TABLE IF NOT EXISTS demo(id INT32, v INT32 DEFAULT 0);\nSELECT id, v FROM demo ORDER BY id LIMIT 10;`;
       } else if (pick === 'write') {
         sqlTA.value = `-- Write demo (non-idempotent if persisted)\n-- Re-running may insert duplicate rows when using persistent storage.\nCREATE TABLE IF NOT EXISTS people(id INT32, name VARCHAR(50), age INT32 DEFAULT 0);\nINSERT INTO people(id, name, age) VALUES (1, 'Alice', 25), (2, 'Bob', 30);\nUPDATE people SET age = 26 WHERE id = 1;\nSELECT * FROM people ORDER BY id;`;
+      } else if (pick === 'delete') {
+        sqlTA.value = `-- Delete demo\nCREATE TABLE IF NOT EXISTS tasks(id INT32 PRIMARY KEY, detail VARCHAR(100));\nINSERT INTO tasks VALUES (1, 'todo'), (2, 'in progress'), (3, 'done');\nDELETE FROM tasks WHERE id = 2;\nSELECT * FROM tasks ORDER BY id;`;
       } else if (pick === 'read') {
         sqlTA.value = `-- Read-only demo\nSHOW DATABASES;\nSHOW TABLES;\nSELECT table_name FROM information_schema.tables ORDER BY table_name LIMIT 10;`;
       } else if (pick === 'explain') {

@@ -1,5 +1,8 @@
 # QuillSQL
 
+[![Crates.io](https://img.shields.io/crates/v/quill-sql.svg)](https://crates.io/crates/quill-sql)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 <div align="center">
   <img src="/public/rust-db.png" alt="QuillSQL Architecture" width="720"/>
   <p><em>A tiny yet serious SQL database in Rust — simple, modular, pragmatic.</em></p>
