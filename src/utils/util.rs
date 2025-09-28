@@ -176,6 +176,36 @@ pub fn time() -> u128 {
         .as_nanos()
 }
 
+/// Compute the minimal contiguous diff window between two equal-length slices.
+/// Returns Some((start, end)) where [start, end) is the changed window; None if identical.
+pub fn find_contiguous_diff(a: &[u8], b: &[u8]) -> Option<(usize, usize)> {
+    if a.len() != b.len() {
+        return None;
+    }
+    let mut start = 0usize;
+    while start < a.len() && a[start] == b[start] {
+        start += 1;
+    }
+    if start == a.len() {
+        return None;
+    }
+    let mut end = a.len();
+    while end > start && a[end - 1] == b[end - 1] {
+        end -= 1;
+    }
+    Some((start, end))
+}
+
+/// Apply a delta to dst at given offset, returns false if OOB.
+pub fn apply_delta_checked(dst: &mut [u8], offset: usize, data: &[u8]) -> bool {
+    let end = offset.saturating_add(data.len());
+    if end > dst.len() {
+        return false;
+    }
+    dst[offset..end].copy_from_slice(data);
+    true
+}
+
 pub fn extract_id_from_filename(entry: &std::path::PathBuf) -> QuillSQLResult<u128> {
     entry
         .extension()

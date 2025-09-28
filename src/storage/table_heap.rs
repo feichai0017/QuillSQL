@@ -1,5 +1,5 @@
 use crate::buffer::{AtomicPageId, PageId, WritePageGuard, INVALID_PAGE_ID};
-use crate::catalog::SchemaRef;
+use crate::catalog::{SchemaRef, EMPTY_SCHEMA_REF};
 use crate::storage::codec::TablePageCodec;
 use crate::storage::page::{RecordId, TablePage, TupleMeta, INVALID_RID};
 use crate::{buffer::BufferPoolManager, error::QuillSQLResult};
@@ -9,8 +9,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use crate::recovery::wal_record::{
-    HeapDeletePayload, HeapInsertPayload, HeapRecordPayload, HeapUpdatePayload, PageWritePayload,
-    RelationIdent, TupleMetaRepr, WalRecordPayload,
+    HeapDeletePayload, HeapInsertPayload, HeapRecordPayload, HeapUpdatePayload, PageDeltaPayload,
+    PageWritePayload, RelationIdent, TupleMetaRepr, WalRecordPayload,
 };
 use crate::storage::codec::TupleCodec;
 use crate::storage::tuple::Tuple;
@@ -57,17 +57,57 @@ impl TableHeap {
     ) -> QuillSQLResult<()> {
         let prev_lsn = guard.page_lsn;
         if let Some(wal) = self.buffer_pool.wal_manager() {
-            let mut page_image = Vec::new();
-            let result = wal.append_record_with(|ctx| {
-                table_page.set_lsn(ctx.end_lsn);
-                page_image = TablePageCodec::encode(table_page);
-                WalRecordPayload::PageWrite(PageWritePayload {
-                    page_id,
-                    prev_page_lsn: prev_lsn,
-                    page_image: page_image.clone(),
-                })
-            })?;
-            guard.overwrite(&page_image, Some(result.end_lsn));
+            // FPW: if first touch since checkpoint, force full-page image
+            if wal.fpw_first_touch(page_id) {
+                let new_image = TablePageCodec::encode(table_page);
+                let result = wal.append_record_with(|ctx| {
+                    table_page.set_lsn(ctx.end_lsn);
+                    WalRecordPayload::PageWrite(PageWritePayload {
+                        page_id,
+                        prev_page_lsn: prev_lsn,
+                        page_image: new_image.clone(),
+                    })
+                })?;
+                guard.overwrite(&new_image, Some(result.end_lsn));
+                return Ok(());
+            }
+            // Encode new page image
+            let new_image = TablePageCodec::encode(table_page);
+            // Compute minimal contiguous diff with current buffer page bytes
+            let old = &guard.data;
+            let (start, end) =
+                if let Some((s, e)) = crate::utils::util::find_contiguous_diff(old, &new_image) {
+                    (s, e)
+                } else {
+                    return Ok(());
+                };
+            let diff_len = end - start;
+            // Threshold: env QUILL_WAL_DELTA_THRESHOLD (bytes), default PAGE_SIZE/16
+            let delta_threshold = std::env::var("QUILL_WAL_DELTA_THRESHOLD")
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(crate::buffer::PAGE_SIZE / 16);
+            let result = if diff_len <= delta_threshold {
+                wal.append_record_with(|ctx| {
+                    table_page.set_lsn(ctx.end_lsn);
+                    WalRecordPayload::PageDelta(PageDeltaPayload {
+                        page_id,
+                        prev_page_lsn: prev_lsn,
+                        offset: start as u16,
+                        data: new_image[start..end].to_vec(),
+                    })
+                })?
+            } else {
+                wal.append_record_with(|ctx| {
+                    table_page.set_lsn(ctx.end_lsn);
+                    WalRecordPayload::PageWrite(PageWritePayload {
+                        page_id,
+                        prev_page_lsn: prev_lsn,
+                        page_image: new_image.clone(),
+                    })
+                })?
+            };
+            guard.overwrite(&new_image, Some(result.end_lsn));
         } else {
             table_page.set_lsn(prev_lsn);
             let encoded = TablePageCodec::encode(table_page);
@@ -121,6 +161,7 @@ impl TableHeap {
                     relation,
                     page_id: current_page_id,
                     slot_id,
+                    op_txn_id: meta.insert_txn_id,
                     tuple_meta,
                     tuple_data: tuple_bytes,
                 }))?;
@@ -169,6 +210,7 @@ impl TableHeap {
             relation,
             page_id: rid.page_id,
             slot_id: slot,
+            op_txn_id: new_meta.insert_txn_id, // best-effort; op id carried separately if needed
             new_tuple_meta: TupleMetaRepr::from(new_meta),
             new_tuple_data: new_tuple_bytes,
             old_tuple_meta: Some(TupleMetaRepr::from(old_meta)),
@@ -192,6 +234,7 @@ impl TableHeap {
                 relation,
                 page_id: rid.page_id,
                 slot_id: slot,
+                op_txn_id: meta.delete_txn_id,
                 old_tuple_meta: TupleMetaRepr::from(old_meta),
                 old_tuple_data: Some(old_tuple_bytes),
             })
@@ -202,6 +245,7 @@ impl TableHeap {
                 relation,
                 page_id: rid.page_id,
                 slot_id: slot,
+                op_txn_id: meta.insert_txn_id,
                 new_tuple_meta: TupleMetaRepr::from(meta),
                 new_tuple_data: new_tuple_bytes,
                 old_tuple_meta: Some(TupleMetaRepr::from(old_meta)),
@@ -278,6 +322,94 @@ impl TableHeap {
             }
         }
         Ok(None)
+    }
+
+    /// Construct a lightweight TableHeap view for recovery operations.
+    /// This instance uses an empty schema and does not rely on first/last page ids.
+    pub fn recovery_view(buffer_pool: Arc<BufferPoolManager>) -> Self {
+        Self {
+            schema: EMPTY_SCHEMA_REF.clone(),
+            buffer_pool,
+            first_page_id: AtomicU32::new(0),
+            last_page_id: AtomicU32::new(0),
+        }
+    }
+
+    /// Recovery-only API: set tuple meta without emitting WAL.
+    /// Only used by RecoveryManager during UNDO.
+    pub fn recover_set_tuple_meta(&self, rid: RecordId, meta: TupleMeta) -> QuillSQLResult<()> {
+        let mut guard = self.buffer_pool.fetch_page_write(rid.page_id)?;
+        let (mut header, hdr_len) =
+            crate::storage::codec::TablePageHeaderCodec::decode(&guard.data)?;
+        if (rid.slot_num as usize) >= header.tuple_infos.len() {
+            return Ok(());
+        }
+        let info = &mut header.tuple_infos[rid.slot_num as usize];
+        if info.meta.is_deleted != meta.is_deleted {
+            if meta.is_deleted {
+                header.num_deleted_tuples = header.num_deleted_tuples.saturating_add(1);
+            } else {
+                header.num_deleted_tuples = header.num_deleted_tuples.saturating_sub(1);
+            }
+        }
+        info.meta = meta;
+        let new_header = crate::storage::codec::TablePageHeaderCodec::encode(&header);
+        let copy_len = std::cmp::min(hdr_len, new_header.len());
+        guard.data[0..copy_len].copy_from_slice(&new_header[..copy_len]);
+        Ok(())
+    }
+
+    /// Recovery-only API: set tuple raw bytes without emitting WAL.
+    /// If size mismatches, repack tuple area and update offsets.
+    pub fn recover_set_tuple_bytes(&self, rid: RecordId, new_bytes: &[u8]) -> QuillSQLResult<()> {
+        let mut guard = self.buffer_pool.fetch_page_write(rid.page_id)?;
+        let (mut header, _hdr_len) =
+            crate::storage::codec::TablePageHeaderCodec::decode(&guard.data)?;
+        if (rid.slot_num as usize) >= header.tuple_infos.len() {
+            return Ok(());
+        }
+        let slot = rid.slot_num as usize;
+        let info = &mut header.tuple_infos[slot];
+        let off = info.offset as usize;
+        let sz = info.size as usize;
+        if new_bytes.len() == sz {
+            if off + sz <= crate::buffer::PAGE_SIZE {
+                guard.data[off..off + sz].copy_from_slice(new_bytes);
+            }
+            return Ok(());
+        }
+        let n = header.tuple_infos.len();
+        let mut tuples: Vec<Vec<u8>> = Vec::with_capacity(n);
+        for i in 0..n {
+            let inf = &header.tuple_infos[i];
+            let s = &guard.data[inf.offset as usize..(inf.offset + inf.size) as usize];
+            if i == slot {
+                tuples.push(new_bytes.to_vec());
+            } else {
+                tuples.push(s.to_vec());
+            }
+        }
+        let mut tail = crate::buffer::PAGE_SIZE;
+        for i in 0..n {
+            let sz = tuples[i].len();
+            tail = tail.saturating_sub(sz);
+            header.tuple_infos[i].offset = tail as u16;
+            header.tuple_infos[i].size = sz as u16;
+        }
+        let new_header = crate::storage::codec::TablePageHeaderCodec::encode(&header);
+        for b in guard.data.iter_mut() {
+            *b = 0;
+        }
+        let hdr_copy = std::cmp::min(new_header.len(), crate::buffer::PAGE_SIZE);
+        guard.data[0..hdr_copy].copy_from_slice(&new_header[..hdr_copy]);
+        for i in 0..n {
+            let off = header.tuple_infos[i].offset as usize;
+            let sz = header.tuple_infos[i].size as usize;
+            if off + sz <= crate::buffer::PAGE_SIZE {
+                guard.data[off..off + sz].copy_from_slice(&tuples[i][..sz]);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -584,6 +716,7 @@ mod tests {
 
     use crate::buffer::BufferPoolManager;
     use crate::catalog::{Column, DataType, Schema};
+    use crate::storage::codec::TupleCodec;
     use crate::storage::disk_manager::DiskManager;
     use crate::storage::disk_scheduler::DiskScheduler;
     use crate::storage::page::EMPTY_TUPLE_META;
@@ -872,5 +1005,80 @@ mod tests {
         // Sanity: ensure rid3 exists but not returned in range
         let (_m, t3) = table_heap.full_tuple(rid3).unwrap();
         assert_eq!(t3.data, vec![3i8.into(), 3i16.into()]);
+    }
+
+    #[test]
+    pub fn test_recover_set_tuple_meta_and_bytes() {
+        let temp_dir = TempDir::new().unwrap();
+        let temp_path = temp_dir.path().join("test.db");
+
+        let schema = Arc::new(Schema::new(vec![
+            Column::new("a", DataType::Int8, false),
+            Column::new("b", DataType::Int16, false),
+        ]));
+        let disk_manager = DiskManager::try_new(temp_path).unwrap();
+        let disk_scheduler = Arc::new(DiskScheduler::new(Arc::new(disk_manager)));
+        let buffer_pool = Arc::new(BufferPoolManager::new(128, disk_scheduler));
+        let table_heap = TableHeap::try_new(schema.clone(), buffer_pool.clone()).unwrap();
+
+        // Insert a row
+        let rid = table_heap
+            .insert_tuple(
+                &EMPTY_TUPLE_META,
+                &Tuple::new(schema.clone(), vec![1i8.into(), 10i16.into()]),
+            )
+            .unwrap();
+
+        // Change bytes via recovery API
+        let new_tuple = Tuple::new(schema.clone(), vec![2i8.into(), 20i16.into()]);
+        let new_bytes = TupleCodec::encode(&new_tuple);
+        table_heap
+            .recover_set_tuple_bytes(rid, &new_bytes)
+            .expect("recover bytes");
+
+        // Verify tuple data changed
+        let (_m, t) = table_heap.full_tuple(rid).unwrap();
+        assert_eq!(t.data, vec![2i8.into(), 20i16.into()]);
+
+        // Mark deleted via recovery API and verify
+        let mut meta = table_heap.tuple_meta(rid).unwrap();
+        meta.is_deleted = true;
+        table_heap
+            .recover_set_tuple_meta(rid, meta)
+            .expect("recover meta");
+        let m2 = table_heap.tuple_meta(rid).unwrap();
+        assert!(m2.is_deleted);
+    }
+
+    #[test]
+    pub fn test_recover_repack_on_size_mismatch() {
+        let temp_dir = TempDir::new().unwrap();
+        let temp_path = temp_dir.path().join("test.db");
+
+        let schema = Arc::new(Schema::new(vec![
+            Column::new("a", DataType::Int8, false),
+            Column::new("b", DataType::Int16, false),
+        ]));
+        let disk_manager = DiskManager::try_new(temp_path).unwrap();
+        let disk_scheduler = Arc::new(DiskScheduler::new(Arc::new(disk_manager)));
+        let buffer_pool = Arc::new(BufferPoolManager::new(128, disk_scheduler));
+        let table_heap = TableHeap::try_new(schema.clone(), buffer_pool.clone()).unwrap();
+
+        let rid = table_heap
+            .insert_tuple(
+                &EMPTY_TUPLE_META,
+                &Tuple::new(schema.clone(), vec![1i8.into(), 10i16.into()]),
+            )
+            .unwrap();
+
+        // Create a tuple with different encoded length and recover-set it
+        let larger_tuple = Tuple::new(schema.clone(), vec![99i8.into(), 300i16.into()]);
+        let larger_bytes = TupleCodec::encode(&larger_tuple);
+        table_heap
+            .recover_set_tuple_bytes(rid, &larger_bytes)
+            .expect("recover larger bytes");
+
+        let (_m, t2) = table_heap.full_tuple(rid).unwrap();
+        assert_eq!(t2.data, vec![99i8.into(), 300i16.into()]);
     }
 }

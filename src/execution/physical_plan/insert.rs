@@ -3,7 +3,7 @@ use std::sync::atomic::Ordering;
 use std::sync::{atomic::AtomicU32, Arc};
 
 use crate::catalog::{SchemaRef, INSERT_OUTPUT_SCHEMA_REF};
-use crate::storage::page::EMPTY_TUPLE_META;
+use crate::storage::page::TupleMeta;
 use crate::storage::tuple::Tuple;
 use crate::utils::scalar::ScalarValue;
 use crate::utils::table_ref::TableReference;
@@ -86,7 +86,12 @@ impl VolcanoExecutor for PhysicalInsert {
             let tuple = Tuple::new(self.table_schema.clone(), full_data);
 
             let table_heap = context.catalog.table_heap(&self.table)?;
-            let rid = table_heap.insert_tuple(&EMPTY_TUPLE_META, &tuple)?;
+            let meta = TupleMeta {
+                insert_txn_id: context.txn.id(),
+                delete_txn_id: 0,
+                is_deleted: false,
+            };
+            let rid = table_heap.insert_tuple(&meta, &tuple)?;
 
             let indexes = context.catalog.table_indexes(&self.table)?;
             for index in indexes {

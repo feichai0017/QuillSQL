@@ -12,6 +12,17 @@ const CONTROL_FILE_NAME: &str = "control.dat";
 const CONTROL_FILE_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+// control.dat (bincode of ControlFileData)
+// struct ControlFileData {
+//   version: u32              // CONTROL_FILE_VERSION (currently 2)
+//   system_id: u128           // random system identifier
+//   wal_segment_size: u64     // current wal segment size
+//   durable_lsn: u64          // flushed & durable WAL LSN
+//   max_assigned_lsn: u64     // latest assigned LSN
+//   last_checkpoint_lsn: u64  // last checkpoint LSN
+//   last_record_start: u64    // last record's start LSN
+// }
+// Persist flow: write tmp file then rename (atomic-ish on POSIX)
 struct ControlFileData {
     version: u32,
     system_id: u128,

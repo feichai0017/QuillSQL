@@ -24,7 +24,7 @@ use crate::{
     storage::disk_manager::DiskManager,
     storage::disk_scheduler::DiskScheduler,
     storage::tuple::Tuple,
-    transaction::TransactionManager,
+    transaction::{IsolationLevel, TransactionManager},
 };
 
 #[derive(Debug, Default, Clone)]
@@ -53,6 +53,8 @@ pub struct Database {
     temp_dir: Option<TempDir>,
     checkpoint_stop: Arc<AtomicBool>,
     checkpoint_handle: Option<thread::JoinHandle<()>>,
+    bg_writer_stop: Arc<AtomicBool>,
+    bg_writer_handle: Option<thread::JoinHandle<()>>,
 }
 impl Database {
     pub fn new_on_disk(db_path: &str) -> QuillSQLResult<Self> {
@@ -92,8 +94,9 @@ impl Database {
 
         let catalog = Catalog::new(buffer_pool.clone(), disk_manager.clone());
 
-        let recovery_summary =
-            RecoveryManager::new(wal_manager.clone(), disk_scheduler.clone()).replay()?;
+        let recovery_summary = RecoveryManager::new(wal_manager.clone(), disk_scheduler.clone())
+            .with_buffer_pool(buffer_pool.clone())
+            .replay()?;
         if recovery_summary.redo_count > 0 {
             debug!(
                 "Recovery replayed {} record(s) starting at LSN {}",
@@ -115,6 +118,13 @@ impl Database {
             wal_config.checkpoint_interval_ms,
         );
 
+        let (bg_writer_stop, bg_writer_handle) = spawn_bg_writer(
+            buffer_pool.clone(),
+            std::env::var("QUILL_BG_WRITER_INTERVAL_MS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok()),
+        );
+
         let mut db = Self {
             buffer_pool,
             catalog,
@@ -123,6 +133,8 @@ impl Database {
             temp_dir: None,
             checkpoint_stop,
             checkpoint_handle,
+            bg_writer_stop,
+            bg_writer_handle,
         };
         load_catalog_data(&mut db)?;
         Ok(db)
@@ -167,8 +179,9 @@ impl Database {
 
         let catalog = Catalog::new(buffer_pool.clone(), disk_manager.clone());
 
-        let recovery_summary =
-            RecoveryManager::new(wal_manager.clone(), disk_scheduler.clone()).replay()?;
+        let recovery_summary = RecoveryManager::new(wal_manager.clone(), disk_scheduler.clone())
+            .with_buffer_pool(buffer_pool.clone())
+            .replay()?;
         if recovery_summary.redo_count > 0 {
             debug!(
                 "Recovery replayed {} record(s) starting at LSN {}",
@@ -190,6 +203,13 @@ impl Database {
             wal_config.checkpoint_interval_ms,
         );
 
+        let (bg_writer_stop, bg_writer_handle) = spawn_bg_writer(
+            buffer_pool.clone(),
+            std::env::var("QUILL_BG_WRITER_INTERVAL_MS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok()),
+        );
+
         let mut db = Self {
             buffer_pool,
             catalog,
@@ -198,6 +218,8 @@ impl Database {
             temp_dir: Some(temp_dir),
             checkpoint_stop,
             checkpoint_handle,
+            bg_writer_stop,
+            bg_writer_handle,
         };
         load_catalog_data(&mut db)?;
         Ok(db)
@@ -226,12 +248,23 @@ impl Database {
             pretty_format_physical_plan(&physical_plan)
         );
 
-        let execution_ctx = ExecutionContext::new(&mut self.catalog);
+        let mut txn = self
+            .transaction_manager
+            .begin(IsolationLevel::ReadUncommitted)?;
+        let execution_ctx = ExecutionContext::new(&mut self.catalog, &mut txn);
         let mut execution_engine = ExecutionEngine {
             context: execution_ctx,
         };
-        let tuples = execution_engine.execute(Arc::new(physical_plan))?;
-        Ok(tuples)
+        match execution_engine.execute(Arc::new(physical_plan)) {
+            Ok(tuples) => {
+                let _ = self.transaction_manager.commit(&mut txn);
+                Ok(tuples)
+            }
+            Err(e) => {
+                let _ = self.transaction_manager.abort(&mut txn);
+                Err(e)
+            }
+        }
     }
 
     pub fn create_logical_plan(&mut self, sql: &str) -> QuillSQLResult<LogicalPlan> {
@@ -268,6 +301,12 @@ impl Drop for Database {
         if let Some(handle) = self.checkpoint_handle.take() {
             if let Err(join_err) = handle.join() {
                 warn!("Checkpoint worker terminated with panic: {:?}", join_err);
+            }
+        }
+        self.bg_writer_stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.bg_writer_handle.take() {
+            if let Err(join_err) = handle.join() {
+                warn!("BG writer terminated with panic: {:?}", join_err);
             }
         }
     }
@@ -383,6 +422,7 @@ fn spawn_checkpoint_worker(
                         last_lsn,
                         dirty_pages,
                         active_transactions: active_txns,
+                        dpt: vec![],
                     };
                     if let Err(e) = wal.log_checkpoint(payload) {
                         warn!("Checkpoint write failed: {}", e);
@@ -401,5 +441,42 @@ fn spawn_checkpoint_worker(
             None
         });
 
+    (stop, handle)
+}
+
+fn spawn_bg_writer(
+    buffer_pool: Arc<BufferPoolManager>,
+    interval_ms: Option<u64>,
+) -> (Arc<AtomicBool>, Option<thread::JoinHandle<()>>) {
+    let stop = Arc::new(AtomicBool::new(false));
+    let Some(ms) = interval_ms else {
+        return (stop, None);
+    };
+    if ms == 0 {
+        return (stop, None);
+    }
+    let stop_flag = stop.clone();
+    let bp = buffer_pool.clone();
+    let interval = Duration::from_millis(ms);
+    let handle = thread::Builder::new()
+        .name("bg-writer".into())
+        .spawn(move || {
+            while !stop_flag.load(Ordering::Relaxed) {
+                // Flush a small batch of dirty pages per cycle
+                let dirty_ids = bp.dirty_page_ids();
+                for page_id in dirty_ids.into_iter().take(16) {
+                    let _ = bp.flush_page(page_id);
+                }
+                if stop_flag.load(Ordering::Relaxed) {
+                    break;
+                }
+                thread::sleep(interval);
+            }
+        })
+        .map(Some)
+        .unwrap_or_else(|err| {
+            warn!("Failed to spawn bg writer: {}", err);
+            None
+        });
     (stop, handle)
 }

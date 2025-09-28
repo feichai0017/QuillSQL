@@ -71,6 +71,7 @@ impl VolcanoExecutor for PhysicalUpdate {
                     tuple.data[index] = new_value;
                 }
                 table_heap.update_tuple(rid, tuple)?;
+                // 如果是删除语义（未来支持），应在相应路径设置 delete_txn_id = context.txn.id()
                 self.update_rows.fetch_add(1, Ordering::SeqCst);
             } else {
                 return if self.update_rows.load(Ordering::SeqCst) == 0 {

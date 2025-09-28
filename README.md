@@ -1,7 +1,7 @@
 # QuillSQL
 
 <div align="center">
-  <img src="/public/rust-db.png" alt="QuillSQL Cover" width="520"/>
+  <img src="/public/rust-db.png" alt="QuillSQL Architecture" width="720"/>
   <p><em>A tiny yet serious SQL database in Rust — simple, modular, pragmatic.</em></p>
 </div>
 
@@ -13,7 +13,7 @@
 - **Streaming scan**: Large sequential scans bypass buffer pool via a small direct I/O ring buffer to avoid cache pollution
 - **Information schema**: `information_schema.schemas`, `tables`, `columns`, `indexes`
 - **Now supports**: `SHOW DATABASES`, `SHOW TABLES`, `EXPLAIN`
-- **Docs**: [Architecture](docs/architecture.md) · [Buffer Pool](docs/buffer_pool.md) · [B+ Tree Index](docs/btree_index.md) · [Disk I/O](docs/disk_io.md)
+- **Docs**: [Architecture](docs/architecture.md) · [Buffer Pool](docs/buffer_pool.md) · [B+ Tree Index](docs/btree_index.md) · [Disk I/O](docs/disk_io.md) · [WAL & Recovery](docs/wal.md)
 
 ## 🚀 Quick Start
 

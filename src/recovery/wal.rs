@@ -9,6 +9,7 @@ use std::sync::{Arc, Weak};
 use std::thread;
 use std::time::Duration;
 
+use crate::buffer::PageId;
 use crate::config::WalConfig;
 use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::recovery::control_file::{ControlFileManager, WalInitState};
@@ -18,6 +19,7 @@ use crate::recovery::wal_record::{
 };
 use crate::storage::disk_scheduler::DiskScheduler;
 use bytes::Bytes;
+use dashmap::DashSet;
 
 pub type Lsn = u64;
 
@@ -70,6 +72,7 @@ pub struct WalManager {
     flush_lock: Mutex<()>,
     flush_cond: Condvar,
     checkpoint_redo_start: AtomicU64,
+    touched_pages: DashSet<PageId>,
 }
 
 impl WalManager {
@@ -120,6 +123,7 @@ impl WalManager {
             flush_lock: Mutex::new(()),
             flush_cond: Condvar::new(),
             checkpoint_redo_start: AtomicU64::new(0),
+            touched_pages: DashSet::new(),
         })
     }
 
@@ -191,6 +195,8 @@ impl WalManager {
         self.checkpoint_redo_start
             .store(redo_start, Ordering::Release);
         self.flush(Some(result.end_lsn))?;
+        // Reset FPW epoch
+        self.touched_pages.clear();
         Ok(result.end_lsn)
     }
 
@@ -315,6 +321,11 @@ impl WalManager {
             )
         };
         WalReader::new(directory, scheduler)
+    }
+
+    /// Returns true if this is the first touch of the page since last checkpoint.
+    pub fn fpw_first_touch(&self, page_id: PageId) -> bool {
+        self.touched_pages.insert(page_id)
     }
 }
 
@@ -881,12 +892,15 @@ mod tests {
             last_lsn,
             dirty_pages: Vec::new(),
             active_transactions: Vec::new(),
+            dpt: Vec::new(),
         };
         wal.log_checkpoint(payload).expect("checkpoint");
         wal.flush(None).expect("final flush");
 
         let keep_segment_id = 1 + (last_lsn / segment_size);
-        let min_keep = keep_segment_id.saturating_sub(retain_segments as u64).max(1);
+        let min_keep = keep_segment_id
+            .saturating_sub(retain_segments as u64)
+            .max(1);
 
         drop(wal);
 
@@ -940,6 +954,7 @@ mod tests {
             last_lsn: 7,
             dirty_pages: vec![1, 2, 3],
             active_transactions: vec![10, 11],
+            dpt: Vec::new(),
         };
         let checkpoint_lsn = wal.log_checkpoint(payload.clone()).expect("checkpoint");
         assert!(wal.last_checkpoint_lsn() <= checkpoint_lsn);
