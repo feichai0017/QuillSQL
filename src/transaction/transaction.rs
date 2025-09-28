@@ -6,6 +6,7 @@ pub const INVALID_TRANSACTION_ID: TransactionId = 0;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IsolationLevel {
     ReadUncommitted,
+    ReadCommitted,
     SnapshotIsolation,
     Serializable,
 }

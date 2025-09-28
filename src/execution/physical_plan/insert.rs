@@ -3,8 +3,10 @@ use std::sync::atomic::Ordering;
 use std::sync::{atomic::AtomicU32, Arc};
 
 use crate::catalog::{SchemaRef, INSERT_OUTPUT_SCHEMA_REF};
+use crate::error::QuillSQLError;
 use crate::storage::page::TupleMeta;
 use crate::storage::tuple::Tuple;
+use crate::transaction::LockMode;
 use crate::utils::scalar::ScalarValue;
 use crate::utils::table_ref::TableReference;
 use crate::{
@@ -44,6 +46,20 @@ impl VolcanoExecutor for PhysicalInsert {
         debug!("init insert executor");
         self.input.init(context)?;
         self.insert_rows.store(0, Ordering::SeqCst);
+        if context
+            .txn_mgr
+            .acquire_table_lock(
+                context.txn,
+                self.table.clone(),
+                LockMode::IntentionExclusive,
+            )
+            .is_err()
+        {
+            return Err(QuillSQLError::Execution(format!(
+                "failed to acquire IX lock on table {}",
+                self.table
+            )));
+        }
         Ok(())
     }
     fn next(&self, context: &mut ExecutionContext) -> QuillSQLResult<Option<Tuple>> {
@@ -92,6 +108,12 @@ impl VolcanoExecutor for PhysicalInsert {
                 is_deleted: false,
             };
             let rid = table_heap.insert_tuple(&meta, &tuple)?;
+            context.txn_mgr.record_row_lock(
+                context.txn.id(),
+                self.table.clone(),
+                rid,
+                LockMode::Exclusive,
+            );
 
             let indexes = context.catalog.table_indexes(&self.table)?;
             for index in indexes {

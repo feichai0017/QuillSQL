@@ -4,6 +4,7 @@ use crate::execution::{ExecutionContext, VolcanoExecutor};
 use crate::expression::{Expr, ExprTrait};
 use crate::storage::table_heap::TableIterator;
 use crate::storage::tuple::{Tuple, EMPTY_TUPLE};
+use crate::transaction::LockMode;
 use crate::utils::scalar::ScalarValue;
 use crate::utils::table_ref::TableReference;
 use std::collections::HashMap;
@@ -44,6 +45,19 @@ impl VolcanoExecutor for PhysicalUpdate {
         self.update_rows.store(0, Ordering::SeqCst);
         let table_heap = context.catalog.table_heap(&self.table)?;
         *self.table_iterator.lock().unwrap() = Some(TableIterator::new(table_heap.clone(), ..));
+        context
+            .txn_mgr
+            .acquire_table_lock(
+                context.txn,
+                self.table.clone(),
+                LockMode::IntentionExclusive,
+            )
+            .map_err(|_| {
+                QuillSQLError::Execution(format!(
+                    "failed to acquire IX lock on table {}",
+                    self.table
+                ))
+            })?;
         Ok(())
     }
 
@@ -63,6 +77,19 @@ impl VolcanoExecutor for PhysicalUpdate {
                         continue;
                     }
                 }
+
+                let meta = table_heap.tuple_meta(rid)?;
+                if !Tuple::is_visible(&meta, context.txn.id()) {
+                    continue;
+                }
+
+                context.txn_mgr.record_row_lock(
+                    context.txn.id(),
+                    self.table.clone(),
+                    rid,
+                    LockMode::Exclusive,
+                );
+
                 // update tuple data
                 for (col_name, value_expr) in self.assignments.iter() {
                     let index = tuple.schema.index_of(None, &col_name)?;

@@ -1,5 +1,7 @@
 use crate::catalog::{SchemaRef, EMPTY_SCHEMA_REF};
 use crate::error::QuillSQLError;
+use crate::storage::page::TupleMeta;
+use crate::transaction::TransactionId;
 use crate::utils::table_ref::TableReference;
 use crate::{catalog::Schema, error::QuillSQLResult, utils::scalar::ScalarValue};
 use std::cmp::Ordering;
@@ -17,12 +19,6 @@ pub struct Tuple {
 impl Tuple {
     pub fn new(schema: SchemaRef, data: Vec<ScalarValue>) -> Self {
         debug_assert_eq!(schema.columns.len(), data.len());
-        debug_assert!(schema
-            .columns
-            .iter()
-            .zip(data.iter())
-            .find(|(col, val)| ScalarValue::new_empty(col.data_type).data_type() != val.data_type())
-            .is_none());
         Self { schema, data }
     }
 
@@ -50,6 +46,13 @@ impl Tuple {
         Self::new(schema, data)
     }
 
+    pub fn is_visible(meta: &TupleMeta, txn_id: TransactionId) -> bool {
+        if meta.is_deleted {
+            return meta.delete_txn_id == txn_id;
+        }
+        meta.insert_txn_id <= txn_id
+    }
+
     pub fn try_merge(tuples: impl IntoIterator<Item = Self>) -> QuillSQLResult<Self> {
         let mut data = vec![];
         let mut merged_schema = Schema::empty();
@@ -62,6 +65,13 @@ impl Tuple {
 
     pub fn is_null(&self) -> bool {
         self.data.iter().all(|x| x.is_null())
+    }
+
+    pub fn visible_to(&self, meta: &TupleMeta, txn_id: TransactionId) -> bool {
+        if meta.is_deleted && meta.delete_txn_id <= txn_id {
+            return false;
+        }
+        meta.insert_txn_id <= txn_id
     }
 
     pub fn value(&self, index: usize) -> QuillSQLResult<&ScalarValue> {

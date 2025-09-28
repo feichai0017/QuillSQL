@@ -3,10 +3,15 @@ pub mod physical_plan;
 use std::sync::Arc;
 
 use crate::catalog::SchemaRef;
-use crate::error::QuillSQLResult;
+use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::execution::physical_plan::PhysicalPlan;
 use crate::transaction::TransactionManager;
-use crate::{catalog::Catalog, storage::tuple::Tuple, transaction::Transaction};
+use crate::{
+    catalog::Catalog,
+    storage::tuple::Tuple,
+    transaction::{LockMode, Transaction},
+    utils::table_ref::TableReference,
+};
 pub trait VolcanoExecutor {
     fn init(&self, _context: &mut ExecutionContext) -> QuillSQLResult<()> {
         Ok(())
@@ -34,6 +39,13 @@ impl<'a> ExecutionContext<'a> {
             txn,
             txn_mgr,
         }
+    }
+
+    pub fn lock_table(&mut self, table: TableReference, mode: LockMode) -> QuillSQLResult<()> {
+        self.txn_mgr
+            .acquire_table_lock(self.txn, table.clone(), mode)
+            .map_err(|e| QuillSQLError::Execution(format!("lock error: {}", e)))?;
+        Ok(())
     }
 }
 
