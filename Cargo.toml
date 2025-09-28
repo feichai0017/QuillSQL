@@ -3,7 +3,10 @@
 name = "quill-sql"
 version = "0.1.0"
 edition = "2021"
+description = "A tiny yet serious SQL database in Rust with ARIES-style WAL, 2PL, and B+Tree indexes."
 license = "MIT"
+repository = "https://github.com/feichai0017/quillsql"
+readme = "README.md"
 
 [dependencies]
 log = "0.4.21"
