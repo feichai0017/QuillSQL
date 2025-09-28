@@ -5,6 +5,7 @@ use std::sync::Arc;
 use crate::catalog::SchemaRef;
 use crate::error::QuillSQLResult;
 use crate::execution::physical_plan::PhysicalPlan;
+use crate::transaction::TransactionManager;
 use crate::{catalog::Catalog, storage::tuple::Tuple, transaction::Transaction};
 pub trait VolcanoExecutor {
     fn init(&self, _context: &mut ExecutionContext) -> QuillSQLResult<()> {
@@ -19,11 +20,20 @@ pub trait VolcanoExecutor {
 pub struct ExecutionContext<'a> {
     pub catalog: &'a mut Catalog,
     pub txn: &'a mut Transaction,
+    pub txn_mgr: &'a TransactionManager,
 }
 
 impl<'a> ExecutionContext<'a> {
-    pub fn new(catalog: &'a mut Catalog, txn: &'a mut Transaction) -> Self {
-        Self { catalog, txn }
+    pub fn new(
+        catalog: &'a mut Catalog,
+        txn: &'a mut Transaction,
+        txn_mgr: &'a TransactionManager,
+    ) -> Self {
+        Self {
+            catalog,
+            txn,
+            txn_mgr,
+        }
     }
 }
 

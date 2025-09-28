@@ -15,6 +15,8 @@ pub struct PhysicalIndexScan {
     start_bound: Bound<Tuple>,
     end_bound: Bound<Tuple>,
     iterator: Mutex<Option<TreeIndexIterator>>,
+    // Counts invisible hits to opportunistically trigger lazy cleanup
+    invisible_hits: Mutex<usize>,
 }
 
 impl PhysicalIndexScan {
@@ -31,6 +33,7 @@ impl PhysicalIndexScan {
             start_bound: range.start_bound().cloned(),
             end_bound: range.end_bound().cloned(),
             iterator: Mutex::new(None),
+            invisible_hits: Mutex::new(0),
         }
     }
 }
@@ -56,10 +59,33 @@ impl VolcanoExecutor for PhysicalIndexScan {
             ));
         };
         let table_heap = context.catalog.table_heap(&self.table_ref)?;
-        if let Some(rid) = iterator.next()? {
-            Ok(Some(table_heap.tuple(rid)?))
-        } else {
-            Ok(None)
+
+        // thresholds: keep front-path smooth, offload to background mostly
+        const INVISIBLE_THRESHOLD: usize = 2048;
+
+        loop {
+            if let Some(rid) = iterator.next()? {
+                // heap visibility check
+                let meta = table_heap.tuple_meta(rid)?;
+                if meta.is_deleted {
+                    // accumulate and maybe trigger lazy cleanup
+                    let mut cnt = self.invisible_hits.lock().unwrap();
+                    *cnt += 1;
+                    if *cnt >= INVISIBLE_THRESHOLD {
+                        *cnt = 0;
+                        if let Some(index_arc) =
+                            context.catalog.index(&self.table_ref, &self.index_name)?
+                        {
+                            // signal background worker via counter (best-effort)
+                            index_arc.note_potential_garbage(INVISIBLE_THRESHOLD);
+                        }
+                    }
+                    continue;
+                }
+                return Ok(Some(table_heap.tuple(rid)?));
+            } else {
+                return Ok(None);
+            }
         }
     }
 

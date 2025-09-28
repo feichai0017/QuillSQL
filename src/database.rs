@@ -8,7 +8,8 @@ use tempfile::TempDir;
 
 use crate::buffer::BUFFER_POOL_SIZE;
 use crate::catalog::load_catalog_data;
-use crate::config::WalConfig;
+use crate::catalog::registry::global_index_registry;
+use crate::config::{IndexVacuumConfig, WalConfig};
 use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::optimizer::LogicalOptimizer;
 use crate::plan::logical_plan::LogicalPlan;
@@ -123,6 +124,7 @@ impl Database {
             std::env::var("QUILL_BG_WRITER_INTERVAL_MS")
                 .ok()
                 .and_then(|v| v.parse::<u64>().ok()),
+            IndexVacuumConfig::default(),
         );
 
         let mut db = Self {
@@ -208,6 +210,7 @@ impl Database {
             std::env::var("QUILL_BG_WRITER_INTERVAL_MS")
                 .ok()
                 .and_then(|v| v.parse::<u64>().ok()),
+            IndexVacuumConfig::default(),
         );
 
         let mut db = Self {
@@ -251,7 +254,8 @@ impl Database {
         let mut txn = self
             .transaction_manager
             .begin(IsolationLevel::ReadUncommitted)?;
-        let execution_ctx = ExecutionContext::new(&mut self.catalog, &mut txn);
+        let execution_ctx =
+            ExecutionContext::new(&mut self.catalog, &mut txn, &self.transaction_manager);
         let mut execution_engine = ExecutionEngine {
             context: execution_ctx,
         };
@@ -447,6 +451,7 @@ fn spawn_checkpoint_worker(
 fn spawn_bg_writer(
     buffer_pool: Arc<BufferPoolManager>,
     interval_ms: Option<u64>,
+    vacuum_cfg: IndexVacuumConfig,
 ) -> (Arc<AtomicBool>, Option<thread::JoinHandle<()>>) {
     let stop = Arc::new(AtomicBool::new(false));
     let Some(ms) = interval_ms else {
@@ -467,6 +472,22 @@ fn spawn_bg_writer(
                 for page_id in dirty_ids.into_iter().take(16) {
                     let _ = bp.flush_page(page_id);
                 }
+
+                // Opportunistic index lazy cleanup based on pending_garbage counters.
+                // Global registry is read-only and cheap to iterate.
+                let registry = global_index_registry();
+                for (idx, heap) in registry.iter().take(16) {
+                    let pending = idx.take_pending_garbage();
+                    if pending >= vacuum_cfg.trigger_threshold {
+                        // conservative predicate using heap meta only (no txn watermarks here):
+                        // delete-marked tuples are always globally invisible for readers.
+                        let _ = idx.lazy_cleanup_with(
+                            |rid| heap.tuple_meta(*rid).map(|m| m.is_deleted).unwrap_or(false),
+                            Some(vacuum_cfg.batch_limit),
+                        );
+                    }
+                }
+
                 if stop_flag.load(Ordering::Relaxed) {
                     break;
                 }

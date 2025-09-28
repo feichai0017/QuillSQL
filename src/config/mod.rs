@@ -127,3 +127,23 @@ impl Default for TableScanConfig {
         }
     }
 }
+
+#[derive(Debug, Clone, Copy)]
+pub struct IndexVacuumConfig {
+    /// Background vacuum interval in milliseconds
+    pub interval_ms: u64,
+    /// Pending garbage counter threshold to trigger a cleanup batch
+    pub trigger_threshold: usize,
+    /// Max number of entries to cleanup in one batch
+    pub batch_limit: usize,
+}
+
+impl Default for IndexVacuumConfig {
+    fn default() -> Self {
+        Self {
+            interval_ms: 10_000,     // 10s
+            trigger_threshold: 4096, // pending count to trigger
+            batch_limit: 128,        // small batch to avoid stalls
+        }
+    }
+}

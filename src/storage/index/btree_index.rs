@@ -3,7 +3,7 @@ use std::collections::VecDeque;
 use std::fmt::Write;
 use std::sync::Arc;
 
-use crate::buffer::{PageId, ReadPageGuard, WritePageGuard, INVALID_PAGE_ID};
+use crate::buffer::{PageId, ReadPageGuard, WritePageGuard, INVALID_PAGE_ID, PAGE_SIZE};
 use crate::catalog::SchemaRef;
 use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::storage::codec::{
@@ -18,10 +18,13 @@ use crate::{
 };
 
 use crate::config::BTreeConfig;
+use crate::recovery::wal_record::{PageDeltaPayload, PageWritePayload, WalRecordPayload};
 use crate::storage::codec::BPlusTreePageTypeCodec;
 pub use crate::storage::index::btree_iterator::TreeIndexIterator;
 use crate::storage::page::BPlusTreePageType;
 use crate::storage::tuple::Tuple;
+use crate::utils::util;
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
 // OLC bounded restart and backoff configuration
 const MAX_OLC_RESTARTS: usize = 64;
@@ -78,6 +81,8 @@ pub struct BPlusTreeIndex {
     pub header_page_id: PageId,
     pub header_page_lock: Arc<RwLock<()>>,
     pub config: BTreeConfig,
+    /// Best-effort counter of potentially dead index entries observed by readers.
+    pub pending_garbage: AtomicUsize,
 }
 
 impl Index for BPlusTreeIndex {
@@ -96,6 +101,60 @@ impl Index for BPlusTreeIndex {
 }
 
 impl BPlusTreeIndex {
+    /// Write a modified index page back to the buffer with WAL (FPW/Delta) just like table heap.
+    /// This centralizes crash-consistent updates for header/leaf/internal pages.
+    fn wal_overwrite_page(
+        &self,
+        guard: &mut WritePageGuard,
+        new_image: Vec<u8>,
+    ) -> QuillSQLResult<()> {
+        debug_assert_eq!(new_image.len(), PAGE_SIZE);
+        let prev_lsn = guard.page_lsn;
+        if let Some(wal) = self.buffer_pool.wal_manager() {
+            let page_id = guard.page_id();
+            if wal.fpw_first_touch(page_id) {
+                let res = wal.append_record_with(|_| {
+                    WalRecordPayload::PageWrite(PageWritePayload {
+                        page_id,
+                        prev_page_lsn: prev_lsn,
+                        page_image: new_image.clone(),
+                    })
+                })?;
+                guard.overwrite(&new_image, Some(res.end_lsn));
+                return Ok(());
+            }
+
+            let old = &guard.data;
+            if let Some((start, end)) = util::find_contiguous_diff(old, &new_image) {
+                let diff_len = end - start;
+                let threshold = PAGE_SIZE / 16;
+                let res = if diff_len <= threshold {
+                    wal.append_record_with(|_| {
+                        WalRecordPayload::PageDelta(PageDeltaPayload {
+                            page_id,
+                            prev_page_lsn: prev_lsn,
+                            offset: start as u16,
+                            data: new_image[start..end].to_vec(),
+                        })
+                    })?
+                } else {
+                    wal.append_record_with(|_| {
+                        WalRecordPayload::PageWrite(PageWritePayload {
+                            page_id,
+                            prev_page_lsn: prev_lsn,
+                            page_image: new_image.clone(),
+                        })
+                    })?
+                };
+                guard.overwrite(&new_image, Some(res.end_lsn));
+            } else {
+                // no-op change
+            }
+        } else {
+            guard.overwrite(&new_image, None);
+        }
+        Ok(())
+    }
     pub fn new(
         key_schema: SchemaRef,
         buffer_pool: Arc<BufferPoolManager>,
@@ -124,6 +183,7 @@ impl BPlusTreeIndex {
             header_page_id,
             header_page_lock: Arc::new(RwLock::new(())),
             config: BTreeConfig::default(),
+            pending_garbage: AtomicUsize::new(0),
         }
     }
 
@@ -155,6 +215,7 @@ impl BPlusTreeIndex {
             header_page_id,
             header_page_lock: Arc::new(RwLock::new(())),
             config: BTreeConfig::default(),
+            pending_garbage: AtomicUsize::new(0),
         }
     }
 
@@ -190,7 +251,7 @@ impl BPlusTreeIndex {
             root_page_id: page_id,
         };
         let encoded = BPlusTreeHeaderPageCodec::encode(&header_page);
-        header_guard.overwrite(&encoded, None);
+        self.wal_overwrite_page(&mut header_guard, encoded)?;
         Ok(())
     }
 
@@ -466,7 +527,7 @@ impl BPlusTreeIndex {
                 *existing_rid = rid;
                 leaf_page.header.version += 1;
                 let encoded = BPlusTreeLeafPageCodec::encode(&leaf_page);
-                leaf_guard.overwrite(&encoded, None);
+                self.wal_overwrite_page(&mut leaf_guard, encoded)?;
                 local_ctx.release_all_write_locks();
                 return Ok(());
             }
@@ -513,13 +574,13 @@ impl BPlusTreeIndex {
             leaf_page.insert(key.clone(), rid);
             leaf_page.header.version += 1;
             let encoded = BPlusTreeLeafPageCodec::encode(&leaf_page);
-            leaf_guard.overwrite(&encoded, None);
+            self.wal_overwrite_page(&mut leaf_guard, encoded)?;
             local_ctx.release_all_write_locks();
             return Ok(());
         }
     }
 
-    /// 公共 API: 删除一个键，使用闩锁耦合实现并发安全。
+    /// Public API: delete a key with latch coupling to ensure concurrency safety.
     pub fn delete(&self, key: &Tuple) -> QuillSQLResult<()> {
         if self.is_empty()? {
             return Ok(());
@@ -613,7 +674,7 @@ impl BPlusTreeIndex {
             leaf_page.delete(key);
             leaf_page.header.version += 1;
             let encoded = BPlusTreeLeafPageCodec::encode(&leaf_page);
-            leaf_guard.overwrite(&encoded, None);
+            self.wal_overwrite_page(&mut leaf_guard, encoded)?;
 
             // If the node is underflowing, handle it.
             if leaf_page.header.current_size < leaf_page.min_size() {
@@ -654,7 +715,7 @@ impl BPlusTreeIndex {
                                 parent_page.array[node_idx].0 = leaf_page.key_at(0).clone();
                                 parent_page.header.version += 1;
                                 let encoded = BPlusTreeInternalPageCodec::encode(&parent_page);
-                                parent_guard.overwrite(&encoded, None);
+                                self.wal_overwrite_page(&mut parent_guard, encoded)?;
                             }
                         }
                         // push back to maintain path for later releases
@@ -935,9 +996,9 @@ impl BPlusTreeIndex {
         parent_page.header.version += 1;
 
         let left_encoded = BPlusTreePageCodec::encode(&left_page);
-        left_guard.overwrite(&left_encoded, None);
+        self.wal_overwrite_page(&mut left_guard, left_encoded)?;
         let parent_encoded = BPlusTreeInternalPageCodec::encode(&parent_page);
-        parent_guard.overwrite(&parent_encoded, None);
+        self.wal_overwrite_page(&mut parent_guard, parent_encoded)?;
         drop(left_guard);
         drop(right_guard);
         self.buffer_pool.delete_page(right_page_id)?;
@@ -1069,11 +1130,11 @@ impl BPlusTreeIndex {
         parent_page.header.version += 1;
 
         let from_encoded = BPlusTreePageCodec::encode(&from_page);
-        from_guard.overwrite(&from_encoded, None);
+        self.wal_overwrite_page(&mut from_guard, from_encoded)?;
         let to_encoded = BPlusTreePageCodec::encode(&to_page);
-        to_guard.overwrite(&to_encoded, None);
+        self.wal_overwrite_page(&mut to_guard, to_encoded)?;
         let parent_encoded = BPlusTreeInternalPageCodec::encode(&parent_page);
-        parent_guard.overwrite(&parent_encoded, None);
+        self.wal_overwrite_page(&mut parent_guard, parent_encoded)?;
 
         Ok(())
     }
@@ -1126,19 +1187,69 @@ impl BPlusTreeIndex {
         Ok(())
     }
 
-    /// 内部方法：当树为空时，创建第一个节点。
+    /// Internal: create the very first node when the tree is empty.
     fn start_new_tree(&self, key: &Tuple, rid: RecordId) -> QuillSQLResult<()> {
         let mut root_guard = self.buffer_pool.new_page()?;
         let root_page_id = root_guard.page_id();
         let mut leaf_page = BPlusTreeLeafPage::new(self.key_schema.clone(), self.leaf_max_size);
         leaf_page.insert(key.clone(), rid);
         let encoded_data = BPlusTreeLeafPageCodec::encode(&leaf_page);
-        root_guard.overwrite(&encoded_data, None);
-        // 更新根节点 ID（先释放页锁，再更新 header，避免锁序反转）。
-        // 约定：调用方已持有 header_page_lock。
+        self.wal_overwrite_page(&mut root_guard, encoded_data)?;
+        // Update root id (release page latch before touching header to avoid lock inversion).
+        // Precondition: caller holds header_page_lock.
         drop(root_guard);
         self.set_root_page_id(root_page_id)?;
         Ok(())
+    }
+
+    /// Best-effort lazy cleanup: iterate across leaves and delete keys whose RIDs
+    /// satisfy the `is_globally_dead` predicate. This is REDO-safe and uses the
+    /// existing delete() path to maintain separators and handle underflow properly.
+    /// Notes:
+    /// - Callers should pass a predicate that only returns true for tuples that are
+    ///   globally invisible (e.g., deleted and the deleting txn committed).
+    /// - This method is conservative and may revisit pages as structure changes; it
+    ///   favors correctness over speed.
+    pub fn lazy_cleanup_with<F>(
+        &self,
+        mut is_globally_dead: F,
+        limit: Option<usize>,
+    ) -> QuillSQLResult<usize>
+    where
+        F: FnMut(&RecordId) -> bool,
+    {
+        let mut cleaned = 0usize;
+        let mut guard = self.find_first_leaf_page()?;
+        loop {
+            let (leaf, _) = BPlusTreeLeafPageCodec::decode(&guard.data, self.key_schema.clone())?;
+            // Snapshot next pid before releasing read guard
+            let next_pid = leaf.header.next_page_id;
+            // Collect keys to delete
+            let mut to_delete: Vec<Tuple> = Vec::new();
+            for i in 0..(leaf.header.current_size as usize) {
+                let kv = leaf.kv_at(i).clone();
+                if is_globally_dead(&kv.1) {
+                    to_delete.push(kv.0);
+                }
+            }
+            drop(guard);
+
+            for k in to_delete.into_iter() {
+                self.delete(&k)?;
+                cleaned += 1;
+                if let Some(maxn) = limit {
+                    if cleaned >= maxn {
+                        return Ok(cleaned);
+                    }
+                }
+            }
+
+            if next_pid == INVALID_PAGE_ID {
+                break;
+            }
+            guard = self.buffer_pool.fetch_page_read(next_pid)?;
+        }
+        Ok(cleaned)
     }
 
     fn find_leaf_page_optimistic(&self, key: &Tuple) -> QuillSQLResult<ReadPageGuard> {
@@ -1329,7 +1440,7 @@ impl BPlusTreeIndex {
                     new_leaf.header.next_page_id = leaf_page.header.next_page_id;
                     leaf_page.header.next_page_id = new_page_id;
                     let new_data = BPlusTreeLeafPageCodec::encode(&new_leaf);
-                    new_page_guard.overwrite(&new_data, None);
+                    self.wal_overwrite_page(&mut new_page_guard, new_data)?;
                     leaf_page.header.version += 1;
                     if self.config.debug_split_level >= 2 {
                         if new_leaf.header.current_size > 0 {
@@ -1385,7 +1496,7 @@ impl BPlusTreeIndex {
                     // - Right's next pointer inherits left's next
                     new_internal.header.next_page_id = old_next;
                     let new_data = BPlusTreeInternalPageCodec::encode(&new_internal);
-                    new_page_guard.overwrite(&new_data, None);
+                    self.wal_overwrite_page(&mut new_page_guard, new_data)?;
                     // B-link: publish right sibling pointer for readers to chase
                     internal_page.header.next_page_id = new_page_id;
                     internal_page.header.version += 1;
@@ -1401,7 +1512,7 @@ impl BPlusTreeIndex {
 
             // 写回修改后的旧页面和新页面（保持子页锁直到父更新完成）
             let old_page_data = BPlusTreePageCodec::encode(&page);
-            page_guard.overwrite(&old_page_data, None);
+            self.wal_overwrite_page(&mut page_guard, old_page_data)?;
 
             // 若当前分裂页是根（无父在 write_set），则创建新的根
             if page_guard.page_id() == self.get_root_page_id()? {
@@ -1420,7 +1531,7 @@ impl BPlusTreeIndex {
                 new_root_page.insert(middle_key, new_page_id);
 
                 let encoded = BPlusTreeInternalPageCodec::encode(&new_root_page);
-                new_root_guard.overwrite(&encoded, None);
+                self.wal_overwrite_page(&mut new_root_guard, encoded)?;
 
                 // Avoid deadlock: release child page latches before taking header lock
                 drop(new_page_guard);
@@ -1462,7 +1573,7 @@ impl BPlusTreeIndex {
             parent_page.header.version += 1;
 
             let encoded = BPlusTreeInternalPageCodec::encode(&parent_page);
-            parent_guard.overwrite(&encoded, None);
+            self.wal_overwrite_page(&mut parent_guard, encoded)?;
 
             if parent_page.is_full() {
                 // 子页到父的结构已一致，现在可释放子页锁，继续向上分裂父
@@ -1478,6 +1589,17 @@ impl BPlusTreeIndex {
             }
         }
     }
+
+    /// Hint that a reader observed a globally invisible RID through this index.
+    /// This increments a best-effort counter to help background cleanup scheduling.
+    pub fn note_potential_garbage(&self, n: usize) {
+        self.pending_garbage.fetch_add(n, AtomicOrdering::Relaxed);
+    }
+
+    /// Returns and resets the pending garbage counter.
+    pub fn take_pending_garbage(&self) -> usize {
+        self.pending_garbage.swap(0, AtomicOrdering::Relaxed)
+    }
 }
 
 #[cfg(test)]
@@ -1489,6 +1611,8 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::catalog::SchemaRef;
+    use crate::config::WalConfig;
+    use crate::recovery::{RecoveryManager, WalManager};
     use crate::storage::disk_manager::DiskManager;
     use crate::storage::disk_scheduler::DiskScheduler;
     use crate::storage::index::btree_index::TreeIndexIterator;
@@ -1543,6 +1667,89 @@ mod tests {
         );
 
         (temp_dir, index, key_schema)
+    }
+
+    /// Helper: build bpm + wal on a fresh temp dir
+    fn setup_with_wal(
+        db_path: &std::path::Path,
+        wal_dir: &std::path::Path,
+        bpm_pages: usize,
+    ) -> (Arc<BufferPoolManager>, Arc<WalManager>, Arc<DiskScheduler>) {
+        let dm = Arc::new(DiskManager::try_new(db_path).unwrap());
+        let scheduler = Arc::new(DiskScheduler::new(dm));
+        let mut cfg = WalConfig::default();
+        cfg.directory = wal_dir.to_path_buf();
+        let wal = Arc::new(WalManager::new(cfg, scheduler.clone(), None, None).unwrap());
+        let bpm = Arc::new(BufferPoolManager::new(bpm_pages, scheduler.clone()));
+        bpm.set_wal_manager(wal.clone());
+        (bpm, wal, scheduler)
+    }
+
+    /// 根据 key 生成与 BusTub 一致的 RID，用于断言
+    fn rid_from_key(key: i64) -> RecordId {
+        let value = key & 0xFFFFFFFF;
+        RecordId::new((key >> 32) as u32, value as u32)
+    }
+
+    #[test]
+    fn test_index_recovery_replays_wal_split() {
+        ensure_deadlock_watchdog();
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("test.db");
+        let wal_dir = tmp.path().join("wal");
+
+        // 1) 初始运行：带 WAL 的环境，强制小页触发分裂
+        let (bpm, wal, scheduler) = setup_with_wal(&db_path, &wal_dir, 64);
+        let key_schema: SchemaRef =
+            Arc::new(Schema::new(vec![Column::new("a", DataType::Int64, false)]));
+        let index = BPlusTreeIndex::new(key_schema.clone(), bpm.clone(), 2, 3);
+        let header_pid = index.header_page_id; // 记录 header 页 id，崩溃后用来 reopen
+
+        let keys: Vec<i64> = (1..=30).collect();
+        for k in &keys {
+            let t = Tuple::new(key_schema.clone(), vec![(*k).into()]);
+            index.insert(&t, rid_from_key(*k)).unwrap();
+        }
+
+        // 刷 WAL 到耐久，模拟崩溃
+        let _ = wal.flush(None).unwrap();
+        drop(index);
+        drop(bpm);
+        drop(wal);
+        drop(scheduler);
+
+        // 2) 恢复阶段：重放 WAL 到数据文件
+        let dm2 = Arc::new(DiskManager::try_new(&db_path).unwrap());
+        let scheduler2 = Arc::new(DiskScheduler::new(dm2));
+        let mut cfg2 = WalConfig::default();
+        cfg2.directory = wal_dir.clone();
+        let wal2 = Arc::new(WalManager::new(cfg2, scheduler2.clone(), None, None).unwrap());
+        let rm = RecoveryManager::new(wal2.clone(), scheduler2.clone());
+        let _summary = rm.replay().unwrap();
+
+        // 3) 打开新的 BufferPool，reopen 索引并验证所有键可查询 & 有序遍历
+        let bpm2 = Arc::new(BufferPoolManager::new(128, scheduler2.clone()));
+        let reopened = BPlusTreeIndex::open(key_schema.clone(), bpm2.clone(), 2, 3, header_pid);
+
+        for k in &keys {
+            let t = Tuple::new(key_schema.clone(), vec![(*k).into()]);
+            let got = reopened
+                .get(&t)
+                .unwrap()
+                .expect("missing key after recovery");
+            assert_eq!(got.page_id, rid_from_key(*k).page_id);
+            assert_eq!(got.slot_num, rid_from_key(*k).slot_num);
+        }
+
+        // 验证遍历顺序
+        let index_arc = Arc::new(reopened);
+        let mut it = TreeIndexIterator::new(index_arc, ..);
+        let mut i = 1i64;
+        while let Some(rid) = it.next().unwrap() {
+            assert_eq!(rid.slot_num, rid_from_key(i).slot_num);
+            i += 1;
+        }
+        assert_eq!(i, 31);
     }
 
     /// Helper function to create RID from i64 key (exactly like BusTub's RID construction)
