@@ -76,7 +76,7 @@ pub const INVALID_RID: RecordId = RecordId {
     slot_num: 0,
 };
 
-#[derive(derive_new::new, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(derive_new::new, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RecordId {
     pub page_id: PageId,
     pub slot_num: u32,

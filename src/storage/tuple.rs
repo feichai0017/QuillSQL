@@ -1,7 +1,9 @@
-use crate::catalog::{SchemaRef, EMPTY_SCHEMA_REF};
-use crate::error::QuillSQLError;
+use crate::catalog::{Schema, SchemaRef, EMPTY_SCHEMA_REF};
+use crate::error::{QuillSQLError, QuillSQLResult};
+use crate::storage::page::{RecordId, TupleMeta};
+use crate::transaction::TransactionId;
+use crate::utils::scalar::ScalarValue;
 use crate::utils::table_ref::TableReference;
-use crate::{catalog::Schema, error::QuillSQLResult, utils::scalar::ScalarValue};
 use std::cmp::Ordering;
 use std::fmt::{Display, Formatter};
 use std::sync::{Arc, LazyLock};
@@ -17,12 +19,6 @@ pub struct Tuple {
 impl Tuple {
     pub fn new(schema: SchemaRef, data: Vec<ScalarValue>) -> Self {
         debug_assert_eq!(schema.columns.len(), data.len());
-        debug_assert!(schema
-            .columns
-            .iter()
-            .zip(data.iter())
-            .find(|(col, val)| ScalarValue::new_empty(col.data_type).data_type() != val.data_type())
-            .is_none());
         Self { schema, data }
     }
 
@@ -50,6 +46,13 @@ impl Tuple {
         Self::new(schema, data)
     }
 
+    pub fn is_visible(meta: &TupleMeta, txn_id: TransactionId) -> bool {
+        if meta.is_deleted {
+            return meta.delete_txn_id == txn_id;
+        }
+        meta.insert_txn_id <= txn_id
+    }
+
     pub fn try_merge(tuples: impl IntoIterator<Item = Self>) -> QuillSQLResult<Self> {
         let mut data = vec![];
         let mut merged_schema = Schema::empty();
@@ -62,6 +65,13 @@ impl Tuple {
 
     pub fn is_null(&self) -> bool {
         self.data.iter().all(|x| x.is_null())
+    }
+
+    pub fn visible_to(&self, meta: &TupleMeta, txn_id: TransactionId) -> bool {
+        if meta.is_deleted && meta.delete_txn_id <= txn_id {
+            return false;
+        }
+        meta.insert_txn_id <= txn_id
     }
 
     pub fn value(&self, index: usize) -> QuillSQLResult<&ScalarValue> {
@@ -77,6 +87,17 @@ impl Tuple {
     ) -> QuillSQLResult<&ScalarValue> {
         let idx = self.schema.index_of(relation, name)?;
         self.value(idx)
+    }
+
+    pub fn as_rid(&self) -> QuillSQLResult<RecordId> {
+        if self.data.len() < 2 {
+            return Err(QuillSQLError::Execution(
+                "RID tuple must have at least two columns".to_string(),
+            ));
+        }
+        let page_id = value_as_u32(&self.data[0])?;
+        let slot_num = value_as_u32(&self.data[1])?;
+        Ok(RecordId::new(page_id, slot_num))
     }
 }
 
@@ -136,4 +157,28 @@ mod tests {
         assert_eq!(tuple1.partial_cmp(&tuple4).unwrap(), Ordering::Less);
         assert_eq!(tuple1.partial_cmp(&tuple5).unwrap(), Ordering::Greater);
     }
+}
+
+fn value_as_u32(value: &ScalarValue) -> QuillSQLResult<u32> {
+    let num = match value {
+        ScalarValue::Int16(Some(v)) => *v as i32,
+        ScalarValue::Int32(Some(v)) => *v,
+        ScalarValue::Int64(Some(v)) => *v as i32,
+        ScalarValue::UInt16(Some(v)) => *v as i32,
+        ScalarValue::UInt32(Some(v)) => *v as i32,
+        ScalarValue::UInt64(Some(v)) => *v as i32,
+        ScalarValue::Int8(Some(v)) => *v as i32,
+        ScalarValue::UInt8(Some(v)) => *v as i32,
+        _ => {
+            return Err(QuillSQLError::Execution(
+                "RID column must be integer".to_string(),
+            ))
+        }
+    };
+    if num < 0 {
+        return Err(QuillSQLError::Execution(
+            "RID column must be positive".to_string(),
+        ));
+    }
+    Ok(num as u32)
 }

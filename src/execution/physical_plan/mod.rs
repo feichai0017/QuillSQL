@@ -1,6 +1,7 @@
 mod aggregate;
 mod create_index;
 mod create_table;
+mod delete;
 mod empty;
 mod filter;
 mod index_scan;
@@ -16,6 +17,7 @@ mod values;
 pub use aggregate::PhysicalAggregate;
 pub use create_index::PhysicalCreateIndex;
 pub use create_table::PhysicalCreateTable;
+pub use delete::PhysicalDelete;
 pub use empty::PhysicalEmpty;
 pub use filter::PhysicalFilter;
 pub use index_scan::PhysicalIndexScan;
@@ -38,19 +40,20 @@ use crate::{
 #[derive(Debug)]
 pub enum PhysicalPlan {
     Empty(PhysicalEmpty),
-    CreateTable(PhysicalCreateTable),
-    CreateIndex(PhysicalCreateIndex),
-    Project(PhysicalProject),
-    Filter(PhysicalFilter),
+    Values(PhysicalValues),
     SeqScan(PhysicalSeqScan),
     IndexScan(PhysicalIndexScan),
     Limit(PhysicalLimit),
-    Insert(PhysicalInsert),
-    Values(PhysicalValues),
-    NestedLoopJoin(PhysicalNestedLoopJoin),
     Sort(PhysicalSort),
-    Aggregate(PhysicalAggregate),
     Update(PhysicalUpdate),
+    Delete(PhysicalDelete),
+    Insert(PhysicalInsert),
+    Project(PhysicalProject),
+    Filter(PhysicalFilter),
+    NestedLoopJoin(PhysicalNestedLoopJoin),
+    Aggregate(PhysicalAggregate),
+    CreateTable(PhysicalCreateTable),
+    CreateIndex(PhysicalCreateIndex),
 }
 
 impl PhysicalPlan {
@@ -73,6 +76,7 @@ impl PhysicalPlan {
             | PhysicalPlan::SeqScan(_)
             | PhysicalPlan::IndexScan(_)
             | PhysicalPlan::Update(_)
+            | PhysicalPlan::Delete(_)
             | PhysicalPlan::Values(_) => vec![],
         }
     }
@@ -95,6 +99,7 @@ impl VolcanoExecutor for PhysicalPlan {
             PhysicalPlan::Sort(op) => op.init(context),
             PhysicalPlan::Aggregate(op) => op.init(context),
             PhysicalPlan::Update(op) => op.init(context),
+            PhysicalPlan::Delete(op) => op.init(context),
         }
     }
 
@@ -114,6 +119,7 @@ impl VolcanoExecutor for PhysicalPlan {
             PhysicalPlan::Sort(op) => op.next(context),
             PhysicalPlan::Aggregate(op) => op.next(context),
             PhysicalPlan::Update(op) => op.next(context),
+            PhysicalPlan::Delete(op) => op.next(context),
         }
     }
 
@@ -133,6 +139,7 @@ impl VolcanoExecutor for PhysicalPlan {
             Self::Sort(op) => op.output_schema(),
             Self::Aggregate(op) => op.output_schema(),
             Self::Update(op) => op.output_schema(),
+            Self::Delete(op) => op.output_schema(),
         }
     }
 }
@@ -154,6 +161,7 @@ impl std::fmt::Display for PhysicalPlan {
             Self::Sort(op) => write!(f, "{op}"),
             Self::Aggregate(op) => write!(f, "{op}"),
             Self::Update(op) => write!(f, "{op}"),
+            Self::Delete(op) => write!(f, "{op}"),
         }
     }
 }

@@ -1,19 +1,32 @@
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::recovery::wal_record::{TransactionPayload, TransactionRecordKind, WalRecordPayload};
 use crate::recovery::{Lsn, WalManager};
+use crate::storage::page::RecordId;
+use crate::transaction::{
+    IsolationLevel, LockManager, LockMode, Transaction, TransactionId, TransactionState,
+};
+use crate::utils::table_ref::TableReference;
+use dashmap::{DashMap, DashSet};
 
-use dashmap::DashSet;
-
-use super::{IsolationLevel, Transaction, TransactionId, TransactionState};
+#[derive(Debug, Default)]
+struct HeldLocks {
+    tables: Vec<(TableReference, LockMode)>,
+    rows: Vec<(TableReference, RecordId, LockMode)>,
+    row_keys: HashSet<(TableReference, RecordId)>,
+    shared_rows: HashSet<(TableReference, RecordId)>,
+}
 
 pub struct TransactionManager {
     wal: Arc<WalManager>,
     next_txn_id: AtomicU64,
     synchronous_commit: AtomicBool,
     active_txns: DashSet<TransactionId>,
+    lock_manager: Arc<LockManager>,
+    held_locks: DashMap<TransactionId, HeldLocks>,
 }
 
 impl TransactionManager {
@@ -23,7 +36,28 @@ impl TransactionManager {
             next_txn_id: AtomicU64::new(1),
             synchronous_commit: AtomicBool::new(synchronous_commit),
             active_txns: DashSet::new(),
+            lock_manager: Arc::new(LockManager::new()),
+            held_locks: DashMap::new(),
         }
+    }
+
+    pub fn with_lock_manager(
+        wal: Arc<WalManager>,
+        synchronous_commit: bool,
+        lock_manager: Arc<LockManager>,
+    ) -> Self {
+        Self {
+            wal,
+            next_txn_id: AtomicU64::new(1),
+            synchronous_commit: AtomicBool::new(synchronous_commit),
+            active_txns: DashSet::new(),
+            lock_manager,
+            held_locks: DashMap::new(),
+        }
+    }
+
+    pub fn lock_manager(&self) -> Arc<LockManager> {
+        self.lock_manager.clone()
     }
 
     pub fn begin(&self, isolation_level: IsolationLevel) -> QuillSQLResult<Transaction> {
@@ -43,7 +77,68 @@ impl TransactionManager {
         })?;
         txn.set_begin_lsn(append.end_lsn);
         self.active_txns.insert(txn_id);
+        self.held_locks.insert(txn_id, HeldLocks::default());
         Ok(txn)
+    }
+
+    pub fn acquire_table_lock(
+        &self,
+        txn: &Transaction,
+        table: TableReference,
+        mode: LockMode,
+    ) -> QuillSQLResult<()> {
+        if self.lock_manager.lock_table(txn, mode, table.clone()) {
+            if let Some(mut entry) = self.held_locks.get_mut(&txn.id()) {
+                entry.tables.push((table, mode));
+            } else {
+                let mut new_entry = HeldLocks::default();
+                new_entry.tables.push((table, mode));
+                self.held_locks.insert(txn.id(), new_entry);
+            }
+            Ok(())
+        } else {
+            Err(QuillSQLError::Internal(format!(
+                "Failed to acquire table lock for txn {}",
+                txn.id()
+            )))
+        }
+    }
+
+    pub fn try_acquire_row_lock(
+        &self,
+        txn: &Transaction,
+        table: TableReference,
+        rid: RecordId,
+        mode: LockMode,
+    ) -> QuillSQLResult<bool> {
+        let key = (table.clone(), rid);
+        if let Some(entry) = self.held_locks.get(&txn.id()) {
+            if entry.row_keys.contains(&key) {
+                return Ok(true);
+            }
+        }
+        if self.lock_manager.lock_row(txn, mode, table.clone(), rid) {
+            self.record_row_lock(txn.id(), table, rid, mode);
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    pub fn acquire_row_lock(
+        &self,
+        txn: &Transaction,
+        table: TableReference,
+        rid: RecordId,
+        mode: LockMode,
+    ) -> QuillSQLResult<()> {
+        if !self.try_acquire_row_lock(txn, table.clone(), rid, mode)? {
+            return Err(QuillSQLError::Internal(format!(
+                "Failed to acquire row lock for txn {}",
+                txn.id()
+            )));
+        }
+        Ok(())
     }
 
     pub fn commit(&self, txn: &mut Transaction) -> QuillSQLResult<()> {
@@ -74,6 +169,8 @@ impl TransactionManager {
         txn.set_state(TransactionState::Committed);
 
         self.active_txns.remove(&txn_id);
+        self.release_all_locks(txn_id);
+        txn.clear_undo();
         self.finish_commit(txn, append.end_lsn)
     }
 
@@ -89,6 +186,8 @@ impl TransactionManager {
             TransactionState::Running | TransactionState::Tainted => {}
         }
 
+        txn.apply_undo()?;
+
         let txn_id = txn.id();
         let append = self.wal.append_record_with(|_| {
             WalRecordPayload::Transaction(TransactionPayload {
@@ -100,6 +199,8 @@ impl TransactionManager {
         txn.set_state(TransactionState::Aborted);
 
         self.active_txns.remove(&txn_id);
+        self.release_all_locks(txn_id);
+        txn.clear_undo();
         self.finish_commit(txn, append.end_lsn)
     }
 
@@ -122,6 +223,49 @@ impl TransactionManager {
             let _ = self.wal.flush_until(lsn)?;
         }
         Ok(())
+    }
+
+    pub fn record_row_lock(
+        &self,
+        txn_id: TransactionId,
+        table: TableReference,
+        rid: RecordId,
+        mode: LockMode,
+    ) {
+        let mut entry = self
+            .held_locks
+            .entry(txn_id)
+            .or_insert_with(HeldLocks::default);
+        if entry.row_keys.insert((table.clone(), rid)) {
+            entry.rows.push((table, rid, mode));
+        }
+    }
+
+    pub fn record_shared_row_lock(
+        &self,
+        txn_id: TransactionId,
+        table: TableReference,
+        rid: RecordId,
+    ) {
+        let mut entry = self
+            .held_locks
+            .entry(txn_id)
+            .or_insert_with(HeldLocks::default);
+        entry.shared_rows.insert((table, rid));
+    }
+
+    fn release_all_locks(&self, txn_id: TransactionId) {
+        if let Some((_, mut held)) = self.held_locks.remove(&txn_id) {
+            for (table, rid, _) in held.rows.drain(..).rev() {
+                let _ = self.lock_manager.unlock_row_raw(txn_id, table, rid);
+            }
+            for (table, rid) in held.shared_rows.drain() {
+                let _ = self.lock_manager.unlock_row_raw(txn_id, table, rid);
+            }
+            for (table, _) in held.tables.drain(..).rev() {
+                let _ = self.lock_manager.unlock_table_raw(txn_id, table);
+            }
+        }
     }
 }
 

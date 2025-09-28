@@ -6,17 +6,11 @@ use crate::plan::logical_plan::{
     Project, Sort, TableScan, Update, Values,
 };
 
-use crate::execution::physical_plan::PhysicalLimit;
-use crate::execution::physical_plan::PhysicalNestedLoopJoin;
-use crate::execution::physical_plan::PhysicalPlan;
-use crate::execution::physical_plan::PhysicalProject;
-use crate::execution::physical_plan::PhysicalSeqScan;
-use crate::execution::physical_plan::PhysicalSort;
-use crate::execution::physical_plan::PhysicalValues;
-use crate::execution::physical_plan::{PhysicalAggregate, PhysicalCreateTable};
-use crate::execution::physical_plan::{PhysicalCreateIndex, PhysicalEmpty};
-use crate::execution::physical_plan::{PhysicalFilter, PhysicalIndexScan};
-use crate::execution::physical_plan::{PhysicalInsert, PhysicalUpdate};
+use crate::execution::physical_plan::{
+    PhysicalAggregate, PhysicalCreateIndex, PhysicalCreateTable, PhysicalDelete, PhysicalEmpty,
+    PhysicalFilter, PhysicalIndexScan, PhysicalInsert, PhysicalLimit, PhysicalNestedLoopJoin,
+    PhysicalPlan, PhysicalProject, PhysicalSeqScan, PhysicalSort, PhysicalUpdate, PhysicalValues,
+};
 
 pub struct PhysicalPlanner<'a> {
     pub catalog: &'a Catalog,
@@ -181,16 +175,16 @@ impl PhysicalPlanner<'_> {
                     schema.clone(),
                 ))
             }
-            LogicalPlan::Update(Update {
-                table,
-                table_schema,
-                assignments,
-                selection,
-            }) => PhysicalPlan::Update(PhysicalUpdate::new(
-                table.clone(),
-                table_schema.clone(),
-                assignments.clone(),
-                selection.clone(),
+            LogicalPlan::Update(update) => PhysicalPlan::Update(PhysicalUpdate::new(
+                update.table.clone(),
+                update.table_schema.clone(),
+                update.assignments.clone(),
+                update.selection.clone(),
+            )),
+            LogicalPlan::Delete(delete) => PhysicalPlan::Delete(PhysicalDelete::new(
+                delete.table.clone(),
+                delete.table_schema.clone(),
+                delete.selection.clone(),
             )),
         };
         plan

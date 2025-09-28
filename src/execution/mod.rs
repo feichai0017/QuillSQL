@@ -3,10 +3,15 @@ pub mod physical_plan;
 use std::sync::Arc;
 
 use crate::catalog::SchemaRef;
-use crate::error::QuillSQLResult;
+use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::execution::physical_plan::PhysicalPlan;
 use crate::transaction::TransactionManager;
-use crate::{catalog::Catalog, storage::tuple::Tuple, transaction::Transaction};
+use crate::{
+    catalog::Catalog,
+    storage::tuple::Tuple,
+    transaction::{LockMode, Transaction},
+    utils::table_ref::TableReference,
+};
 pub trait VolcanoExecutor {
     fn init(&self, _context: &mut ExecutionContext) -> QuillSQLResult<()> {
         Ok(())
@@ -34,6 +39,34 @@ impl<'a> ExecutionContext<'a> {
             txn,
             txn_mgr,
         }
+    }
+
+    pub fn lock_table(&mut self, table: TableReference, mode: LockMode) -> QuillSQLResult<()> {
+        self.txn_mgr
+            .acquire_table_lock(self.txn, table.clone(), mode)
+            .map_err(|e| QuillSQLError::Execution(format!("lock error: {}", e)))?;
+        Ok(())
+    }
+
+    pub fn lock_row_shared(&mut self, table: &TableReference, rid: crate::storage::page::RecordId) {
+        self.txn_mgr
+            .record_row_lock(self.txn.id(), table.clone(), rid, LockMode::Shared);
+    }
+
+    pub fn lock_row_exclusive(
+        &mut self,
+        table: &TableReference,
+        rid: crate::storage::page::RecordId,
+    ) -> QuillSQLResult<()> {
+        if !self
+            .txn_mgr
+            .try_acquire_row_lock(self.txn, table.clone(), rid, LockMode::Exclusive)?
+        {
+            return Err(QuillSQLError::Execution(
+                "failed to acquire row exclusive lock".to_string(),
+            ));
+        }
+        Ok(())
     }
 }
 

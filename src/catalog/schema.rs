@@ -22,6 +22,13 @@ pub static UPDATE_OUTPUT_SCHEMA_REF: LazyLock<SchemaRef> = LazyLock::new(|| {
         false,
     )]))
 });
+pub static DELETE_OUTPUT_SCHEMA_REF: LazyLock<SchemaRef> = LazyLock::new(|| {
+    Arc::new(Schema::new(vec![Column::new(
+        "delete_rows",
+        DataType::Int32,
+        false,
+    )]))
+});
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct Schema {

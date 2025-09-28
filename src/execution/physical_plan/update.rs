@@ -4,6 +4,7 @@ use crate::execution::{ExecutionContext, VolcanoExecutor};
 use crate::expression::{Expr, ExprTrait};
 use crate::storage::table_heap::TableIterator;
 use crate::storage::tuple::{Tuple, EMPTY_TUPLE};
+use crate::transaction::LockMode;
 use crate::utils::scalar::ScalarValue;
 use crate::utils::table_ref::TableReference;
 use std::collections::HashMap;
@@ -44,6 +45,19 @@ impl VolcanoExecutor for PhysicalUpdate {
         self.update_rows.store(0, Ordering::SeqCst);
         let table_heap = context.catalog.table_heap(&self.table)?;
         *self.table_iterator.lock().unwrap() = Some(TableIterator::new(table_heap.clone(), ..));
+        context
+            .txn_mgr
+            .acquire_table_lock(
+                context.txn,
+                self.table.clone(),
+                LockMode::IntentionExclusive,
+            )
+            .map_err(|_| {
+                QuillSQLError::Execution(format!(
+                    "failed to acquire IX lock on table {}",
+                    self.table
+                ))
+            })?;
         Ok(())
     }
 
@@ -63,15 +77,58 @@ impl VolcanoExecutor for PhysicalUpdate {
                         continue;
                     }
                 }
+
+                let meta = table_heap.tuple_meta(rid)?;
+                if !Tuple::is_visible(&meta, context.txn.id()) {
+                    continue;
+                }
+
+                context.txn_mgr.record_row_lock(
+                    context.txn.id(),
+                    self.table.clone(),
+                    rid,
+                    LockMode::Exclusive,
+                );
+
+                let prev_tuple = tuple.clone();
+                let prev_meta = meta;
+
                 // update tuple data
                 for (col_name, value_expr) in self.assignments.iter() {
-                    let index = tuple.schema.index_of(None, &col_name)?;
+                    let index = tuple.schema.index_of(None, col_name)?;
                     let col_datatype = tuple.schema.columns[index].data_type;
                     let new_value = value_expr.evaluate(&EMPTY_TUPLE)?.cast_to(&col_datatype)?;
                     tuple.data[index] = new_value;
                 }
-                table_heap.update_tuple(rid, tuple)?;
-                // 如果是删除语义（未来支持），应在相应路径设置 delete_txn_id = context.txn.id()
+                table_heap.update_tuple(rid, tuple.clone())?;
+
+                let mut new_keys = Vec::new();
+                let mut old_keys = Vec::new();
+                let indexes = context.catalog.table_indexes(&self.table)?;
+                for index in indexes {
+                    let old_key = prev_tuple
+                        .project_with_schema(index.key_schema.clone())
+                        .ok();
+                    let new_key = tuple.project_with_schema(index.key_schema.clone()).ok();
+                    if let Some(old_key_tuple) = old_key.clone() {
+                        index.delete(&old_key_tuple)?;
+                        old_keys.push((index.clone(), old_key_tuple));
+                    }
+                    if let Some(new_key_tuple) = new_key.clone() {
+                        index.insert(&new_key_tuple, rid)?;
+                        new_keys.push((index.clone(), new_key_tuple));
+                    }
+                }
+
+                context.txn.push_update_undo(
+                    table_heap.clone(),
+                    rid,
+                    prev_meta,
+                    prev_tuple,
+                    new_keys,
+                    old_keys,
+                );
+
                 self.update_rows.fetch_add(1, Ordering::SeqCst);
             } else {
                 return if self.update_rows.load(Ordering::SeqCst) == 0 {

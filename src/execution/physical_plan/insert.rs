@@ -3,8 +3,10 @@ use std::sync::atomic::Ordering;
 use std::sync::{atomic::AtomicU32, Arc};
 
 use crate::catalog::{SchemaRef, INSERT_OUTPUT_SCHEMA_REF};
+use crate::error::QuillSQLError;
 use crate::storage::page::TupleMeta;
 use crate::storage::tuple::Tuple;
+use crate::transaction::LockMode;
 use crate::utils::scalar::ScalarValue;
 use crate::utils::table_ref::TableReference;
 use crate::{
@@ -44,6 +46,20 @@ impl VolcanoExecutor for PhysicalInsert {
         debug!("init insert executor");
         self.input.init(context)?;
         self.insert_rows.store(0, Ordering::SeqCst);
+        if context
+            .txn_mgr
+            .acquire_table_lock(
+                context.txn,
+                self.table.clone(),
+                LockMode::IntentionExclusive,
+            )
+            .is_err()
+        {
+            return Err(QuillSQLError::Execution(format!(
+                "failed to acquire IX lock on table {}",
+                self.table
+            )));
+        }
         Ok(())
     }
     fn next(&self, context: &mut ExecutionContext) -> QuillSQLResult<Option<Tuple>> {
@@ -92,21 +108,24 @@ impl VolcanoExecutor for PhysicalInsert {
                 is_deleted: false,
             };
             let rid = table_heap.insert_tuple(&meta, &tuple)?;
+            let mut index_links = Vec::new();
 
             let indexes = context.catalog.table_indexes(&self.table)?;
             for index in indexes {
                 if let Ok(key_tuple) = tuple.project_with_schema(index.key_schema.clone()) {
                     let root_page_id = index.get_root_page_id()?;
                     index.insert(&key_tuple, rid)?;
+                    index_links.push((index.clone(), key_tuple));
                     let new_root_page_id = index.get_root_page_id()?;
                     if new_root_page_id != root_page_id {
-                        // The root page ID has changed, which means a split propagated to the root.
-                        // With the new header page model, we no longer need to update the catalog here,
-                        // as the header_page_id is immutable. The root_page_id is updated within
-                        // the header page automatically.
+                        // root change comment
                     }
                 }
             }
+
+            context
+                .txn
+                .push_insert_undo(table_heap.clone(), rid, index_links);
 
             self.insert_rows.fetch_add(1, Ordering::SeqCst);
         }

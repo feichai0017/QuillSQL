@@ -13,7 +13,7 @@
 - **Streaming scan**: Large sequential scans bypass buffer pool via a small direct I/O ring buffer to avoid cache pollution
 - **WAL & Recovery (ARIES-inspired)**: FPW + PageDelta, DPT, chained CLR, per-transaction undo chains, idempotent replays
 - **Information schema**: `information_schema.schemas`, `tables`, `columns`, `indexes`
-- **Now supports**: `SHOW DATABASES`, `SHOW TABLES`, `EXPLAIN`
+- **Now supports**: `SHOW DATABASES`, `SHOW TABLES`, `EXPLAIN`, `DELETE`
 - **Docs**: [Architecture](docs/architecture.md) · [Buffer Pool](docs/buffer_pool.md) · [B+ Tree Index](docs/btree_index.md) · [Disk I/O](docs/disk_io.md) · [WAL & Recovery](docs/wal.md)
 
 ---
@@ -91,6 +91,8 @@ EXPLAIN SELECT id, COUNT(*) FROM t GROUP BY id ORDER BY id;
 
 - **UPDATE**
   - `UPDATE t SET col = expr [, ...] [WHERE predicate]`
+- **DELETE**
+  - `DELETE FROM t [WHERE predicate]`
 
 - **SHOW**
 - `SHOW DATABASES;` (rewritten to `SELECT schema FROM information_schema.schemas`)
@@ -101,7 +103,7 @@ EXPLAIN SELECT id, COUNT(*) FROM t GROUP BY id ORDER BY id;
 
 ## ⚠️ Current Limitations
 
-- Not yet supported: `DELETE`, `DROP`, `ALTER`, transaction control (BEGIN/COMMIT/ROLLBACK)
+- Not yet supported: `DROP`, `ALTER`, transaction control (BEGIN/COMMIT/ROLLBACK)
 - Not implemented: outer joins (Left/Right/Full), arithmetic expressions, table/subquery aliases
 - `ORDER BY` `DESC` / `NULLS FIRST|LAST` currently affects sorting only (not storage layout)
 
@@ -178,6 +180,7 @@ Includes sqllogictest-based cases:
 - `src/tests/sql_example/create_index.slt`
 - `src/tests/sql_example/insert.slt`
 - `src/tests/sql_example/show_explain.slt`
+- `src/tests/sql_example/delete.slt`
 
 ## 📚 Acknowledgements
 

@@ -1,4 +1,11 @@
+use crate::error::QuillSQLResult;
 use crate::recovery::Lsn;
+use crate::storage::codec::TupleCodec;
+use crate::storage::index::btree_index::BPlusTreeIndex;
+use crate::storage::page::{RecordId, TupleMeta};
+use crate::storage::table_heap::TableHeap;
+use crate::storage::tuple::Tuple;
+use std::sync::Arc;
 
 pub type TransactionId = u64;
 pub const INVALID_TRANSACTION_ID: TransactionId = 0;
@@ -6,6 +13,7 @@ pub const INVALID_TRANSACTION_ID: TransactionId = 0;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IsolationLevel {
     ReadUncommitted,
+    ReadCommitted,
     SnapshotIsolation,
     Serializable,
 }
@@ -26,6 +34,79 @@ pub struct Transaction {
     synchronous_commit: bool,
     begin_lsn: Option<Lsn>,
     last_lsn: Option<Lsn>,
+    undo_actions: Vec<UndoAction>,
+}
+
+#[derive(Debug, Clone)]
+enum UndoAction {
+    Insert {
+        table: Arc<TableHeap>,
+        rid: RecordId,
+        indexes: Vec<(Arc<BPlusTreeIndex>, Tuple)>,
+    },
+    Update {
+        table: Arc<TableHeap>,
+        rid: RecordId,
+        prev_meta: TupleMeta,
+        prev_tuple: Tuple,
+        new_keys: Vec<(Arc<BPlusTreeIndex>, Tuple)>,
+        old_keys: Vec<(Arc<BPlusTreeIndex>, Tuple)>,
+    },
+    Delete {
+        table: Arc<TableHeap>,
+        rid: RecordId,
+        prev_meta: TupleMeta,
+        prev_tuple: Tuple,
+        indexes: Vec<(Arc<BPlusTreeIndex>, Tuple)>,
+    },
+}
+
+impl UndoAction {
+    fn undo(self, txn_id: TransactionId) -> QuillSQLResult<()> {
+        match self {
+            UndoAction::Insert {
+                table,
+                rid,
+                indexes,
+            } => {
+                for (index, key) in indexes.into_iter() {
+                    index.delete(&key)?;
+                }
+                table.recover_delete_tuple(rid, txn_id)?;
+                Ok(())
+            }
+            UndoAction::Update {
+                table,
+                rid,
+                prev_meta,
+                prev_tuple,
+                new_keys,
+                old_keys,
+            } => {
+                table.recover_restore_tuple(rid, prev_meta, &prev_tuple)?;
+                for (index, key) in new_keys.into_iter() {
+                    index.delete(&key)?;
+                }
+                for (index, key) in old_keys.into_iter() {
+                    index.insert(&key, rid)?;
+                }
+                Ok(())
+            }
+            UndoAction::Delete {
+                table,
+                rid,
+                prev_meta,
+                prev_tuple,
+                indexes,
+            } => {
+                table.recover_restore_tuple(rid, prev_meta, &prev_tuple)?;
+                for (index, key) in indexes.into_iter() {
+                    index.insert(&key, rid)?;
+                }
+                Ok(())
+            }
+        }
+    }
 }
 
 impl Transaction {
@@ -41,6 +122,7 @@ impl Transaction {
             synchronous_commit,
             begin_lsn: None,
             last_lsn: None,
+            undo_actions: Vec::new(),
         }
     }
 
@@ -84,6 +166,66 @@ impl Transaction {
     pub(crate) fn mark_tainted(&mut self) {
         self.state = TransactionState::Tainted;
     }
+
+    pub fn push_insert_undo(
+        &mut self,
+        table: Arc<TableHeap>,
+        rid: RecordId,
+        indexes: Vec<(Arc<BPlusTreeIndex>, Tuple)>,
+    ) {
+        self.undo_actions.push(UndoAction::Insert {
+            table,
+            rid,
+            indexes,
+        });
+    }
+
+    pub fn push_update_undo(
+        &mut self,
+        table: Arc<TableHeap>,
+        rid: RecordId,
+        prev_meta: TupleMeta,
+        prev_tuple: Tuple,
+        new_keys: Vec<(Arc<BPlusTreeIndex>, Tuple)>,
+        old_keys: Vec<(Arc<BPlusTreeIndex>, Tuple)>,
+    ) {
+        self.undo_actions.push(UndoAction::Update {
+            table,
+            rid,
+            prev_meta,
+            prev_tuple,
+            new_keys,
+            old_keys,
+        });
+    }
+
+    pub fn push_delete_undo(
+        &mut self,
+        table: Arc<TableHeap>,
+        rid: RecordId,
+        prev_meta: TupleMeta,
+        prev_tuple: Tuple,
+        indexes: Vec<(Arc<BPlusTreeIndex>, Tuple)>,
+    ) {
+        self.undo_actions.push(UndoAction::Delete {
+            table,
+            rid,
+            prev_meta,
+            prev_tuple,
+            indexes,
+        });
+    }
+
+    pub fn apply_undo(&mut self) -> QuillSQLResult<()> {
+        while let Some(action) = self.undo_actions.pop() {
+            action.undo(self.id)?;
+        }
+        Ok(())
+    }
+
+    pub fn clear_undo(&mut self) {
+        self.undo_actions.clear();
+    }
 }
 
 /// Represents a link to a previous version of this tuple
@@ -101,7 +243,6 @@ impl UndoLink {
 pub struct UndoLog {
     is_deleted: bool,
     modified_fields: Vec<bool>,
-    // TODO: replace Tuple with a more compact redo/undo representation.
     tuple: crate::storage::tuple::Tuple,
     timestamp: u64,
     prev_version: UndoLink,
