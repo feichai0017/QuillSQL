@@ -1,5 +1,5 @@
-app = "quillsql"         # 自定义
-primary_region = "sin"           # 选最近区域
+app = "quillsql"         
+primary_region = "sin"           
 
 [build]
   dockerfile = "Dockerfile"
@@ -21,6 +21,6 @@ primary_region = "sin"           # 选最近区域
   cpus = 1
   memory = "512mb"
 
-[[mounts]]
-  source = "data"
-  destination = "/data"
+# [[mounts]]
+#   source = "data"
+#   destination = "/data"
