@@ -86,7 +86,33 @@ impl TryFrom<&sqlparser::ast::DataType> for DataType {
             | sqlparser::ast::DataType::UnsignedInteger(_) => Ok(DataType::UInt32),
             sqlparser::ast::DataType::UnsignedBigInt(_) => Ok(DataType::UInt64),
             sqlparser::ast::DataType::Float(_) => Ok(DataType::Float32),
-            sqlparser::ast::DataType::Double => Ok(DataType::Float32),
+            sqlparser::ast::DataType::Double => Ok(DataType::Float64),
+            // Accept common custom synonyms like INT32/INT64/UINT32/FLOAT64, etc.
+            sqlparser::ast::DataType::Custom(object_name, _) => {
+                let name = object_name.to_string().to_ascii_lowercase();
+                let dt = match name.as_str() {
+                    "bool" | "boolean" => DataType::Boolean,
+                    "int8" | "tinyint" => DataType::Int8,
+                    "int16" | "smallint" => DataType::Int16,
+                    "int32" | "int" | "integer" => DataType::Int32,
+                    "int64" | "bigint" => DataType::Int64,
+                    "uint8" => DataType::UInt8,
+                    "uint16" => DataType::UInt16,
+                    "uint32" => DataType::UInt32,
+                    "uint64" => DataType::UInt64,
+                    "float32" | "float" => DataType::Float32,
+                    "float64" | "double" => DataType::Float64,
+                    // allow bare varchar without length here
+                    "varchar" => DataType::Varchar(None),
+                    _ => {
+                        return Err(QuillSQLError::NotSupport(format!(
+                            "Not support datatype {}",
+                            value
+                        )))
+                    }
+                };
+                Ok(dt)
+            }
             sqlparser::ast::DataType::Varchar(len) => {
                 Ok(DataType::Varchar(len.map(|l| l.length as usize)))
             }
