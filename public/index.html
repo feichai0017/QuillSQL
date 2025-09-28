@@ -107,6 +107,7 @@
               <option value="explain">Explain Plan</option>
               <option value="schema">Schema Info</option>
               <option value="aggregate">Aggregates & Join</option>
+              <option value="indexdemo">Index Demo</option>
             </select>
             <button id="applyExample" class="secondary">Load Example</button>
             <button id="clear" class="secondary">Clear Results</button>
@@ -261,7 +262,9 @@
         } else if (pick === 'schema') {
           sqlTA.value = `-- Information schema\nSHOW DATABASES;\nSHOW TABLES;\nSELECT table_name FROM information_schema.tables ORDER BY table_name LIMIT 10;`;
         } else if (pick === 'aggregate') {
-          sqlTA.value = `-- Aggregates & Join (non-idempotent if persisted)\nCREATE TABLE customers(id INT32, name VARCHAR(50));\nCREATE TABLE orders(id INT32, customer_id INT32, amount INT32);\nINSERT INTO customers VALUES (1, 'Alice'), (2, 'Bob');\nINSERT INTO orders VALUES (101, 1, 100), (102, 1, 200), (103, 2, 150);\nSELECT c.name, COUNT(o.id) AS cnt, AVG(o.amount) AS avg_amount\nFROM customers c INNER JOIN orders o ON c.id = o.customer_id\nGROUP BY c.name ORDER BY c.name;`;
+          sqlTA.value = `-- Aggregates & Join (non-idempotent if persisted)\nCREATE TABLE customers(id INT32, name VARCHAR(50));\nCREATE TABLE orders(id INT32, customer_id INT32, amount INT32);\nINSERT INTO customers VALUES (1, 'Alice'), (2, 'Bob');\nINSERT INTO orders VALUES (101, 1, 100), (102, 1, 200), (103, 2, 150);\nSELECT customers.name, COUNT(orders.id) AS cnt, AVG(orders.amount) AS avg_amount\nFROM customers INNER JOIN orders ON customers.id = orders.customer_id\nGROUP BY customers.name ORDER BY customers.name;`;
+        } else if (pick === 'indexdemo') {
+          sqlTA.value = `-- Index demo (non-idempotent if persisted)\nCREATE TABLE products(id INT32 NOT NULL, category_id INT32, name VARCHAR(100), price INT32);\nCREATE INDEX idx_products_category ON products(category_id);\nINSERT INTO products VALUES (1, 1, 'Laptop', 1200), (2, 1, 'Mouse', 25), (3, 2, 'Book', 15);\nSELECT id, name FROM products WHERE category_id = 1 ORDER BY id;`;
         }
       });
 
