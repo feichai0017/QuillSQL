@@ -82,11 +82,8 @@ impl TableHeap {
                     return Ok(());
                 };
             let diff_len = end - start;
-            // Threshold: env QUILL_WAL_DELTA_THRESHOLD (bytes), default PAGE_SIZE/16
-            let delta_threshold = std::env::var("QUILL_WAL_DELTA_THRESHOLD")
-                .ok()
-                .and_then(|s| s.parse::<usize>().ok())
-                .unwrap_or(crate::buffer::PAGE_SIZE / 16);
+            // Threshold: centralized default PAGE_SIZE/16 (env removed)
+            let delta_threshold = crate::buffer::PAGE_SIZE / 16;
             let result = if diff_len <= delta_threshold {
                 wal.append_record_with(|ctx| {
                     table_page.set_lsn(ctx.end_lsn);
@@ -448,17 +445,11 @@ impl TableIterator {
         let start = range.start_bound().cloned();
         let end = range.end_bound().cloned();
 
-        // Decide strategy: enable streaming if (env=1) or approx pages >= threshold and full scan
-        let env_stream = std::env::var("QUILL_STREAM_SCAN").ok().as_deref() == Some("1");
+        // Centralized config (remove env): use TableScanConfig defaults
+        let cfg = crate::config::TableScanConfig::default();
         let pool_quarter = (heap.buffer_pool.pool.len().max(1) / 4) as u32;
-        let threshold: u32 = std::env::var("QUILL_STREAM_THRESHOLD")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(pool_quarter.max(1));
-        let readahead: usize = std::env::var("QUILL_STREAM_READAHEAD")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(2);
+        let threshold: u32 = cfg.stream_threshold_pages.unwrap_or(pool_quarter.max(1));
+        let readahead: usize = cfg.readahead_pages;
 
         let approx_pages = heap
             .last_page_id
@@ -472,7 +463,7 @@ impl TableIterator {
         let requested_stream = match streaming_hint {
             Some(true) => true,
             Some(false) => false,
-            None => env_stream || approx_pages >= threshold,
+            None => cfg.stream_scan_enable || approx_pages >= threshold,
         };
         // If explicitly hinted true, allow streaming even for ranged scans. Otherwise only for full scan.
         let use_streaming = if matches!(streaming_hint, Some(true)) {

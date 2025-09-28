@@ -1,10 +1,9 @@
 use axum::{extract::State, http::StatusCode, routing::post, Json, Router};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
-use std::path::PathBuf;
 use std::sync::Arc;
 
-use quill_sql::database::{Database, DatabaseOptions, WalOptions};
+use quill_sql::database::{Database, DatabaseOptions};
 
 /// Shared app state holding a Database protected by a mutex
 #[derive(Clone)]
@@ -49,44 +48,8 @@ fn strip_sql_comments(input: &str) -> String {
 async fn main() {
     env_logger::init();
 
-    // Build database (in-memory temp by default); enable file path via QUILL_DB_FILE
-    let db_options = DatabaseOptions {
-        wal: WalOptions {
-            directory: std::env::var("QUILL_WAL_DIR").ok().map(PathBuf::from),
-            segment_size: std::env::var("QUILL_WAL_SEGMENT_SIZE")
-                .ok()
-                .and_then(|v| v.parse::<u64>().ok()),
-            sync_on_flush: std::env::var("QUILL_WAL_SYNC_ON_FLUSH")
-                .ok()
-                .and_then(|v| parse_env_bool(&v)),
-            writer_interval_ms: std::env::var("QUILL_WAL_WRITER_INTERVAL_MS")
-                .ok()
-                .and_then(|v| match v.parse::<u64>() {
-                    Ok(0) => Some(None),
-                    Ok(ms) => Some(Some(ms)),
-                    Err(_) => None,
-                }),
-            buffer_capacity: std::env::var("QUILL_WAL_BUFFER_CAPACITY")
-                .ok()
-                .and_then(|v| v.parse::<usize>().ok()),
-            flush_coalesce_bytes: std::env::var("QUILL_WAL_FLUSH_COALESCE_BYTES")
-                .ok()
-                .and_then(|v| v.parse::<usize>().ok()),
-            synchronous_commit: std::env::var("QUILL_WAL_SYNCHRONOUS_COMMIT")
-                .ok()
-                .and_then(|v| parse_env_bool(&v)),
-            checkpoint_interval_ms: std::env::var("QUILL_WAL_CHECKPOINT_INTERVAL_MS")
-                .ok()
-                .and_then(|v| match v.parse::<u64>() {
-                    Ok(0) => Some(None),
-                    Ok(ms) => Some(Some(ms)),
-                    Err(_) => None,
-                }),
-            retain_segments: std::env::var("QUILL_WAL_RETAIN_SEGMENTS")
-                .ok()
-                .and_then(|v| v.parse::<usize>().ok()),
-        },
-    };
+    // Build database (in-memory temp by default); WAL config centralized via DatabaseOptions/WalConfig defaults
+    let db_options = DatabaseOptions::default();
 
     let db = if let Ok(path) = std::env::var("QUILL_DB_FILE") {
         Database::new_on_disk_with_options(&path, db_options.clone()).expect("open db file")
@@ -131,13 +94,7 @@ async fn main() {
     .expect("server error");
 }
 
-fn parse_env_bool(value: &str) -> Option<bool> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" | "on" => Some(true),
-        "0" | "false" | "no" | "off" => Some(false),
-        _ => None,
-    }
-}
+// no env parsing for WAL in server; configuration centralized in DatabaseOptions
 
 /// Execute SQL and return rows of strings
 async fn api_sql(
