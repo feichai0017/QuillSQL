@@ -29,22 +29,24 @@ impl LogicalPlanner<'_> {
                     name: col.value.clone(),
                 })),
                 [table, col] => Ok(Expr::Column(ColumnExpr {
-                    relation: Some(TableReference::bare(table.value.clone())),
+                    relation: Some(TableReference::Bare {
+                        table: table.value.clone(),
+                    }),
                     name: col.value.clone(),
                 })),
                 [schema, table, col] => Ok(Expr::Column(ColumnExpr {
-                    relation: Some(TableReference::partial(
-                        schema.value.clone(),
-                        table.value.clone(),
-                    )),
+                    relation: Some(TableReference::Partial {
+                        schema: schema.value.clone(),
+                        table: table.value.clone(),
+                    }),
                     name: col.value.clone(),
                 })),
                 [catalog, schema, table, col] => Ok(Expr::Column(ColumnExpr {
-                    relation: Some(TableReference::full(
-                        catalog.value.clone(),
-                        schema.value.clone(),
-                        table.value.clone(),
-                    )),
+                    relation: Some(TableReference::Full {
+                        catalog: catalog.value.clone(),
+                        schema: schema.value.clone(),
+                        table: table.value.clone(),
+                    }),
                     name: col.value.clone(),
                 })),
                 _ => Err(QuillSQLError::NotSupport(format!(

@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use crate::plan::logical_plan::{
     Aggregate, CreateIndex, CreateTable, EmptyRelation, Filter, Insert, Join, Limit, LogicalPlan,
-    Project, Sort, TableScan, Update, Values,
+    Project, Sort, TableScan, Values,
 };
 
 use crate::execution::physical_plan::{

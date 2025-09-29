@@ -1,4 +1,7 @@
 use crate::error::QuillSQLResult;
+use crate::recovery::wal_record::{
+    HeapDeletePayload, HeapInsertPayload, HeapRecordPayload, HeapUpdatePayload, TupleMetaRepr,
+};
 use crate::recovery::Lsn;
 use crate::storage::codec::TupleCodec;
 use crate::storage::index::btree_index::BPlusTreeIndex;
@@ -8,7 +11,6 @@ use crate::storage::tuple::Tuple;
 use std::sync::Arc;
 
 pub type TransactionId = u64;
-pub const INVALID_TRANSACTION_ID: TransactionId = 0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IsolationLevel {
@@ -27,18 +29,7 @@ pub enum TransactionState {
 }
 
 #[derive(Debug, Clone)]
-pub struct Transaction {
-    id: TransactionId,
-    isolation_level: IsolationLevel,
-    state: TransactionState,
-    synchronous_commit: bool,
-    begin_lsn: Option<Lsn>,
-    last_lsn: Option<Lsn>,
-    undo_actions: Vec<UndoAction>,
-}
-
-#[derive(Debug, Clone)]
-enum UndoAction {
+pub enum UndoAction {
     Insert {
         table: Arc<TableHeap>,
         rid: RecordId,
@@ -62,7 +53,7 @@ enum UndoAction {
 }
 
 impl UndoAction {
-    fn undo(self, txn_id: TransactionId) -> QuillSQLResult<()> {
+    pub fn undo(self, txn_id: TransactionId) -> QuillSQLResult<()> {
         match self {
             UndoAction::Insert {
                 table,
@@ -107,6 +98,62 @@ impl UndoAction {
             }
         }
     }
+
+    pub fn to_heap_payload(&self) -> QuillSQLResult<HeapRecordPayload> {
+        match self {
+            UndoAction::Insert { table, rid, .. } => {
+                let (meta, tuple) = table.full_tuple(*rid)?;
+                Ok(HeapRecordPayload::Delete(HeapDeletePayload {
+                    relation: table.relation_ident(),
+                    page_id: rid.page_id,
+                    slot_id: rid.slot_num as u16,
+                    op_txn_id: meta.insert_txn_id,
+                    old_tuple_meta: TupleMetaRepr::from(meta),
+                    old_tuple_data: Some(TupleCodec::encode(&tuple)),
+                }))
+            }
+            UndoAction::Update {
+                table,
+                rid,
+                prev_meta,
+                prev_tuple,
+                ..
+            } => Ok(HeapRecordPayload::Update(HeapUpdatePayload {
+                relation: table.relation_ident(),
+                page_id: rid.page_id,
+                slot_id: rid.slot_num as u16,
+                op_txn_id: prev_meta.insert_txn_id,
+                new_tuple_meta: TupleMetaRepr::from(*prev_meta),
+                new_tuple_data: TupleCodec::encode(prev_tuple),
+                old_tuple_meta: None,
+                old_tuple_data: None,
+            })),
+            UndoAction::Delete {
+                table,
+                rid,
+                prev_meta,
+                prev_tuple,
+                ..
+            } => Ok(HeapRecordPayload::Insert(HeapInsertPayload {
+                relation: table.relation_ident(),
+                page_id: rid.page_id,
+                slot_id: rid.slot_num as u16,
+                op_txn_id: prev_meta.insert_txn_id,
+                tuple_meta: TupleMetaRepr::from(*prev_meta),
+                tuple_data: TupleCodec::encode(prev_tuple),
+            })),
+        }
+    }
+}
+
+pub struct Transaction {
+    id: TransactionId,
+    isolation_level: IsolationLevel,
+    state: TransactionState,
+    synchronous_commit: bool,
+    begin_lsn: Option<Lsn>,
+    last_lsn: Option<Lsn>,
+    undo_actions: Vec<UndoAction>,
 }
 
 impl Transaction {
@@ -216,34 +263,11 @@ impl Transaction {
         });
     }
 
-    pub fn apply_undo(&mut self) -> QuillSQLResult<()> {
-        while let Some(action) = self.undo_actions.pop() {
-            action.undo(self.id)?;
-        }
-        Ok(())
+    pub fn pop_undo_action(&mut self) -> Option<UndoAction> {
+        self.undo_actions.pop()
     }
 
     pub fn clear_undo(&mut self) {
         self.undo_actions.clear();
     }
-}
-
-/// Represents a link to a previous version of this tuple
-pub struct UndoLink {
-    prev_txn: TransactionId,
-    prev_log_idx: u32,
-}
-
-impl UndoLink {
-    pub fn is_valid(&self) -> bool {
-        self.prev_txn != INVALID_TRANSACTION_ID
-    }
-}
-
-pub struct UndoLog {
-    is_deleted: bool,
-    modified_fields: Vec<bool>,
-    tuple: crate::storage::tuple::Tuple,
-    timestamp: u64,
-    prev_version: UndoLink,
 }

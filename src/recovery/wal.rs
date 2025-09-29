@@ -35,7 +35,7 @@ pub struct WalAppendResult {
     pub end_lsn: Lsn,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct WalRecord {
     pub start_lsn: Lsn,
     pub end_lsn: Lsn,

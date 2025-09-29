@@ -19,7 +19,6 @@ use crate::{
 
 use crate::config::BTreeConfig;
 use crate::recovery::wal_record::{PageDeltaPayload, PageWritePayload, WalRecordPayload};
-use crate::recovery::Lsn;
 use crate::storage::codec::BPlusTreePageTypeCodec;
 pub use crate::storage::index::btree_iterator::TreeIndexIterator;
 use crate::storage::page::BPlusTreePageType;

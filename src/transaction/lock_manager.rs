@@ -2,7 +2,7 @@ use crate::storage::page::RecordId;
 use crate::transaction::{Transaction, TransactionId};
 use crate::utils::table_ref::TableReference;
 use parking_lot::{Condvar, Mutex};
-use std::collections::{hash_map::Entry, HashMap, VecDeque};
+use std::collections::{hash_map::Entry, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -15,7 +15,7 @@ pub enum LockMode {
     SharedIntentionExclusive,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct LockRequest {
     id: u64,
     txn_id: TransactionId,
@@ -55,6 +55,7 @@ pub struct LockManager {
     table_lock_map: Mutex<HashMap<TableReference, Arc<ResourceLock>>>,
     row_lock_map: Mutex<HashMap<RowKey, Arc<ResourceLock>>>,
     request_id: AtomicU64,
+    wait_for: Mutex<HashMap<TransactionId, HashSet<TransactionId>>>,
 }
 
 impl LockManager {
@@ -64,6 +65,7 @@ impl LockManager {
             table_lock_map: Mutex::new(HashMap::new()),
             row_lock_map: Mutex::new(HashMap::new()),
             request_id: AtomicU64::new(1),
+            wait_for: Mutex::new(HashMap::new()),
         }
     }
 
@@ -178,35 +180,31 @@ impl LockManager {
     fn lock_resource(&self, resource: Arc<ResourceLock>, request: LockRequest) -> bool {
         let mut queue_guard = resource.state.lock();
 
-        if let Some(existing) = queue_guard.requests.iter_mut().find(|req| {
+        let mut prev_mode: Option<LockMode> = None;
+        let mut txn_id = request.txn_id;
+        let request_id = if let Some(existing) = queue_guard.requests.iter_mut().find(|req| {
             req.txn_id == request.txn_id
                 && req.rid == request.rid
                 && req.table_ref == request.table_ref
         }) {
-            if existing.mode == request.mode || dominates(existing.mode, request.mode) {
+            if existing.mode == request.mode {
                 return true;
             }
 
-            let req_id = existing.id;
+            if !can_upgrade(existing.mode, request.mode) {
+                return false;
+            }
+
+            prev_mode = Some(existing.mode);
+            txn_id = existing.txn_id;
             existing.mode = request.mode;
             existing.granted = false;
+            existing.id
+        } else {
+            queue_guard.requests.push_back(request);
+            queue_guard.requests.back().map(|req| req.id).unwrap_or(0)
+        };
 
-            loop {
-                if can_grant(&queue_guard.requests, req_id) {
-                    if let Some(target) =
-                        queue_guard.requests.iter_mut().find(|req| req.id == req_id)
-                    {
-                        target.granted = true;
-                    }
-                    resource.condvar.notify_all();
-                    return true;
-                }
-                resource.condvar.wait(&mut queue_guard);
-            }
-        }
-
-        let request_id = request.id;
-        queue_guard.requests.push_back(request);
         loop {
             if can_grant(&queue_guard.requests, request_id) {
                 if let Some(req) = queue_guard
@@ -216,10 +214,73 @@ impl LockManager {
                 {
                     req.granted = true;
                 }
+                self.clear_wait_edges(txn_id);
                 return true;
             }
+            let blockers = blockers_for(&queue_guard.requests, request_id);
+            if self.record_wait(txn_id, &blockers) {
+                if let Some(mode) = prev_mode {
+                    if let Some(req) = queue_guard
+                        .requests
+                        .iter_mut()
+                        .find(|req| req.id == request_id)
+                    {
+                        req.mode = mode;
+                        req.granted = true;
+                    }
+                } else {
+                    queue_guard.requests.retain(|req| req.id != request_id);
+                }
+                resource.condvar.notify_all();
+                self.clear_wait_edges(txn_id);
+                return false;
+            }
             resource.condvar.wait(&mut queue_guard);
+            self.clear_wait_edges(txn_id);
         }
+    }
+
+    fn record_wait(&self, txn_id: TransactionId, blockers: &[TransactionId]) -> bool {
+        let mut wait_for = self.wait_for.lock();
+        let entry = wait_for.entry(txn_id).or_default();
+        entry.clear();
+        entry.extend(blockers.iter().copied());
+        self.has_cycle(&wait_for, txn_id)
+    }
+
+    fn clear_wait_edges(&self, txn: TransactionId) {
+        let mut wait_for = self.wait_for.lock();
+        wait_for.remove(&txn);
+        for edges in wait_for.values_mut() {
+            edges.remove(&txn);
+        }
+    }
+
+    fn has_cycle(
+        &self,
+        wait_for: &HashMap<TransactionId, HashSet<TransactionId>>,
+        start: TransactionId,
+    ) -> bool {
+        fn dfs(
+            graph: &HashMap<TransactionId, HashSet<TransactionId>>,
+            node: TransactionId,
+            start: TransactionId,
+            visited: &mut HashSet<TransactionId>,
+        ) -> bool {
+            if !visited.insert(node) {
+                return false;
+            }
+            if let Some(edges) = graph.get(&node) {
+                for &next in edges {
+                    if next == start || dfs(graph, next, start, visited) {
+                        return true;
+                    }
+                }
+            }
+            visited.remove(&node);
+            false
+        }
+        dfs(wait_for, start, start, &mut HashSet::new())
     }
 
     fn unlock_table_internal(&self, txn_id: TransactionId, table_ref: TableReference) -> bool {
@@ -331,9 +392,45 @@ fn can_grant(queue: &VecDeque<LockRequest>, request_id: u64) -> bool {
     true
 }
 
+fn blockers_for(queue: &VecDeque<LockRequest>, request_id: u64) -> Vec<TransactionId> {
+    let Some((position, target)) = queue
+        .iter()
+        .enumerate()
+        .find(|(_, req)| req.id == request_id)
+    else {
+        return Vec::new();
+    };
+    queue
+        .iter()
+        .take(position)
+        .filter(|req| req.granted && req.txn_id != target.txn_id)
+        .map(|req| req.txn_id)
+        .collect()
+}
+
+fn can_upgrade(held: LockMode, requested: LockMode) -> bool {
+    matches!(
+        (held, requested),
+        (LockMode::Shared, LockMode::Exclusive)
+            | (LockMode::Shared, LockMode::SharedIntentionExclusive)
+            | (LockMode::IntentionShared, LockMode::IntentionExclusive)
+            | (
+                LockMode::IntentionShared,
+                LockMode::SharedIntentionExclusive
+            )
+            | (
+                LockMode::IntentionExclusive,
+                LockMode::SharedIntentionExclusive
+            )
+    )
+}
+
 fn modes_compatible(requested: LockMode, held: LockMode) -> bool {
     match requested {
-        LockMode::Shared => matches!(held, LockMode::Shared | LockMode::IntentionShared),
+        LockMode::Shared => matches!(
+            held,
+            LockMode::Shared | LockMode::IntentionShared | LockMode::SharedIntentionExclusive
+        ),
         LockMode::Exclusive => false,
         LockMode::IntentionShared => matches!(
             held,
@@ -352,29 +449,11 @@ fn modes_compatible(requested: LockMode, held: LockMode) -> bool {
     }
 }
 
-fn dominates(held: LockMode, requested: LockMode) -> bool {
-    match held {
-        LockMode::Exclusive => true,
-        LockMode::SharedIntentionExclusive => matches!(
-            requested,
-            LockMode::Shared
-                | LockMode::IntentionShared
-                | LockMode::IntentionExclusive
-                | LockMode::SharedIntentionExclusive
-        ),
-        LockMode::Shared => matches!(requested, LockMode::Shared | LockMode::IntentionShared),
-        LockMode::IntentionExclusive => matches!(
-            requested,
-            LockMode::IntentionExclusive | LockMode::IntentionShared
-        ),
-        LockMode::IntentionShared => matches!(requested, LockMode::IntentionShared),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::transaction::{IsolationLevel, Transaction};
+    use crate::utils::table_ref::TableReference;
     use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
     use std::sync::Arc;
     use std::thread;
@@ -387,7 +466,9 @@ mod tests {
     #[test]
     fn shared_locks_are_compatible() {
         let manager = LockManager::new();
-        let table = TableReference::bare("t_shared");
+        let table = TableReference::Bare {
+            table: "t_shared".to_string(),
+        };
         let txn1 = new_txn(1);
         let txn2 = new_txn(2);
 
@@ -401,7 +482,9 @@ mod tests {
     #[test]
     fn exclusive_waits_for_shared() {
         let manager = Arc::new(LockManager::new());
-        let table = TableReference::bare("t_block");
+        let table = TableReference::Bare {
+            table: "t_block".to_string(),
+        };
         let txn1 = new_txn(10);
         let txn2 = new_txn(20);
 
@@ -431,7 +514,9 @@ mod tests {
     #[test]
     fn row_lock_conflict_blocks() {
         let manager = Arc::new(LockManager::new());
-        let table = TableReference::bare("t_row");
+        let table = TableReference::Bare {
+            table: "t_row".to_string(),
+        };
         let rid = RecordId::new(1, 1);
         let writer = new_txn(100);
         let reader = new_txn(200);
