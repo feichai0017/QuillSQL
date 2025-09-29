@@ -24,9 +24,15 @@ impl PhysicalPlanner<'_> {
 
     fn build_plan(&self, logical_plan: Arc<LogicalPlan>) -> PhysicalPlan {
         let plan = match logical_plan.as_ref() {
-            LogicalPlan::CreateTable(CreateTable { name, columns }) => PhysicalPlan::CreateTable(
-                PhysicalCreateTable::new(name.clone(), Schema::new(columns.clone())),
-            ),
+            LogicalPlan::CreateTable(CreateTable {
+                name,
+                columns,
+                if_not_exists,
+            }) => PhysicalPlan::CreateTable(PhysicalCreateTable::new(
+                name.clone(),
+                Schema::new(columns.clone()),
+                *if_not_exists,
+            )),
             LogicalPlan::CreateIndex(CreateIndex {
                 index_name,
                 table,

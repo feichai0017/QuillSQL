@@ -739,7 +739,7 @@ fn fill_stream_ring(
         for slot in start_slot..page.header.num_tuples as usize {
             let rid = RecordId::new(pid, slot as u32);
             let (meta, t) = page.tuple(slot as u16)?;
-            if !Tuple::is_visible(&meta, 0) {
+            if meta.is_deleted {
                 continue;
             }
             ring.push((rid, t));

@@ -12,10 +12,15 @@ use std::sync::Arc;
 pub struct PhysicalCreateTable {
     pub table: TableReference,
     pub schema: Schema,
+    pub if_not_exists: bool,
 }
 
 impl VolcanoExecutor for PhysicalCreateTable {
     fn next(&self, context: &mut ExecutionContext) -> QuillSQLResult<Option<Tuple>> {
+        if self.if_not_exists && context.catalog.try_table_heap(&self.table).is_some() {
+            return Ok(None);
+        }
+
         context
             .catalog
             .create_table(self.table.clone(), Arc::new(self.schema.clone()))?;

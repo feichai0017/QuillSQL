@@ -15,9 +15,12 @@ pub struct LogicalPlanner<'a> {
 impl<'a> LogicalPlanner<'a> {
     pub fn plan(&mut self, stmt: &ast::Statement) -> QuillSQLResult<LogicalPlan> {
         match stmt {
-            ast::Statement::CreateTable { name, columns, .. } => {
-                self.plan_create_table(name, columns)
-            }
+            ast::Statement::CreateTable {
+                name,
+                columns,
+                if_not_exists,
+                ..
+            } => self.plan_create_table(name, columns, *if_not_exists),
             ast::Statement::CreateIndex {
                 name,
                 table_name,

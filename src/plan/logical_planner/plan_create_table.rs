@@ -13,6 +13,7 @@ impl<'a> LogicalPlanner<'a> {
         &self,
         name: &sqlparser::ast::ObjectName,
         column_defs: &Vec<sqlparser::ast::ColumnDef>,
+        if_not_exists: bool,
     ) -> QuillSQLResult<LogicalPlan> {
         let name = self.bind_table_name(name)?;
         let mut columns = vec![];
@@ -55,7 +56,11 @@ impl<'a> LogicalPlanner<'a> {
         }
 
         check_column_name_conflict(&columns)?;
-        Ok(LogicalPlan::CreateTable(CreateTable { name, columns }))
+        Ok(LogicalPlan::CreateTable(CreateTable {
+            name,
+            columns,
+            if_not_exists,
+        }))
     }
 }
 

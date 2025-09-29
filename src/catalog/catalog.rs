@@ -225,6 +225,17 @@ impl Catalog {
         Ok(catalog_table.table.clone())
     }
 
+    pub fn try_table_heap(&self, table_ref: &TableReference) -> Option<Arc<TableHeap>> {
+        let schema_name = table_ref
+            .schema()
+            .unwrap_or(DEFAULT_SCHEMA_NAME)
+            .to_string();
+        self.schemas
+            .get(&schema_name)
+            .and_then(|schema| schema.tables.get(table_ref.table()))
+            .map(|catalog_table| catalog_table.table.clone())
+    }
+
     pub fn table_indexes(
         &self,
         table_ref: &TableReference,
