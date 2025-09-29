@@ -225,6 +225,17 @@ impl Catalog {
         Ok(catalog_table.table.clone())
     }
 
+    pub fn try_table_heap(&self, table_ref: &TableReference) -> Option<Arc<TableHeap>> {
+        let schema_name = table_ref
+            .schema()
+            .unwrap_or(DEFAULT_SCHEMA_NAME)
+            .to_string();
+        self.schemas
+            .get(&schema_name)
+            .and_then(|schema| schema.tables.get(table_ref.table()))
+            .map(|catalog_table| catalog_table.table.clone())
+    }
+
     pub fn table_indexes(
         &self,
         table_ref: &TableReference,
@@ -429,7 +440,9 @@ mod tests {
     pub fn test_catalog_create_table() {
         let mut db = Database::new_temp().unwrap();
 
-        let table_ref1 = TableReference::bare("test_table1");
+        let table_ref1 = TableReference::Bare {
+            table: "test_table1".to_string(),
+        };
         let schema = Arc::new(Schema::new(vec![
             Column::new("a", DataType::Int8, true),
             Column::new("b", DataType::Int16, true),
@@ -441,7 +454,9 @@ mod tests {
             .unwrap();
         assert_eq!(table_info.schema, schema);
 
-        let table_ref2 = TableReference::bare("test_table2");
+        let table_ref2 = TableReference::Bare {
+            table: "test_table2".to_string(),
+        };
         let schema = Arc::new(Schema::new(vec![
             Column::new("d", DataType::Int32, true),
             Column::new("e", DataType::Int16, true),
@@ -464,7 +479,9 @@ mod tests {
     pub fn test_catalog_create_index() {
         let mut db = Database::new_temp().unwrap();
 
-        let table_ref = TableReference::bare("test_table1");
+        let table_ref = TableReference::Bare {
+            table: "test_table1".to_string(),
+        };
         let schema = Arc::new(Schema::new(vec![
             Column::new("a", DataType::Int8, true),
             Column::new("b", DataType::Int16, true),

@@ -24,31 +24,6 @@ pub enum TableReference {
 }
 
 impl TableReference {
-    pub fn bare(table: impl Into<String>) -> Self {
-        Self::Bare {
-            table: table.into(),
-        }
-    }
-
-    pub fn partial(schema: impl Into<String>, table: impl Into<String>) -> Self {
-        Self::Partial {
-            schema: schema.into(),
-            table: table.into(),
-        }
-    }
-
-    pub fn full(
-        catalog: impl Into<String>,
-        schema: impl Into<String>,
-        table: impl Into<String>,
-    ) -> Self {
-        Self::Full {
-            catalog: catalog.into(),
-            schema: schema.into(),
-            table: table.into(),
-        }
-    }
-
     pub fn table(&self) -> &str {
         match self {
             Self::Full { table, .. } | Self::Partial { table, .. } | Self::Bare { table } => table,

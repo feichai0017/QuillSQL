@@ -235,7 +235,11 @@ fn load_user_tables(db: &mut Database) -> QuillSQLResult<()> {
             last_page_id: AtomicPageId::new(last_page_id),
         };
         db.catalog.load_table(
-            TableReference::full(catalog, table_schema, table_name),
+            TableReference::Full {
+                catalog: catalog.to_string(),
+                schema: table_schema.to_string(),
+                table: table_name.to_string(),
+            },
             CatalogTable::new(table_name, Arc::new(table_heap)),
         )?;
     }
@@ -277,7 +281,11 @@ fn load_user_indexes(db: &mut Database) -> QuillSQLResult<()> {
             return error;
         };
 
-        let table_ref = TableReference::full(catalog_name, table_schema_name, table_name);
+        let table_ref = TableReference::Full {
+            catalog: catalog_name.clone(),
+            schema: table_schema_name.clone(),
+            table: table_name.clone(),
+        };
         let table_schema = db.catalog.table_heap(&table_ref)?.schema.clone();
         let key_schema = Arc::new(parse_key_schema_from_varchar(
             key_schema_str.as_str(),

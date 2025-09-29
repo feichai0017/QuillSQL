@@ -114,7 +114,7 @@ impl TableHeap {
         Ok(())
     }
 
-    fn relation_ident(&self) -> RelationIdent {
+    pub(crate) fn relation_ident(&self) -> RelationIdent {
         RelationIdent {
             root_page_id: self.first_page_id.load(Ordering::SeqCst),
         }
@@ -122,7 +122,8 @@ impl TableHeap {
 
     fn append_heap_record(&self, payload: HeapRecordPayload) -> QuillSQLResult<()> {
         if let Some(wal) = self.buffer_pool.wal_manager() {
-            wal.append_record_with(|_| WalRecordPayload::Heap(payload.clone()))?;
+            let _wal_result =
+                wal.append_record_with(|_| WalRecordPayload::Heap(payload.clone()))?;
         }
         Ok(())
     }
@@ -149,44 +150,33 @@ impl TableHeap {
                 TablePageCodec::decode(&current_page_guard.data, self.schema.clone())?.0;
             table_page.set_lsn(current_page_guard.page_lsn);
 
-            // If there's space, insert the tuple.
             if table_page.next_tuple_offset(tuple).is_ok() {
                 let tuple_bytes = TupleCodec::encode(tuple);
                 let slot_id = table_page.insert_tuple(meta, tuple)?;
                 let relation = self.relation_ident();
                 let tuple_meta = TupleMetaRepr::from(*meta);
-                self.append_heap_record(HeapRecordPayload::Insert(HeapInsertPayload {
+                let payload = HeapRecordPayload::Insert(HeapInsertPayload {
                     relation,
                     page_id: current_page_id,
                     slot_id,
                     op_txn_id: meta.insert_txn_id,
                     tuple_meta,
                     tuple_data: tuple_bytes,
-                }))?;
+                });
+                self.append_heap_record(payload.clone())?;
                 self.write_back_page(current_page_id, &mut current_page_guard, &mut table_page)?;
                 return Ok(RecordId::new(current_page_id, slot_id as u32));
             }
 
-            // If the page is full, allocate a new one and link it.
             let mut new_page_guard = self.buffer_pool.new_page()?;
             let new_page_id = new_page_guard.page_id();
-
-            // Initialize the new page.
             let mut new_table_page = TablePage::new(self.schema.clone(), INVALID_PAGE_ID);
             self.write_back_page(new_page_id, &mut new_page_guard, &mut new_table_page)?;
-            // new_page_guard is already a write guard, so we can modify its data.
-            // We'll let it drop at the end of the *next* loop iteration (or when the function returns).
-            // But for now, we must write our changes to it.
-            // We don't need to do this here because the page is already blank.
 
-            // Update the old page to point to the new one.
             table_page.header.next_page_id = new_page_id;
             self.write_back_page(current_page_id, &mut current_page_guard, &mut table_page)?;
-
-            // The `current_page_guard` will be dropped here, saving the changes.
             drop(current_page_guard);
 
-            // Update the atomic last_page_id and continue the loop.
             self.last_page_id.store(new_page_id, Ordering::SeqCst);
             current_page_id = new_page_id;
         }
@@ -208,7 +198,7 @@ impl TableHeap {
             relation,
             page_id: rid.page_id,
             slot_id: slot,
-            op_txn_id: new_meta.insert_txn_id, // best-effort; op id carried separately if needed
+            op_txn_id: new_meta.insert_txn_id,
             new_tuple_meta: TupleMetaRepr::from(new_meta),
             new_tuple_data: new_tuple_bytes,
             old_tuple_meta: Some(TupleMetaRepr::from(old_meta)),
@@ -450,6 +440,8 @@ impl TableHeap {
             return Ok(());
         }
         meta.is_deleted = true;
+        // capture old meta before mutation for WAL logging
+        let old_meta = meta;
         meta.delete_txn_id = txn_id;
         table_page.update_tuple_meta(meta, slot)?;
         let old_tuple_bytes = TupleCodec::encode(&tuple);
@@ -460,7 +452,7 @@ impl TableHeap {
             page_id: rid.page_id,
             slot_id: slot,
             op_txn_id: txn_id,
-            old_tuple_meta: TupleMetaRepr::from(meta),
+            old_tuple_meta: TupleMetaRepr::from(old_meta),
             old_tuple_data: Some(old_tuple_bytes),
         });
         self.append_heap_record(payload)?;
@@ -745,11 +737,12 @@ fn fill_stream_ring(
             0
         };
         for slot in start_slot..page.header.num_tuples as usize {
-            if !page.header.tuple_infos[slot].meta.is_deleted {
-                let rid = RecordId::new(pid, slot as u32);
-                let (_m, t) = page.tuple(slot as u16)?;
-                ring.push((rid, t));
+            let rid = RecordId::new(pid, slot as u32);
+            let (meta, t) = page.tuple(slot as u16)?;
+            if meta.is_deleted {
+                continue;
             }
+            ring.push((rid, t));
         }
         pid = page.header.next_page_id;
     }

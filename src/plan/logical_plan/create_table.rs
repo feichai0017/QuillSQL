@@ -5,6 +5,7 @@ use crate::utils::table_ref::TableReference;
 pub struct CreateTable {
     pub name: TableReference,
     pub columns: Vec<Column>,
+    pub if_not_exists: bool,
 }
 
 impl std::fmt::Display for CreateTable {

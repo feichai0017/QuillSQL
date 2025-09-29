@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use crate::plan::logical_plan::{
     Aggregate, CreateIndex, CreateTable, EmptyRelation, Filter, Insert, Join, Limit, LogicalPlan,
-    Project, Sort, TableScan, Update, Values,
+    Project, Sort, TableScan, Values,
 };
 
 use crate::execution::physical_plan::{
@@ -24,9 +24,15 @@ impl PhysicalPlanner<'_> {
 
     fn build_plan(&self, logical_plan: Arc<LogicalPlan>) -> PhysicalPlan {
         let plan = match logical_plan.as_ref() {
-            LogicalPlan::CreateTable(CreateTable { name, columns }) => PhysicalPlan::CreateTable(
-                PhysicalCreateTable::new(name.clone(), Schema::new(columns.clone())),
-            ),
+            LogicalPlan::CreateTable(CreateTable {
+                name,
+                columns,
+                if_not_exists,
+            }) => PhysicalPlan::CreateTable(PhysicalCreateTable::new(
+                name.clone(),
+                Schema::new(columns.clone()),
+                *if_not_exists,
+            )),
             LogicalPlan::CreateIndex(CreateIndex {
                 index_name,
                 table,

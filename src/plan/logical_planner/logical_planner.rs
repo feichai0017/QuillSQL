@@ -15,9 +15,12 @@ pub struct LogicalPlanner<'a> {
 impl<'a> LogicalPlanner<'a> {
     pub fn plan(&mut self, stmt: &ast::Statement) -> QuillSQLResult<LogicalPlan> {
         match stmt {
-            ast::Statement::CreateTable { name, columns, .. } => {
-                self.plan_create_table(name, columns)
-            }
+            ast::Statement::CreateTable {
+                name,
+                columns,
+                if_not_exists,
+                ..
+            } => self.plan_create_table(name, columns, *if_not_exists),
             ast::Statement::CreateIndex {
                 name,
                 table_name,
@@ -82,16 +85,18 @@ impl<'a> LogicalPlanner<'a> {
 
     pub fn bind_table_name(&self, table_name: &ast::ObjectName) -> QuillSQLResult<TableReference> {
         match table_name.0.as_slice() {
-            [table] => Ok(TableReference::bare(table.value.clone())),
-            [schema, table] => Ok(TableReference::partial(
-                schema.value.clone(),
-                table.value.clone(),
-            )),
-            [catalog, schema, table] => Ok(TableReference::full(
-                catalog.value.clone(),
-                schema.value.clone(),
-                table.value.clone(),
-            )),
+            [table] => Ok(TableReference::Bare {
+                table: table.value.clone(),
+            }),
+            [schema, table] => Ok(TableReference::Partial {
+                schema: schema.value.clone(),
+                table: table.value.clone(),
+            }),
+            [catalog, schema, table] => Ok(TableReference::Full {
+                catalog: catalog.value.clone(),
+                schema: schema.value.clone(),
+                table: table.value.clone(),
+            }),
             _ => Err(QuillSQLError::Plan(format!(
                 "Fail to plan table name: {}",
                 table_name

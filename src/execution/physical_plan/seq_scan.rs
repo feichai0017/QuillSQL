@@ -3,7 +3,7 @@ use std::sync::Mutex;
 use crate::catalog::SchemaRef;
 use crate::error::QuillSQLError;
 use crate::storage::table_heap::TableIterator;
-use crate::transaction::{LockMode, TransactionId};
+use crate::transaction::LockMode;
 use crate::utils::table_ref::TableReference;
 use crate::{
     error::QuillSQLResult,

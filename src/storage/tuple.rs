@@ -48,7 +48,7 @@ impl Tuple {
 
     pub fn is_visible(meta: &TupleMeta, txn_id: TransactionId) -> bool {
         if meta.is_deleted {
-            return meta.delete_txn_id == txn_id;
+            return false;
         }
         meta.insert_txn_id <= txn_id
     }

@@ -1,2 +1,5 @@
 statement ok
 create table t(v1 int, v2 int, v3 int)
+
+statement ok
+create table if not exists t

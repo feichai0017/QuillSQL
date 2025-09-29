@@ -3,7 +3,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::error::{QuillSQLError, QuillSQLResult};
-use crate::recovery::wal_record::{TransactionPayload, TransactionRecordKind, WalRecordPayload};
+use crate::recovery::wal_record::{
+    ClrPayload, TransactionPayload, TransactionRecordKind, WalRecordPayload,
+};
 use crate::recovery::{Lsn, WalManager};
 use crate::storage::page::RecordId;
 use crate::transaction::{
@@ -186,9 +188,28 @@ impl TransactionManager {
             TransactionState::Running | TransactionState::Tainted => {}
         }
 
-        txn.apply_undo()?;
-
         let txn_id = txn.id();
+        let mut undo_next: Option<Lsn> = None;
+        while let Some(action) = txn.pop_undo_action() {
+            let payload = action.to_heap_payload()?;
+            let clr_result = self.wal.append_record_with(|ctx| {
+                txn.record_lsn(ctx.end_lsn);
+                WalRecordPayload::Clr(ClrPayload {
+                    txn_id,
+                    undone_lsn: ctx.start_lsn,
+                    undo_next_lsn: undo_next.unwrap_or(0),
+                })
+            })?;
+            txn.record_lsn(clr_result.end_lsn);
+            let heap_result = self.wal.append_record_with(|ctx| {
+                txn.record_lsn(ctx.end_lsn);
+                WalRecordPayload::Heap(payload.clone())
+            })?;
+            txn.record_lsn(heap_result.end_lsn);
+            action.undo(txn_id)?;
+            undo_next = Some(heap_result.start_lsn);
+        }
+
         let append = self.wal.append_record_with(|_| {
             WalRecordPayload::Transaction(TransactionPayload {
                 marker: TransactionRecordKind::Abort,
@@ -276,6 +297,11 @@ mod tests {
     use crate::recovery::WalManager;
     use crate::storage::disk_manager::DiskManager;
     use crate::storage::disk_scheduler::DiskScheduler;
+    use crate::storage::table_heap::TableHeap;
+    use crate::{
+        buffer::BufferPoolManager,
+        catalog::{Schema, SchemaRef},
+    };
     use std::path::Path;
     use tempfile::TempDir;
 
