@@ -8,6 +8,7 @@ use crate::storage::index::btree_index::BPlusTreeIndex;
 use crate::storage::page::{RecordId, TupleMeta};
 use crate::storage::table_heap::TableHeap;
 use crate::storage::tuple::Tuple;
+use std::str::FromStr;
 use std::sync::Arc;
 
 pub type TransactionId = u64;
@@ -18,6 +19,31 @@ pub enum IsolationLevel {
     ReadCommitted,
     SnapshotIsolation,
     Serializable,
+}
+
+impl IsolationLevel {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            IsolationLevel::ReadUncommitted => "read-uncommitted",
+            IsolationLevel::ReadCommitted => "read-committed",
+            IsolationLevel::SnapshotIsolation => "snapshot-isolation",
+            IsolationLevel::Serializable => "serializable",
+        }
+    }
+}
+
+impl FromStr for IsolationLevel {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "read-uncommitted" | "ru" => Ok(IsolationLevel::ReadUncommitted),
+            "read-committed" | "rc" => Ok(IsolationLevel::ReadCommitted),
+            "snapshot-isolation" | "si" => Ok(IsolationLevel::SnapshotIsolation),
+            "serializable" | "sr" | "serial" => Ok(IsolationLevel::Serializable),
+            other => Err(format!("unknown isolation level '{}'", other)),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

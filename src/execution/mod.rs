@@ -48,9 +48,34 @@ impl<'a> ExecutionContext<'a> {
         Ok(())
     }
 
-    pub fn lock_row_shared(&mut self, table: &TableReference, rid: crate::storage::page::RecordId) {
+    pub fn lock_row_shared(
+        &mut self,
+        table: &TableReference,
+        rid: crate::storage::page::RecordId,
+        retain: bool,
+    ) -> QuillSQLResult<()> {
+        let acquired =
+            self.txn_mgr
+                .try_acquire_row_lock(self.txn, table.clone(), rid, LockMode::Shared)?;
+        if !acquired {
+            return Err(QuillSQLError::Execution(
+                "failed to acquire shared row lock".to_string(),
+            ));
+        }
+        if retain {
+            self.txn_mgr
+                .record_shared_row_lock(self.txn.id(), table.clone(), rid);
+        }
+        Ok(())
+    }
+
+    pub fn unlock_row_shared(
+        &mut self,
+        table: &TableReference,
+        rid: crate::storage::page::RecordId,
+    ) -> QuillSQLResult<()> {
         self.txn_mgr
-            .record_row_lock(self.txn.id(), table.clone(), rid, LockMode::Shared);
+            .try_unlock_shared_row(self.txn.id(), table, rid)
     }
 
     pub fn lock_row_exclusive(

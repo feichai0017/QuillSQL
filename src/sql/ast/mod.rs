@@ -12,3 +12,4 @@ pub use sqlparser::ast::Statement;
 pub use sqlparser::ast::TableConstraint;
 pub use sqlparser::ast::UnaryOperator;
 pub use sqlparser::ast::Value;
+pub use sqlparser::ast::TransactionMode;

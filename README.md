@@ -126,6 +126,7 @@ Minimal environment variables (runtime only)
 - PORT: bind port (overrides the port of `QUILL_HTTP_ADDR`)
 - QUILL_HTTP_ADDR: listen address (default `0.0.0.0:8080`)
 - QUILL_DB_FILE: path to database file (uses a temp DB if unset)
+- QUILL_DEFAULT_ISOLATION: default isolation level for the HTTP server session (`read-uncommitted`, `read-committed`, `snapshot-isolation`, `serializable`)
 - RUST_LOG: log level (e.g., info, debug)
 
 Example (Rust)

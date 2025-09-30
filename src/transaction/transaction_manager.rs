@@ -58,10 +58,6 @@ impl TransactionManager {
         }
     }
 
-    pub fn lock_manager(&self) -> Arc<LockManager> {
-        self.lock_manager.clone()
-    }
-
     pub fn begin(&self, isolation_level: IsolationLevel) -> QuillSQLResult<Transaction> {
         let txn_id = self.next_txn_id.fetch_add(1, Ordering::SeqCst);
         if txn_id == 0 {
@@ -273,6 +269,34 @@ impl TransactionManager {
             .entry(txn_id)
             .or_insert_with(HeldLocks::default);
         entry.shared_rows.insert((table, rid));
+    }
+
+    pub fn remove_shared_row_lock(
+        &self,
+        txn_id: TransactionId,
+        table: &TableReference,
+        rid: RecordId,
+    ) {
+        if let Some(mut entry) = self.held_locks.get_mut(&txn_id) {
+            entry.shared_rows.remove(&(table.clone(), rid));
+        }
+    }
+
+    pub fn try_unlock_shared_row(
+        &self,
+        txn_id: TransactionId,
+        table: &TableReference,
+        rid: RecordId,
+    ) -> QuillSQLResult<()> {
+        let unlocked = self.lock_manager.unlock_row_raw(txn_id, table.clone(), rid);
+        if !unlocked {
+            return Err(QuillSQLError::Execution(format!(
+                "failed to release shared row lock for txn {} on {}",
+                txn_id, table
+            )));
+        }
+        self.remove_shared_row_lock(txn_id, table, rid);
+        Ok(())
     }
 
     fn release_all_locks(&self, txn_id: TransactionId) {

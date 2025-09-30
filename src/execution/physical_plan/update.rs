@@ -8,6 +8,7 @@ use crate::transaction::LockMode;
 use crate::utils::scalar::ScalarValue;
 use crate::utils::table_ref::TableReference;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
 
@@ -83,12 +84,7 @@ impl VolcanoExecutor for PhysicalUpdate {
                     continue;
                 }
 
-                context.txn_mgr.record_row_lock(
-                    context.txn.id(),
-                    self.table.clone(),
-                    rid,
-                    LockMode::Exclusive,
-                );
+                context.lock_row_exclusive(&self.table, rid)?;
 
                 let prev_tuple = tuple.clone();
                 let prev_meta = meta;
@@ -104,17 +100,37 @@ impl VolcanoExecutor for PhysicalUpdate {
 
                 let mut new_keys = Vec::new();
                 let mut old_keys = Vec::new();
+                let changed_cols: HashSet<&str> =
+                    self.assignments.keys().map(|s| s.as_str()).collect();
                 let indexes = context.catalog.table_indexes(&self.table)?;
                 for index in indexes {
+                    // Skip indexes whose key columns are not affected by this update
+                    let affected = index
+                        .key_schema
+                        .columns
+                        .iter()
+                        .any(|c| changed_cols.contains(c.name.as_str()));
+                    if !affected {
+                        continue;
+                    }
+
                     let old_key = prev_tuple
                         .project_with_schema(index.key_schema.clone())
                         .ok();
                     let new_key = tuple.project_with_schema(index.key_schema.clone()).ok();
-                    if let Some(old_key_tuple) = old_key.clone() {
+
+                    // Skip maintenance when key values are unchanged
+                    if let (Some(ref ok), Some(ref nk)) = (&old_key, &new_key) {
+                        if ok.data == nk.data {
+                            continue;
+                        }
+                    }
+
+                    if let Some(old_key_tuple) = old_key {
                         index.delete(&old_key_tuple)?;
                         old_keys.push((index.clone(), old_key_tuple));
                     }
-                    if let Some(new_key_tuple) = new_key.clone() {
+                    if let Some(new_key_tuple) = new_key {
                         index.insert(&new_key_tuple, rid)?;
                         new_keys.push((index.clone(), new_key_tuple));
                     }

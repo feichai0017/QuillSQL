@@ -41,9 +41,10 @@ pub struct WalOptions {
     pub retain_segments: Option<usize>,
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct DatabaseOptions {
     pub wal: WalOptions,
+    pub default_isolation_level: Option<IsolationLevel>,
 }
 
 pub struct Database {
@@ -51,6 +52,7 @@ pub struct Database {
     pub(crate) catalog: Catalog,
     pub(crate) wal_manager: Arc<WalManager>,
     pub(crate) transaction_manager: Arc<TransactionManager>,
+    default_isolation: IsolationLevel,
     temp_dir: Option<TempDir>,
     checkpoint_stop: Arc<AtomicBool>,
     checkpoint_handle: Option<thread::JoinHandle<()>>,
@@ -132,6 +134,9 @@ impl Database {
             catalog,
             wal_manager,
             transaction_manager,
+            default_isolation: options
+                .default_isolation_level
+                .unwrap_or(IsolationLevel::ReadUncommitted),
             temp_dir: None,
             checkpoint_stop,
             checkpoint_handle,
@@ -218,6 +223,9 @@ impl Database {
             catalog,
             wal_manager,
             transaction_manager,
+            default_isolation: options
+                .default_isolation_level
+                .unwrap_or(IsolationLevel::ReadUncommitted),
             temp_dir: Some(temp_dir),
             checkpoint_stop,
             checkpoint_handle,
@@ -251,9 +259,7 @@ impl Database {
             pretty_format_physical_plan(&physical_plan)
         );
 
-        let mut txn = self
-            .transaction_manager
-            .begin(IsolationLevel::ReadUncommitted)?;
+        let mut txn = self.transaction_manager.begin(self.default_isolation)?;
         let execution_ctx =
             ExecutionContext::new(&mut self.catalog, &mut txn, &self.transaction_manager);
         let mut execution_engine = ExecutionEngine {

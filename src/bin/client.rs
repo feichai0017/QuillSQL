@@ -1,9 +1,11 @@
 use clap::Parser;
 use quill_sql::database::{Database, DatabaseOptions, WalOptions};
+use quill_sql::transaction::IsolationLevel;
 use quill_sql::utils::util::pretty_format_tuples;
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
 use std::path::PathBuf;
+use std::str::FromStr;
 
 #[derive(Debug, Parser, PartialEq)]
 #[clap(author, version, about, long_about= None)]
@@ -35,6 +37,12 @@ struct Args {
     wal_checkpoint_interval_ms: Option<u64>,
     #[clap(long, help = "Number of WAL segments to retain on disk")]
     wal_retain_segments: Option<usize>,
+    #[clap(
+        long,
+        help = "Default isolation level (read-uncommitted|read-committed|snapshot-isolation|serializable)",
+        value_name = "LEVEL"
+    )]
+    isolation_level: Option<String>,
 }
 
 fn main() {
@@ -64,7 +72,16 @@ fn main() {
         }),
         retain_segments: args.wal_retain_segments,
     };
-    let db_options = DatabaseOptions { wal: wal_options };
+    let default_isolation_level = args
+        .isolation_level
+        .as_deref()
+        .map(IsolationLevel::from_str)
+        .transpose()
+        .unwrap_or_else(|e| panic!("invalid isolation level: {}", e));
+    let db_options = DatabaseOptions {
+        wal: wal_options,
+        default_isolation_level,
+    };
 
     let mut db = if let Some(path) = args.file {
         Database::new_on_disk_with_options(path.as_str(), db_options.clone())
