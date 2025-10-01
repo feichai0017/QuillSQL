@@ -4,700 +4,835 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>QuillSQL Console</title>
+  <title>QUILLSQL</title>
   <style>
     :root {
-      --bg: #0b0f19;
-      --panel: #111826;
-      --panel-dark: #0e1422;
-      --border: #1f2937;
-      --text: #cbd5e1;
-      --text-bright: #e2e8f0;
-      --muted: #8b9bb3;
-      --accent: #00e5ff;
-      --accent-hover: #00c4e6;
-      --success: #22d3ee;
-      --warning: #f59e0b;
-      --error: #ef4444;
-      --sql-keyword: #60a5fa;
-      --sql-string: #f472b6;
-      --sql-comment: #34d399;
-      --grid: rgba(148, 163, 184, 0.08);
+      --bg: #040607;
+      --surface: #05090b;
+      --surface-lite: #0b1014;
+      --border: #131c22;
+      --text: #d1f0ff;
+      --text-muted: #6c8593;
+      --accent: #27f79a;
+      --accent-soft: rgba(39, 247, 154, 0.16);
+      --accent-strong: rgba(39, 247, 154, 0.7);
+      --warning: #f7c948;
+      --error: #ff7b72;
+      --success: #2ee6c5;
+      --scanline: rgba(39, 247, 154, 0.045);
     }
 
     * {
       box-sizing: border-box;
     }
 
+    html,
     body {
-      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
       margin: 0;
-      background: var(--bg);
+      height: 100%;
+      background: radial-gradient(circle at 50% -20%, rgba(39, 247, 154, 0.22), transparent 60%), var(--bg);
       color: var(--text);
-      height: 100vh;
-      overflow: hidden;
-      position: relative;
+      font-family: "JetBrains Mono", "Fira Mono", "SFMono-Regular", Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      letter-spacing: 0.02em;
+      -webkit-font-smoothing: antialiased;
     }
 
     body::before {
       content: "";
-      position: absolute;
+      position: fixed;
       inset: 0;
       pointer-events: none;
+      background: linear-gradient(var(--scanline) 1px, transparent 1px);
+      background-size: 100% 2px;
+      mix-blend-mode: screen;
       opacity: 0.65;
-      background:
-        linear-gradient(180deg, rgba(0, 229, 255, 0.06), transparent 25%, transparent 75%, rgba(0, 229, 255, 0.04)),
-        radial-gradient(800px 400px at 10% -10%, rgba(0, 229, 255, 0.12), transparent 60%),
-        radial-gradient(800px 400px at 110% 110%, rgba(168, 85, 247, 0.10), transparent 60%),
-        repeating-linear-gradient(0deg, transparent, transparent 22px, var(--grid) 23px),
-        repeating-linear-gradient(90deg, transparent, transparent 22px, var(--grid) 23px);
-      mask-image: radial-gradient(1200px 600px at 50% -20%, black 30%, transparent 70%);
     }
 
     body::after {
       content: "";
-      position: absolute;
+      position: fixed;
       inset: 0;
       pointer-events: none;
-      background: radial-gradient(1200px 600px at 50% -10%, rgba(0, 0, 0, 0.25), transparent 60%);
+      background: radial-gradient(circle at 20% 20%, rgba(39, 247, 154, 0.18), transparent 50%),
+        radial-gradient(circle at 80% 80%, rgba(39, 120, 247, 0.12), transparent 55%);
+      opacity: 0.6;
+      mix-blend-mode: color-dodge;
     }
 
-    .layout {
-      display: flex;
-      flex-direction: column;
-      height: 100vh;
+    a {
+      color: var(--accent);
     }
 
-    /* Header */
-    .header {
-      background: rgba(14, 20, 34, 0.8);
-      backdrop-filter: blur(6px);
-      border-bottom: 1px solid var(--border);
-      padding: 10px 14px;
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      flex-shrink: 0;
-      box-shadow: inset 0 -1px 0 rgba(255, 255, 255, 0.04);
-    }
-
-    .header img {
-      width: 24px;
-      height: 24px;
-      border-radius: 4px;
-      object-fit: contain;
-    }
-
-    .header .brand {
-      font-size: 14px;
-      font-weight: 700;
-      color: var(--text-bright);
-      letter-spacing: 0.3px;
-    }
-
-    .header .spacer {
-      flex: 1;
-    }
-
-    .header .term-dots {
-      display: flex;
-      gap: 6px;
-      align-items: center;
-      margin-left: 6px;
-    }
-
-    .header .dot {
-      width: 10px;
-      height: 10px;
-      border-radius: 50%;
-      box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35) inset, 0 0 8px rgba(255, 255, 255, 0.05);
-    }
-
-    .header .dot.red {
-      background: #ef4444;
-    }
-
-    .header .dot.yellow {
-      background: #f59e0b;
-    }
-
-    .header .dot.green {
-      background: #22c55e;
-    }
-
-    /* Breathing status dots */
-    @keyframes breathe {
-
-      0%,
-      100% {
-        transform: scale(1);
-        filter: drop-shadow(0 0 0 rgba(34, 197, 94, 0));
-      }
-
-      50% {
-        transform: scale(1.12);
-        filter: drop-shadow(0 0 6px rgba(34, 197, 94, 0.45));
-      }
-    }
-
-    .header .dot.green {
-      animation: breathe 2.2s ease-in-out infinite;
-    }
-
-    .header a {
-      color: var(--text-bright);
-      text-decoration: none;
-      font-size: 12px;
-      margin-left: 10px;
-      padding: 6px 10px;
-      border: 1px solid rgba(0, 229, 255, 0.18);
-      border-radius: 999px;
-      background: linear-gradient(180deg, rgba(0, 229, 255, 0.08), rgba(0, 229, 255, 0.04));
-      box-shadow: 0 0 0 1px rgba(0, 229, 255, 0.06) inset;
-      transition: all .15s ease;
-    }
-
-    .header a:hover {
-      color: var(--text-bright);
-      border-color: rgba(0, 229, 255, 0.35);
-      box-shadow: 0 0 16px rgba(0, 229, 255, 0.12), 0 0 0 1px rgba(0, 229, 255, 0.12) inset;
-    }
-
-    /* Main */
-    .main {
-      flex: 1;
+    .terminal {
+      position: relative;
+      max-width: 960px;
+      height: 88vh;
+      margin: 3vh auto;
+      background: linear-gradient(140deg, rgba(39, 247, 154, 0.07), transparent 70%), var(--surface);
+      border: 1px solid var(--border);
+      box-shadow: 0 18px 60px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(39, 247, 154, 0.05);
       display: flex;
       flex-direction: column;
       overflow: hidden;
     }
 
-    .query-panel {
-      background: rgba(17, 24, 38, 0.8);
-      border-bottom: 1px solid var(--border);
-      padding: 12px;
-      flex-shrink: 0;
-    }
-
-    .query-header {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      margin-bottom: 8px;
-      font-size: 12px;
-      color: var(--muted);
-    }
-
-    .query-header .status {
-      margin-left: auto;
-    }
-
-    .sql-editor {
-      width: 100%;
-      height: 120px;
-      background: #0f172a;
-      border: 1px solid var(--border);
-      color: var(--text);
-      border-radius: 8px;
-      padding: 10px;
-      font-size: 13px;
-      resize: vertical;
-      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.25) inset;
-    }
-
-    .controls {
-      display: flex;
-      gap: 6px;
-      align-items: center;
-      margin-top: 8px;
-      flex-wrap: wrap;
-    }
-
-    button {
-      padding: 6px 12px;
-      background: var(--accent);
-      color: var(--text-bright);
-      border: none;
-      border-radius: 4px;
-      font-size: 12px;
-      cursor: pointer;
-    }
-
-    button:hover {
-      background: var(--accent-hover);
-    }
-
-    /* Neon pulse buttons */
-    button {
-      box-shadow: 0 0 0 0 rgba(0, 229, 255, 0.0), 0 0 0 1px rgba(0, 229, 255, 0.08) inset;
-      transition: box-shadow .18s ease, transform .12s ease;
-    }
-
-    button:hover {
-      box-shadow: 0 0 18px rgba(0, 229, 255, 0.22), 0 0 0 1px rgba(0, 229, 255, 0.18) inset;
-      transform: translateY(-1px);
-    }
-
-    button:active {
-      transform: translateY(0);
-    }
-
-    button.secondary {
-      background: var(--panel-dark);
-      border: 1px solid var(--border);
-    }
-
-    button.secondary:hover {
-      background: var(--border);
-    }
-
-    select,
-    input[type="text"] {
-      background: #1b1b1b;
-      border: 1px solid var(--border);
-      color: var(--text);
-      border-radius: 4px;
-      padding: 4px 6px;
-      font-size: 12px;
-    }
-
-    /* Results */
-    .results-panel {
-      flex: 1;
-      display: flex;
-      flex-direction: column;
-      background: rgba(17, 24, 38, 0.8);
-    }
-
-    .results-header {
-      padding: 8px 12px;
-      border-bottom: 1px solid var(--border);
-      font-size: 12px;
-      color: var(--muted);
-      background: rgba(14, 20, 34, 0.8);
-    }
-
-    .results-content {
-      flex: 1;
-      overflow: auto;
-      padding: 12px;
-    }
-
-    /* Subtle scanline overlay in results */
-    .results-content::after {
-      content: "";
-      position: sticky;
-      top: 0;
-      display: block;
-      height: 2px;
-      background: linear-gradient(90deg, transparent, rgba(0, 229, 255, 0.45), transparent);
-      filter: blur(1px);
-      opacity: 0.0;
-      transition: opacity .2s ease;
-    }
-
-    .running .results-content::after {
-      opacity: 0.9;
-      animation: sweep 1.2s linear infinite;
-    }
-
-    @keyframes sweep {
-      from {
-        transform: translateX(-100%);
-      }
-
-      to {
-        transform: translateX(100%);
-      }
-    }
-
-    table {
-      border-collapse: collapse;
-      width: 100%;
-      font-size: 12px;
-      background: #0b1224;
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      overflow: hidden;
-    }
-
-    th {
-      background: #0d1326;
-      color: var(--text-bright);
-      font-weight: 600;
-      text-align: left;
-      padding: 8px;
-      border: 1px solid var(--border);
-    }
-
-    td {
-      padding: 6px 8px;
-      border: 1px solid var(--border);
-      color: var(--text);
-    }
-
-    tr:nth-child(even) {
-      background: rgba(255, 255, 255, 0.03);
-    }
-
-    tr:hover {
-      background: rgba(255, 255, 255, 0.05);
-    }
-
-    .result-block {
-      margin-bottom: 14px;
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      overflow: hidden;
-      opacity: 0;
-      transform: translateY(6px);
-      animation: fadeInUp .26s ease forwards;
-    }
-
-    @keyframes fadeInUp {
-      to {
-        opacity: 1;
-        transform: translateY(0);
-      }
-    }
-
-    .stmt {
-      padding: 6px 8px;
-      font-size: 11px;
-      color: var(--sql-keyword);
-      background: #101116;
-      border-bottom: 1px solid var(--border);
-    }
-
-    .rows-info {
-      font-size: 11px;
-      color: var(--muted);
-      padding: 6px 8px;
-      border-top: 1px solid var(--border);
-      background: #101116;
-    }
-
-    .error {
-      color: var(--text-bright);
-      background: #2b1a1a;
-      border-left: 3px solid var(--error);
-      padding: 10px;
-      white-space: pre-wrap;
-      font-size: 12px;
-    }
-
-    .success {
-      color: var(--success);
-      font-size: 12px;
-    }
-
-    .empty-state {
-      text-align: center;
-      color: var(--muted);
-      font-size: 12px;
-      padding: 40px;
-    }
-
-    /* Footer */
-    .footer {
-      background: rgba(14, 20, 34, 0.8);
-      backdrop-filter: blur(6px);
-      border-top: 1px solid var(--border);
-      padding: 6px 12px;
-      font-size: 11px;
-      color: var(--muted);
+    .bezel {
       display: flex;
       align-items: center;
       gap: 12px;
-      flex-shrink: 0;
+      padding: 12px 14px;
+      background: rgba(4, 12, 14, 0.94);
+      border-bottom: 1px solid rgba(39, 247, 154, 0.08);
+      box-shadow: inset 0 -1px 0 rgba(39, 247, 154, 0.08);
     }
 
-    .footer .config {
-      display: flex;
+    .bezel-links {
+      margin-left: auto;
+      display: inline-flex;
+      gap: 8px;
       align-items: center;
+    }
+
+    .bezel-link {
+      padding: 4px 10px;
+      border: 1px solid rgba(39, 247, 154, 0.24);
+      border-radius: 6px;
+      color: var(--accent);
+      font-size: 11px;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      text-decoration: none;
+      transition: background 0.15s ease, color 0.15s ease, border 0.15s ease;
+      background: transparent;
+      cursor: pointer;
+    }
+
+    .bezel-link:hover {
+      background: rgba(39, 247, 154, 0.12);
+      border-color: rgba(39, 247, 154, 0.5);
+    }
+
+    .led-strip {
+      display: inline-flex;
       gap: 6px;
     }
 
-    .footer input {
-      width: 320px;
-      background: #0f172a;
-      border: 1px solid var(--border);
-      color: var(--text);
-      border-radius: 6px;
+    .led {
+      width: 11px;
+      height: 11px;
+      border-radius: 50%;
+      background: rgba(39, 247, 154, 0.25);
+      box-shadow: 0 0 4px rgba(39, 247, 154, 0.65);
     }
 
-    ::-webkit-scrollbar {
-      width: 8px;
-      height: 8px;
+    .led.warn {
+      background: rgba(247, 201, 72, 0.35);
+      box-shadow: 0 0 4px rgba(247, 201, 72, 0.65);
     }
 
-    ::-webkit-scrollbar-thumb {
-      background: var(--border);
-      border-radius: 4px;
+    .led.error {
+      background: rgba(255, 123, 114, 0.35);
+      box-shadow: 0 0 4px rgba(255, 123, 114, 0.65);
     }
 
-    /* Hide bottom footer (endpoint UI) for a cleaner terminal look */
-    .footer {
-      display: none;
+    .bezel .title {
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.18em;
+      font-size: 11px;
+      color: var(--text-muted);
     }
 
-    /* Focus glow for editor */
-    .sql-editor:focus {
-      outline: none;
-      box-shadow: 0 0 0 1px rgba(0, 229, 255, 0.28) inset, 0 0 22px rgba(0, 229, 255, 0.16);
-      border-color: rgba(0, 229, 255, 0.35);
+    .status {
+      margin-left: 16px;
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.16em;
+      color: var(--accent);
     }
 
-    /* Top progress bar when running */
-    .query-panel {
+    .status[data-state="busy"] {
+      color: var(--warning);
+    }
+
+    .status[data-state="error"] {
+      color: var(--error);
+    }
+
+    .screen {
+      display: flex;
+      flex-direction: column;
       position: relative;
+      flex: 1;
+      padding: 0;
+      min-height: 0;
     }
 
-    .query-panel::after {
+    .screen::before {
       content: "";
       position: absolute;
-      left: -30%;
-      right: 100%;
-      top: 0;
-      height: 2px;
-      background: linear-gradient(90deg, transparent, var(--accent), transparent);
-      opacity: 0;
-      transition: opacity .2s ease;
+      inset: 0;
+      pointer-events: none;
+      background: repeating-linear-gradient(180deg, rgba(0, 0, 0, 0.12) 0px, rgba(0, 0, 0, 0.12) 1px, transparent 1px, transparent 3px);
+      mix-blend-mode: multiply;
+      opacity: 0.45;
     }
 
-    .running .query-panel::after {
-      opacity: 1;
-      animation: progress 1.4s linear infinite;
+    .screen::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      background: radial-gradient(circle at 50% 0%, rgba(255, 255, 255, 0.08), transparent 55%);
+      opacity: 0.3;
+      mix-blend-mode: screen;
     }
 
-    @keyframes progress {
-      0% {
-        left: -30%;
-        right: 100%;
+    .overlay {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      background: linear-gradient(rgba(39, 247, 154, 0.1), transparent), linear-gradient(90deg, rgba(39, 247, 154, 0.05), transparent 60%);
+      mix-blend-mode: soft-light;
+      opacity: 0.35;
+    }
+
+    .content {
+      position: relative;
+      flex: 1;
+      display: grid;
+      grid-template-rows: auto 1fr auto auto;
+      gap: 12px;
+      padding: 16px 22px 12px 22px;
+      min-height: 0;
+      z-index: 1;
+    }
+
+    pre.logo {
+      margin: 0;
+      margin-bottom: 14px;
+      color: var(--accent);
+      font-size: 12px;
+      text-shadow: 0 0 8px rgba(39, 247, 154, 0.45);
+    }
+
+    #log {
+      overflow-y: auto;
+      padding-right: 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      min-height: 0;
+    }
+
+    #log::-webkit-scrollbar {
+      width: 8px;
+    }
+
+    #log::-webkit-scrollbar-thumb {
+      background: rgba(39, 247, 154, 0.12);
+      border-radius: 8px;
+    }
+
+    .line {
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-size: 13px;
+    }
+
+    .line.prompt {
+      color: var(--accent);
+    }
+
+    .line.error {
+      color: var(--error);
+    }
+
+    .line.success {
+      color: var(--success);
+    }
+
+    .line.muted {
+      color: var(--text-muted);
+    }
+
+    .line .prompt-text {
+      color: var(--accent);
+      margin-right: 8px;
+    }
+
+    pre.block {
+      margin: 0;
+      background: rgba(7, 12, 14, 0.74);
+      border: 1px solid rgba(39, 247, 154, 0.18);
+      padding: 12px 14px;
+      border-radius: 6px;
+      font-size: 13px;
+      line-height: 1.6;
+      color: var(--text);
+      backdrop-filter: blur(4px);
+      box-shadow: 0 0 0 1px rgba(39, 247, 154, 0.05) inset;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    form.input-form {
+      position: relative;
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      margin-top: 16px;
+      padding: 12px 14px;
+      border: 1px solid rgba(39, 247, 154, 0.12);
+      border-radius: 8px;
+      background: rgba(5, 11, 14, 0.78);
+      box-shadow: inset 0 0 0 1px rgba(39, 247, 154, 0.05), 0 12px 32px rgba(0, 0, 0, 0.45);
+    }
+
+    form.input-form:focus-within {
+      border-color: rgba(39, 247, 154, 0.34);
+      box-shadow: inset 0 0 0 1px rgba(39, 247, 154, 0.18), 0 0 16px rgba(39, 247, 154, 0.18);
+    }
+
+    .prompt-label {
+      color: var(--accent);
+      padding-top: 4px;
+    }
+
+    #cmd {
+      flex: 1;
+      min-height: 22px;
+      max-height: 160px;
+      background: transparent;
+      border: none;
+      outline: none;
+      resize: none;
+      color: var(--text);
+      font: inherit;
+      line-height: 1.6;
+      padding: 0;
+      caret-color: var(--accent);
+    }
+
+    #cmd::placeholder {
+      color: rgba(108, 133, 147, 0.55);
+    }
+
+    .hint {
+      font-size: 11px;
+      color: var(--text-muted);
+      margin-top: 6px;
+    }
+
+    .badge {
+      display: inline-block;
+      padding: 2px 6px;
+      border: 1px solid rgba(39, 247, 154, 0.24);
+      border-radius: 4px;
+      font-size: 10px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--accent);
+    }
+
+    @media (max-width: 720px) {
+      .terminal {
+        margin: 0;
+        height: 100vh;
+        border-radius: 0;
       }
 
-      50% {
-        left: 20%;
-        right: 20%;
+      .bezel {
+        flex-wrap: wrap;
+        gap: 8px;
       }
 
-      100% {
-        left: 100%;
-        right: -30%;
+      form.input-form {
+        flex-direction: column;
+      }
+
+      .prompt-label {
+        padding-top: 0;
       }
     }
   </style>
 </head>
 
 <body>
-  <div class="layout">
-    <div class="header">
-      <img src="/rust-db.png" alt="logo" />
-      <div class="brand">QuillSQL Console</div>
-      <div class="term-dots"><span class="dot red"></span><span class="dot yellow"></span><span
-          class="dot green"></span></div>
-      <div class="spacer"></div>
-      <a href="/docs.html" target="_blank">Docs</a>
-      <a href="https://github.com/feichai0017/quillsql" target="_blank">GitHub</a>
+  <div class="terminal">
+    <div class="bezel">
+      <div class="led-strip">
+        <span class="led error"></span>
+        <span class="led warn"></span>
+        <span class="led"></span>
+      </div>
+      <span class="title">QUILLSQL TERMINAL</span>
+      <div class="bezel-links">
+        <button class="bezel-link" id="openGithub">GITHUB</button>
+        <button class="bezel-link" id="openProfile">PROFILE</button>
+      </div>
+      <span id="status" class="status" data-state="ready">READY</span>
     </div>
-
-    <div class="main">
-      <div class="query-panel">
-        <div class="query-header">
-          SQL Query Editor
-          <span class="status" id="status"></span>
-        </div>
-        <textarea id="sql" class="sql-editor"></textarea>
-        <div class="controls">
-          <button id="run">▶ Execute (Ctrl+Enter)</button>
-          <select id="exampleSel">
-            <option value="">Choose Example...</option>
-            <option value="basic">Basic (Idempotent)</option>
-            <option value="write">Write Demo (Insert/Update)</option>
-            <option value="delete">Delete Demo</option>
-            <option value="read">Read-only Demo</option>
-            <option value="explain">Explain Plan</option>
-            <option value="schema">Schema Info</option>
-            <option value="aggregate">Aggregates & Join</option>
-            <option value="indexdemo">Index Demo</option>
-          </select>
-          <button id="applyExample" class="secondary">Load Example</button>
-          <button id="clear" class="secondary">Clear Results</button>
-          <button id="format" class="secondary">Format SQL</button>
-        </div>
+    <div class="screen">
+      <div class="overlay"></div>
+      <div class="content">
+        <pre class="logo" id="logo"></pre>
+        <div id="log" class="log"></div>
+        <form id="input-form" class="input-form" autocomplete="off">
+          <span class="prompt-label">quill@tty:~$</span>
+          <textarea id="cmd" rows="1" placeholder="type help for usage · Shift+Enter to add newline"></textarea>
+        </form>
+        <div class="hint">Commands: help · docs · doc &lt;name&gt; · github · profile · clear · examples · example
+          &lt;name&gt; · history · Any other input executes SQL.</div>
       </div>
-
-      <div class="results-panel">
-        <div class="results-header">Query Results</div>
-        <div class="results-content">
-          <div id="result" class="empty-state">Execute a query to see results here</div>
-        </div>
-      </div>
-    </div>
-
-    <div class="footer">
-      <div class="config">
-        <label>API Endpoint:</label>
-        <input id="apiBase" type="text" placeholder="/api/sql or https://quillsql.fly.dev/api/sql" />
-        <button id="saveApiBase" class="secondary">Save</button>
-      </div>
-      <span>QuillSQL v0.1.0 | Persistent storage via QUILL_DB_FILE</span>
     </div>
   </div>
-
   <script>
-    const runBtn = document.getElementById('run');
-    const exampleSel = document.getElementById('exampleSel');
-    const applyExample = document.getElementById('applyExample');
-    const clearBtn = document.getElementById('clear');
-    const formatBtn = document.getElementById('format');
-    const sqlTA = document.getElementById('sql');
-    const status = document.getElementById('status');
-    const result = document.getElementById('result');
-    const apiBaseInput = document.getElementById('apiBase');
-    const saveApiBaseBtn = document.getElementById('saveApiBase');
+    const statusEl = document.getElementById('status');
+    const logEl = document.getElementById('log');
+    const cmdEl = document.getElementById('cmd');
+    const formEl = document.getElementById('input-form');
+    const logoEl = document.getElementById('logo');
+    const openGithubBtn = document.getElementById('openGithub');
+    const openProfileBtn = document.getElementById('openProfile');
 
-    // Initialize multiline placeholder with real line breaks
-    const placeholderLines = [
-      '-- Supported (subset):',
-      '— Data types: BOOLEAN, INT8/16/32/64, UINT8/16/32/64, FLOAT32/64, VARCHAR(n)',
-      '— Statements: CREATE TABLE, CREATE INDEX, SELECT, INSERT, UPDATE, SHOW, EXPLAIN',
-      '— Tip: Use idempotent demos like CREATE TABLE IF NOT EXISTS and SELECT'
-    ];
-    sqlTA.placeholder = placeholderLines.join('\n');
+    const STORAGE_KEY = 'quillsql:apiBase';
+    const DEFAULT_API_BASE = '/api/sql';
 
-    const defaultApi = '/api/sql';
-    const getApiBase = () => (localStorage.getItem('apiBase') || defaultApi);
-    const setApiBase = (v) => localStorage.setItem('apiBase', v);
-    apiBaseInput.value = getApiBase();
+    const asciiLogo = [
+      '   ██████╗ ██╗   ██╗██╗██╗     ██╗     ███████╗ ██████╗ ██╗      ',
+      '  ██╔═══██╗██║   ██║██║██║     ██║     ██╔════╝██╔═══██╗██║      ',
+      '  ██║   ██║██║   ██║██║██║     ██║     ███████╗██║   ██║██║      ',
+      '  ██║▄▄ ██║██║   ██║██║██║     ██║     ╚════██║██║▄▄ ██║██║      ',
+      '  ╚██████╔╝╚██████╔╝██║███████╗███████╗███████║╚██████╔╝███████╗ ',
+      '   ╚══▀▀═╝  ╚═════╝ ╚═╝╚══════╝╚══════╝╚══════╝ ╚══▀▀═╝ ╚══════╝ ',
+      '-----------------------------------------------------------------',
+      '    QuillSQL • Interactive Terminal • `help` for usage           '
+    ].join('\n');
 
-    function renderTable(rows) {
-      const cols = Math.max(...rows.map(r => r.length));
-      const th = Array.from({ length: cols }, (_, i) => `<th>Column ${i + 1}</th>`).join('');
-      const trs = rows.map(r => `<tr>${r.map(c => `<td>${c}</td>`).join('')}</tr>`).join('');
-      return `<table><thead><tr>${th}</tr></thead><tbody>${trs}</tbody></table>`;
+    logoEl.textContent = asciiLogo;
+
+    const examples = {
+      basic: `-- Idempotent basic demo\nDROP TABLE IF EXISTS demo;\nCREATE TABLE demo(id INT32, v INT32 DEFAULT 0);\nINSERT INTO demo(id, v) VALUES (1, 1);\nSELECT id, v FROM demo ORDER BY id LIMIT 10;`,
+      write: `-- Write demo (non-idempotent if persisted)\nDROP TABLE IF EXISTS people;\nCREATE TABLE people(id INT32, name VARCHAR(50), age INT32 DEFAULT 0);\nINSERT INTO people(id, name, age) VALUES (1, 'Alice', 25);\nINSERT INTO people(id, name, age) VALUES (2, 'Bob', 30);\nUPDATE people SET age = 26 WHERE id = 1;\nSELECT * FROM people ORDER BY id;`,
+      delete: `-- Delete demo\nDROP TABLE IF EXISTS tasks;\nCREATE TABLE tasks(id INT32 PRIMARY KEY, detail VARCHAR(100));\nINSERT INTO tasks VALUES (1, 'todo');\nINSERT INTO tasks VALUES (2, 'in progress');\nINSERT INTO tasks VALUES (3, 'done');\nDELETE FROM tasks WHERE id = 2;\nSELECT * FROM tasks ORDER BY id;`,
+      read: `-- Read-only demo\nSHOW DATABASES;\nSHOW TABLES;\nSELECT table_name FROM information_schema.tables ORDER BY table_name LIMIT 10;`,
+      explain: `-- Explain plan demo\nEXPLAIN SELECT 1;\nEXPLAIN SELECT 1 AS a UNION ALL SELECT 2 AS a;`,
+      schema: `-- Information schema\nSHOW DATABASES;\nSHOW TABLES;\nSELECT table_name FROM information_schema.tables ORDER BY table_name LIMIT 10;`,
+      aggregate: `-- Aggregates & Join (resets tables each run)\nDROP TABLE IF EXISTS orders;\nDROP TABLE IF EXISTS customers;\nCREATE TABLE customers(customer_id INT32, customer_name VARCHAR(50));\nCREATE TABLE orders(order_id INT32, order_customer INT32, order_amount INT32);\nINSERT INTO customers VALUES (1, 'Alice');\nINSERT INTO customers VALUES (2, 'Bob');\nINSERT INTO orders VALUES (101, 1, 100);\nINSERT INTO orders VALUES (102, 1, 200);\nINSERT INTO orders VALUES (103, 2, 150);\nSELECT customer_name, COUNT(order_id) AS cnt, AVG(order_amount) AS avg_amount\nFROM customers INNER JOIN orders ON customers.customer_id = orders.order_customer\nGROUP BY customer_name ORDER BY customer_name;`,
+      indexdemo: `-- Index demo (resets tables)\nDROP TABLE IF EXISTS products;\nCREATE TABLE products(id INT32 NOT NULL, category_id INT32, name VARCHAR(100), price INT32);\nCREATE INDEX idx_products_category ON products(category_id);\nINSERT INTO products VALUES (1, 1, 'Laptop', 1200);\nINSERT INTO products VALUES (2, 1, 'Mouse', 25);\nINSERT INTO products VALUES (3, 2, 'Book', 15);\nSELECT id, name FROM products WHERE category_id = 1 ORDER BY id;`,
+      txn_read_committed: `-- Read Committed vs dirty reads\nDROP TABLE IF EXISTS bank;\nCREATE TABLE bank(id INT32 PRIMARY KEY, balance_amount INT32);\nINSERT INTO bank VALUES (1, 1000);\n\nBEGIN TRANSACTION ISOLATION LEVEL READ COMMITTED;\nUPDATE bank SET balance_amount = balance_amount + 100 WHERE id = 1;\nSELECT balance_amount FROM bank WHERE id = 1;\nROLLBACK;\nSELECT balance_amount FROM bank WHERE id = 1;`,
+      txn_repeatable: `-- Repeatable Read blocking demo\nDROP TABLE IF EXISTS inventory;\nCREATE TABLE inventory(id INT32 PRIMARY KEY, qty INT32);\nINSERT INTO inventory VALUES (1, 10);\n\nBEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ;\nSELECT qty FROM inventory WHERE id = 1;\n-- Imagine a concurrent update here; this session will see the original qty\nSELECT qty FROM inventory WHERE id = 1;\nCOMMIT;`,
+      txn_serializable: `-- Serializable anomaly detection\nDROP TABLE IF EXISTS seats;\nCREATE TABLE seats(id INT32 PRIMARY KEY, taken BOOLEAN DEFAULT FALSE);\nINSERT INTO seats VALUES (1, FALSE);\n\nBEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;\nUPDATE seats SET taken = TRUE WHERE id = 1 AND taken = FALSE;\nSELECT taken FROM seats WHERE id = 1;\nCOMMIT;`
+    };
+
+    const docFiles = {
+      architecture: 'architecture.md',
+      buffer_pool: 'buffer_pool.md',
+      btree_index: 'btree_index.md',
+      disk_io: 'disk_io.md',
+      wal: 'wal.md',
+      transactions: 'transactions.md'
+    };
+
+    const GITHUB_URL = 'https://github.com/feichai0017/quillsql';
+    const PROFILE_URL = 'https://github.com/feichai0017';
+
+    const history = [];
+    let historyIndex = -1;
+
+    const getApiBase = () => DEFAULT_API_BASE;
+    const batchEndpointFor = (base) => (base.endsWith('/sql') ? base.replace(/\/sql$/, '/sql_batch') : `${base}_batch`);
+
+    function setStatus(text, state = 'ready') {
+      statusEl.textContent = text;
+      statusEl.dataset.state = state;
+    }
+
+    function appendLine(text, className = '') {
+      const div = document.createElement('div');
+      div.className = ['line', className].join(' ').trim();
+      div.textContent = text;
+      logEl.appendChild(div);
+      scrollLog();
+    }
+
+    function appendPrompt(command) {
+      const div = document.createElement('div');
+      div.className = 'line prompt';
+      const promptSpan = document.createElement('span');
+      promptSpan.className = 'prompt-text';
+      promptSpan.textContent = 'quill@tty:~$';
+      const contentSpan = document.createElement('span');
+      contentSpan.textContent = ` ${command}`;
+      div.appendChild(promptSpan);
+      div.appendChild(contentSpan);
+      logEl.appendChild(div);
+      scrollLog();
+    }
+
+    function appendBlock(text, className = '', autoScroll = true) {
+      const pre = document.createElement('pre');
+      pre.className = ['block', className].join(' ').trim();
+      pre.textContent = text;
+      pre.tabIndex = 0;
+      logEl.appendChild(pre);
+      if (autoScroll) {
+        scrollLog();
+      }
+    }
+
+    function scrollLog() {
+      requestAnimationFrame(() => {
+        logEl.scrollTop = logEl.scrollHeight;
+      });
+    }
+
+    function sanitizeCell(value) {
+      if (value === null || value === undefined) return 'NULL';
+      if (typeof value === 'object') {
+        try {
+          return JSON.stringify(value);
+        } catch (_) {
+          return String(value);
+        }
+      }
+      return String(value);
+    }
+
+    function asciiTable(rows) {
+      const colCount = Math.max(...rows.map(r => r.length), 0);
+      if (colCount === 0) return '';
+      const headers = Array.from({ length: colCount }, (_, i) => `col${i + 1}`);
+      const values = rows.map(r => r.map(sanitizeCell));
+      const widths = headers.map((h, i) => Math.max(h.length, ...values.map(r => (r[i] || '').length)));
+
+      const sep = `+${widths.map(w => '-'.repeat(w + 2)).join('+')}+`;
+      const headerLine = `|${headers.map((h, i) => ` ${h.padEnd(widths[i])} `).join('|')}|`;
+      const body = values.map(row => `|${Array.from({ length: colCount }, (_, i) => ` ${(row[i] || '').padEnd(widths[i])} `).join('|')}|`).join('\n');
+      return [sep, headerLine, sep, body, sep].filter(Boolean).join('\n');
     }
 
     function renderResult(rows) {
       if (!rows || rows.length === 0) {
-        return '<div class="success">✓ Query executed successfully (0 rows)</div>';
+        appendLine('✓ Query executed successfully (0 rows)', 'success');
+        return;
       }
-      const singleCol = rows.every(r => r.length === 1);
-      if (singleCol) {
-        const text = rows.map(r => r[0]).join('\n');
-        return `<pre style="background:#0f1117;border:1px solid var(--border);padding:10px;border-radius:6px;white-space:pre-wrap;">${text.replace(/[&<>]/g, s => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[s]))}</pre>`;
+      const table = asciiTable(rows);
+      if (table) {
+        appendBlock(table);
+        appendLine(`${rows.length} row(s)`, 'muted');
+      } else {
+        const text = rows.map(r => r.join('\t')).join('\n');
+        appendBlock(text);
       }
-      return renderTable(rows);
     }
 
     function friendlyError(text) {
       const t = String(text || '');
       if (/Not\s*support|not\s*supported|NotSupport/i.test(t)) {
-        return `Unsupported statement or data type\n\n${t}`;
+        return `Unsupported statement or data type.\n${t}`;
       }
       return t;
     }
 
-    async function runSQL() {
-      document.body.classList.add('running');
-      status.textContent = '⏳ Executing...';
-      result.innerHTML = '';
+    async function runSQL(sqlText) {
+      setStatus('RUNNING', 'busy');
+      cmdEl.disabled = true;
       try {
-        const api = getApiBase();
-        const statements = sqlTA.value
+        const apiBase = getApiBase();
+        const rawStatements = sqlText
           .split(';')
           .map(s => s.trim())
-          .filter(s => s.length > 0)
+          .filter(Boolean)
           .slice(0, 100);
 
-        if (statements.length === 0) {
-          result.innerHTML = '<div class="empty-state">No SQL statements to execute</div>';
+        if (rawStatements.length === 0) {
+          appendLine('No SQL statements to execute.', 'muted');
           return;
         }
 
-        let out = '';
-
-        // Prefer batch API if available, fallback to per-statement
-        const batchApi = api.replace(/\/sql$/, '/sql_batch');
         let usedBatch = false;
+
         try {
-          const bres = await fetch(batchApi, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sql: sqlTA.value }) });
-          if (bres.ok) {
-            const data = await bres.json();
+          const resp = await fetch(batchEndpointFor(apiBase), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sql: sqlText })
+          });
+          if (resp.ok) {
+            const data = await resp.json();
             const results = Array.isArray(data.results) ? data.results : [];
-            for (let i = 0; i < Math.min(results.length, statements.length); i++) {
-              const rows = results[i] || [];
-              const body = rows.length ? renderResult(rows) : '<div class="success">✓ Query executed successfully (0 rows)</div>';
-              out += `<div class="result-block"><div class="stmt">Statement ${i + 1}: ${statements[i]}</div>${body}<div class="rows-info">${rows.length} rows</div></div>`;
-            }
+            results.slice(0, rawStatements.length).forEach((rows, idx) => {
+              appendLine(`[${String(idx + 1).padStart(2, '0')}] ${rawStatements[idx]}`);
+              renderResult(rows || []);
+            });
             usedBatch = true;
           }
-        } catch (_) { /* ignore and fallback */ }
+        } catch (e) {
+          // swallow and fall back
+        }
 
         if (!usedBatch) {
-          for (const [i, stmt] of statements.entries()) {
-            const res = await fetch(api, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sql: stmt }) });
-            if (!res.ok) {
-              const err = await res.text();
-              out += `<div class="result-block"><div class="stmt">Statement ${i + 1}: ${stmt}</div><div class="error">❌ ${friendlyError(err)}</div></div>`;
+          for (let i = 0; i < rawStatements.length; i += 1) {
+            const stmt = rawStatements[i];
+            appendLine(`[${String(i + 1).padStart(2, '0')}] ${stmt}`);
+            const resp = await fetch(apiBase, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ sql: stmt })
+            });
+            if (!resp.ok) {
+              const err = await resp.text();
+              appendLine(`❌ ${friendlyError(err)}`, 'error');
               break;
             } else {
-              const data = await res.json();
-              const rows = data.rows || [];
-              const body = rows.length ? renderResult(rows) : '<div class="success">✓ Query executed successfully (0 rows)</div>';
-              out += `<div class="result-block"><div class="stmt">Statement ${i + 1}: ${stmt}</div>${body}<div class="rows-info">${rows.length} rows</div></div>`;
+              const data = await resp.json();
+              renderResult(data.rows || []);
             }
           }
         }
-
-        result.innerHTML = out || '<div class="success">✓ All queries completed</div>';
       } catch (e) {
-        result.innerHTML = `<div class="error">❌ Connection Error: ${e}</div>`;
+        appendLine(`❌ Connection Error: ${e}`, 'error');
       } finally {
-        status.textContent = '✓ Ready';
-        document.body.classList.remove('running');
+        setStatus('READY', 'ready');
+        cmdEl.disabled = false;
+        cmdEl.focus();
       }
     }
 
-    runBtn.addEventListener('click', runSQL);
-    sqlTA.addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) runSQL(); });
-    clearBtn.addEventListener('click', () => { result.innerHTML = '<div class="empty-state">Execute a query to see results here</div>'; });
-    formatBtn.addEventListener('click', () => {
-      const formatted = sqlTA.value
-        .replace(/\s+/g, ' ')
-        .replace(/\s*;\s*/g, ';\n')
-        .replace(/\b(SELECT|FROM|WHERE|ORDER BY|GROUP BY|HAVING|INSERT|UPDATE|DELETE|CREATE|EXPLAIN|LIMIT|OFFSET|INNER JOIN|CROSS JOIN|SHOW TABLES|SHOW DATABASES)\b/gi, '\n$1')
-        .replace(/^\s+/gm, '')
-        .trim();
-      sqlTA.value = formatted;
+    function printHelp() {
+      appendLine('Available commands:', 'muted');
+      appendBlock([
+        ' help                 Show this message',
+        ' docs                 List available documentation files',
+        ' doc <name>          Fetch and render a documentation file',
+        ' github              Show repository information',
+        ' profile             Show maintainer profile',
+        ' clear                Clear the terminal session',
+        ' examples             List bundled SQL snippets',
+        ' example <name>       Load an example into the prompt',
+        ' history              Show previous commands',
+        ' Any other input      Executes as SQL (multi-line supported)'
+      ].join('\n'));
+      appendLine('Session tips: Shift+Enter inserts newline · Commands are trimmed before execution.', 'muted');
+    }
+
+    function showExamples() {
+      appendLine('Example bundles:', 'muted');
+      const list = Object.keys(examples).map(k => `  - ${k}`).join('\n');
+      appendBlock(list);
+      appendLine('Use `example <name>` to load into the prompt.', 'muted');
+    }
+
+    function showDocs() {
+      appendLine('Available docs:', 'muted');
+      const list = Object.entries(docFiles).map(([key, file]) => `  - ${key} (${file})`).join('\n');
+      appendBlock(list);
+      appendLine('Use `doc <name>` to render markdown inside the terminal.', 'muted');
+    }
+
+    function markdownToTTY(md) {
+      const lines = md.replace(/\r\n?/g, '\n').split('\n');
+      const output = [];
+      let inCodeBlock = false;
+      for (const rawLine of lines) {
+        let line = rawLine;
+        if (line.trim().startsWith('```')) {
+          inCodeBlock = !inCodeBlock;
+          output.push(inCodeBlock ? '```' : '```');
+          continue;
+        }
+        if (!inCodeBlock) {
+          const headingMatch = line.match(/^(#{1,6})\s+(.*)$/);
+          if (headingMatch) {
+            const level = headingMatch[1].length;
+            const text = headingMatch[2].trim();
+            if (level <= 2) {
+              const bar = '='.repeat(text.length);
+              output.push(text.toUpperCase());
+              output.push(bar);
+            } else {
+              output.push(`${'#'.repeat(level)} ${text}`);
+            }
+            continue;
+          }
+          line = line.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1 <$2>');
+          line = line.replace(/\*\*([^*]+)\*\*/g, '$1');
+          line = line.replace(/\*([^*]+)\*/g, '$1');
+          line = line.replace(/`([^`]+)`/g, '$1');
+        }
+        output.push(line);
+      }
+      return output.join('\n').trim();
+    }
+
+    async function loadDoc(key) {
+      const file = docFiles[key];
+      if (!file) {
+        appendLine(`Unknown doc: ${key}`, 'error');
+        return;
+      }
+      setStatus('DOCS', 'busy');
+      try {
+        const res = await fetch(`/docs/${file}`);
+        if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+        const md = await res.text();
+        const rendered = markdownToTTY(md);
+        appendLine(`[docs] ${file}`, 'muted');
+        appendBlock(rendered);
+      } catch (e) {
+        appendLine(`Failed to load doc: ${e}`, 'error');
+      } finally {
+        setStatus('READY', 'ready');
+      }
+    }
+
+    function showGithub() {
+      appendLine('GitHub repository', 'muted');
+      appendBlock([
+        'Project: QuillSQL',
+        `URL   : ${GITHUB_URL}`,
+        'Stars : give it a ⭐ if you find it useful!',
+        '',
+        'Tip: run `git clone` with the URL above to explore locally.'
+      ].join('\n'));
+    }
+
+    function showProfile() {
+      appendLine('Maintainer profile', 'muted');
+      appendBlock([
+        'Handle : feichai0017',
+        `URL    : ${PROFILE_URL}`,
+        'Bio    : Systems & database tinkerer. Find more projects on GitHub.'
+      ].join('\n'));
+    }
+
+    function handleCommand(input) {
+      const trimmed = input.trim();
+      if (!trimmed) {
+        appendLine('(empty)', 'muted');
+        return;
+      }
+
+      if (trimmed === 'help') {
+        printHelp();
+        return;
+      }
+
+      if (trimmed === 'docs') {
+        showDocs();
+        return;
+      }
+
+      if (trimmed.startsWith('doc ')) {
+        const key = trimmed.split(/\s+/)[1];
+        if (!key) {
+          appendLine('Usage: doc <name>', 'error');
+        } else {
+          loadDoc(key);
+        }
+        return;
+      }
+
+      if (trimmed === 'github') {
+        showGithub();
+        return;
+      }
+
+      if (trimmed === 'profile') {
+        showProfile();
+        return;
+      }
+
+      if (trimmed === 'clear') {
+        logEl.innerHTML = '';
+        appendLine('Session cleared.', 'muted');
+        return;
+      }
+
+      if (trimmed === 'history') {
+        if (history.length === 0) {
+          appendLine('No history yet.', 'muted');
+        } else {
+          appendBlock(history.map((cmd, idx) => `${String(idx + 1).padStart(2, '0')}: ${cmd}`).join('\n'));
+        }
+        return;
+      }
+
+      if (trimmed === 'examples') {
+        showExamples();
+        return;
+      }
+
+      if (trimmed.startsWith('example ')) {
+        const key = trimmed.split(/\s+/)[1];
+        if (!examples[key]) {
+          appendLine(`Unknown example: ${key}`, 'error');
+        } else {
+          const sqlText = examples[key];
+          cmdEl.value = sqlText;
+          cmdEl.dispatchEvent(new Event('input'));
+          appendLine(`Loaded example '${key}' into prompt.`, 'success');
+          runSQL(sqlText);
+        }
+        return;
+      }
+
+      runSQL(input);
+    }
+
+    formEl.addEventListener('submit', (event) => {
+      event.preventDefault();
+      const value = cmdEl.value;
+      const normalized = value.replace(/\s+$/g, '');
+      appendPrompt(normalized || value);
+      if (value.trim()) {
+        history.push(value.trim());
+        historyIndex = history.length;
+        handleCommand(value);
+      } else {
+        appendLine('(empty)', 'muted');
+      }
+      cmdEl.value = '';
+      cmdEl.style.height = '22px';
     });
 
-    applyExample.addEventListener('click', () => {
-      const pick = exampleSel.value;
-      if (pick === 'basic') {
-        sqlTA.value = `-- Idempotent basic demo\nCREATE TABLE IF NOT EXISTS demo(id INT32, v INT32 DEFAULT 0);\nSELECT id, v FROM demo ORDER BY id LIMIT 10;`;
-      } else if (pick === 'write') {
-        sqlTA.value = `-- Write demo (non-idempotent if persisted)\n-- Re-running may insert duplicate rows when using persistent storage.\nCREATE TABLE IF NOT EXISTS people(id INT32, name VARCHAR(50), age INT32 DEFAULT 0);\nINSERT INTO people(id, name, age) VALUES (1, 'Alice', 25), (2, 'Bob', 30);\nUPDATE people SET age = 26 WHERE id = 1;\nSELECT * FROM people ORDER BY id;`;
-      } else if (pick === 'delete') {
-        sqlTA.value = `-- Delete demo\nCREATE TABLE IF NOT EXISTS tasks(id INT32 PRIMARY KEY, detail VARCHAR(100));\nINSERT INTO tasks VALUES (1, 'todo'), (2, 'in progress'), (3, 'done');\nDELETE FROM tasks WHERE id = 2;\nSELECT * FROM tasks ORDER BY id;`;
-      } else if (pick === 'read') {
-        sqlTA.value = `-- Read-only demo\nSHOW DATABASES;\nSHOW TABLES;\nSELECT table_name FROM information_schema.tables ORDER BY table_name LIMIT 10;`;
-      } else if (pick === 'explain') {
-        sqlTA.value = `-- Explain plan demo\nEXPLAIN SELECT 1;\nEXPLAIN SELECT 1 AS a UNION ALL SELECT 2 AS a;`;
-      } else if (pick === 'schema') {
-        sqlTA.value = `-- Information schema\nSHOW DATABASES;\nSHOW TABLES;\nSELECT table_name FROM information_schema.tables ORDER BY table_name LIMIT 10;`;
-      } else if (pick === 'aggregate') {
-        sqlTA.value = `-- Aggregates & Join (non-idempotent if persisted)\nCREATE TABLE IF NOT EXISTS customers(id INT32, name VARCHAR(50));\nCREATE TABLE IF NOT EXISTS orders(id INT32, customer_id INT32, amount INT32);\nINSERT INTO customers VALUES (1, 'Alice'), (2, 'Bob');\nINSERT INTO orders VALUES (101, 1, 100), (102, 1, 200), (103, 2, 150);\nSELECT customers.name, COUNT(orders.id) AS cnt, AVG(orders.amount) AS avg_amount\nFROM customers INNER JOIN orders ON customers.id = orders.customer_id\nGROUP BY customers.name ORDER BY customers.name;`;
-      } else if (pick === 'indexdemo') {
-        sqlTA.value = `-- Index demo (non-idempotent if persisted)\nCREATE TABLE IF NOT EXISTS products(id INT32 NOT NULL, category_id INT32, name VARCHAR(100), price INT32);\nCREATE INDEX idx_products_category ON products(category_id);\nINSERT INTO products VALUES (1, 1, 'Laptop', 1200), (2, 1, 'Mouse', 25), (3, 2, 'Book', 15);\nSELECT id, name FROM products WHERE category_id = 1 ORDER BY id;`;
+    cmdEl.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' && !event.shiftKey) {
+        event.preventDefault();
+        formEl.requestSubmit();
+      } else if (event.key === 'ArrowUp') {
+        event.preventDefault();
+        if (history.length === 0) return;
+        historyIndex = Math.max(0, historyIndex - 1);
+        cmdEl.value = history[historyIndex] || '';
+        cmdEl.dispatchEvent(new Event('input'));
+      } else if (event.key === 'ArrowDown') {
+        event.preventDefault();
+        if (history.length === 0) return;
+        historyIndex = Math.min(history.length, historyIndex + 1);
+        cmdEl.value = history[historyIndex] || '';
+        cmdEl.dispatchEvent(new Event('input'));
       }
     });
 
-    saveApiBaseBtn.addEventListener('click', () => {
-      const v = apiBaseInput.value.trim();
-      if (v) { setApiBase(v); status.textContent = '✓ Endpoint saved'; setTimeout(() => status.textContent = '✓ Ready', 1600); }
+    cmdEl.addEventListener('input', () => {
+      cmdEl.style.height = '22px';
+      cmdEl.style.height = `${cmdEl.scrollHeight}px`;
     });
 
-    status.textContent = '✓ Ready';
+    openGithubBtn.addEventListener('click', () => {
+      showGithub();
+    });
+
+    openProfileBtn.addEventListener('click', () => {
+      showProfile();
+    });
+
+    appendLine('Welcome to QUILLSQL Terminal. Type `help` to get started.', 'muted');
+    appendLine(`Current SQL endpoint: ${getApiBase()}`, 'muted');
+    cmdEl.focus();
   </script>
 </body>
 
