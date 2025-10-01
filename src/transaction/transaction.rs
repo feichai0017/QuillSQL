@@ -8,6 +8,8 @@ use crate::storage::index::btree_index::BPlusTreeIndex;
 use crate::storage::page::{RecordId, TupleMeta};
 use crate::storage::table_heap::TableHeap;
 use crate::storage::tuple::Tuple;
+use sqlparser::ast::TransactionAccessMode;
+use std::str::FromStr;
 use std::sync::Arc;
 
 pub type TransactionId = u64;
@@ -16,8 +18,33 @@ pub type TransactionId = u64;
 pub enum IsolationLevel {
     ReadUncommitted,
     ReadCommitted,
-    SnapshotIsolation,
+    RepeatableRead,
     Serializable,
+}
+
+impl IsolationLevel {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            IsolationLevel::ReadUncommitted => "read-uncommitted",
+            IsolationLevel::ReadCommitted => "read-committed",
+            IsolationLevel::RepeatableRead => "repeatable-read",
+            IsolationLevel::Serializable => "serializable",
+        }
+    }
+}
+
+impl FromStr for IsolationLevel {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "read-uncommitted" | "ru" => Ok(IsolationLevel::ReadUncommitted),
+            "read-committed" | "rc" => Ok(IsolationLevel::ReadCommitted),
+            "repeatable-read" | "rr" => Ok(IsolationLevel::RepeatableRead),
+            "serializable" | "sr" | "serial" => Ok(IsolationLevel::Serializable),
+            other => Err(format!("unknown isolation level '{}'", other)),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,6 +176,7 @@ impl UndoAction {
 pub struct Transaction {
     id: TransactionId,
     isolation_level: IsolationLevel,
+    access_mode: TransactionAccessMode,
     state: TransactionState,
     synchronous_commit: bool,
     begin_lsn: Option<Lsn>,
@@ -160,11 +188,13 @@ impl Transaction {
     pub fn new(
         id: TransactionId,
         isolation_level: IsolationLevel,
+        access_mode: TransactionAccessMode,
         synchronous_commit: bool,
     ) -> Self {
         Self {
             id,
             isolation_level,
+            access_mode,
             state: TransactionState::Running,
             synchronous_commit,
             begin_lsn: None,
@@ -179,6 +209,14 @@ impl Transaction {
 
     pub fn isolation_level(&self) -> IsolationLevel {
         self.isolation_level
+    }
+
+    pub fn access_mode(&self) -> TransactionAccessMode {
+        self.access_mode
+    }
+
+    pub fn set_isolation_level(&mut self, isolation_level: IsolationLevel) {
+        self.isolation_level = isolation_level;
     }
 
     pub fn state(&self) -> TransactionState {
@@ -208,6 +246,14 @@ impl Transaction {
 
     pub(crate) fn set_state(&mut self, state: TransactionState) {
         self.state = state;
+    }
+
+    pub(crate) fn set_access_mode(&mut self, access_mode: TransactionAccessMode) {
+        self.access_mode = access_mode;
+    }
+
+    pub fn update_access_mode(&mut self, access_mode: TransactionAccessMode) {
+        self.access_mode = access_mode;
     }
 
     pub(crate) fn mark_tainted(&mut self) {

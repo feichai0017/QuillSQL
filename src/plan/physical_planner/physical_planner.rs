@@ -192,6 +192,12 @@ impl PhysicalPlanner<'_> {
                 delete.table_schema.clone(),
                 delete.selection.clone(),
             )),
+            LogicalPlan::BeginTransaction(_)
+            | LogicalPlan::CommitTransaction
+            | LogicalPlan::RollbackTransaction
+            | LogicalPlan::SetTransaction { .. } => {
+                PhysicalPlan::Empty(PhysicalEmpty::new(0, Schema::empty().into()))
+            }
         };
         plan
     }

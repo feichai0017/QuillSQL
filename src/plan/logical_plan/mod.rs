@@ -35,6 +35,8 @@ use crate::catalog::{
     UPDATE_OUTPUT_SCHEMA_REF,
 };
 use crate::error::{QuillSQLError, QuillSQLResult};
+use crate::transaction::IsolationLevel;
+use sqlparser::ast::{TransactionAccessMode, TransactionMode};
 use std::sync::Arc;
 
 #[derive(Debug, Clone)]
@@ -53,6 +55,13 @@ pub enum LogicalPlan {
     Aggregate(Aggregate),
     Update(Update),
     Delete(Delete),
+    BeginTransaction(TransactionModes),
+    CommitTransaction,
+    RollbackTransaction,
+    SetTransaction {
+        scope: TransactionScope,
+        modes: TransactionModes,
+    },
 }
 
 impl LogicalPlan {
@@ -72,6 +81,10 @@ impl LogicalPlan {
             LogicalPlan::Aggregate(Aggregate { schema, .. }) => schema,
             LogicalPlan::Update(_) => &UPDATE_OUTPUT_SCHEMA_REF,
             LogicalPlan::Delete(_) => &DELETE_OUTPUT_SCHEMA_REF,
+            LogicalPlan::BeginTransaction(_)
+            | LogicalPlan::CommitTransaction
+            | LogicalPlan::RollbackTransaction
+            | LogicalPlan::SetTransaction { .. } => &EMPTY_SCHEMA_REF,
         }
     }
 
@@ -90,7 +103,11 @@ impl LogicalPlan {
             | LogicalPlan::Values(_)
             | LogicalPlan::Update(_)
             | LogicalPlan::Delete(_)
-            | LogicalPlan::EmptyRelation(_) => vec![],
+            | LogicalPlan::EmptyRelation(_)
+            | LogicalPlan::BeginTransaction(_)
+            | LogicalPlan::CommitTransaction
+            | LogicalPlan::RollbackTransaction
+            | LogicalPlan::SetTransaction { .. } => vec![],
         }
     }
 
@@ -239,7 +256,11 @@ impl LogicalPlan {
             | LogicalPlan::Values(_)
             | LogicalPlan::Update(_)
             | LogicalPlan::Delete(_)
-            | LogicalPlan::EmptyRelation(_) => Ok(self.clone()),
+            | LogicalPlan::EmptyRelation(_)
+            | LogicalPlan::BeginTransaction(_)
+            | LogicalPlan::CommitTransaction
+            | LogicalPlan::RollbackTransaction
+            | LogicalPlan::SetTransaction { .. } => Ok(self.clone()),
         }
     }
 }
@@ -261,6 +282,64 @@ impl std::fmt::Display for LogicalPlan {
             LogicalPlan::Aggregate(v) => write!(f, "{v}"),
             LogicalPlan::Update(v) => write!(f, "{v}"),
             LogicalPlan::Delete(v) => write!(f, "{v}"),
+            LogicalPlan::BeginTransaction(_) => write!(f, "BeginTransaction"),
+            LogicalPlan::CommitTransaction => write!(f, "CommitTransaction"),
+            LogicalPlan::RollbackTransaction => write!(f, "RollbackTransaction"),
+            LogicalPlan::SetTransaction { .. } => write!(f, "SetTransaction"),
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum TransactionScope {
+    Session,
+    Transaction,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TransactionModes {
+    pub isolation_level: Option<IsolationLevel>,
+    pub access_mode: Option<TransactionAccessMode>,
+}
+
+impl TransactionModes {
+    pub fn from_modes(modes: &[TransactionMode]) -> Self {
+        let mut result = TransactionModes::default();
+        for mode in modes {
+            match mode {
+                TransactionMode::IsolationLevel(level) => {
+                    let isolation = match level {
+                        sqlparser::ast::TransactionIsolationLevel::ReadUncommitted => {
+                            IsolationLevel::ReadUncommitted
+                        }
+                        sqlparser::ast::TransactionIsolationLevel::ReadCommitted => {
+                            IsolationLevel::ReadCommitted
+                        }
+                        sqlparser::ast::TransactionIsolationLevel::RepeatableRead => {
+                            IsolationLevel::RepeatableRead
+                        }
+                        sqlparser::ast::TransactionIsolationLevel::Serializable => {
+                            IsolationLevel::Serializable
+                        }
+                    };
+                    result.isolation_level = Some(isolation);
+                }
+                TransactionMode::AccessMode(mode) => {
+                    result.access_mode = Some(*mode);
+                }
+            }
+        }
+        result
+    }
+
+    pub fn unwrap_effective_isolation(&self, fallback: IsolationLevel) -> IsolationLevel {
+        self.isolation_level.unwrap_or(fallback)
+    }
+
+    pub fn unwrap_effective_access_mode(
+        &self,
+        fallback: TransactionAccessMode,
+    ) -> TransactionAccessMode {
+        self.access_mode.unwrap_or(fallback)
     }
 }

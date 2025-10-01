@@ -99,3 +99,19 @@ The WAL system's behavior can be tuned via `WalOptions` in `src/database.rs`, wh
 -   `wal_writer_interval_ms`: The wake-up interval for the background `WalWriter`.
 -   `wal_checkpoint_interval_ms`: The frequency of checkpoints.
 -   `synchronous_commit`: Whether commits wait for disk durability.
+
+## 6. Transaction Manager Integration
+
+The WAL stack is tightly coupled with the transaction subsystem:
+
+- `TransactionManager::begin` writes a `Transaction(Begin)` record and stamps the transaction's `begin_lsn`.
+- `commit` appends `Transaction(Commit)` and blocks on durability when `synchronous_commit` is enabled; async mode still calls `flush_until`.
+- `abort` walks the transaction's undo stack, emits CLRs + logical undo records, then appends `Transaction(Abort)`.
+- Executors record undo actions (insert/update/delete) so abort/rollback can replay the logical inverse.
+- Isolation/access modes (`ReadUncommitted`, `ReadCommitted`, `RepeatableRead`, `Serializable`, `READ ONLY`) are managed in `SessionContext` and enforced by the planner/execution. `READ ONLY` transactions fail early on DML via `ExecutionContext::ensure_writable`, but still participate in WAL for consistency (BEGIN/COMMIT records).
+
+## 7. Observability & Logging
+
+- Lock manager adds trace logs (`lock granted`, `wait edge`) and WARN on deadlock detection, assisting investigation of blocking scenarios.
+- WAL exposes `durable_lsn`, `max_assigned_lsn`, and background flush status.
+- Integration tests in `transaction_tests.rs` cover read-only rejection, RC update visibility, and RR blocking behavior.

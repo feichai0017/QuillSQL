@@ -61,6 +61,18 @@ impl TableReference {
             }
         }
     }
+
+    pub fn to_log_string(&self) -> String {
+        match self {
+            TableReference::Bare { table } => table.clone(),
+            TableReference::Partial { schema, table } => format!("{schema}.{table}"),
+            TableReference::Full {
+                catalog,
+                schema,
+                table,
+            } => format!("{catalog}.{schema}.{table}"),
+        }
+    }
 }
 
 impl std::fmt::Display for TableReference {

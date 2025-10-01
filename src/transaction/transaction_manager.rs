@@ -13,6 +13,7 @@ use crate::transaction::{
 };
 use crate::utils::table_ref::TableReference;
 use dashmap::{DashMap, DashSet};
+use sqlparser::ast::TransactionAccessMode;
 
 #[derive(Debug, Default)]
 struct HeldLocks {
@@ -58,11 +59,11 @@ impl TransactionManager {
         }
     }
 
-    pub fn lock_manager(&self) -> Arc<LockManager> {
-        self.lock_manager.clone()
-    }
-
-    pub fn begin(&self, isolation_level: IsolationLevel) -> QuillSQLResult<Transaction> {
+    pub fn begin(
+        &self,
+        isolation_level: IsolationLevel,
+        access_mode: TransactionAccessMode,
+    ) -> QuillSQLResult<Transaction> {
         let txn_id = self.next_txn_id.fetch_add(1, Ordering::SeqCst);
         if txn_id == 0 {
             return Err(QuillSQLError::Internal(
@@ -70,7 +71,7 @@ impl TransactionManager {
             ));
         }
         let sync_commit = self.synchronous_commit.load(Ordering::Relaxed);
-        let mut txn = Transaction::new(txn_id, isolation_level, sync_commit);
+        let mut txn = Transaction::new(txn_id, isolation_level, access_mode, sync_commit);
         let append = self.wal.append_record_with(|_| {
             WalRecordPayload::Transaction(TransactionPayload {
                 marker: TransactionRecordKind::Begin,
@@ -262,6 +263,17 @@ impl TransactionManager {
         }
     }
 
+    pub fn remove_row_key_marker(
+        &self,
+        txn_id: TransactionId,
+        table: &TableReference,
+        rid: RecordId,
+    ) {
+        if let Some(mut entry) = self.held_locks.get_mut(&txn_id) {
+            entry.row_keys.remove(&(table.clone(), rid));
+        }
+    }
+
     pub fn record_shared_row_lock(
         &self,
         txn_id: TransactionId,
@@ -273,6 +285,34 @@ impl TransactionManager {
             .entry(txn_id)
             .or_insert_with(HeldLocks::default);
         entry.shared_rows.insert((table, rid));
+    }
+
+    pub fn remove_shared_row_lock(
+        &self,
+        txn_id: TransactionId,
+        table: &TableReference,
+        rid: RecordId,
+    ) {
+        if let Some(mut entry) = self.held_locks.get_mut(&txn_id) {
+            entry.shared_rows.remove(&(table.clone(), rid));
+        }
+    }
+
+    pub fn try_unlock_shared_row(
+        &self,
+        txn_id: TransactionId,
+        table: &TableReference,
+        rid: RecordId,
+    ) -> QuillSQLResult<()> {
+        let unlocked = self.lock_manager.unlock_row_raw(txn_id, table.clone(), rid);
+        if !unlocked {
+            return Err(QuillSQLError::Execution(format!(
+                "failed to release shared row lock for txn {} on {}",
+                txn_id, table
+            )));
+        }
+        self.remove_shared_row_lock(txn_id, table, rid);
+        Ok(())
     }
 
     fn release_all_locks(&self, txn_id: TransactionId) {
@@ -297,11 +337,6 @@ mod tests {
     use crate::recovery::WalManager;
     use crate::storage::disk_manager::DiskManager;
     use crate::storage::disk_scheduler::DiskScheduler;
-    use crate::storage::table_heap::TableHeap;
-    use crate::{
-        buffer::BufferPoolManager,
-        catalog::{Schema, SchemaRef},
-    };
     use std::path::Path;
     use tempfile::TempDir;
 
@@ -327,7 +362,10 @@ mod tests {
         let manager = TransactionManager::new(wal.clone(), true);
 
         let mut txn = manager
-            .begin(IsolationLevel::ReadUncommitted)
+            .begin(
+                IsolationLevel::ReadUncommitted,
+                TransactionAccessMode::ReadWrite,
+            )
             .expect("begin txn");
         manager.commit(&mut txn).expect("commit");
 
@@ -343,7 +381,10 @@ mod tests {
         let manager = TransactionManager::new(wal.clone(), false);
 
         let mut txn = manager
-            .begin(IsolationLevel::ReadUncommitted)
+            .begin(
+                IsolationLevel::ReadUncommitted,
+                TransactionAccessMode::ReadWrite,
+            )
             .expect("begin txn");
         manager.abort(&mut txn).expect("abort");
 

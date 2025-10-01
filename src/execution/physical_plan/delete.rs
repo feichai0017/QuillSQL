@@ -35,6 +35,7 @@ impl PhysicalDelete {
 impl VolcanoExecutor for PhysicalDelete {
     fn init(&self, context: &mut ExecutionContext) -> QuillSQLResult<()> {
         self.deleted_rows.store(0, Ordering::SeqCst);
+        context.ensure_writable(&self.table, "DELETE")?;
         context.lock_table(self.table.clone(), LockMode::IntentionExclusive)?;
         let table_heap = context.catalog.table_heap(&self.table)?;
         *self.iterator.lock().unwrap() = Some(TableIterator::new(table_heap, ..));
