@@ -11,13 +11,14 @@
 ## ✨ Highlights
 
 - **Clean architecture**: SQL → Logical Plan → Physical Plan → Volcano executor
+- **Transaction control**: `BEGIN/COMMIT/ROLLBACK`, `SET TRANSACTION`, `SET SESSION TRANSACTION`, enforced `READ ONLY`, row/table locks
 - **B+Tree index**: OLC readers, B-link pages, latch crabbing, range scan iterator
 - **Buffer pool**: LRU-K, pin/unpin with RAII guards, flush-on-evict
 - **Streaming scan**: Large sequential scans bypass buffer pool via a small direct I/O ring buffer to avoid cache pollution
 - **WAL & Recovery (ARIES-inspired)**: FPW + PageDelta, DPT, chained CLR, per-transaction undo chains, idempotent replays
 - **Information schema**: `information_schema.schemas`, `tables`, `columns`, `indexes`
 - **Now supports**: `SHOW DATABASES`, `SHOW TABLES`, `EXPLAIN`, `DELETE`
-- **Docs**: [Architecture](docs/architecture.md) · [Buffer Pool](docs/buffer_pool.md) · [B+ Tree Index](docs/btree_index.md) · [Disk I/O](docs/disk_io.md) · [WAL & Recovery](docs/wal.md)
+- **Docs**: [Architecture](docs/architecture.md) · [Buffer Pool](docs/buffer_pool.md) · [B+ Tree Index](docs/btree_index.md) · [Disk I/O](docs/disk_io.md) · [WAL & Recovery](docs/wal.md) · [Transactions](docs/transactions.md)
 
 ---
 
@@ -106,7 +107,7 @@ EXPLAIN SELECT id, COUNT(*) FROM t GROUP BY id ORDER BY id;
 
 ## ⚠️ Current Limitations
 
-- Not yet supported: `DROP`, `ALTER`, transaction control (BEGIN/COMMIT/ROLLBACK)
+- Not yet supported: `DROP`, `ALTER`, MVCC, predicate locking.
 - Not implemented: outer joins (Left/Right/Full), arithmetic expressions, table/subquery aliases
 - `ORDER BY` `DESC` / `NULLS FIRST|LAST` currently affects sorting only (not storage layout)
 
@@ -126,7 +127,7 @@ Minimal environment variables (runtime only)
 - PORT: bind port (overrides the port of `QUILL_HTTP_ADDR`)
 - QUILL_HTTP_ADDR: listen address (default `0.0.0.0:8080`)
 - QUILL_DB_FILE: path to database file (uses a temp DB if unset)
-- QUILL_DEFAULT_ISOLATION: default isolation level for the HTTP server session (`read-uncommitted`, `read-committed`, `snapshot-isolation`, `serializable`)
+- QUILL_DEFAULT_ISOLATION: default session isolation (`read-uncommitted`, `read-committed`, `repeatable-read`, `serializable`)
 - RUST_LOG: log level (e.g., info, debug)
 
 Example (Rust)

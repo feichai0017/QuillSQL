@@ -18,6 +18,13 @@ This document gives a high-level overview of QuillSQL’s end-to-end architectur
 +---------------------------------------------------------------+
                  |
                  v
++---------------------------------------------------------------+
+|                      Transaction Layer                       |
+|  session::SessionContext  ->  transaction::TransactionManager |
+|  -> LockManager (table/row 2PL) + WAL integration             |
++---------------------------------------------------------------+
+                |
+                v
 +------------------------+     +--------------------------------+
 |  Optimizer (logical)   | --> |  Optimized LogicalPlan         |
 |  - Eliminate/Merge/PD  |     |  (rule-based, no stats)        |
@@ -108,3 +115,25 @@ This document gives a high-level overview of QuillSQL’s end-to-end architectur
 - Cost model and statistics-driven planning.
 - Bitmap Heap Scan for large index ranges.
 - WAL/MVCC for crash recovery and snapshot isolation.
+
+## Transaction & Session Subsystem
+
+- `SessionContext`
+  - Per-connection state: default isolation/access mode, autocommit, active transaction handle.
+  - Applies `SET TRANSACTION`/`SET SESSION TRANSACTION` requests and propagates modes when a transaction is started.
+- `TransactionManager`
+  - Entry point for `begin / commit / abort`.
+  - Assigns transaction IDs, logs begin/commit/abort records into WAL, maintains undo stacks for DML.
+  - Exposes helpers for executors to acquire table/row locks respecting isolation and access modes (ReadWrite vs ReadOnly).
+- `LockManager`
+  - Central 2PL implementation with table+row granularity (IS/IX/S/SIX/X).
+  - Maintains per-resource queues, wait-for graph and deadlock detection; shared row locks can be released eagerly for RC, retained for RR/Serializable.
+  - Trace logging records grant/wait/deadlock events for observability.
+- Isolation support
+  - `ReadUncommitted`: direct access, no row locks.
+  - `ReadCommitted`: S locks acquired but released after read.
+  - `RepeatableRead` / `Serializable`: S locks retained until commit; RR still relies on explicit locking (no MVCC yet).
+  - Transactions can be marked `READ ONLY`, causing DML to fail early via `ExecutionContext::ensure_writable`.
+- WAL interaction
+  - TransactionManager writes begin/commit/abort and logical undo records.
+  - Buffer pool ensures page_lsn ordering; commit waits respect synchronous/asynchronous modes.
