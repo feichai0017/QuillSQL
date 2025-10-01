@@ -46,10 +46,11 @@ This document gives a high-level overview of QuillSQL’s end-to-end architectur
                  |
                  v
 +-------------------------+        +-----------------------------+
-|       Storage Layer     |        |       Buffer Pool           |
+|       Storage Layer     |        |       Buffer Manager        |
 |  - TableHeap (heap)     |        |  - Frames + PageTable       |
 |  - B+Tree Index         |        |  - LRU-K + TinyLFU (opt)    |
-|  - Page codecs          |        |  - Pin/Unpin RAII           |
+|  - Page codecs          |        |  - WAL-aware guards         |
+|                         |        |  - Prefetch + BG writer     |
 +-------------------------+        +-----------------------------+
                  |                                   |
                  v                                   v
@@ -79,10 +80,11 @@ This document gives a high-level overview of QuillSQL’s end-to-end architectur
   - B+Tree Index: B-link pages (internal and leaf) for high concurrency, header page tracks root.
   - Page codecs: encode/decode pages and tuples to/from fixed-size bytes.
 
-- Buffer Pool Manager
-  - Page table (DashMap<PageId, FrameId>), per-frame RwLock, RAII guards.
-  - LRU-K replacer (optionally TinyLFU admission to resist cache pollution).
-  - Safe eviction, flush-on-evict, and explicit `flush_all_pages()` for durability.
+- Buffer Manager
+  - Page table (DashMap<PageId, FrameId>), per-frame RwLock, and RAII read/write guards that manage pin counts automatically.
+  - WAL-aware eviction path: `ensure_wal_durable` guarantees the W(AL) record for a dirty page is on disk before flush/evict; dirty page table + `note_dirty_page` feed checkpoints.
+  - LRU-K replacer (optional TinyLFU admission) to protect hot sets from scan pollution; inflight load map prevents thundering herd reads.
+  - `prefetch_page` API lets iterators warm the cache without pinning; background writer periodically drains dirty pages so foreground work stays responsive.
 
 - Disk I/O
   - Asynchronous scheduler thread (channels) handles Read/Write/Allocate/Deallocate.
