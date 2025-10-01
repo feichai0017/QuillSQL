@@ -47,7 +47,7 @@ impl BufferManager {
     }
 
     pub fn new_with_config(config: BufferPoolConfig, disk_scheduler: Arc<DiskScheduler>) -> Self {
-        let pool = Arc::new(BufferPool::new_with_config(config.clone(), disk_scheduler));
+        let pool = Arc::new(BufferPool::new_with_config(config, disk_scheduler));
         let replacer = Arc::new(RwLock::new(LRUKReplacer::new(pool.capacity())));
         let tiny_lfu = if config.tiny_lfu_enable {
             Some(Arc::new(RwLock::new(TinyLFU::new(
@@ -191,7 +191,7 @@ impl BufferManager {
         schema: SchemaRef,
     ) -> QuillSQLResult<(ReadPageGuard, TablePage)> {
         let guard = self.fetch_page_read(page_id)?;
-        let (page, _) = TablePageCodec::decode(&guard.data()[..], schema)?;
+        let (page, _) = TablePageCodec::decode(guard.data(), schema)?;
         Ok((guard, page))
     }
 
@@ -201,7 +201,7 @@ impl BufferManager {
         key_schema: SchemaRef,
     ) -> QuillSQLResult<(ReadPageGuard, BPlusTreePage)> {
         let guard = self.fetch_page_read(page_id)?;
-        let (page, _) = BPlusTreePageCodec::decode(&guard.data()[..], key_schema.clone())?;
+        let (page, _) = BPlusTreePageCodec::decode(guard.data(), key_schema.clone())?;
         Ok((guard, page))
     }
 
@@ -211,7 +211,7 @@ impl BufferManager {
         key_schema: SchemaRef,
     ) -> QuillSQLResult<(ReadPageGuard, BPlusTreeInternalPage)> {
         let guard = self.fetch_page_read(page_id)?;
-        let (page, _) = BPlusTreeInternalPageCodec::decode(&guard.data()[..], key_schema.clone())?;
+        let (page, _) = BPlusTreeInternalPageCodec::decode(guard.data(), key_schema.clone())?;
         Ok((guard, page))
     }
 
@@ -221,7 +221,7 @@ impl BufferManager {
         key_schema: SchemaRef,
     ) -> QuillSQLResult<(ReadPageGuard, BPlusTreeLeafPage)> {
         let guard = self.fetch_page_read(page_id)?;
-        let (page, _) = BPlusTreeLeafPageCodec::decode(&guard.data()[..], key_schema.clone())?;
+        let (page, _) = BPlusTreeLeafPageCodec::decode(guard.data(), key_schema.clone())?;
         Ok((guard, page))
     }
 
@@ -230,7 +230,7 @@ impl BufferManager {
         page_id: PageId,
     ) -> QuillSQLResult<(ReadPageGuard, BPlusTreeHeaderPage)> {
         let guard = self.fetch_page_read(page_id)?;
-        let (header, _) = BPlusTreeHeaderPageCodec::decode(&guard.data()[..])?;
+        let (header, _) = BPlusTreeHeaderPageCodec::decode(guard.data())?;
         Ok((guard, header))
     }
 
@@ -255,6 +255,7 @@ impl BufferManager {
         drop(meta);
         self.ensure_wal_durable(lsn)?;
         let bytes = {
+            let _lock = self.pool.frame_lock(frame_id).read();
             let slice = unsafe { self.pool.frame_slice(frame_id) };
             Bytes::copy_from_slice(slice)
         };
@@ -327,7 +328,7 @@ impl BufferManager {
             {
                 let mut rep = self.replacer.write();
                 let _ = rep.set_evictable(frame_id, true);
-                let _ = rep.remove(frame_id);
+                rep.remove(frame_id);
             }
             self.pool.push_free_frame(frame_id);
             self.pool
@@ -602,9 +603,9 @@ mod tests {
     #[test]
     fn delete_page_releases_frame() {
         let (_tmp, manager) = setup_manager(2);
-        let (page_id, frame_id) = {
+        let page_id = {
             let guard = manager.new_page().unwrap();
-            (guard.page_id(), guard.frame_id())
+            guard.page_id()
         };
 
         assert!(manager.delete_page(page_id).unwrap());

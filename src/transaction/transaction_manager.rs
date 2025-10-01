@@ -254,10 +254,7 @@ impl TransactionManager {
         rid: RecordId,
         mode: LockMode,
     ) {
-        let mut entry = self
-            .held_locks
-            .entry(txn_id)
-            .or_insert_with(HeldLocks::default);
+        let mut entry = self.held_locks.entry(txn_id).or_default();
         if entry.row_keys.insert((table.clone(), rid)) {
             entry.rows.push((table, rid, mode));
         }
@@ -280,10 +277,7 @@ impl TransactionManager {
         table: TableReference,
         rid: RecordId,
     ) {
-        let mut entry = self
-            .held_locks
-            .entry(txn_id)
-            .or_insert_with(HeldLocks::default);
+        let mut entry = self.held_locks.entry(txn_id).or_default();
         entry.shared_rows.insert((table, rid));
     }
 
@@ -348,9 +342,11 @@ mod tests {
     fn build_wal(temp_dir: &TempDir) -> Arc<WalManager> {
         let wal_path = temp_dir.path().join("wal");
         let db_path = temp_dir.path().join("test.db");
-        let mut config = WalConfig::default();
-        config.directory = wal_path;
-        config.sync_on_flush = false;
+        let config = WalConfig {
+            directory: wal_path,
+            sync_on_flush: false,
+            ..WalConfig::default()
+        };
         let scheduler = build_scheduler(&db_path);
         Arc::new(WalManager::new(config, scheduler, None, None).expect("wal manager"))
     }

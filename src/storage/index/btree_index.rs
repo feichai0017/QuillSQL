@@ -1450,15 +1450,13 @@ impl BPlusTreeIndex {
                     let new_data = BPlusTreeLeafPageCodec::encode(&new_leaf);
                     self.wal_overwrite_page(&mut new_page_guard, new_data)?;
                     leaf_page.header.version += 1;
-                    if self.config.debug_split_level >= 2 {
-                        if new_leaf.header.current_size > 0 {
-                            eprintln!(
-                                "[SPLIT DEBUG] leaf_split left={} right={} sep_key={}",
-                                page_id,
-                                new_page_id,
-                                new_leaf.key_at(0)
-                            );
-                        }
+                    if self.config.debug_split_level >= 2 && new_leaf.header.current_size > 0 {
+                        eprintln!(
+                            "[SPLIT DEBUG] leaf_split left={} right={} sep_key={}",
+                            page_id,
+                            new_page_id,
+                            new_leaf.key_at(0)
+                        );
                     }
                     new_leaf.key_at(0).clone()
                 }

@@ -102,10 +102,8 @@ impl HashIndex {
             let dir_read = self.directory.read().unwrap();
             let mut indices = Vec::new();
             for i in 0..dir_len {
-                if dir_read[i] == page_id {
-                    if ((i >> old_local) & 1) == 1 {
-                        indices.push(i);
-                    }
+                if dir_read[i] == page_id && ((i >> old_local) & 1) == 1 {
+                    indices.push(i);
                 }
             }
             (depth_now, indices)

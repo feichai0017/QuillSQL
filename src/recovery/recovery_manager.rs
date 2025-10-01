@@ -416,9 +416,11 @@ mod tests {
         let wal_dir = temp.path().join("wal");
 
         let scheduler = build_scheduler(&db_path);
-        let mut config = WalConfig::default();
-        config.directory = wal_dir.clone();
-        config.sync_on_flush = false;
+        let config = WalConfig {
+            directory: wal_dir.clone(),
+            sync_on_flush: false,
+            ..WalConfig::default()
+        };
         let wal = Arc::new(WalManager::new(config.clone(), scheduler.clone(), None, None).unwrap());
 
         let page_bytes = vec![0xAB; crate::buffer::PAGE_SIZE];
@@ -453,9 +455,11 @@ mod tests {
         let wal_dir = temp.path().join("wal");
 
         let scheduler = build_scheduler(&db_path);
-        let mut config = WalConfig::default();
-        config.directory = wal_dir.clone();
-        config.sync_on_flush = false;
+        let config = WalConfig {
+            directory: wal_dir.clone(),
+            sync_on_flush: false,
+            ..WalConfig::default()
+        };
         let wal = Arc::new(WalManager::new(config.clone(), scheduler.clone(), None, None).unwrap());
 
         // Seed a page with zeros
@@ -501,9 +505,11 @@ mod tests {
         let wal_dir = temp.path().join("wal");
 
         let scheduler = build_scheduler(&db_path);
-        let mut config = WalConfig::default();
-        config.directory = wal_dir.clone();
-        config.sync_on_flush = false;
+        let config = WalConfig {
+            directory: wal_dir.clone(),
+            sync_on_flush: false,
+            ..WalConfig::default()
+        };
         let wal = WalManager::new(config.clone(), scheduler.clone(), None, None).unwrap();
 
         wal.append_record_with(|_| {
@@ -530,9 +536,11 @@ mod tests {
         let wal_dir = temp.path().join("wal");
 
         let scheduler = build_scheduler(&db_path);
-        let mut config = WalConfig::default();
-        config.directory = wal_dir.clone();
-        config.sync_on_flush = false;
+        let config = WalConfig {
+            directory: wal_dir.clone(),
+            sync_on_flush: false,
+            ..WalConfig::default()
+        };
         let wal = Arc::new(WalManager::new(config.clone(), scheduler.clone(), None, None).unwrap());
 
         // Build a page with 1 tuple (slot 0), not deleted
@@ -622,7 +630,7 @@ mod tests {
         let rx = scheduler.schedule_read(page_id).unwrap();
         let data = rx.recv().unwrap().unwrap();
         let (header2, _c) = TablePageHeaderCodec::decode(&data).unwrap();
-        assert_eq!(header2.tuple_infos[0].meta.is_deleted, true);
+        assert!(header2.tuple_infos[0].meta.is_deleted);
     }
 
     #[test]
@@ -683,7 +691,7 @@ mod tests {
             delete_txn_id: 0,
             is_deleted: false,
         };
-        let old_tuple_bytes = vec![0u8 ^ 0xAA; 16];
+        let old_tuple_bytes = vec![0xAA; 16];
         let new_tuple_bytes = vec![0xFF; 24]; // different size to exercise repack
         wal.append_record_with(|_| {
             WalRecordPayload::Heap(crate::recovery::wal_record::HeapRecordPayload::Update(
@@ -846,7 +854,7 @@ mod tests {
         let rx = scheduler.schedule_read(page_id).unwrap();
         let data = rx.recv().unwrap().unwrap();
         let (hdr, _c) = TablePageHeaderCodec::decode(&data).unwrap();
-        assert_eq!(hdr.tuple_infos[0].meta.is_deleted, false);
+        assert!(!hdr.tuple_infos[0].meta.is_deleted);
         let off3 = hdr.tuple_infos[0].offset as usize;
         assert_eq!(&data[off3..off3 + 8], &old_bytes[..]);
     }
@@ -1022,7 +1030,7 @@ mod tests {
         for i in 0..4u16 {
             let off = ((i % 32) * 8) as usize;
             // Last writer for this offset is i + 96 within 0..128 sequence
-            let expected = vec![(i + 96) as u8; 8];
+            let expected = [(i + 96) as u8; 8];
             assert_eq!(&data[off..off + 8], &expected[..]);
         }
     }
@@ -1361,7 +1369,7 @@ mod tests {
             let rx_a = scheduler_r.schedule_read(pid_a).unwrap();
             let data_a = rx_a.recv().unwrap().unwrap();
             let (hdr_a, _ca) = TablePageHeaderCodec::decode(&data_a).unwrap();
-            assert_eq!(hdr_a.tuple_infos[0].meta.is_deleted, true);
+            assert!(hdr_a.tuple_infos[0].meta.is_deleted);
 
             let rx_b = scheduler_r.schedule_read(pid_b).unwrap();
             let data_b = rx_b.recv().unwrap().unwrap();

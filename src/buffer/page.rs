@@ -194,7 +194,8 @@ impl Drop for WritePageGuard {
 pub(crate) fn new_read_guard(bpm: Arc<BufferManager>, frame_id: FrameId) -> ReadPageGuard {
     let pool = bpm.buffer_pool();
     let lock = pool.frame_lock(frame_id).read();
-    let static_guard = unsafe { mem::transmute::<_, RwLockReadGuard<'static, ()>>(lock) };
+    let static_guard =
+        unsafe { mem::transmute::<RwLockReadGuard<'_, ()>, RwLockReadGuard<'static, ()>>(lock) };
     ReadPageGuard {
         bpm,
         pool,
@@ -206,7 +207,8 @@ pub(crate) fn new_read_guard(bpm: Arc<BufferManager>, frame_id: FrameId) -> Read
 pub(crate) fn new_write_guard(bpm: Arc<BufferManager>, frame_id: FrameId) -> WritePageGuard {
     let pool = bpm.buffer_pool();
     let lock = pool.frame_lock(frame_id).write();
-    let static_guard = unsafe { mem::transmute::<_, RwLockWriteGuard<'static, ()>>(lock) };
+    let static_guard =
+        unsafe { mem::transmute::<RwLockWriteGuard<'_, ()>, RwLockWriteGuard<'static, ()>>(lock) };
     WritePageGuard {
         bpm,
         pool,

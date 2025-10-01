@@ -80,16 +80,35 @@ impl BufferPool {
         &self.locks[frame_id]
     }
 
+    /// Returns an immutable view over the page bytes stored in `frame_id`.
+    ///
+    /// # Safety
+    /// Caller must guarantee the frame lock is held for read (or write) and that the
+    /// frame remains pinned for the duration of the returned slice. Violating the
+    /// locking protocol allows concurrent mutation and results in undefined behavior.
     pub unsafe fn frame_slice(&self, frame_id: FrameId) -> &[u8] {
         let ptr = self.frame_ptr(frame_id) as *const u8;
         std::slice::from_raw_parts(ptr, PAGE_SIZE)
     }
 
+    /// Returns a mutable view over the page bytes stored in `frame_id`.
+    ///
+    /// # Safety
+    /// Caller must hold the frame's write lock and ensure no other references to the
+    /// underlying slice exist. The buffer manager enforces this by acquiring the
+    /// corresponding `RwLock` write guard before invoking this function. Misuse causes
+    /// aliasing mutable references and leads to undefined behavior.
+    #[allow(clippy::mut_from_ref)]
     pub unsafe fn frame_slice_mut(&self, frame_id: FrameId) -> &mut [u8] {
         let ptr = self.frame_ptr(frame_id);
         std::slice::from_raw_parts_mut(ptr, PAGE_SIZE)
     }
 
+    /// Computes the raw pointer to the page bytes backing `frame_id`.
+    ///
+    /// # Safety
+    /// Equivalent to `frame_slice`/`frame_slice_mut`; caller must uphold the same
+    /// locking and lifetime guarantees before dereferencing the pointer.
     unsafe fn frame_ptr(&self, frame_id: FrameId) -> *mut u8 {
         self.arena.as_ptr().add(frame_id * PAGE_SIZE) as *mut u8
     }
