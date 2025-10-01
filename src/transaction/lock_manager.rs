@@ -460,7 +460,12 @@ mod tests {
     use std::time::Duration;
 
     fn new_txn(id: TransactionId) -> Transaction {
-        Transaction::new(id, IsolationLevel::ReadCommitted, true)
+        Transaction::new(
+            id,
+            IsolationLevel::ReadCommitted,
+            sqlparser::ast::TransactionAccessMode::ReadWrite,
+            true,
+        )
     }
 
     #[test]

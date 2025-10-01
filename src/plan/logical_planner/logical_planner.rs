@@ -1,8 +1,9 @@
 use crate::error::{QuillSQLError, QuillSQLResult};
 
 use crate::catalog::Catalog;
-use crate::plan::logical_plan::{LogicalPlan, OrderByExpr};
+use crate::plan::logical_plan::{LogicalPlan, OrderByExpr, TransactionModes, TransactionScope};
 use crate::sql::ast;
+use crate::sql::ast::Value;
 use crate::utils::table_ref::TableReference;
 
 pub struct PlannerContext<'a> {
@@ -70,8 +71,47 @@ impl<'a> LogicalPlanner<'a> {
                 self.plan_delete(&from[0], selection)
             }
             ast::Statement::Explain { statement, .. } => self.plan_explain(statement),
+            ast::Statement::StartTransaction { modes, .. } => self.plan_begin_transaction(modes),
+            ast::Statement::Commit { .. } => Ok(LogicalPlan::CommitTransaction),
+            ast::Statement::Rollback { .. } => Ok(LogicalPlan::RollbackTransaction),
+            ast::Statement::SetTransaction {
+                modes,
+                snapshot,
+                session,
+            } => self.plan_set_transaction(*session, snapshot, modes),
             _ => unimplemented!(),
         }
+    }
+
+    fn plan_begin_transaction(
+        &self,
+        modes: &Vec<ast::TransactionMode>,
+    ) -> QuillSQLResult<LogicalPlan> {
+        Ok(LogicalPlan::BeginTransaction(TransactionModes::from_modes(
+            modes,
+        )))
+    }
+
+    fn plan_set_transaction(
+        &self,
+        session_scope: bool,
+        snapshot: &Option<Value>,
+        modes: &Vec<ast::TransactionMode>,
+    ) -> QuillSQLResult<LogicalPlan> {
+        if snapshot.is_some() {
+            return Err(QuillSQLError::Plan(
+                "SET TRANSACTION SNAPSHOT is not supported".to_string(),
+            ));
+        };
+        let logical_scope = if session_scope {
+            TransactionScope::Session
+        } else {
+            TransactionScope::Transaction
+        };
+        Ok(LogicalPlan::SetTransaction {
+            scope: logical_scope,
+            modes: TransactionModes::from_modes(modes),
+        })
     }
 
     pub fn bind_order_by_expr(&self, order_by: &ast::OrderByExpr) -> QuillSQLResult<OrderByExpr> {

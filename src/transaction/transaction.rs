@@ -8,6 +8,7 @@ use crate::storage::index::btree_index::BPlusTreeIndex;
 use crate::storage::page::{RecordId, TupleMeta};
 use crate::storage::table_heap::TableHeap;
 use crate::storage::tuple::Tuple;
+use sqlparser::ast::TransactionAccessMode;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -175,6 +176,7 @@ impl UndoAction {
 pub struct Transaction {
     id: TransactionId,
     isolation_level: IsolationLevel,
+    access_mode: TransactionAccessMode,
     state: TransactionState,
     synchronous_commit: bool,
     begin_lsn: Option<Lsn>,
@@ -186,11 +188,13 @@ impl Transaction {
     pub fn new(
         id: TransactionId,
         isolation_level: IsolationLevel,
+        access_mode: TransactionAccessMode,
         synchronous_commit: bool,
     ) -> Self {
         Self {
             id,
             isolation_level,
+            access_mode,
             state: TransactionState::Running,
             synchronous_commit,
             begin_lsn: None,
@@ -205,6 +209,14 @@ impl Transaction {
 
     pub fn isolation_level(&self) -> IsolationLevel {
         self.isolation_level
+    }
+
+    pub fn access_mode(&self) -> TransactionAccessMode {
+        self.access_mode
+    }
+
+    pub fn set_isolation_level(&mut self, isolation_level: IsolationLevel) {
+        self.isolation_level = isolation_level;
     }
 
     pub fn state(&self) -> TransactionState {
@@ -234,6 +246,14 @@ impl Transaction {
 
     pub(crate) fn set_state(&mut self, state: TransactionState) {
         self.state = state;
+    }
+
+    pub(crate) fn set_access_mode(&mut self, access_mode: TransactionAccessMode) {
+        self.access_mode = access_mode;
+    }
+
+    pub fn update_access_mode(&mut self, access_mode: TransactionAccessMode) {
+        self.access_mode = access_mode;
     }
 
     pub(crate) fn mark_tainted(&mut self) {

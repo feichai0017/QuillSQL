@@ -17,6 +17,15 @@ pub fn parse_sql(sql: &str) -> QuillSQLResult<Vec<Statement>> {
     } else if lower == "show tables" {
         // List all tables
         Some("select table_name from information_schema.tables".to_string())
+    } else if lower.starts_with("set transaction") {
+        let rest = normalized["set transaction".len()..].trim_start();
+        Some(format!("SET TRANSACTION {}", rest))
+    } else if lower.starts_with("set session transaction") {
+        let rest = normalized["set session transaction".len()..].trim_start();
+        Some(format!(
+            "SET SESSION CHARACTERISTICS AS TRANSACTION {}",
+            rest
+        ))
     } else {
         None
     };

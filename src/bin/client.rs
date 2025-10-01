@@ -1,5 +1,6 @@
 use clap::Parser;
 use quill_sql::database::{Database, DatabaseOptions, WalOptions};
+use quill_sql::session::SessionContext;
 use quill_sql::transaction::IsolationLevel;
 use quill_sql::utils::util::pretty_format_tuples;
 use rustyline::error::ReadlineError;
@@ -89,6 +90,7 @@ fn main() {
     } else {
         Database::new_temp_with_options(db_options).expect("fail to open temp database")
     };
+    let mut session = SessionContext::new(db.default_isolation());
 
     println!(":) Welcome to the bustubx, please input sql.");
     let mut rl = DefaultEditor::new().expect("created editor");
@@ -103,7 +105,7 @@ fn main() {
                     println!("bye!");
                     break;
                 }
-                let result = db.run(&line);
+                let result = db.run_with_session(&mut session, &line);
                 match result {
                     Ok(tuples) => {
                         if !tuples.is_empty() {

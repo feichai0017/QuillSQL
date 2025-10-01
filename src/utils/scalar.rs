@@ -184,12 +184,124 @@ impl ScalarValue {
         }
     }
 
-    pub fn wrapping_add(&self, _other: Self) -> QuillSQLResult<Self> {
-        todo!()
+    pub fn wrapping_add(&self, other: Self) -> QuillSQLResult<Self> {
+        use ScalarValue::*;
+        match (self, other.clone()) {
+            (Int8(Some(a)), Int8(Some(b))) => Ok(Int8(Some(a.wrapping_add(b)))),
+            (Int16(Some(a)), Int16(Some(b))) => Ok(Int16(Some(a.wrapping_add(b)))),
+            (Int32(Some(a)), Int32(Some(b))) => Ok(Int32(Some(a.wrapping_add(b)))),
+            (Int64(Some(a)), Int64(Some(b))) => Ok(Int64(Some(a.wrapping_add(b)))),
+            (UInt8(Some(a)), UInt8(Some(b))) => Ok(UInt8(Some(a.wrapping_add(b)))),
+            (UInt16(Some(a)), UInt16(Some(b))) => Ok(UInt16(Some(a.wrapping_add(b)))),
+            (UInt32(Some(a)), UInt32(Some(b))) => Ok(UInt32(Some(a.wrapping_add(b)))),
+            (UInt64(Some(a)), UInt64(Some(b))) => Ok(UInt64(Some(a.wrapping_add(b)))),
+            (Float32(Some(a)), Float32(Some(b))) => Ok(Float32(Some(a + b))),
+            (Float64(Some(a)), Float64(Some(b))) => Ok(Float64(Some(a + b))),
+            (Int8(None), _)
+            | (Int16(None), _)
+            | (Int32(None), _)
+            | (Int64(None), _)
+            | (UInt8(None), _)
+            | (UInt16(None), _)
+            | (UInt32(None), _)
+            | (UInt64(None), _)
+            | (Float32(None), _)
+            | (Float64(None), _) => Ok(self.clone()),
+            _ => Err(QuillSQLError::Execution(format!(
+                "Unsupported addition between {:?} and {:?}",
+                self, other
+            ))),
+        }
     }
 
-    pub fn wrapping_sub(&self, _other: Self) -> QuillSQLResult<Self> {
-        todo!()
+    pub fn wrapping_sub(&self, other: Self) -> QuillSQLResult<Self> {
+        use ScalarValue::*;
+        match (self, other.clone()) {
+            (Int8(Some(a)), Int8(Some(b))) => Ok(Int8(Some(a.wrapping_sub(b)))),
+            (Int16(Some(a)), Int16(Some(b))) => Ok(Int16(Some(a.wrapping_sub(b)))),
+            (Int32(Some(a)), Int32(Some(b))) => Ok(Int32(Some(a.wrapping_sub(b)))),
+            (Int64(Some(a)), Int64(Some(b))) => Ok(Int64(Some(a.wrapping_sub(b)))),
+            (UInt8(Some(a)), UInt8(Some(b))) => Ok(UInt8(Some(a.wrapping_sub(b)))),
+            (UInt16(Some(a)), UInt16(Some(b))) => Ok(UInt16(Some(a.wrapping_sub(b)))),
+            (UInt32(Some(a)), UInt32(Some(b))) => Ok(UInt32(Some(a.wrapping_sub(b)))),
+            (UInt64(Some(a)), UInt64(Some(b))) => Ok(UInt64(Some(a.wrapping_sub(b)))),
+            (Float32(Some(a)), Float32(Some(b))) => Ok(Float32(Some(a - b))),
+            (Float64(Some(a)), Float64(Some(b))) => Ok(Float64(Some(a - b))),
+            (Int8(None), _)
+            | (Int16(None), _)
+            | (Int32(None), _)
+            | (Int64(None), _)
+            | (UInt8(None), _)
+            | (UInt16(None), _)
+            | (UInt32(None), _)
+            | (UInt64(None), _)
+            | (Float32(None), _)
+            | (Float64(None), _) => Ok(self.clone()),
+            _ => Err(QuillSQLError::Execution(format!(
+                "Unsupported subtraction between {:?} and {:?}",
+                self, other
+            ))),
+        }
+    }
+
+    pub fn wrapping_mul(&self, other: Self) -> QuillSQLResult<Self> {
+        use ScalarValue::*;
+        match (self, other.clone()) {
+            (Int32(Some(a)), Int32(Some(b))) => Ok(Int32(Some(a.wrapping_mul(b)))),
+            (Int64(Some(a)), Int64(Some(b))) => Ok(Int64(Some(a.wrapping_mul(b)))),
+            (UInt32(Some(a)), UInt32(Some(b))) => Ok(UInt32(Some(a.wrapping_mul(b)))),
+            (UInt64(Some(a)), UInt64(Some(b))) => Ok(UInt64(Some(a.wrapping_mul(b)))),
+            (Float32(Some(a)), Float32(Some(b))) => Ok(Float32(Some(a * b))),
+            (Float64(Some(a)), Float64(Some(b))) => Ok(Float64(Some(a * b))),
+            (Int8(Some(a)), Int8(Some(b))) => Ok(Int8(Some(a.wrapping_mul(b)))),
+            (Int16(Some(a)), Int16(Some(b))) => Ok(Int16(Some(a.wrapping_mul(b)))),
+            (UInt8(Some(a)), UInt8(Some(b))) => Ok(UInt8(Some(a.wrapping_mul(b)))),
+            (UInt16(Some(a)), UInt16(Some(b))) => Ok(UInt16(Some(a.wrapping_mul(b)))),
+            (Int8(None), _)
+            | (Int16(None), _)
+            | (Int32(None), _)
+            | (Int64(None), _)
+            | (UInt8(None), _)
+            | (UInt16(None), _)
+            | (UInt32(None), _)
+            | (UInt64(None), _)
+            | (Float32(None), _)
+            | (Float64(None), _) => Ok(self.clone()),
+            _ => Err(QuillSQLError::Execution(format!(
+                "Unsupported multiplication between {:?} and {:?}",
+                self, other
+            ))),
+        }
+    }
+
+    pub fn wrapping_div(&self, other: Self) -> QuillSQLResult<Self> {
+        use ScalarValue::*;
+        match (self, other.clone()) {
+            (Int8(Some(a)), Int8(Some(b))) => Ok(Int8(Some(a.wrapping_div(b)))),
+            (Int16(Some(a)), Int16(Some(b))) => Ok(Int16(Some(a.wrapping_div(b)))),
+            (Int32(Some(a)), Int32(Some(b))) => Ok(Int32(Some(a.wrapping_div(b)))),
+            (Int64(Some(a)), Int64(Some(b))) => Ok(Int64(Some(a.wrapping_div(b)))),
+            (UInt8(Some(a)), UInt8(Some(b))) => Ok(UInt8(Some(a.wrapping_div(b)))),
+            (UInt16(Some(a)), UInt16(Some(b))) => Ok(UInt16(Some(a.wrapping_div(b)))),
+            (UInt32(Some(a)), UInt32(Some(b))) => Ok(UInt32(Some(a.wrapping_div(b)))),
+            (UInt64(Some(a)), UInt64(Some(b))) => Ok(UInt64(Some(a.wrapping_div(b)))),
+            (Float32(Some(a)), Float32(Some(b))) => Ok(Float32(Some(a / b))),
+            (Float64(Some(a)), Float64(Some(b))) => Ok(Float64(Some(a / b))),
+            (Int8(None), _)
+            | (Int16(None), _)
+            | (Int32(None), _)
+            | (Int64(None), _)
+            | (UInt8(None), _)
+            | (UInt16(None), _)
+            | (UInt32(None), _)
+            | (UInt64(None), _)
+            | (Float32(None), _)
+            | (Float64(None), _) => Ok(self.clone()),
+            _ => Err(QuillSQLError::Execution(format!(
+                "Unsupported division between {:?} and {:?}",
+                self, other
+            ))),
+        }
     }
 
     pub fn from_string(string: &String, data_type: DataType) -> QuillSQLResult<Self> {

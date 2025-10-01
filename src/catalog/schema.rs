@@ -98,10 +98,13 @@ impl Schema {
             .columns
             .iter()
             .enumerate()
-            .find(|(_, col)| match (relation, &col.relation) {
-                (Some(rel), Some(col_rel)) => rel.resolved_eq(col_rel) && name == col.name,
-                (Some(_), None) => false,
-                (None, Some(_)) | (None, None) => name == col.name,
+            .find(|(_, col)| {
+                let name_matches = col.name.eq_ignore_ascii_case(name);
+                match (relation, &col.relation) {
+                    (Some(rel), Some(col_rel)) => name_matches && rel.resolved_eq(col_rel),
+                    (Some(_), None) => false,
+                    (None, Some(_)) | (None, None) => name_matches,
+                }
             })
             .ok_or_else(|| QuillSQLError::Plan(format!("Unable to get column named \"{name}\"")))?;
         Ok(idx)

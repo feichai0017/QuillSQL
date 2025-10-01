@@ -13,6 +13,7 @@ use crate::transaction::{
 };
 use crate::utils::table_ref::TableReference;
 use dashmap::{DashMap, DashSet};
+use sqlparser::ast::TransactionAccessMode;
 
 #[derive(Debug, Default)]
 struct HeldLocks {
@@ -58,7 +59,11 @@ impl TransactionManager {
         }
     }
 
-    pub fn begin(&self, isolation_level: IsolationLevel) -> QuillSQLResult<Transaction> {
+    pub fn begin(
+        &self,
+        isolation_level: IsolationLevel,
+        access_mode: TransactionAccessMode,
+    ) -> QuillSQLResult<Transaction> {
         let txn_id = self.next_txn_id.fetch_add(1, Ordering::SeqCst);
         if txn_id == 0 {
             return Err(QuillSQLError::Internal(
@@ -66,7 +71,7 @@ impl TransactionManager {
             ));
         }
         let sync_commit = self.synchronous_commit.load(Ordering::Relaxed);
-        let mut txn = Transaction::new(txn_id, isolation_level, sync_commit);
+        let mut txn = Transaction::new(txn_id, isolation_level, access_mode, sync_commit);
         let append = self.wal.append_record_with(|_| {
             WalRecordPayload::Transaction(TransactionPayload {
                 marker: TransactionRecordKind::Begin,
@@ -321,11 +326,6 @@ mod tests {
     use crate::recovery::WalManager;
     use crate::storage::disk_manager::DiskManager;
     use crate::storage::disk_scheduler::DiskScheduler;
-    use crate::storage::table_heap::TableHeap;
-    use crate::{
-        buffer::BufferPoolManager,
-        catalog::{Schema, SchemaRef},
-    };
     use std::path::Path;
     use tempfile::TempDir;
 
@@ -351,7 +351,10 @@ mod tests {
         let manager = TransactionManager::new(wal.clone(), true);
 
         let mut txn = manager
-            .begin(IsolationLevel::ReadUncommitted)
+            .begin(
+                IsolationLevel::ReadUncommitted,
+                TransactionAccessMode::ReadWrite,
+            )
             .expect("begin txn");
         manager.commit(&mut txn).expect("commit");
 
@@ -367,7 +370,10 @@ mod tests {
         let manager = TransactionManager::new(wal.clone(), false);
 
         let mut txn = manager
-            .begin(IsolationLevel::ReadUncommitted)
+            .begin(
+                IsolationLevel::ReadUncommitted,
+                TransactionAccessMode::ReadWrite,
+            )
             .expect("begin txn");
         manager.abort(&mut txn).expect("abort");
 

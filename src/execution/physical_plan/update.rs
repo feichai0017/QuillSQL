@@ -100,8 +100,11 @@ impl VolcanoExecutor for PhysicalUpdate {
 
                 let mut new_keys = Vec::new();
                 let mut old_keys = Vec::new();
-                let changed_cols: HashSet<&str> =
-                    self.assignments.keys().map(|s| s.as_str()).collect();
+                let changed_cols: HashSet<String> = self
+                    .assignments
+                    .keys()
+                    .map(|s| s.to_ascii_lowercase())
+                    .collect();
                 let indexes = context.catalog.table_indexes(&self.table)?;
                 for index in indexes {
                     // Skip indexes whose key columns are not affected by this update
@@ -109,7 +112,7 @@ impl VolcanoExecutor for PhysicalUpdate {
                         .key_schema
                         .columns
                         .iter()
-                        .any(|c| changed_cols.contains(c.name.as_str()));
+                        .any(|c| changed_cols.contains(&c.name.to_ascii_lowercase()));
                     if !affected {
                         continue;
                     }

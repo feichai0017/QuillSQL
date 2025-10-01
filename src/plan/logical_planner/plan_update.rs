@@ -24,15 +24,11 @@ impl<'a> LogicalPlanner<'a> {
 
         let mut assignment_map = HashMap::new();
         for assign in assignments {
-            let column_name = assign
-                .id
-                .get(0)
-                .ok_or(QuillSQLError::Plan(format!(
-                    "Assignment {} is not supported",
-                    assign
-                )))?
-                .value
-                .clone();
+            let column_ident = assign.id.get(0).ok_or(QuillSQLError::Plan(format!(
+                "Assignment {} is not supported",
+                assign
+            )))?;
+            let column_name = column_ident.value.to_ascii_lowercase();
             let value = self.bind_expr(&assign.value)?;
             assignment_map.insert(column_name, value);
         }

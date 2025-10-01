@@ -9,6 +9,7 @@ pub mod function;
 pub mod optimizer;
 pub mod plan;
 pub mod recovery;
+pub mod session;
 pub mod sql;
 pub mod storage;
 pub mod tests;
