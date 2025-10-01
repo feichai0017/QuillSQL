@@ -60,7 +60,7 @@ impl VolcanoExecutor for PhysicalSeqScan {
                     context.unlock_row_shared(&self.table, rid)?;
                     Ok(Some(result))
                 }
-                IsolationLevel::SnapshotIsolation | IsolationLevel::Serializable => {
+                IsolationLevel::RepeatableRead | IsolationLevel::Serializable => {
                     context.lock_row_shared(&self.table, rid, true)?;
                     Ok(Some(tuple))
                 }

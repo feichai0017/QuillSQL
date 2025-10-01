@@ -12,6 +12,8 @@ use crate::{
     transaction::{LockMode, Transaction},
     utils::table_ref::TableReference,
 };
+use log::warn;
+use sqlparser::ast::TransactionAccessMode;
 pub trait VolcanoExecutor {
     fn init(&self, _context: &mut ExecutionContext) -> QuillSQLResult<()> {
         Ok(())
@@ -90,6 +92,24 @@ impl<'a> ExecutionContext<'a> {
             return Err(QuillSQLError::Execution(
                 "failed to acquire row exclusive lock".to_string(),
             ));
+        }
+        Ok(())
+    }
+
+    /// Ensure that the current transaction is allowed to perform a write on the given table.
+    pub fn ensure_writable(&self, table: &TableReference, operation: &str) -> QuillSQLResult<()> {
+        if matches!(self.txn.access_mode(), TransactionAccessMode::ReadOnly) {
+            warn!(
+                "read-only txn {} attempted '{}' on {}",
+                self.txn.id(),
+                operation,
+                table.to_log_string()
+            );
+            return Err(QuillSQLError::Execution(format!(
+                "operation '{}' on table {} is not allowed in READ ONLY transaction",
+                operation,
+                table.to_log_string()
+            )));
         }
         Ok(())
     }

@@ -84,23 +84,27 @@ impl SessionContext {
         self.active_txn.as_mut()
     }
 
-    pub fn set_active_transaction(&mut self, txn: Transaction) -> QuillSQLResult<()> {
+    pub fn set_active_transaction(&mut self, mut txn: Transaction) -> QuillSQLResult<()> {
         if self.active_txn.is_some() {
             return Err(QuillSQLError::Execution(
                 "transaction already active in session".to_string(),
             ));
         }
-        self.active_txn = Some(txn);
-        if let Some(active) = self.active_txn.as_mut() {
-            if let Some(isolation) = self.pending_session_isolation.take() {
-                self.default_isolation = isolation;
-            }
-            if let Some(mode) = self.pending_session_access.take() {
-                self.default_access_mode = mode;
-            }
-            active.set_isolation_level(self.default_isolation);
-            active.update_access_mode(self.default_access_mode);
+        if let Some(isolation) = self.pending_session_isolation.take() {
+            self.default_isolation = isolation;
+            txn.set_isolation_level(isolation);
+        } else {
+            self.default_isolation = txn.isolation_level();
         }
+
+        if let Some(mode) = self.pending_session_access.take() {
+            self.default_access_mode = mode;
+            txn.update_access_mode(mode);
+        } else {
+            self.default_access_mode = txn.access_mode();
+        }
+
+        self.active_txn = Some(txn);
         Ok(())
     }
 

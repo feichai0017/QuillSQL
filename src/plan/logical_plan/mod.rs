@@ -316,7 +316,7 @@ impl TransactionModes {
                             IsolationLevel::ReadCommitted
                         }
                         sqlparser::ast::TransactionIsolationLevel::RepeatableRead => {
-                            IsolationLevel::SnapshotIsolation
+                            IsolationLevel::RepeatableRead
                         }
                         sqlparser::ast::TransactionIsolationLevel::Serializable => {
                             IsolationLevel::Serializable
@@ -334,5 +334,12 @@ impl TransactionModes {
 
     pub fn unwrap_effective_isolation(&self, fallback: IsolationLevel) -> IsolationLevel {
         self.isolation_level.unwrap_or(fallback)
+    }
+
+    pub fn unwrap_effective_access_mode(
+        &self,
+        fallback: TransactionAccessMode,
+    ) -> TransactionAccessMode {
+        self.access_mode.unwrap_or(fallback)
     }
 }

@@ -44,6 +44,7 @@ impl PhysicalUpdate {
 impl VolcanoExecutor for PhysicalUpdate {
     fn init(&self, context: &mut ExecutionContext) -> QuillSQLResult<()> {
         self.update_rows.store(0, Ordering::SeqCst);
+        context.ensure_writable(&self.table, "UPDATE")?;
         let table_heap = context.catalog.table_heap(&self.table)?;
         *self.table_iterator.lock().unwrap() = Some(TableIterator::new(table_heap.clone(), ..));
         context

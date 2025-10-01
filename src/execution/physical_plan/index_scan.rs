@@ -42,13 +42,13 @@ impl PhysicalIndexScan {
 impl VolcanoExecutor for PhysicalIndexScan {
     fn init(&self, context: &mut ExecutionContext) -> QuillSQLResult<()> {
         // Lock table IS for RC/RR; RU keeps current behavior
-        match context.txn.isolation_level() {
-            IsolationLevel::ReadUncommitted => {}
+        if matches!(
+            context.txn.isolation_level(),
             IsolationLevel::ReadCommitted
-            | IsolationLevel::SnapshotIsolation
-            | IsolationLevel::Serializable => {
-                context.lock_table(self.table_ref.clone(), LockMode::IntentionShared)?;
-            }
+                | IsolationLevel::RepeatableRead
+                | IsolationLevel::Serializable
+        ) {
+            context.lock_table(self.table_ref.clone(), LockMode::IntentionShared)?;
         }
         let index = context
             .catalog
@@ -101,7 +101,7 @@ impl VolcanoExecutor for PhysicalIndexScan {
                         context.unlock_row_shared(&self.table_ref, rid)?;
                         Ok(Some(tuple))
                     }
-                    IsolationLevel::SnapshotIsolation | IsolationLevel::Serializable => {
+                    IsolationLevel::RepeatableRead | IsolationLevel::Serializable => {
                         context.lock_row_shared(&self.table_ref, rid, true)?;
                         Ok(Some(table_heap.tuple(rid)?))
                     }

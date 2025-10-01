@@ -1,6 +1,7 @@
 use crate::storage::page::RecordId;
 use crate::transaction::{Transaction, TransactionId};
 use crate::utils::table_ref::TableReference;
+use log::{debug, trace, warn};
 use parking_lot::{Condvar, Mutex};
 use std::collections::{hash_map::Entry, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -213,27 +214,24 @@ impl LockManager {
                     .find(|req| req.id == request_id)
                 {
                     req.granted = true;
+                    trace!(
+                        "lock granted: txn={} resource={:?} mode={:?}",
+                        req.txn_id,
+                        (req.table_ref.clone(), req.rid),
+                        req.mode
+                    );
                 }
                 self.clear_wait_edges(txn_id);
                 return true;
             }
+
             let blockers = blockers_for(&queue_guard.requests, request_id);
-            if self.record_wait(txn_id, &blockers) {
-                if let Some(mode) = prev_mode {
-                    if let Some(req) = queue_guard
-                        .requests
-                        .iter_mut()
-                        .find(|req| req.id == request_id)
-                    {
-                        req.mode = mode;
-                        req.granted = true;
-                    }
-                } else {
-                    queue_guard.requests.retain(|req| req.id != request_id);
+            if !blockers.is_empty() {
+                trace!("wait edge: txn={} blocking_on={:?}", txn_id, blockers);
+                if self.record_wait(txn_id, &blockers) {
+                    warn!("deadlock detected: txn={}", txn_id);
+                    return false;
                 }
-                resource.condvar.notify_all();
-                self.clear_wait_edges(txn_id);
-                return false;
             }
             resource.condvar.wait(&mut queue_guard);
             self.clear_wait_edges(txn_id);

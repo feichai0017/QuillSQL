@@ -18,7 +18,7 @@ pub type TransactionId = u64;
 pub enum IsolationLevel {
     ReadUncommitted,
     ReadCommitted,
-    SnapshotIsolation,
+    RepeatableRead,
     Serializable,
 }
 
@@ -27,7 +27,7 @@ impl IsolationLevel {
         match self {
             IsolationLevel::ReadUncommitted => "read-uncommitted",
             IsolationLevel::ReadCommitted => "read-committed",
-            IsolationLevel::SnapshotIsolation => "snapshot-isolation",
+            IsolationLevel::RepeatableRead => "repeatable-read",
             IsolationLevel::Serializable => "serializable",
         }
     }
@@ -40,7 +40,7 @@ impl FromStr for IsolationLevel {
         match s.trim().to_ascii_lowercase().as_str() {
             "read-uncommitted" | "ru" => Ok(IsolationLevel::ReadUncommitted),
             "read-committed" | "rc" => Ok(IsolationLevel::ReadCommitted),
-            "snapshot-isolation" | "si" => Ok(IsolationLevel::SnapshotIsolation),
+            "repeatable-read" | "rr" => Ok(IsolationLevel::RepeatableRead),
             "serializable" | "sr" | "serial" => Ok(IsolationLevel::Serializable),
             other => Err(format!("unknown isolation level '{}'", other)),
         }
