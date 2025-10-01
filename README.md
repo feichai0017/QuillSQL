@@ -22,6 +22,20 @@
 
 ---
 
+## Demo
+
+<div align="center">
+  <img src="/public/terminal-preview.svg" alt="QuillSQL Web Terminal" width="720"/>
+  <p><em>Built-in web TTY — commands mirror our SQL test suite.</em></p>
+</div>
+
+
+- Run `cargo run --bin server` and open http://127.0.0.1:8080
+- Commands: `help`, `docs`, `doc <name>`, `examples`, `example <name>`, `github`, `profile`
+- Example scripts are pulled straight from `src/tests/sql_example/`
+
+---
+
 ## 🎓 Teaching & Research Friendly
 
 - Clear module boundaries, suitable for classroom assignments and research prototypes. Inspired by CMU 15-445 BusTub with strengthened WAL/Recovery, observability, and centralized configuration.
@@ -119,10 +133,6 @@ cargo test -q
 
 ## ⚙️ Configuration
 
-Programmatic configs (centralized)
-- Build `DatabaseOptions { wal: WalOptions { .. } }` and pass it to `Database::new_*_with_options(..)`; WAL/scan are centrally managed by `crate::config`.
-- Key structs: `IOStrategy`, `IOSchedulerConfig`, `BufferPoolConfig`, `BTreeConfig`, `TableScanConfig`, `WalConfig`/`WalOptions`.
-
 Minimal environment variables (runtime only)
 - PORT: bind port (overrides the port of `QUILL_HTTP_ADDR`)
 - QUILL_HTTP_ADDR: listen address (default `0.0.0.0:8080`)
@@ -130,40 +140,7 @@ Minimal environment variables (runtime only)
 - QUILL_DEFAULT_ISOLATION: default session isolation (`read-uncommitted`, `read-committed`, `repeatable-read`, `serializable`)
 - RUST_LOG: log level (e.g., info, debug)
 
-Example (Rust)
-```rust
-use std::sync::Arc;
-use quillsql::config::{IOStrategy, IOSchedulerConfig, BufferPoolConfig, BTreeConfig, TableScanConfig};
-use quillsql::storage::disk_manager::DiskManager;
-use quillsql::storage::disk_scheduler::DiskScheduler;
-use quillsql::buffer::buffer_pool::BufferPoolManager;
-
-// Disk I/O backend: ThreadPool or Linux io_uring
-let dm = Arc::new(DiskManager::try_new("my.db").unwrap());
-let scheduler = Arc::new(DiskScheduler::new_with_strategy(
-    dm.clone(),
-    IOStrategy::IoUring { queue_depth: Some(256) }, // or ThreadPool { workers: Some(n) }
-));
-
-// Buffer pool
-let bpm = Arc::new(BufferPoolManager::new_with_config(
-    BufferPoolConfig { buffer_pool_size: 5000, ..Default::default() },
-    scheduler.clone(),
-));
-
-// B+Tree iterator tuning (batch window & prefetch)
-let btree_cfg = BTreeConfig { seq_batch_enable: true, seq_window: 32, ..Default::default() };
-// Table scan tuning (streaming readahead)
-let table_scan_cfg = TableScanConfig { stream_scan_enable: true, readahead_pages: 4, ..Default::default() };
-
-// WAL config (centralized)
-use quillsql::config::WalConfig;
-let wal_cfg = WalConfig { segment_size: 16 * 1024 * 1024, sync_on_flush: true, ..Default::default() };
-```
-
-Notes
-- io_uring is Linux-only; non-Linux will fall back to the thread pool.
-- Streaming/RingBuffer optimizations are controlled via `BTreeConfig` / `TableScanConfig` instead of env vars.
+Programmatic options live in `quillsql::config` (see docs) — build `DatabaseOptions` with `WalOptions`, `BufferPoolConfig`, `BTreeConfig`, `TableScanConfig`, etc., and pass into `Database::new_*_with_options`. Examples in the docs remain unchanged.
 
 ## 📦 Docker
 
