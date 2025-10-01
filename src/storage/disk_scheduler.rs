@@ -30,7 +30,7 @@ pub type DiskCommandResultSender<T> = Sender<QuillSQLResult<T>>;
 // Type alias for the receiver part of the result channel
 pub type DiskCommandResultReceiver<T> = Receiver<QuillSQLResult<T>>;
 
-// Commands sent from BufferPoolManager to the DiskScheduler task
+// Commands sent from BufferManager to the DiskScheduler task
 #[derive(Debug, Clone)]
 pub enum DiskRequest {
     ReadPage {

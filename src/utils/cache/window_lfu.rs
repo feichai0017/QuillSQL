@@ -44,8 +44,7 @@ impl Replacer for WindowLFUReplacer {
             node.frequency += 1;
             node.last_access_time = now;
         } else {
-            // 如果缓存已满，不能直接添加，需要先驱逐
-            // BufferPoolManager 应该保证在调用 record_access 前已确保有空间
+            // BufferManager 应该保证在调用 record_access 前已确保有空间
             if self.node_store.len() >= self.capacity {
                 // 通常不应在这里失败，BPM 应该先调用 evict
                 return Err(QuillSQLError::Internal(format!(

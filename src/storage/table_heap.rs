@@ -2,7 +2,7 @@ use crate::buffer::{AtomicPageId, PageId, WritePageGuard, INVALID_PAGE_ID};
 use crate::catalog::{SchemaRef, EMPTY_SCHEMA_REF};
 use crate::storage::codec::TablePageCodec;
 use crate::storage::page::{RecordId, TablePage, TupleMeta, INVALID_RID};
-use crate::{buffer::BufferPoolManager, error::QuillSQLResult};
+use crate::{buffer::BufferManager, error::QuillSQLResult};
 use std::collections::Bound;
 use std::ops::RangeBounds;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -19,14 +19,14 @@ use crate::utils::ring_buffer::RingBuffer;
 #[derive(Debug)]
 pub struct TableHeap {
     pub schema: SchemaRef,
-    pub buffer_pool: Arc<BufferPoolManager>,
+    pub buffer_pool: Arc<BufferManager>,
     pub first_page_id: AtomicPageId,
     pub last_page_id: AtomicPageId,
 }
 
 impl TableHeap {
     /// Creates a new table heap. This involves allocating an initial page.
-    pub fn try_new(schema: SchemaRef, buffer_pool: Arc<BufferPoolManager>) -> QuillSQLResult<Self> {
+    pub fn try_new(schema: SchemaRef, buffer_pool: Arc<BufferManager>) -> QuillSQLResult<Self> {
         // new_page() returns a WritePageGuard.
         let mut first_page_guard = buffer_pool.new_page()?;
         let first_page_id = first_page_guard.page_id();
@@ -37,8 +37,8 @@ impl TableHeap {
 
         // Use DerefMut to get a mutable reference and update the page data.
         // This also marks the page as dirty automatically.
-        first_page_guard.data.copy_from_slice(&encoded_data);
-        first_page_guard.page_lsn = table_page.lsn();
+        first_page_guard.data_mut().copy_from_slice(&encoded_data);
+        first_page_guard.set_lsn(table_page.lsn());
 
         // The first_page_guard is dropped here, automatically unpinning the page.
         Ok(Self {
@@ -55,7 +55,7 @@ impl TableHeap {
         guard: &mut WritePageGuard,
         table_page: &mut TablePage,
     ) -> QuillSQLResult<()> {
-        let prev_lsn = guard.page_lsn;
+        let prev_lsn = guard.lsn();
         if let Some(wal) = self.buffer_pool.wal_manager() {
             // FPW: if first touch since checkpoint, force full-page image
             if wal.fpw_first_touch(page_id) {
@@ -74,7 +74,7 @@ impl TableHeap {
             // Encode new page image
             let new_image = TablePageCodec::encode(table_page);
             // Compute minimal contiguous diff with current buffer page bytes
-            let old = &guard.data;
+            let old = guard.data();
             let (start, end) =
                 if let Some((s, e)) = crate::utils::util::find_contiguous_diff(old, &new_image) {
                     (s, e)
@@ -147,8 +147,8 @@ impl TableHeap {
         loop {
             let mut current_page_guard = self.buffer_pool.fetch_page_write(current_page_id)?;
             let mut table_page =
-                TablePageCodec::decode(&current_page_guard.data, self.schema.clone())?.0;
-            table_page.set_lsn(current_page_guard.page_lsn);
+                TablePageCodec::decode(current_page_guard.data(), self.schema.clone())?.0;
+            table_page.set_lsn(current_page_guard.lsn());
 
             if table_page.next_tuple_offset(tuple).is_ok() {
                 let tuple_bytes = TupleCodec::encode(tuple);
@@ -184,8 +184,8 @@ impl TableHeap {
 
     pub fn update_tuple(&self, rid: RecordId, tuple: Tuple) -> QuillSQLResult<()> {
         let mut page_guard = self.buffer_pool.fetch_page_write(rid.page_id)?;
-        let mut table_page = TablePageCodec::decode(&page_guard.data, self.schema.clone())?.0;
-        table_page.set_lsn(page_guard.page_lsn);
+        let mut table_page = TablePageCodec::decode(page_guard.data(), self.schema.clone())?.0;
+        table_page.set_lsn(page_guard.lsn());
 
         let slot = rid.slot_num as u16;
         let (old_meta, old_tuple) = table_page.tuple(slot)?;
@@ -209,8 +209,8 @@ impl TableHeap {
 
     pub fn update_tuple_meta(&self, meta: TupleMeta, rid: RecordId) -> QuillSQLResult<()> {
         let mut page_guard = self.buffer_pool.fetch_page_write(rid.page_id)?;
-        let mut table_page = TablePageCodec::decode(&page_guard.data, self.schema.clone())?.0;
-        table_page.set_lsn(page_guard.page_lsn);
+        let mut table_page = TablePageCodec::decode(page_guard.data(), self.schema.clone())?.0;
+        table_page.set_lsn(page_guard.lsn());
 
         let slot = rid.slot_num as u16;
         let (old_meta, old_tuple) = table_page.tuple(slot)?;
@@ -314,7 +314,7 @@ impl TableHeap {
 
     /// Construct a lightweight TableHeap view for recovery operations.
     /// This instance uses an empty schema and does not rely on first/last page ids.
-    pub fn recovery_view(buffer_pool: Arc<BufferPoolManager>) -> Self {
+    pub fn recovery_view(buffer_pool: Arc<BufferManager>) -> Self {
         Self {
             schema: EMPTY_SCHEMA_REF.clone(),
             buffer_pool,
@@ -328,7 +328,7 @@ impl TableHeap {
     pub fn recover_set_tuple_meta(&self, rid: RecordId, meta: TupleMeta) -> QuillSQLResult<()> {
         let mut guard = self.buffer_pool.fetch_page_write(rid.page_id)?;
         let (mut header, hdr_len) =
-            crate::storage::codec::TablePageHeaderCodec::decode(&guard.data)?;
+            crate::storage::codec::TablePageHeaderCodec::decode(guard.data())?;
         if (rid.slot_num as usize) >= header.tuple_infos.len() {
             return Ok(());
         }
@@ -343,7 +343,8 @@ impl TableHeap {
         info.meta = meta;
         let new_header = crate::storage::codec::TablePageHeaderCodec::encode(&header);
         let copy_len = std::cmp::min(hdr_len, new_header.len());
-        guard.data[0..copy_len].copy_from_slice(&new_header[..copy_len]);
+        guard.data_mut()[0..copy_len].copy_from_slice(&new_header[..copy_len]);
+        guard.mark_dirty();
         Ok(())
     }
 
@@ -352,7 +353,7 @@ impl TableHeap {
     pub fn recover_set_tuple_bytes(&self, rid: RecordId, new_bytes: &[u8]) -> QuillSQLResult<()> {
         let mut guard = self.buffer_pool.fetch_page_write(rid.page_id)?;
         let (mut header, _hdr_len) =
-            crate::storage::codec::TablePageHeaderCodec::decode(&guard.data)?;
+            crate::storage::codec::TablePageHeaderCodec::decode(guard.data())?;
         if (rid.slot_num as usize) >= header.tuple_infos.len() {
             return Ok(());
         }
@@ -362,15 +363,16 @@ impl TableHeap {
         let sz = info.size as usize;
         if new_bytes.len() == sz {
             if off + sz <= crate::buffer::PAGE_SIZE {
-                guard.data[off..off + sz].copy_from_slice(new_bytes);
+                guard.data_mut()[off..off + sz].copy_from_slice(new_bytes);
             }
+            guard.mark_dirty();
             return Ok(());
         }
         let n = header.tuple_infos.len();
         let mut tuples: Vec<Vec<u8>> = Vec::with_capacity(n);
         for i in 0..n {
             let inf = &header.tuple_infos[i];
-            let s = &guard.data[inf.offset as usize..(inf.offset + inf.size) as usize];
+            let s = &guard.data()[inf.offset as usize..(inf.offset + inf.size) as usize];
             if i == slot {
                 tuples.push(new_bytes.to_vec());
             } else {
@@ -385,18 +387,19 @@ impl TableHeap {
             header.tuple_infos[i].size = sz as u16;
         }
         let new_header = crate::storage::codec::TablePageHeaderCodec::encode(&header);
-        for b in guard.data.iter_mut() {
+        for b in guard.data_mut().iter_mut() {
             *b = 0;
         }
         let hdr_copy = std::cmp::min(new_header.len(), crate::buffer::PAGE_SIZE);
-        guard.data[0..hdr_copy].copy_from_slice(&new_header[..hdr_copy]);
+        guard.data_mut()[0..hdr_copy].copy_from_slice(&new_header[..hdr_copy]);
         for i in 0..n {
             let off = header.tuple_infos[i].offset as usize;
             let sz = header.tuple_infos[i].size as usize;
             if off + sz <= crate::buffer::PAGE_SIZE {
-                guard.data[off..off + sz].copy_from_slice(&tuples[i][..sz]);
+                guard.data_mut()[off..off + sz].copy_from_slice(&tuples[i][..sz]);
             }
         }
+        guard.mark_dirty();
         Ok(())
     }
 
@@ -431,8 +434,8 @@ impl TableHeap {
         txn_id: crate::transaction::TransactionId,
     ) -> QuillSQLResult<()> {
         let mut page_guard = self.buffer_pool.fetch_page_write(rid.page_id)?;
-        let mut table_page = TablePageCodec::decode(&page_guard.data, self.schema.clone())?.0;
-        table_page.set_lsn(page_guard.page_lsn);
+        let mut table_page = TablePageCodec::decode(page_guard.data(), self.schema.clone())?.0;
+        table_page.set_lsn(page_guard.lsn());
 
         let slot = rid.slot_num as u16;
         let (mut meta, tuple) = table_page.tuple(slot)?;
@@ -497,7 +500,7 @@ impl TableIterator {
 
         // Centralized config (remove env): use TableScanConfig defaults
         let cfg = crate::config::TableScanConfig::default();
-        let pool_quarter = (heap.buffer_pool.pool.len().max(1) / 4) as u32;
+        let pool_quarter = (heap.buffer_pool.buffer_pool().capacity().max(1) / 4) as u32;
         let threshold: u32 = cfg.stream_threshold_pages.unwrap_or(pool_quarter.max(1));
         let readahead: usize = cfg.readahead_pages;
 
@@ -756,7 +759,7 @@ mod tests {
     use std::sync::Arc;
     use tempfile::TempDir;
 
-    use crate::buffer::BufferPoolManager;
+    use crate::buffer::BufferManager;
     use crate::catalog::{Column, DataType, Schema};
     use crate::storage::codec::TupleCodec;
     use crate::storage::disk_manager::DiskManager;
@@ -776,7 +779,7 @@ mod tests {
         ]));
         let disk_manager = DiskManager::try_new(temp_path).unwrap();
         let disk_scheduler = Arc::new(DiskScheduler::new(Arc::new(disk_manager)));
-        let buffer_pool = Arc::new(BufferPoolManager::new(1000, disk_scheduler));
+        let buffer_pool = Arc::new(BufferManager::new(1000, disk_scheduler));
         let table_heap = TableHeap::try_new(schema.clone(), buffer_pool).unwrap();
 
         let _rid1 = table_heap
@@ -821,7 +824,7 @@ mod tests {
         ]));
         let disk_manager = DiskManager::try_new(temp_path).unwrap();
         let disk_scheduler = Arc::new(DiskScheduler::new(Arc::new(disk_manager)));
-        let buffer_pool = Arc::new(BufferPoolManager::new(1000, disk_scheduler));
+        let buffer_pool = Arc::new(BufferManager::new(1000, disk_scheduler));
         let table_heap = TableHeap::try_new(schema.clone(), buffer_pool).unwrap();
 
         let meta1 = super::TupleMeta {
@@ -883,7 +886,7 @@ mod tests {
 
         let disk_manager = DiskManager::try_new(temp_path).unwrap();
         let disk_scheduler = Arc::new(DiskScheduler::new(Arc::new(disk_manager)));
-        let buffer_pool = Arc::new(BufferPoolManager::new(1000, disk_scheduler));
+        let buffer_pool = Arc::new(BufferManager::new(1000, disk_scheduler));
         let table_heap = Arc::new(TableHeap::try_new(schema.clone(), buffer_pool).unwrap());
 
         let meta1 = super::TupleMeta {
@@ -953,7 +956,7 @@ mod tests {
 
         let disk_manager = DiskManager::try_new(temp_path).unwrap();
         let disk_scheduler = Arc::new(DiskScheduler::new(Arc::new(disk_manager)));
-        let buffer_pool = Arc::new(BufferPoolManager::new(128, disk_scheduler));
+        let buffer_pool = Arc::new(BufferManager::new(128, disk_scheduler));
         let table_heap = Arc::new(TableHeap::try_new(schema.clone(), buffer_pool).unwrap());
 
         // Insert many rows to span multiple pages
@@ -999,7 +1002,7 @@ mod tests {
 
         let disk_manager = DiskManager::try_new(temp_path).unwrap();
         let disk_scheduler = Arc::new(DiskScheduler::new(Arc::new(disk_manager)));
-        let buffer_pool = Arc::new(BufferPoolManager::new(128, disk_scheduler));
+        let buffer_pool = Arc::new(BufferManager::new(128, disk_scheduler));
         let table_heap = Arc::new(TableHeap::try_new(schema.clone(), buffer_pool).unwrap());
 
         let rid1 = table_heap
@@ -1060,7 +1063,7 @@ mod tests {
         ]));
         let disk_manager = DiskManager::try_new(temp_path).unwrap();
         let disk_scheduler = Arc::new(DiskScheduler::new(Arc::new(disk_manager)));
-        let buffer_pool = Arc::new(BufferPoolManager::new(128, disk_scheduler));
+        let buffer_pool = Arc::new(BufferManager::new(128, disk_scheduler));
         let table_heap = TableHeap::try_new(schema.clone(), buffer_pool.clone()).unwrap();
 
         // Insert a row
@@ -1103,7 +1106,7 @@ mod tests {
         ]));
         let disk_manager = DiskManager::try_new(temp_path).unwrap();
         let disk_scheduler = Arc::new(DiskScheduler::new(Arc::new(disk_manager)));
-        let buffer_pool = Arc::new(BufferPoolManager::new(128, disk_scheduler));
+        let buffer_pool = Arc::new(BufferManager::new(128, disk_scheduler));
         let table_heap = TableHeap::try_new(schema.clone(), buffer_pool.clone()).unwrap();
 
         let rid = table_heap

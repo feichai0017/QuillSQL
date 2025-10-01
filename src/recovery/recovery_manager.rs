@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 
-use crate::buffer::PAGE_SIZE;
+use crate::buffer::{BufferManager, PAGE_SIZE};
 use crate::error::QuillSQLResult;
 use crate::recovery::wal_record::{
     CheckpointPayload, ClrPayload, HeapRecordPayload, PageDeltaPayload, PageWritePayload,
@@ -17,7 +17,7 @@ use crate::storage::table_heap::TableHeap;
 pub struct RecoveryManager {
     wal: Arc<WalManager>,
     disk_scheduler: Arc<DiskScheduler>,
-    buffer_pool: Option<Arc<crate::buffer::BufferPoolManager>>,
+    buffer_pool: Option<Arc<BufferManager>>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -36,8 +36,8 @@ impl RecoveryManager {
         }
     }
 
-    /// Optionally attach BufferPoolManager to enable TableHeap recovery APIs
-    pub fn with_buffer_pool(mut self, bpm: Arc<crate::buffer::BufferPoolManager>) -> Self {
+    /// Optionally attach BufferManager to enable TableHeap recovery APIs
+    pub fn with_buffer_pool(mut self, bpm: Arc<BufferManager>) -> Self {
         self.buffer_pool = Some(bpm);
         self
     }
@@ -293,7 +293,7 @@ impl RecoveryManager {
             let rid = crate::storage::page::RecordId::new(page_id, slot_idx as u32);
             // Read current meta from header without decoding tuple payload
             let guard = bpm.fetch_page_read(page_id)?;
-            let (header, _hdr_len) = TablePageHeaderCodec::decode(&guard.data)?;
+            let (header, _hdr_len) = TablePageHeaderCodec::decode(guard.data())?;
             drop(guard);
             if slot_idx >= header.tuple_infos.len() {
                 return Ok(());
@@ -389,7 +389,7 @@ impl RecoveryManager {
 #[cfg(test)]
 mod tests {
     use super::RecoveryManager;
-    use crate::buffer::{BufferPoolManager, INVALID_PAGE_ID};
+    use crate::buffer::{BufferManager, INVALID_PAGE_ID};
     use crate::config::WalConfig;
     use crate::recovery::wal_record::{
         PageDeltaPayload, PageWritePayload, TransactionPayload, TransactionRecordKind,
@@ -416,9 +416,11 @@ mod tests {
         let wal_dir = temp.path().join("wal");
 
         let scheduler = build_scheduler(&db_path);
-        let mut config = WalConfig::default();
-        config.directory = wal_dir.clone();
-        config.sync_on_flush = false;
+        let config = WalConfig {
+            directory: wal_dir.clone(),
+            sync_on_flush: false,
+            ..WalConfig::default()
+        };
         let wal = Arc::new(WalManager::new(config.clone(), scheduler.clone(), None, None).unwrap());
 
         let page_bytes = vec![0xAB; crate::buffer::PAGE_SIZE];
@@ -453,9 +455,11 @@ mod tests {
         let wal_dir = temp.path().join("wal");
 
         let scheduler = build_scheduler(&db_path);
-        let mut config = WalConfig::default();
-        config.directory = wal_dir.clone();
-        config.sync_on_flush = false;
+        let config = WalConfig {
+            directory: wal_dir.clone(),
+            sync_on_flush: false,
+            ..WalConfig::default()
+        };
         let wal = Arc::new(WalManager::new(config.clone(), scheduler.clone(), None, None).unwrap());
 
         // Seed a page with zeros
@@ -501,9 +505,11 @@ mod tests {
         let wal_dir = temp.path().join("wal");
 
         let scheduler = build_scheduler(&db_path);
-        let mut config = WalConfig::default();
-        config.directory = wal_dir.clone();
-        config.sync_on_flush = false;
+        let config = WalConfig {
+            directory: wal_dir.clone(),
+            sync_on_flush: false,
+            ..WalConfig::default()
+        };
         let wal = WalManager::new(config.clone(), scheduler.clone(), None, None).unwrap();
 
         wal.append_record_with(|_| {
@@ -530,9 +536,11 @@ mod tests {
         let wal_dir = temp.path().join("wal");
 
         let scheduler = build_scheduler(&db_path);
-        let mut config = WalConfig::default();
-        config.directory = wal_dir.clone();
-        config.sync_on_flush = false;
+        let config = WalConfig {
+            directory: wal_dir.clone(),
+            sync_on_flush: false,
+            ..WalConfig::default()
+        };
         let wal = Arc::new(WalManager::new(config.clone(), scheduler.clone(), None, None).unwrap());
 
         // Build a page with 1 tuple (slot 0), not deleted
@@ -613,7 +621,7 @@ mod tests {
 
         // Reopen wal and run recovery (inject BufferPool to use TableHeap recovery APIs)
         let scheduler = build_scheduler(&db_path);
-        let bpm = Arc::new(BufferPoolManager::new(64, scheduler.clone()));
+        let bpm = Arc::new(BufferManager::new(64, scheduler.clone()));
         let wal = Arc::new(WalManager::new(config, scheduler.clone(), None, None).unwrap());
         let recovery = RecoveryManager::new(wal, scheduler.clone()).with_buffer_pool(bpm);
         let _summary = recovery.replay().unwrap();
@@ -622,7 +630,7 @@ mod tests {
         let rx = scheduler.schedule_read(page_id).unwrap();
         let data = rx.recv().unwrap().unwrap();
         let (header2, _c) = TablePageHeaderCodec::decode(&data).unwrap();
-        assert_eq!(header2.tuple_infos[0].meta.is_deleted, true);
+        assert!(header2.tuple_infos[0].meta.is_deleted);
     }
 
     #[test]
@@ -683,7 +691,7 @@ mod tests {
             delete_txn_id: 0,
             is_deleted: false,
         };
-        let old_tuple_bytes = vec![0u8 ^ 0xAA; 16];
+        let old_tuple_bytes = vec![0xAA; 16];
         let new_tuple_bytes = vec![0xFF; 24]; // different size to exercise repack
         wal.append_record_with(|_| {
             WalRecordPayload::Heap(crate::recovery::wal_record::HeapRecordPayload::Update(
@@ -734,7 +742,7 @@ mod tests {
 
         // Recover (inject BufferPool)
         let scheduler = build_scheduler(&db_path);
-        let bpm = Arc::new(BufferPoolManager::new(64, scheduler.clone()));
+        let bpm = Arc::new(BufferManager::new(64, scheduler.clone()));
         let wal = Arc::new(WalManager::new(config, scheduler.clone(), None, None).unwrap());
         let recovery = RecoveryManager::new(wal, scheduler.clone()).with_buffer_pool(bpm);
         let _ = recovery.replay().unwrap();
@@ -838,7 +846,7 @@ mod tests {
 
         // recover (inject BufferPool)
         let scheduler = build_scheduler(&db_path);
-        let bpm = Arc::new(BufferPoolManager::new(64, scheduler.clone()));
+        let bpm = Arc::new(BufferManager::new(64, scheduler.clone()));
         let wal = Arc::new(WalManager::new(config, scheduler.clone(), None, None).unwrap());
         let recovery = RecoveryManager::new(wal, scheduler.clone()).with_buffer_pool(bpm);
         let _ = recovery.replay().unwrap();
@@ -846,7 +854,7 @@ mod tests {
         let rx = scheduler.schedule_read(page_id).unwrap();
         let data = rx.recv().unwrap().unwrap();
         let (hdr, _c) = TablePageHeaderCodec::decode(&data).unwrap();
-        assert_eq!(hdr.tuple_infos[0].meta.is_deleted, false);
+        assert!(!hdr.tuple_infos[0].meta.is_deleted);
         let off3 = hdr.tuple_infos[0].offset as usize;
         assert_eq!(&data[off3..off3 + 8], &old_bytes[..]);
     }
@@ -930,7 +938,7 @@ mod tests {
 
         // First recovery (inject BufferPool)
         let scheduler = build_scheduler(&db_path);
-        let bpm = Arc::new(BufferPoolManager::new(64, scheduler.clone()));
+        let bpm = Arc::new(BufferManager::new(64, scheduler.clone()));
         let wal = Arc::new(WalManager::new(config.clone(), scheduler.clone(), None, None).unwrap());
         let recovery = RecoveryManager::new(wal, scheduler.clone()).with_buffer_pool(bpm);
         let _ = recovery.replay().unwrap();
@@ -941,7 +949,7 @@ mod tests {
 
         // Second recovery (should not change page state) - inject BufferPool again
         let scheduler2 = build_scheduler(&db_path);
-        let bpm2 = Arc::new(BufferPoolManager::new(64, scheduler2.clone()));
+        let bpm2 = Arc::new(BufferManager::new(64, scheduler2.clone()));
         let wal2 = Arc::new(WalManager::new(config, scheduler2.clone(), None, None).unwrap());
         let recovery2 = RecoveryManager::new(wal2, scheduler2.clone()).with_buffer_pool(bpm2);
         let _ = recovery2.replay().unwrap();
@@ -1022,7 +1030,7 @@ mod tests {
         for i in 0..4u16 {
             let off = ((i % 32) * 8) as usize;
             // Last writer for this offset is i + 96 within 0..128 sequence
-            let expected = vec![(i + 96) as u8; 8];
+            let expected = [(i + 96) as u8; 8];
             assert_eq!(&data[off..off + 8], &expected[..]);
         }
     }
@@ -1190,7 +1198,7 @@ mod tests {
 
         // First recovery should undo both updates and write two CLRs
         let scheduler1 = build_scheduler(&db_path);
-        let bpm1 = Arc::new(BufferPoolManager::new(64, scheduler1.clone()));
+        let bpm1 = Arc::new(BufferManager::new(64, scheduler1.clone()));
         let wal1 =
             Arc::new(WalManager::new(config.clone(), scheduler1.clone(), None, None).unwrap());
         let recovery1 =
@@ -1216,7 +1224,7 @@ mod tests {
 
         // Second recovery: no further changes
         let scheduler2 = build_scheduler(&db_path);
-        let bpm2 = Arc::new(BufferPoolManager::new(64, scheduler2.clone()));
+        let bpm2 = Arc::new(BufferManager::new(64, scheduler2.clone()));
         let wal2 =
             Arc::new(WalManager::new(config.clone(), scheduler2.clone(), None, None).unwrap());
         let recovery2 = RecoveryManager::new(wal2, scheduler2.clone()).with_buffer_pool(bpm2);
@@ -1352,7 +1360,7 @@ mod tests {
 
         for _ in 0..2 {
             let scheduler_r = build_scheduler(&db_path);
-            let bpm_r = Arc::new(BufferPoolManager::new(64, scheduler_r.clone()));
+            let bpm_r = Arc::new(BufferManager::new(64, scheduler_r.clone()));
             let wal_r =
                 Arc::new(WalManager::new(config.clone(), scheduler_r.clone(), None, None).unwrap());
             let recovery = RecoveryManager::new(wal_r, scheduler_r.clone()).with_buffer_pool(bpm_r);
@@ -1361,7 +1369,7 @@ mod tests {
             let rx_a = scheduler_r.schedule_read(pid_a).unwrap();
             let data_a = rx_a.recv().unwrap().unwrap();
             let (hdr_a, _ca) = TablePageHeaderCodec::decode(&data_a).unwrap();
-            assert_eq!(hdr_a.tuple_infos[0].meta.is_deleted, true);
+            assert!(hdr_a.tuple_infos[0].meta.is_deleted);
 
             let rx_b = scheduler_r.schedule_read(pid_b).unwrap();
             let data_b = rx_b.recv().unwrap().unwrap();

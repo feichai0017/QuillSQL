@@ -3,7 +3,9 @@ use std::collections::VecDeque;
 use std::fmt::Write;
 use std::sync::Arc;
 
-use crate::buffer::{PageId, ReadPageGuard, WritePageGuard, INVALID_PAGE_ID, PAGE_SIZE};
+use crate::buffer::{
+    BufferManager, PageId, ReadPageGuard, WritePageGuard, INVALID_PAGE_ID, PAGE_SIZE,
+};
 use crate::catalog::SchemaRef;
 use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::storage::codec::{
@@ -12,10 +14,7 @@ use crate::storage::codec::{
 };
 use crate::storage::index::Index;
 use crate::storage::page::{BPlusTreeHeaderPage, BPlusTreeInternalPage};
-use crate::{
-    buffer::BufferPoolManager,
-    storage::page::{BPlusTreeLeafPage, BPlusTreePage, RecordId},
-};
+use crate::storage::page::{BPlusTreeLeafPage, BPlusTreePage, RecordId};
 
 use crate::config::BTreeConfig;
 use crate::recovery::wal_record::{PageDeltaPayload, PageWritePayload, WalRecordPayload};
@@ -75,7 +74,7 @@ impl<'a> Context<'a> {
 #[derive(Debug)]
 pub struct BPlusTreeIndex {
     pub key_schema: SchemaRef,
-    pub buffer_pool: Arc<BufferPoolManager>,
+    pub buffer_pool: Arc<BufferManager>,
     pub internal_max_size: u32,
     pub leaf_max_size: u32,
     pub header_page_id: PageId,
@@ -109,7 +108,7 @@ impl BPlusTreeIndex {
         new_image: Vec<u8>,
     ) -> QuillSQLResult<()> {
         debug_assert_eq!(new_image.len(), PAGE_SIZE);
-        let prev_lsn = guard.page_lsn;
+        let prev_lsn = guard.lsn();
         if let Some(wal) = self.buffer_pool.wal_manager() {
             let page_id = guard.page_id();
             if wal.fpw_first_touch(page_id) {
@@ -124,7 +123,7 @@ impl BPlusTreeIndex {
                 return Ok(());
             }
 
-            let old = &guard.data;
+            let old = guard.data();
             if let Some((start, end)) = util::find_contiguous_diff(old, &new_image) {
                 let diff_len = end - start;
                 let threshold = PAGE_SIZE / 16;
@@ -157,7 +156,7 @@ impl BPlusTreeIndex {
     }
     pub fn new(
         key_schema: SchemaRef,
-        buffer_pool: Arc<BufferPoolManager>,
+        buffer_pool: Arc<BufferManager>,
         internal_max_size: u32,
         leaf_max_size: u32,
     ) -> Self {
@@ -189,7 +188,7 @@ impl BPlusTreeIndex {
 
     pub fn new_with_config(
         key_schema: SchemaRef,
-        buffer_pool: Arc<BufferPoolManager>,
+        buffer_pool: Arc<BufferManager>,
         internal_max_size: u32,
         leaf_max_size: u32,
         config: BTreeConfig,
@@ -201,7 +200,7 @@ impl BPlusTreeIndex {
 
     pub fn open(
         key_schema: SchemaRef,
-        buffer_pool: Arc<BufferPoolManager>,
+        buffer_pool: Arc<BufferManager>,
         internal_max_size: u32,
         leaf_max_size: u32,
         header_page_id: PageId,
@@ -221,7 +220,7 @@ impl BPlusTreeIndex {
 
     pub fn open_with_config(
         key_schema: SchemaRef,
-        buffer_pool: Arc<BufferPoolManager>,
+        buffer_pool: Arc<BufferManager>,
         internal_max_size: u32,
         leaf_max_size: u32,
         header_page_id: PageId,
@@ -240,7 +239,7 @@ impl BPlusTreeIndex {
 
     pub fn get_root_page_id(&self) -> QuillSQLResult<PageId> {
         let header_guard = self.buffer_pool.fetch_page_read(self.header_page_id)?;
-        let (header_page, _) = BPlusTreeHeaderPageCodec::decode(&header_guard.data)?;
+        let (header_page, _) = BPlusTreeHeaderPageCodec::decode(header_guard.data())?;
         Ok(header_page.root_page_id)
     }
 
@@ -266,7 +265,7 @@ impl BPlusTreeIndex {
         let mut guard = self.find_leaf_page_optimistic(key)?;
         // Walk right through leaf chain while key is greater than last key
         loop {
-            let decoded = BPlusTreeLeafPageCodec::decode(&guard.data, self.key_schema.clone());
+            let decoded = BPlusTreeLeafPageCodec::decode(guard.data(), self.key_schema.clone());
             if let Ok((leaf_page, _)) = decoded {
                 if let Some(rid) = leaf_page.look_up(key) {
                     return Ok(Some(rid));
@@ -287,7 +286,7 @@ impl BPlusTreeIndex {
                 // Retry once from root if decode failed (transient)
                 guard = self.find_leaf_page_optimistic(key)?;
                 let (leaf_page, _) =
-                    BPlusTreeLeafPageCodec::decode(&guard.data, self.key_schema.clone())?;
+                    BPlusTreeLeafPageCodec::decode(guard.data(), self.key_schema.clone())?;
                 return Ok(leaf_page.look_up(key));
             }
         }
@@ -320,12 +319,12 @@ impl BPlusTreeIndex {
 
         loop {
             let (page, _) =
-                BPlusTreePageCodec::decode(&current_guard.data, self.key_schema.clone())?;
+                BPlusTreePageCodec::decode(current_guard.data(), self.key_schema.clone())?;
 
             match page {
                 BPlusTreePage::Internal(_internal) => {
                     let child_page_id = BPlusTreeInternalPageCodec::lookup_child_from_bytes(
-                        &current_guard.data,
+                        current_guard.data(),
                         self.key_schema.clone(),
                         key,
                     )?;
@@ -339,15 +338,16 @@ impl BPlusTreeIndex {
                     }
                     let child_guard = self.buffer_pool.fetch_page_write(child_page_id)?;
                     // header-only safety check for overflow
-                    let will_overflow = match BPlusTreePageTypeCodec::decode(&child_guard.data)?.0 {
+                    let will_overflow = match BPlusTreePageTypeCodec::decode(child_guard.data())?.0
+                    {
                         BPlusTreePageType::LeafPage => {
                             let (hdr, _) =
-                                BPlusTreeLeafPageCodec::decode_header_only(&child_guard.data)?;
+                                BPlusTreeLeafPageCodec::decode_header_only(child_guard.data())?;
                             hdr.current_size == hdr.max_size
                         }
                         BPlusTreePageType::InternalPage => {
                             let (hdr, _) =
-                                BPlusTreeInternalPageCodec::decode_header_only(&child_guard.data)?;
+                                BPlusTreeInternalPageCodec::decode_header_only(child_guard.data())?;
                             hdr.current_size == hdr.max_size
                         }
                     };
@@ -443,13 +443,13 @@ impl BPlusTreeIndex {
             let (mut leaf_guard, mut local_ctx) =
                 self.find_leaf_page_pessimistic(key, true, context)?;
             let (mut leaf_page, _) =
-                BPlusTreeLeafPageCodec::decode(&leaf_guard.data, self.key_schema.clone())?;
+                BPlusTreeLeafPageCodec::decode(leaf_guard.data(), self.key_schema.clone())?;
 
             // If we still hold a parent, verify that this leaf is the expected child.
             // If not, redirect to the expected child to avoid misplacing keys across parent ranges.
             if let Some(parent_guard_ref) = local_ctx.write_set.back() {
                 let (parent_page_chk, _) = BPlusTreeInternalPageCodec::decode(
-                    &parent_guard_ref.data,
+                    parent_guard_ref.data(),
                     self.key_schema.clone(),
                 )?;
                 let expected_pid = parent_page_chk.look_up(key);
@@ -464,7 +464,7 @@ impl BPlusTreeIndex {
                     drop(leaf_guard);
                     leaf_guard = self.buffer_pool.fetch_page_write(expected_pid)?;
                     let (new_leaf, _) =
-                        BPlusTreeLeafPageCodec::decode(&leaf_guard.data, self.key_schema.clone())?;
+                        BPlusTreeLeafPageCodec::decode(leaf_guard.data(), self.key_schema.clone())?;
                     leaf_page = new_leaf;
                 }
             }
@@ -480,8 +480,10 @@ impl BPlusTreeIndex {
                 let next_pid = leaf_page.header.next_page_id;
                 // Peek the next leaf's minimal key using a read latch to avoid heavy contention
                 let next_guard_peek = self.buffer_pool.fetch_page_read(next_pid)?;
-                let (next_leaf_peek, _) =
-                    BPlusTreeLeafPageCodec::decode(&next_guard_peek.data, self.key_schema.clone())?;
+                let (next_leaf_peek, _) = BPlusTreeLeafPageCodec::decode(
+                    next_guard_peek.data(),
+                    self.key_schema.clone(),
+                )?;
                 let next_first_key = if next_leaf_peek.header.current_size > 0 {
                     next_leaf_peek.key_at(0).clone()
                 } else {
@@ -507,7 +509,7 @@ impl BPlusTreeIndex {
                 drop(leaf_guard);
                 let next_guard = self.buffer_pool.fetch_page_write(next_pid)?;
                 let (next_leaf, _) =
-                    BPlusTreeLeafPageCodec::decode(&next_guard.data, self.key_schema.clone())?;
+                    BPlusTreeLeafPageCodec::decode(next_guard.data(), self.key_schema.clone())?;
                 leaf_guard = next_guard;
                 leaf_page = next_leaf;
             }
@@ -591,13 +593,13 @@ impl BPlusTreeIndex {
             let (mut leaf_guard, mut local_ctx) =
                 self.find_leaf_page_pessimistic(key, false, context)?;
             let (mut leaf_page, _) =
-                BPlusTreeLeafPageCodec::decode(&leaf_guard.data, self.key_schema.clone())?;
+                BPlusTreeLeafPageCodec::decode(leaf_guard.data(), self.key_schema.clone())?;
 
             // If we still hold a parent, prefer parent-guided redirection to avoid crossing
             // parent boundary via leaf chain which can cause livelock during structure changes.
             if let Some(parent_guard_ref) = local_ctx.write_set.back() {
                 let (parent_page_chk, _) = BPlusTreeInternalPageCodec::decode(
-                    &parent_guard_ref.data,
+                    parent_guard_ref.data(),
                     self.key_schema.clone(),
                 )?;
                 let expected_pid = parent_page_chk.look_up(key);
@@ -612,7 +614,7 @@ impl BPlusTreeIndex {
                     drop(leaf_guard);
                     leaf_guard = self.buffer_pool.fetch_page_write(expected_pid)?;
                     let (new_leaf, _) =
-                        BPlusTreeLeafPageCodec::decode(&leaf_guard.data, self.key_schema.clone())?;
+                        BPlusTreeLeafPageCodec::decode(leaf_guard.data(), self.key_schema.clone())?;
                     leaf_page = new_leaf;
                 }
             }
@@ -653,7 +655,7 @@ impl BPlusTreeIndex {
                 drop(leaf_guard);
                 leaf_guard = self.buffer_pool.fetch_page_write(next_pid)?;
                 let (new_leaf, _) =
-                    BPlusTreeLeafPageCodec::decode(&leaf_guard.data, self.key_schema.clone())?;
+                    BPlusTreeLeafPageCodec::decode(leaf_guard.data(), self.key_schema.clone())?;
                 leaf_page = new_leaf;
 
                 // Do not force restart here; attempt deletion on the correct leaf first.
@@ -707,7 +709,7 @@ impl BPlusTreeIndex {
                 if was_first && leaf_page.header.current_size > 0 {
                     if let Some(mut parent_guard) = local_ctx.write_set.pop_back() {
                         let (mut parent_page, _) = BPlusTreeInternalPageCodec::decode(
-                            &parent_guard.data,
+                            parent_guard.data(),
                             self.key_schema.clone(),
                         )?;
                         if let Some(node_idx) = parent_page.value_index(leaf_guard.page_id()) {
@@ -746,7 +748,7 @@ impl BPlusTreeIndex {
 
         while let Some(page_id) = queue.pop_front() {
             let guard = self.buffer_pool.fetch_page_read(page_id)?;
-            let (page, _) = BPlusTreePageCodec::decode(&guard.data, self.key_schema.clone())?;
+            let (page, _) = BPlusTreePageCodec::decode(guard.data(), self.key_schema.clone())?;
 
             match page {
                 BPlusTreePage::Internal(internal) => {
@@ -826,7 +828,7 @@ impl BPlusTreeIndex {
             }
         };
         let (parent_page, _) =
-            BPlusTreeInternalPageCodec::decode(&parent_guard.data, self.key_schema.clone())?;
+            BPlusTreeInternalPageCodec::decode(parent_guard.data(), self.key_schema.clone())?;
 
         let Some(node_idx) = parent_page.value_index(node_guard.page_id()) else {
             return Err(QuillSQLError::Internal(
@@ -845,7 +847,7 @@ impl BPlusTreeIndex {
                 let node_guard_new = self.buffer_pool.fetch_page_write(node_pid)?;
                 node_guard = node_guard_new;
                 let (left_sibling_page, _) =
-                    BPlusTreePageCodec::decode(&left_sibling_guard.data, self.key_schema.clone())?;
+                    BPlusTreePageCodec::decode(left_sibling_guard.data(), self.key_schema.clone())?;
                 if left_sibling_page.current_size() > left_sibling_page.min_size() {
                     self.redistribute(
                         left_sibling_guard,
@@ -860,7 +862,7 @@ impl BPlusTreeIndex {
                 // We already hold node; locking left next preserves non-decreasing order
                 let left_sibling_guard = self.buffer_pool.fetch_page_write(left_sibling_pid)?;
                 let (left_sibling_page, _) =
-                    BPlusTreePageCodec::decode(&left_sibling_guard.data, self.key_schema.clone())?;
+                    BPlusTreePageCodec::decode(left_sibling_guard.data(), self.key_schema.clone())?;
                 if left_sibling_page.current_size() > left_sibling_page.min_size() {
                     self.redistribute(
                         left_sibling_guard,
@@ -884,8 +886,10 @@ impl BPlusTreeIndex {
                 let right_sibling_guard = self.buffer_pool.fetch_page_write(right_sibling_pid)?;
                 let node_guard_new = self.buffer_pool.fetch_page_write(node_pid)?;
                 node_guard = node_guard_new;
-                let (right_sibling_page, _) =
-                    BPlusTreePageCodec::decode(&right_sibling_guard.data, self.key_schema.clone())?;
+                let (right_sibling_page, _) = BPlusTreePageCodec::decode(
+                    right_sibling_guard.data(),
+                    self.key_schema.clone(),
+                )?;
                 if right_sibling_page.current_size() > right_sibling_page.min_size() {
                     self.redistribute(
                         right_sibling_guard,
@@ -898,8 +902,10 @@ impl BPlusTreeIndex {
                 }
             } else {
                 let right_sibling_guard = self.buffer_pool.fetch_page_write(right_sibling_pid)?;
-                let (right_sibling_page, _) =
-                    BPlusTreePageCodec::decode(&right_sibling_guard.data, self.key_schema.clone())?;
+                let (right_sibling_page, _) = BPlusTreePageCodec::decode(
+                    right_sibling_guard.data(),
+                    self.key_schema.clone(),
+                )?;
                 if right_sibling_page.current_size() > right_sibling_page.min_size() {
                     self.redistribute(
                         right_sibling_guard,
@@ -958,11 +964,11 @@ impl BPlusTreeIndex {
         context: &mut Context,
     ) -> QuillSQLResult<()> {
         let (mut left_page, _) =
-            BPlusTreePageCodec::decode(&left_guard.data, self.key_schema.clone())?;
+            BPlusTreePageCodec::decode(left_guard.data(), self.key_schema.clone())?;
         let (mut right_page, _) =
-            BPlusTreePageCodec::decode(&right_guard.data, self.key_schema.clone())?;
+            BPlusTreePageCodec::decode(right_guard.data(), self.key_schema.clone())?;
         let (mut parent_page, _) =
-            BPlusTreeInternalPageCodec::decode(&parent_guard.data, self.key_schema.clone())?;
+            BPlusTreeInternalPageCodec::decode(parent_guard.data(), self.key_schema.clone())?;
 
         let right_page_id = right_guard.page_id();
         let middle_key = match parent_page.remove(right_page_id) {
@@ -1023,10 +1029,11 @@ impl BPlusTreeIndex {
         from_is_left_sibling: bool,
     ) -> QuillSQLResult<()> {
         let (mut from_page, _) =
-            BPlusTreePageCodec::decode(&from_guard.data, self.key_schema.clone())?;
-        let (mut to_page, _) = BPlusTreePageCodec::decode(&to_guard.data, self.key_schema.clone())?;
+            BPlusTreePageCodec::decode(from_guard.data(), self.key_schema.clone())?;
+        let (mut to_page, _) =
+            BPlusTreePageCodec::decode(to_guard.data(), self.key_schema.clone())?;
         let (mut parent_page, _) =
-            BPlusTreeInternalPageCodec::decode(&parent_guard.data, self.key_schema.clone())?;
+            BPlusTreeInternalPageCodec::decode(parent_guard.data(), self.key_schema.clone())?;
 
         if from_is_left_sibling {
             // from=left(from_internal), to=right(to_internal). Separator key is at parent_idx_of_to_node.
@@ -1162,7 +1169,8 @@ impl BPlusTreeIndex {
     }
 
     fn adjust_root(&self, root_guard: WritePageGuard) -> QuillSQLResult<()> {
-        let (root_page, _) = BPlusTreePageCodec::decode(&root_guard.data, self.key_schema.clone())?;
+        let (root_page, _) =
+            BPlusTreePageCodec::decode(root_guard.data(), self.key_schema.clone())?;
 
         if let BPlusTreePage::Internal(root_internal) = root_page {
             if root_internal.header.current_size == 1 {
@@ -1221,7 +1229,7 @@ impl BPlusTreeIndex {
         let mut cleaned = 0usize;
         let mut guard = self.find_first_leaf_page()?;
         loop {
-            let (leaf, _) = BPlusTreeLeafPageCodec::decode(&guard.data, self.key_schema.clone())?;
+            let (leaf, _) = BPlusTreeLeafPageCodec::decode(guard.data(), self.key_schema.clone())?;
             // Snapshot next pid before releasing read guard
             let next_pid = leaf.header.next_page_id;
             // Collect keys to delete
@@ -1259,7 +1267,7 @@ impl BPlusTreeIndex {
             let mut current_guard = self.buffer_pool.fetch_page_read(self.get_root_page_id()?)?;
             loop {
                 let decoded =
-                    BPlusTreePageCodec::decode(&current_guard.data, self.key_schema.clone());
+                    BPlusTreePageCodec::decode(current_guard.data(), self.key_schema.clone());
                 if decoded.is_err() {
                     drop(current_guard);
                     restarts += 1;
@@ -1276,7 +1284,7 @@ impl BPlusTreeIndex {
                     BPlusTreePage::Internal(internal) => {
                         // Double-read header-only version for OLC
                         let (hdr1, _) =
-                            BPlusTreeInternalPageCodec::decode_header_only(&current_guard.data)?;
+                            BPlusTreeInternalPageCodec::decode_header_only(current_guard.data())?;
                         let v1 = hdr1.version;
                         if let Some(ref hk) = internal.high_key {
                             if key >= hk && internal.header.next_page_id != INVALID_PAGE_ID {
@@ -1290,12 +1298,12 @@ impl BPlusTreeIndex {
                         }
                         // Byte-based child lookup to avoid re-decode costs
                         let next_page_id = BPlusTreeInternalPageCodec::lookup_child_from_bytes(
-                            &current_guard.data,
+                            current_guard.data(),
                             self.key_schema.clone(),
                             key,
                         )?;
                         let (hdr2, _) =
-                            BPlusTreeInternalPageCodec::decode_header_only(&current_guard.data)?;
+                            BPlusTreeInternalPageCodec::decode_header_only(current_guard.data())?;
                         let v2 = hdr2.version;
                         if v1 != v2 {
                             drop(current_guard);
@@ -1314,10 +1322,10 @@ impl BPlusTreeIndex {
                     }
                     BPlusTreePage::Leaf(_leaf) => {
                         let (h1, _) =
-                            BPlusTreeLeafPageCodec::decode_header_only(&current_guard.data)?;
+                            BPlusTreeLeafPageCodec::decode_header_only(current_guard.data())?;
                         let v1 = h1.version;
                         let (h2, _) =
-                            BPlusTreeLeafPageCodec::decode_header_only(&current_guard.data)?;
+                            BPlusTreeLeafPageCodec::decode_header_only(current_guard.data())?;
                         let v2 = h2.version;
                         if v1 != v2 {
                             drop(current_guard);
@@ -1345,7 +1353,7 @@ impl BPlusTreeIndex {
 
         loop {
             let guard = self.buffer_pool.fetch_page_read(current_page_id)?;
-            let (page, _) = BPlusTreePageCodec::decode(&guard.data, self.key_schema.clone())?;
+            let (page, _) = BPlusTreePageCodec::decode(guard.data(), self.key_schema.clone())?;
 
             match page {
                 BPlusTreePage::Internal(internal) => {
@@ -1379,7 +1387,7 @@ impl BPlusTreeIndex {
 
             // b. 解码页面内容以判断其类型。
             let (page_content, _) =
-                BPlusTreePageCodec::decode(&current_guard.data, self.key_schema.clone())?;
+                BPlusTreePageCodec::decode(current_guard.data(), self.key_schema.clone())?;
 
             match page_content {
                 // c. 如果是内部节点...
@@ -1387,7 +1395,7 @@ impl BPlusTreeIndex {
                     // find next child id using bytes path
                     current_page_id =
                         crate::storage::codec::BPlusTreeInternalPageCodec::lookup_child_from_bytes(
-                            &current_guard.data,
+                            current_guard.data(),
                             self.key_schema.clone(),
                             key,
                         )?;
@@ -1425,7 +1433,7 @@ impl BPlusTreeIndex {
                 );
             }
             let (mut page, _) =
-                BPlusTreePageCodec::decode(&page_guard.data, self.key_schema.clone())?;
+                BPlusTreePageCodec::decode(page_guard.data(), self.key_schema.clone())?;
 
             let mut new_page_guard = self.buffer_pool.new_page()?;
             let new_page_id = new_page_guard.page_id();
@@ -1442,15 +1450,13 @@ impl BPlusTreeIndex {
                     let new_data = BPlusTreeLeafPageCodec::encode(&new_leaf);
                     self.wal_overwrite_page(&mut new_page_guard, new_data)?;
                     leaf_page.header.version += 1;
-                    if self.config.debug_split_level >= 2 {
-                        if new_leaf.header.current_size > 0 {
-                            eprintln!(
-                                "[SPLIT DEBUG] leaf_split left={} right={} sep_key={}",
-                                page_id,
-                                new_page_id,
-                                new_leaf.key_at(0)
-                            );
-                        }
+                    if self.config.debug_split_level >= 2 && new_leaf.header.current_size > 0 {
+                        eprintln!(
+                            "[SPLIT DEBUG] leaf_split left={} right={} sep_key={}",
+                            page_id,
+                            new_page_id,
+                            new_leaf.key_at(0)
+                        );
                     }
                     new_leaf.key_at(0).clone()
                 }
@@ -1561,7 +1567,7 @@ impl BPlusTreeIndex {
                 );
             }
             let (mut parent_page, _) =
-                BPlusTreeInternalPageCodec::decode(&parent_guard.data, self.key_schema.clone())?;
+                BPlusTreeInternalPageCodec::decode(parent_guard.data(), self.key_schema.clone())?;
             // Insert the separator key right after the original left child (page_id)
             if parent_page.value_index(page_id).is_none() {
                 // Parent no longer contains this child; signal upper layer to retry from root
@@ -1619,7 +1625,7 @@ mod tests {
     use crate::storage::page::{BPlusTreePage, RecordId};
     use crate::storage::tuple::Tuple;
     use crate::{
-        buffer::BufferPoolManager,
+        buffer::BufferManager,
         catalog::{Column, DataType, Schema},
         storage::codec::BPlusTreePageCodec,
     };
@@ -1658,7 +1664,7 @@ mod tests {
         let key_schema = Arc::new(Schema::new(vec![Column::new("a", DataType::Int64, false)]));
         let disk_manager = DiskManager::try_new(temp_path).unwrap();
         let disk_scheduler = Arc::new(DiskScheduler::new(Arc::new(disk_manager)));
-        let buffer_pool = Arc::new(BufferPoolManager::new(buffer_pool_size, disk_scheduler));
+        let buffer_pool = Arc::new(BufferManager::new(buffer_pool_size, disk_scheduler));
         let index = BPlusTreeIndex::new(
             key_schema.clone(),
             buffer_pool,
@@ -1674,13 +1680,13 @@ mod tests {
         db_path: &std::path::Path,
         wal_dir: &std::path::Path,
         bpm_pages: usize,
-    ) -> (Arc<BufferPoolManager>, Arc<WalManager>, Arc<DiskScheduler>) {
+    ) -> (Arc<BufferManager>, Arc<WalManager>, Arc<DiskScheduler>) {
         let dm = Arc::new(DiskManager::try_new(db_path).unwrap());
         let scheduler = Arc::new(DiskScheduler::new(dm));
         let mut cfg = WalConfig::default();
         cfg.directory = wal_dir.to_path_buf();
         let wal = Arc::new(WalManager::new(cfg, scheduler.clone(), None, None).unwrap());
-        let bpm = Arc::new(BufferPoolManager::new(bpm_pages, scheduler.clone()));
+        let bpm = Arc::new(BufferManager::new(bpm_pages, scheduler.clone()));
         bpm.set_wal_manager(wal.clone());
         (bpm, wal, scheduler)
     }
@@ -1728,7 +1734,7 @@ mod tests {
         let _summary = rm.replay().unwrap();
 
         // 3) 打开新的 BufferPool，reopen 索引并验证所有键可查询 & 有序遍历
-        let bpm2 = Arc::new(BufferPoolManager::new(128, scheduler2.clone()));
+        let bpm2 = Arc::new(BufferManager::new(128, scheduler2.clone()));
         let reopened = BPlusTreeIndex::open(key_schema.clone(), bpm2.clone(), 2, 3, header_pid);
 
         for k in &keys {
@@ -1779,7 +1785,7 @@ mod tests {
 
         let root_guard = index.buffer_pool.fetch_page_read(root_page_id).unwrap();
         let (root_page, _) =
-            BPlusTreePageCodec::decode(&root_guard.data, key_schema.clone()).unwrap();
+            BPlusTreePageCodec::decode(root_guard.data(), key_schema.clone()).unwrap();
 
         assert!(matches!(root_page, BPlusTreePage::Leaf(_)));
 
@@ -1928,7 +1934,7 @@ mod tests {
         let root_page_id = index.get_root_page_id().unwrap();
         let root_guard = index.buffer_pool.fetch_page_read(root_page_id).unwrap();
         let (root_page, _) =
-            BPlusTreePageCodec::decode(&root_guard.data, key_schema.clone()).unwrap();
+            BPlusTreePageCodec::decode(root_guard.data(), key_schema.clone()).unwrap();
         let (left_internal_id, right_internal_id) =
             if let BPlusTreePage::Internal(root_internal) = root_page {
                 assert_eq!(root_internal.header.current_size, 2);
@@ -1940,7 +1946,7 @@ mod tests {
 
         let left_guard = index.buffer_pool.fetch_page_read(left_internal_id).unwrap();
         let (left_page, _) =
-            BPlusTreePageCodec::decode(&left_guard.data, key_schema.clone()).unwrap();
+            BPlusTreePageCodec::decode(left_guard.data(), key_schema.clone()).unwrap();
         if let BPlusTreePage::Internal(left_internal) = left_page {
             assert_eq!(
                 left_internal.high_key,
@@ -2136,7 +2142,7 @@ mod tests {
         let tuple = create_tuple_from_key(probe, key_schema.clone());
         if index.get(&tuple).unwrap().is_none() {
             let guard = index.find_leaf_page_optimistic(&tuple).unwrap();
-            let (page, _) = BPlusTreePageCodec::decode(&guard.data, key_schema.clone()).unwrap();
+            let (page, _) = BPlusTreePageCodec::decode(guard.data(), key_schema.clone()).unwrap();
             if let BPlusTreePage::Leaf(leaf) = page {
                 println!(
                     "Early probe leaf for 630 has keys: {:?}",
@@ -2165,7 +2171,7 @@ mod tests {
         let tuple = create_tuple_from_key(probe, key_schema.clone());
         if index.get(&tuple).unwrap().is_none() {
             let guard = index.find_leaf_page_optimistic(&tuple).unwrap();
-            let (page, _) = BPlusTreePageCodec::decode(&guard.data, key_schema.clone()).unwrap();
+            let (page, _) = BPlusTreePageCodec::decode(guard.data(), key_schema.clone()).unwrap();
             if let BPlusTreePage::Leaf(leaf) = page {
                 println!(
                     "Probe leaf for 630 has keys: {:?}",
@@ -2374,7 +2380,7 @@ mod tests {
         let root_page_id = index.get_root_page_id().unwrap();
         let root_guard = index.buffer_pool.fetch_page_read(root_page_id).unwrap();
         let (root_page, _) =
-            BPlusTreePageCodec::decode(&root_guard.data, key_schema.clone()).unwrap();
+            BPlusTreePageCodec::decode(root_guard.data(), key_schema.clone()).unwrap();
 
         // Root should be internal page after split
         let BPlusTreePage::Internal(root_internal) = root_page else {
@@ -2388,9 +2394,9 @@ mod tests {
         let left_guard = index.buffer_pool.fetch_page_read(left_pid).unwrap();
         let right_guard = index.buffer_pool.fetch_page_read(right_pid).unwrap();
         let (left_page, _) =
-            BPlusTreePageCodec::decode(&left_guard.data, key_schema.clone()).unwrap();
+            BPlusTreePageCodec::decode(left_guard.data(), key_schema.clone()).unwrap();
         let (right_page, _) =
-            BPlusTreePageCodec::decode(&right_guard.data, key_schema.clone()).unwrap();
+            BPlusTreePageCodec::decode(right_guard.data(), key_schema.clone()).unwrap();
 
         let BPlusTreePage::Leaf(left_leaf) = left_page else {
             panic!("left child not leaf");

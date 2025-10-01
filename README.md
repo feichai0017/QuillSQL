@@ -13,8 +13,8 @@
 - **Clean architecture**: SQL → Logical Plan → Physical Plan → Volcano executor
 - **Transaction control**: `BEGIN/COMMIT/ROLLBACK`, `SET TRANSACTION`, `SET SESSION TRANSACTION`, enforced `READ ONLY`, row/table locks
 - **B+Tree index**: OLC readers, B-link pages, latch crabbing, range scan iterator
-- **Buffer pool**: LRU-K, pin/unpin with RAII guards, flush-on-evict
-- **Streaming scan**: Large sequential scans bypass buffer pool via a small direct I/O ring buffer to avoid cache pollution
+- **Buffer manager**: LRU-K + TinyLFU, WAL-aware dirty tracking, prefetch API, background writer
+- **Streaming / Prefetch**: Large sequential scans bypass the cache via a small direct I/O ring buffer; targeted prefetch warms hot paths without pins
 - **WAL & Recovery (ARIES-inspired)**: FPW + PageDelta, DPT, chained CLR, per-transaction undo chains, idempotent replays
 - **Information schema**: `information_schema.schemas`, `tables`, `columns`, `indexes`
 - **Now supports**: `SHOW DATABASES`, `SHOW TABLES`, `EXPLAIN`, `DELETE`

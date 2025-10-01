@@ -336,7 +336,6 @@ pub fn key_schema_to_varchar(key_schema: &Schema) -> String {
 fn parse_key_schema_from_varchar(varchar: &str, table_schema: SchemaRef) -> QuillSQLResult<Schema> {
     let column_names = varchar
         .split(",")
-        .into_iter()
         .map(|name| name.trim())
         .collect::<Vec<&str>>();
     let indices = column_names

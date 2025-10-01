@@ -53,28 +53,34 @@ impl Replacer for LRUKReplacer {
         }
     }
 
-    // 驱逐 evictable 且具有最大 k-distance 的 frame
+    /// Drop victim from replacer; returns frame id if available.
     fn evict(&mut self) -> Option<FrameId> {
-        let mut max_k_distance = 0;
-        let mut result = None;
-        for (frame_id, node) in self.node_store.iter() {
+        let mut victim: Option<(FrameId, u64, u64)> = None; // (frame_id, k_distance, oldest_ts)
+        for (&frame_id, node) in &self.node_store {
             if !node.is_evictable {
                 continue;
             }
+            let oldest = node.history.front().copied().unwrap_or(0);
             let k_distance = if node.history.len() < self.k {
-                u64::MAX - node.history.front().unwrap()
+                u64::MAX
             } else {
-                self.current_timestamp - node.history.front().unwrap()
+                self.current_timestamp.saturating_sub(oldest)
             };
-            if k_distance > max_k_distance {
-                max_k_distance = k_distance;
-                result = Some(*frame_id);
+            match victim {
+                None => victim = Some((frame_id, k_distance, oldest)),
+                Some((_, best_dist, best_oldest)) => {
+                    if k_distance > best_dist || (k_distance == best_dist && oldest < best_oldest) {
+                        victim = Some((frame_id, k_distance, oldest));
+                    }
+                }
             }
         }
-        if let Some(frame_id) = result {
+        if let Some((frame_id, _, _)) = victim {
             self.remove(frame_id);
+            Some(frame_id)
+        } else {
+            None
         }
-        result
     }
 
     // 记录frame的访问

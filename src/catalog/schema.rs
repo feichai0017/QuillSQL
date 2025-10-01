@@ -42,11 +42,10 @@ impl Schema {
 
     fn new_with_check(columns: Vec<ColumnRef>) -> Self {
         for (idx1, col1) in columns.iter().enumerate() {
-            for idx2 in idx1 + 1..columns.len() {
-                let col2 = &columns[idx2];
+            for col2 in columns.iter().skip(idx1 + 1) {
                 match (&col1.relation, &col2.relation) {
                     (Some(rel1), Some(rel2)) => {
-                        assert_ne!(rel1.resolved_eq(rel2) && col1.name == col2.name, true)
+                        assert!(!(rel1.resolved_eq(rel2) && col1.name == col2.name));
                     }
                     (None, None) => assert_ne!(col1.name, col2.name),
                     (Some(_), None) | (None, Some(_)) => {}

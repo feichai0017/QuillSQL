@@ -530,9 +530,7 @@ impl WalStorage {
             .scheduler
             .schedule_wal_write(path, offset, data, sync)
             .map_err(|e| io_error(&e))?;
-        let res = rx
-            .recv()
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        let res = rx.recv().map_err(|e| io::Error::other(e.to_string()))?;
         res.map_err(|e| io_error(&e))
     }
 }
@@ -622,8 +620,7 @@ impl WalReader {
         }
         let rx = self
             .scheduler
-            .schedule_wal_read(path.to_path_buf(), offset, len)
-            .map_err(|e| e)?;
+            .schedule_wal_read(path.to_path_buf(), offset, len)?;
         let result = rx
             .recv()
             .map_err(|e| QuillSQLError::Internal(format!("WAL reader recv failed: {}", e)))?;
@@ -687,7 +684,7 @@ fn list_segments(directory: &Path) -> QuillSQLResult<Vec<u64>> {
 }
 
 fn io_error(err: &QuillSQLError) -> std::io::Error {
-    std::io::Error::new(std::io::ErrorKind::Other, err.to_string())
+    std::io::Error::other(err.to_string())
 }
 
 #[derive(Debug)]

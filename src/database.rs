@@ -6,7 +6,7 @@ use std::thread;
 use std::time::Duration;
 use tempfile::TempDir;
 
-use crate::buffer::BUFFER_POOL_SIZE;
+use crate::buffer::{BufferManager, BUFFER_POOL_SIZE};
 use crate::catalog::load_catalog_data;
 use crate::catalog::registry::global_index_registry;
 use crate::config::{IndexVacuumConfig, WalConfig};
@@ -19,7 +19,6 @@ use crate::recovery::{ControlFileManager, RecoveryManager, WalManager};
 use crate::session::SessionContext;
 use crate::utils::util::{pretty_format_logical_plan, pretty_format_physical_plan};
 use crate::{
-    buffer::BufferPoolManager,
     catalog::Catalog,
     execution::{ExecutionContext, ExecutionEngine},
     plan::{LogicalPlanner, PlannerContext},
@@ -50,7 +49,7 @@ pub struct DatabaseOptions {
 }
 
 pub struct Database {
-    pub(crate) buffer_pool: Arc<BufferPoolManager>,
+    pub(crate) buffer_pool: Arc<BufferManager>,
     pub(crate) catalog: Catalog,
     pub(crate) wal_manager: Arc<WalManager>,
     pub(crate) transaction_manager: Arc<TransactionManager>,
@@ -72,10 +71,7 @@ impl Database {
     ) -> QuillSQLResult<Self> {
         let disk_manager = Arc::new(DiskManager::try_new(db_path)?);
         let disk_scheduler = Arc::new(DiskScheduler::new(disk_manager.clone()));
-        let buffer_pool = Arc::new(BufferPoolManager::new(
-            BUFFER_POOL_SIZE,
-            disk_scheduler.clone(),
-        ));
+        let buffer_pool = Arc::new(BufferManager::new(BUFFER_POOL_SIZE, disk_scheduler.clone()));
 
         let wal_config = wal_config_for_path(db_path, &options.wal);
         let synchronous_commit = wal_config.synchronous_commit;
@@ -161,10 +157,7 @@ impl Database {
                 QuillSQLError::Internal("Invalid temp path".to_string()),
             )?)?);
         let disk_scheduler = Arc::new(DiskScheduler::new(disk_manager.clone()));
-        let buffer_pool = Arc::new(BufferPoolManager::new(
-            BUFFER_POOL_SIZE,
-            disk_scheduler.clone(),
-        ));
+        let buffer_pool = Arc::new(BufferManager::new(BUFFER_POOL_SIZE, disk_scheduler.clone()));
 
         let wal_config = wal_config_for_temp(temp_dir.path(), &options.wal);
         let synchronous_commit = wal_config.synchronous_commit;
@@ -497,7 +490,7 @@ fn wal_config_for_temp(temp_root: &Path, overrides: &WalOptions) -> WalConfig {
 
 fn spawn_checkpoint_worker(
     wal_manager: Arc<WalManager>,
-    buffer_pool: Arc<BufferPoolManager>,
+    buffer_pool: Arc<BufferManager>,
     transaction_manager: Arc<TransactionManager>,
     interval_ms: Option<u64>,
 ) -> (Arc<AtomicBool>, Option<thread::JoinHandle<()>>) {
@@ -553,7 +546,7 @@ fn spawn_checkpoint_worker(
 }
 
 fn spawn_bg_writer(
-    buffer_pool: Arc<BufferPoolManager>,
+    buffer_pool: Arc<BufferManager>,
     interval_ms: Option<u64>,
     vacuum_cfg: IndexVacuumConfig,
 ) -> (Arc<AtomicBool>, Option<thread::JoinHandle<()>>) {

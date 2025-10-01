@@ -1,7 +1,7 @@
 use crate::storage::page::RecordId;
 use crate::transaction::{Transaction, TransactionId};
 use crate::utils::table_ref::TableReference;
-use log::{debug, trace, warn};
+use log::{trace, warn};
 use parking_lot::{Condvar, Mutex};
 use std::collections::{hash_map::Entry, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -68,6 +68,11 @@ impl LockManager {
             request_id: AtomicU64::new(1),
             wait_for: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Create a lock manager using default configuration.
+    pub fn default_instance() -> Self {
+        Self::new()
     }
 
     /// Acquire a table level lock for the given transaction.
@@ -370,6 +375,12 @@ impl LockManager {
         }
 
         removed
+    }
+}
+
+impl Default for LockManager {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

@@ -15,7 +15,7 @@ use crate::storage::page::{
 use crate::storage::tuple::Tuple;
 use crate::utils::table_ref::TableReference;
 use crate::{
-    buffer::BufferPoolManager,
+    buffer::BufferManager,
     error::{QuillSQLError, QuillSQLResult},
     storage::index::btree_index::BPlusTreeIndex,
     storage::table_heap::TableHeap,
@@ -27,7 +27,7 @@ pub static DEFAULT_SCHEMA_NAME: &str = "public";
 #[derive(Debug)]
 pub struct Catalog {
     pub schemas: HashMap<String, CatalogSchema>,
-    pub buffer_pool: Arc<BufferPoolManager>,
+    pub buffer_pool: Arc<BufferManager>,
     pub disk_manager: Arc<DiskManager>,
 }
 
@@ -64,7 +64,7 @@ impl CatalogTable {
 }
 
 impl Catalog {
-    pub fn new(buffer_pool: Arc<BufferPoolManager>, disk_manager: Arc<DiskManager>) -> Self {
+    pub fn new(buffer_pool: Arc<BufferManager>, disk_manager: Arc<DiskManager>) -> Self {
         Self {
             schemas: HashMap::new(),
             buffer_pool,
