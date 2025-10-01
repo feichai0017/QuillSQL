@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 
-use crate::buffer::PAGE_SIZE;
+use crate::buffer::{BufferManager, PAGE_SIZE};
 use crate::error::QuillSQLResult;
 use crate::recovery::wal_record::{
     CheckpointPayload, ClrPayload, HeapRecordPayload, PageDeltaPayload, PageWritePayload,
@@ -17,7 +17,7 @@ use crate::storage::table_heap::TableHeap;
 pub struct RecoveryManager {
     wal: Arc<WalManager>,
     disk_scheduler: Arc<DiskScheduler>,
-    buffer_pool: Option<Arc<crate::buffer::BufferPoolManager>>,
+    buffer_pool: Option<Arc<BufferManager>>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -36,8 +36,8 @@ impl RecoveryManager {
         }
     }
 
-    /// Optionally attach BufferPoolManager to enable TableHeap recovery APIs
-    pub fn with_buffer_pool(mut self, bpm: Arc<crate::buffer::BufferPoolManager>) -> Self {
+    /// Optionally attach BufferManager to enable TableHeap recovery APIs
+    pub fn with_buffer_pool(mut self, bpm: Arc<BufferManager>) -> Self {
         self.buffer_pool = Some(bpm);
         self
     }
@@ -293,7 +293,7 @@ impl RecoveryManager {
             let rid = crate::storage::page::RecordId::new(page_id, slot_idx as u32);
             // Read current meta from header without decoding tuple payload
             let guard = bpm.fetch_page_read(page_id)?;
-            let (header, _hdr_len) = TablePageHeaderCodec::decode(&guard.data)?;
+            let (header, _hdr_len) = TablePageHeaderCodec::decode(guard.data())?;
             drop(guard);
             if slot_idx >= header.tuple_infos.len() {
                 return Ok(());
@@ -389,7 +389,7 @@ impl RecoveryManager {
 #[cfg(test)]
 mod tests {
     use super::RecoveryManager;
-    use crate::buffer::{BufferPoolManager, INVALID_PAGE_ID};
+    use crate::buffer::{BufferManager, INVALID_PAGE_ID};
     use crate::config::WalConfig;
     use crate::recovery::wal_record::{
         PageDeltaPayload, PageWritePayload, TransactionPayload, TransactionRecordKind,
@@ -613,7 +613,7 @@ mod tests {
 
         // Reopen wal and run recovery (inject BufferPool to use TableHeap recovery APIs)
         let scheduler = build_scheduler(&db_path);
-        let bpm = Arc::new(BufferPoolManager::new(64, scheduler.clone()));
+        let bpm = Arc::new(BufferManager::new(64, scheduler.clone()));
         let wal = Arc::new(WalManager::new(config, scheduler.clone(), None, None).unwrap());
         let recovery = RecoveryManager::new(wal, scheduler.clone()).with_buffer_pool(bpm);
         let _summary = recovery.replay().unwrap();
@@ -734,7 +734,7 @@ mod tests {
 
         // Recover (inject BufferPool)
         let scheduler = build_scheduler(&db_path);
-        let bpm = Arc::new(BufferPoolManager::new(64, scheduler.clone()));
+        let bpm = Arc::new(BufferManager::new(64, scheduler.clone()));
         let wal = Arc::new(WalManager::new(config, scheduler.clone(), None, None).unwrap());
         let recovery = RecoveryManager::new(wal, scheduler.clone()).with_buffer_pool(bpm);
         let _ = recovery.replay().unwrap();
@@ -838,7 +838,7 @@ mod tests {
 
         // recover (inject BufferPool)
         let scheduler = build_scheduler(&db_path);
-        let bpm = Arc::new(BufferPoolManager::new(64, scheduler.clone()));
+        let bpm = Arc::new(BufferManager::new(64, scheduler.clone()));
         let wal = Arc::new(WalManager::new(config, scheduler.clone(), None, None).unwrap());
         let recovery = RecoveryManager::new(wal, scheduler.clone()).with_buffer_pool(bpm);
         let _ = recovery.replay().unwrap();
@@ -930,7 +930,7 @@ mod tests {
 
         // First recovery (inject BufferPool)
         let scheduler = build_scheduler(&db_path);
-        let bpm = Arc::new(BufferPoolManager::new(64, scheduler.clone()));
+        let bpm = Arc::new(BufferManager::new(64, scheduler.clone()));
         let wal = Arc::new(WalManager::new(config.clone(), scheduler.clone(), None, None).unwrap());
         let recovery = RecoveryManager::new(wal, scheduler.clone()).with_buffer_pool(bpm);
         let _ = recovery.replay().unwrap();
@@ -941,7 +941,7 @@ mod tests {
 
         // Second recovery (should not change page state) - inject BufferPool again
         let scheduler2 = build_scheduler(&db_path);
-        let bpm2 = Arc::new(BufferPoolManager::new(64, scheduler2.clone()));
+        let bpm2 = Arc::new(BufferManager::new(64, scheduler2.clone()));
         let wal2 = Arc::new(WalManager::new(config, scheduler2.clone(), None, None).unwrap());
         let recovery2 = RecoveryManager::new(wal2, scheduler2.clone()).with_buffer_pool(bpm2);
         let _ = recovery2.replay().unwrap();
@@ -1190,7 +1190,7 @@ mod tests {
 
         // First recovery should undo both updates and write two CLRs
         let scheduler1 = build_scheduler(&db_path);
-        let bpm1 = Arc::new(BufferPoolManager::new(64, scheduler1.clone()));
+        let bpm1 = Arc::new(BufferManager::new(64, scheduler1.clone()));
         let wal1 =
             Arc::new(WalManager::new(config.clone(), scheduler1.clone(), None, None).unwrap());
         let recovery1 =
@@ -1216,7 +1216,7 @@ mod tests {
 
         // Second recovery: no further changes
         let scheduler2 = build_scheduler(&db_path);
-        let bpm2 = Arc::new(BufferPoolManager::new(64, scheduler2.clone()));
+        let bpm2 = Arc::new(BufferManager::new(64, scheduler2.clone()));
         let wal2 =
             Arc::new(WalManager::new(config.clone(), scheduler2.clone(), None, None).unwrap());
         let recovery2 = RecoveryManager::new(wal2, scheduler2.clone()).with_buffer_pool(bpm2);
@@ -1352,7 +1352,7 @@ mod tests {
 
         for _ in 0..2 {
             let scheduler_r = build_scheduler(&db_path);
-            let bpm_r = Arc::new(BufferPoolManager::new(64, scheduler_r.clone()));
+            let bpm_r = Arc::new(BufferManager::new(64, scheduler_r.clone()));
             let wal_r =
                 Arc::new(WalManager::new(config.clone(), scheduler_r.clone(), None, None).unwrap());
             let recovery = RecoveryManager::new(wal_r, scheduler_r.clone()).with_buffer_pool(bpm_r);

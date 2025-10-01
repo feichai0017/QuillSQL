@@ -1,4 +1,4 @@
-use crate::buffer::{BufferPoolManager, PageId, WritePageGuard};
+use crate::buffer::{BufferManager, PageId, WritePageGuard};
 use crate::catalog::SchemaRef;
 use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::storage::index::Index;
@@ -15,7 +15,7 @@ use std::sync::RwLock;
 #[derive(Debug)]
 pub struct HashIndex {
     pub key_schema: SchemaRef,
-    pub buffer_pool: Arc<BufferPoolManager>,
+    pub buffer_pool: Arc<BufferManager>,
     pub bucket_max_size: u32,
     pub dir_depth: RwLock<u32>,
     pub directory: RwLock<Vec<PageId>>,
@@ -24,7 +24,7 @@ pub struct HashIndex {
 impl HashIndex {
     pub fn new(
         key_schema: SchemaRef,
-        buffer_pool: Arc<BufferPoolManager>,
+        buffer_pool: Arc<BufferManager>,
         bucket_max_size: u32,
     ) -> Self {
         // create one initial bucket
@@ -32,7 +32,7 @@ impl HashIndex {
             let mut guard = buffer_pool.new_page().expect("alloc bucket");
             let page = HashBucketPage::new(key_schema.clone(), bucket_max_size, 0);
             let bytes = crate::storage::codec::HashBucketPageCodec::encode(&page);
-            guard.data.copy_from_slice(&bytes);
+            guard.data_mut().copy_from_slice(&bytes);
             guard.page_id()
         };
         Self {
@@ -61,7 +61,7 @@ impl HashIndex {
     fn load_bucket(&self, page_id: PageId) -> QuillSQLResult<(WritePageGuard, HashBucketPage)> {
         let guard = self.buffer_pool.fetch_page_write(page_id)?;
         let (bucket, _) = crate::storage::codec::HashBucketPageCodec::decode(
-            &guard.data,
+            guard.data(),
             self.key_schema.clone(),
         )?;
         Ok((guard, bucket))
@@ -69,7 +69,7 @@ impl HashIndex {
 
     fn write_bucket(&self, mut guard: WritePageGuard, bucket: &HashBucketPage) {
         let bytes = crate::storage::codec::HashBucketPageCodec::encode(bucket);
-        guard.data.copy_from_slice(&bytes);
+        guard.data_mut().copy_from_slice(&bytes);
     }
 
     fn split_bucket(
@@ -343,7 +343,7 @@ impl Index for HashIndex {
 #[cfg(test)]
 mod tests {
     use super::HashIndex;
-    use crate::buffer::BufferPoolManager;
+    use crate::buffer::BufferManager;
     use crate::catalog::{Column, DataType, Schema};
     use crate::storage::disk_manager::DiskManager;
     use crate::storage::disk_scheduler::DiskScheduler;
@@ -360,7 +360,7 @@ mod tests {
         let temp_path = temp_dir.path().join("test.db");
         let disk_manager = Arc::new(DiskManager::try_new(temp_path).unwrap());
         let disk_scheduler = Arc::new(DiskScheduler::new(disk_manager));
-        let buffer_pool = Arc::new(BufferPoolManager::new(512, disk_scheduler));
+        let buffer_pool = Arc::new(BufferManager::new(512, disk_scheduler));
         let index = HashIndex::new(key_schema.clone(), buffer_pool, 8);
 
         // insert 5 keys
@@ -396,7 +396,7 @@ mod tests {
         let temp_path = temp_dir.path().join("test.db");
         let disk_manager = Arc::new(DiskManager::try_new(temp_path).unwrap());
         let disk_scheduler = Arc::new(DiskScheduler::new(disk_manager));
-        let buffer_pool = Arc::new(BufferPoolManager::new(128, disk_scheduler));
+        let buffer_pool = Arc::new(BufferManager::new(128, disk_scheduler));
         // small bucket size to trigger splits quickly
         let index = HashIndex::new(key_schema.clone(), buffer_pool.clone(), 2);
 

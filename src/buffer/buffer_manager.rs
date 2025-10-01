@@ -10,7 +10,6 @@ use crate::buffer::buffer_pool::{BufferPool, FrameId, FrameMeta};
 use crate::buffer::page::{self, PageId, ReadPageGuard, WritePageGuard, INVALID_PAGE_ID};
 use crate::catalog::SchemaRef;
 use crate::config::BufferPoolConfig;
-use crate::config::WalConfig;
 use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::recovery::{Lsn, WalManager};
 use crate::storage::codec::{
@@ -246,7 +245,7 @@ impl BufferManager {
         let Some(frame_id) = self.pool.lookup_frame(page_id) else {
             return Ok(false);
         };
-        let mut meta = self.pool.frame_meta(frame_id);
+        let meta = self.pool.frame_meta(frame_id);
         if !meta.is_dirty {
             self.dirty_pages.remove(&page_id);
             self.dirty_page_table.remove(&page_id);
@@ -412,20 +411,56 @@ impl BufferManager {
         if let Some(frame_id) = self.pool.pop_free_frame() {
             return Ok(frame_id);
         }
-        let mut rep = self.replacer.write();
-        if let Some(victim) = rep.evict() {
-            drop(rep);
-            return Ok(victim);
-        }
-        Err(QuillSQLError::Storage(
-            "Cannot allocate frame: buffer pool is full".to_string(),
-        ))
+        self.evict_victim_frame()
     }
 
     fn replacer_record_access(&self, frame_id: FrameId) -> QuillSQLResult<()> {
         let mut rep = self.replacer.write();
         let _ = rep.record_access(frame_id);
         Ok(())
+    }
+
+    fn evict_victim_frame(&self) -> QuillSQLResult<FrameId> {
+        loop {
+            let victim = {
+                let mut rep = self.replacer.write();
+                match rep.evict() {
+                    Some(frame_id) => frame_id,
+                    None => {
+                        return Err(QuillSQLError::Storage(
+                            "Cannot allocate frame: buffer pool is full".to_string(),
+                        ))
+                    }
+                }
+            };
+
+            let (page_id, pin_count, is_dirty, lsn) = {
+                let meta = self.pool.frame_meta(victim);
+                (meta.page_id, meta.pin_count, meta.is_dirty, meta.lsn)
+            };
+
+            if pin_count > 0 {
+                let mut rep = self.replacer.write();
+                let _ = rep.record_access(victim);
+                let _ = rep.set_evictable(victim, false);
+                continue;
+            }
+
+            if page_id != INVALID_PAGE_ID {
+                if is_dirty {
+                    self.ensure_wal_durable(lsn)?;
+                    let bytes = Bytes::copy_from_slice(unsafe { self.pool.frame_slice(victim) });
+                    self.pool.write_page_to_disk(page_id, bytes)?;
+                    self.dirty_pages.remove(&page_id);
+                    self.dirty_page_table.remove(&page_id);
+                }
+                self.pool.remove_mapping(page_id);
+            }
+
+            self.pool.clear_frame_meta(victim);
+            self.pool.reset_frame(victim);
+            return Ok(victim);
+        }
     }
 
     fn mark_evictable(&self, frame_id: FrameId) -> QuillSQLResult<()> {
@@ -467,11 +502,10 @@ impl BufferManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::WalConfig;
-    use crate::recovery::WalManager;
     use crate::storage::disk_manager::DiskManager;
     use crate::storage::disk_scheduler::DiskScheduler;
-    use std::sync::Arc;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
     use tempfile::TempDir;
 
     fn setup_manager(num_pages: usize) -> (TempDir, Arc<BufferManager>) {
@@ -486,7 +520,7 @@ mod tests {
     #[test]
     fn new_page_initializes_frame() {
         let (_tmp, manager) = setup_manager(2);
-        let mut guard = manager.new_page().unwrap();
+        let guard = manager.new_page().unwrap();
         let page_id = guard.page_id();
         let frame_id = guard.frame_id();
 
@@ -580,5 +614,98 @@ mod tests {
         // Ensure subsequent allocation succeeds and pool remains operational
         let new_guard = manager.new_page().unwrap();
         assert!(new_guard.frame_id() < manager.buffer_pool().capacity());
+    }
+
+    #[test]
+    fn concurrent_reads_do_not_leak_pins() {
+        const THREADS: usize = 8;
+        let (_tmp, manager) = setup_manager(4);
+        let (page_id, frame_id) = {
+            let mut guard = manager.new_page().unwrap();
+            guard.data_mut()[0] = 42;
+            (guard.page_id(), guard.frame_id())
+        };
+
+        let barrier = Arc::new(Barrier::new(THREADS));
+        let mut handles = Vec::with_capacity(THREADS);
+        for _ in 0..THREADS {
+            let mgr = manager.clone();
+            let barrier = barrier.clone();
+            handles.push(thread::spawn(move || {
+                barrier.wait();
+                for _ in 0..50 {
+                    let guard = mgr.fetch_page_read(page_id).expect("read page");
+                    assert_eq!(guard.data()[0], 42);
+                }
+            }));
+        }
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        let pool = manager.buffer_pool();
+        let meta = pool.frame_meta(frame_id);
+        assert_eq!(meta.pin_count, 0);
+        assert_eq!(meta.page_id, page_id);
+    }
+
+    #[test]
+    fn concurrent_writes_mark_dirty_and_flush_once() {
+        const THREADS: usize = 4;
+        let (_tmp, manager) = setup_manager(4);
+        let (page_id, frame_id) = {
+            let guard = manager.new_page().unwrap();
+            (guard.page_id(), guard.frame_id())
+        };
+
+        let barrier = Arc::new(Barrier::new(THREADS));
+        let mut handles = Vec::with_capacity(THREADS);
+        for tid in 0..THREADS {
+            let mgr = manager.clone();
+            let barrier = barrier.clone();
+            handles.push(thread::spawn(move || {
+                let lsn = (tid as Lsn) + 1;
+                barrier.wait();
+                for _ in 0..25 {
+                    let mut guard = mgr.fetch_page_write(page_id).expect("write guard");
+                    guard.data_mut()[tid] = (tid as u8) + 1;
+                    guard.set_lsn(lsn);
+                    guard.mark_dirty();
+                }
+            }));
+        }
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        {
+            let pool = manager.buffer_pool();
+            let meta = pool.frame_meta(frame_id);
+            assert!(meta.is_dirty);
+            assert_eq!(meta.pin_count, 0);
+            assert_eq!(meta.page_id, page_id);
+        }
+
+        assert!(manager.flush_page(page_id).unwrap());
+        {
+            let pool = manager.buffer_pool();
+            let meta = pool.frame_meta(frame_id);
+            assert!(!meta.is_dirty);
+            assert_eq!(meta.pin_count, 0);
+        }
+
+        let read_back = manager
+            .buffer_pool()
+            .disk_scheduler()
+            .schedule_read(page_id)
+            .unwrap()
+            .recv()
+            .unwrap()
+            .unwrap();
+        for tid in 0..THREADS {
+            assert_eq!(read_back[tid], (tid as u8) + 1);
+        }
     }
 }

@@ -1,84 +1,43 @@
-//! Buffer Pool Manager
-//! - Page table (PageId→FrameId), LRU-K replacer, optional TinyLFU admission
-//! - Read/Write page guards pin/unpin via RAII; flush dirty pages before eviction
-//! - Disk I/O offloaded to async DiskScheduler
+//! Low-level buffer pool responsible for frame storage, page table, and disk I/O.
 
 use bytes::Bytes;
-use dashmap::{DashMap, DashSet};
-use parking_lot::{Mutex, RwLock};
-use std::sync::atomic::Ordering;
-use std::{collections::VecDeque, sync::Arc};
+use dashmap::DashMap;
+use parking_lot::{Mutex, MutexGuard, RwLock};
+use std::cell::UnsafeCell;
+use std::collections::VecDeque;
+use std::sync::Arc;
 
-use crate::buffer::page::{
-    self, Page, PageId, ReadPageGuard, WritePageGuard, INVALID_PAGE_ID, PAGE_SIZE,
-};
-
-use crate::catalog::SchemaRef;
-use crate::error::{QuillSQLError, QuillSQLResult};
-use crate::storage::codec::{
-    BPlusTreeHeaderPageCodec, BPlusTreeInternalPageCodec, BPlusTreeLeafPageCodec,
-    BPlusTreePageCodec, TablePageCodec,
-};
-use crate::storage::disk_scheduler::DiskScheduler;
-use crate::storage::{
-    page::TablePage,
-    page::{BPlusTreeHeaderPage, BPlusTreeInternalPage, BPlusTreeLeafPage, BPlusTreePage},
-};
-
+use crate::buffer::page::{PageId, INVALID_PAGE_ID, PAGE_SIZE};
 use crate::config::BufferPoolConfig;
+use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::recovery::Lsn;
-use crate::recovery::WalManager;
-use crate::utils::cache::lru_k::LRUKReplacer;
-use crate::utils::cache::tiny_lfu::TinyLFU;
-use crate::utils::cache::Replacer;
+use crate::storage::disk_scheduler::DiskScheduler;
 
 pub type FrameId = usize;
 
 pub const BUFFER_POOL_SIZE: usize = 5000;
 
-#[derive(Debug)]
-pub struct BufferPoolManager {
-    pub pool: Vec<Arc<RwLock<Page>>>,
-    pub replacer: Arc<RwLock<LRUKReplacer>>,
-    pub disk_scheduler: Arc<DiskScheduler>,
-    pub page_table: Arc<DashMap<PageId, FrameId>>,
-    pub free_list: Arc<RwLock<VecDeque<FrameId>>>,
-    /// Per-page inflight load guards to serialize concurrent loads of the same page
-    pub inflight_loads: Arc<DashMap<PageId, Arc<Mutex<()>>>>,
-    /// Optional TinyLFU admission filter
-    pub tiny_lfu: Option<Arc<RwLock<TinyLFU>>>,
-    /// Dirty page tracking for checkpoints and background writers
-    pub dirty_pages: Arc<DashSet<PageId>>,
-    /// Dirty page table: page id -> first dirty LSN (recLSN)
-    pub dirty_page_table: DashMap<PageId, Lsn>,
-    /// Optional WAL manager to enforce write-ahead rule on flush
-    pub wal_manager: Arc<RwLock<Option<Arc<WalManager>>>>,
+#[derive(Debug, Default, Clone)]
+pub struct FrameMeta {
+    pub page_id: PageId,
+    pub pin_count: u32,
+    pub is_dirty: bool,
+    pub lsn: Lsn,
 }
 
-impl BufferPoolManager {
-    #[inline]
-    fn replacer_set_evictable(&self, frame_id: FrameId, evictable: bool) -> QuillSQLResult<()> {
-        let mut rep = self.replacer.write();
-        rep.set_evictable(frame_id, evictable)
-            .map_err(|e| QuillSQLError::Internal(format!("replacer set_evictable failed: {}", e)))
-    }
+#[derive(Debug)]
+pub struct BufferPool {
+    arena: Box<[UnsafeCell<u8>]>,
+    locks: Vec<RwLock<()>>,
+    meta: Vec<Mutex<FrameMeta>>,
+    page_table: DashMap<PageId, FrameId>,
+    free_list: Mutex<VecDeque<FrameId>>,
+    disk_scheduler: Arc<DiskScheduler>,
+}
 
-    #[inline]
-    fn replacer_record_access(&self, frame_id: FrameId) -> QuillSQLResult<()> {
-        let mut rep = self.replacer.write();
-        rep.record_access(frame_id)
-            .map_err(|e| QuillSQLError::Internal(format!("replacer record_access failed: {}", e)))
-    }
-    #[inline]
-    fn replacer_touch_and_set(&self, frame_id: FrameId, evictable: bool) -> QuillSQLResult<()> {
-        let mut rep = self.replacer.write();
-        rep.record_access(frame_id).map_err(|e| {
-            QuillSQLError::Internal(format!("replacer record_access failed: {}", e))
-        })?;
-        rep.set_evictable(frame_id, evictable)
-            .map_err(|e| QuillSQLError::Internal(format!("replacer set_evictable failed: {}", e)))
-    }
+unsafe impl Sync for BufferPool {}
 
+impl BufferPool {
     pub fn new(num_pages: usize, disk_scheduler: Arc<DiskScheduler>) -> Self {
         Self::new_with_config(
             BufferPoolConfig {
@@ -92,1007 +51,270 @@ impl BufferPoolManager {
     pub fn new_with_config(config: BufferPoolConfig, disk_scheduler: Arc<DiskScheduler>) -> Self {
         let num_pages = config.buffer_pool_size;
         let mut free_list = VecDeque::with_capacity(num_pages);
-        let mut pool = vec![];
-        for i in 0..num_pages {
-            free_list.push_back(i);
-            pool.push(Arc::new(RwLock::new(Page::empty())));
+        let mut meta = Vec::with_capacity(num_pages);
+        let mut locks = Vec::with_capacity(num_pages);
+        for frame_id in 0..num_pages {
+            free_list.push_back(frame_id);
+            meta.push(Mutex::new(FrameMeta::default()));
+            locks.push(RwLock::new(()));
         }
+        let mut arena_vec: Vec<UnsafeCell<u8>> = Vec::with_capacity(num_pages * PAGE_SIZE);
+        arena_vec.resize_with(num_pages * PAGE_SIZE, || UnsafeCell::new(0u8));
+        let arena = arena_vec.into_boxed_slice();
 
         Self {
-            pool,
-            replacer: Arc::new(RwLock::new(LRUKReplacer::new(num_pages))),
+            arena,
+            locks,
+            meta,
+            page_table: DashMap::new(),
+            free_list: Mutex::new(free_list),
             disk_scheduler,
-            page_table: Arc::new(DashMap::new()),
-            free_list: Arc::new(RwLock::new(free_list)),
-            inflight_loads: Arc::new(DashMap::new()),
-            tiny_lfu: if config.tiny_lfu_enable {
-                Some(Arc::new(RwLock::new(TinyLFU::new(
-                    num_pages.next_power_of_two(),
-                    config.tiny_lfu_counters,
-                ))))
-            } else {
-                None
-            },
-            dirty_pages: Arc::new(DashSet::new()),
-            wal_manager: Arc::new(RwLock::new(None)),
-            dirty_page_table: DashMap::new(),
         }
     }
 
-    pub fn set_wal_manager(&self, wal_manager: Arc<WalManager>) {
-        *self.wal_manager.write() = Some(wal_manager);
+    pub fn capacity(&self) -> usize {
+        self.locks.len()
     }
 
-    pub fn wal_manager(&self) -> Option<Arc<WalManager>> {
-        self.wal_manager.read().clone()
+    pub fn frame_lock(&self, frame_id: FrameId) -> &RwLock<()> {
+        &self.locks[frame_id]
     }
 
-    pub fn dirty_page_ids(&self) -> Vec<PageId> {
-        self.dirty_pages.iter().map(|entry| *entry.key()).collect()
+    pub unsafe fn frame_slice(&self, frame_id: FrameId) -> &[u8] {
+        let ptr = self.frame_ptr(frame_id) as *const u8;
+        std::slice::from_raw_parts(ptr, PAGE_SIZE)
     }
 
-    pub fn dirty_page_table_snapshot(&self) -> Vec<(PageId, Lsn)> {
-        self.dirty_page_table
-            .iter()
-            .map(|entry| (*entry.key(), *entry.value()))
-            .collect()
+    pub unsafe fn frame_slice_mut(&self, frame_id: FrameId) -> &mut [u8] {
+        let ptr = self.frame_ptr(frame_id);
+        std::slice::from_raw_parts_mut(ptr, PAGE_SIZE)
     }
 
-    #[inline]
-    fn note_dirty_page(&self, page_id: PageId, rec_lsn: Lsn) {
-        self.dirty_pages.insert(page_id);
-        self.dirty_page_table.entry(page_id).or_insert(rec_lsn);
+    unsafe fn frame_ptr(&self, frame_id: FrameId) -> *mut u8 {
+        self.arena.as_ptr().add(frame_id * PAGE_SIZE) as *mut u8
     }
 
-    /// 创建一个新页面。
-    pub fn new_page(self: &Arc<Self>) -> QuillSQLResult<WritePageGuard> {
-        if self.free_list.read().is_empty() && self.replacer.read().size() == 0 {
-            return Err(QuillSQLError::Storage(
-                "Cannot new page because buffer pool is full and no page to evict".to_string(),
-            ));
+    pub fn frame_meta(&self, frame_id: FrameId) -> MutexGuard<'_, FrameMeta> {
+        self.meta[frame_id].lock()
+    }
+
+    pub fn clear_frame_meta(&self, frame_id: FrameId) {
+        let mut meta = self.meta[frame_id].lock();
+        *meta = FrameMeta::default();
+    }
+
+    pub fn pop_free_frame(&self) -> Option<FrameId> {
+        self.free_list.lock().pop_front()
+    }
+
+    pub fn has_free_frame(&self) -> bool {
+        !self.free_list.lock().is_empty()
+    }
+
+    pub fn push_free_frame(&self, frame_id: FrameId) {
+        self.free_list.lock().push_back(frame_id);
+    }
+
+    pub fn insert_mapping(&self, page_id: PageId, frame_id: FrameId) {
+        self.page_table.insert(page_id, frame_id);
+    }
+
+    pub fn remove_mapping_if(&self, page_id: PageId, frame_id: FrameId) -> bool {
+        self.page_table
+            .remove_if(&page_id, |_, current| *current == frame_id)
+            .is_some()
+    }
+
+    pub fn remove_mapping(&self, page_id: PageId) {
+        self.page_table.remove(&page_id);
+    }
+
+    pub fn lookup_frame(&self, page_id: PageId) -> Option<FrameId> {
+        self.page_table.get(&page_id).map(|entry| *entry.value())
+    }
+
+    pub fn read_page_from_disk(&self, page_id: PageId) -> QuillSQLResult<Vec<u8>> {
+        let rx = self.disk_scheduler.schedule_read(page_id)?;
+        let data = rx
+            .recv()
+            .map_err(|e| QuillSQLError::Internal(format!("Channel disconnected: {}", e)))??;
+        Ok(data.to_vec())
+    }
+
+    pub fn load_page_into_frame(&self, page_id: PageId, frame_id: FrameId) -> QuillSQLResult<()> {
+        let page_bytes = self.read_page_from_disk(page_id)?;
+        let slice = unsafe { self.frame_slice_mut(frame_id) };
+        let len = PAGE_SIZE.min(page_bytes.len());
+        slice[..len].copy_from_slice(&page_bytes[..len]);
+        if len < PAGE_SIZE {
+            slice[len..].fill(0);
         }
-
-        let frame_id = self.allocate_frame()?;
-
-        let rx_alloc = self.disk_scheduler.schedule_allocate()?;
-        let new_page_id = rx_alloc.recv().map_err(|e| {
-            QuillSQLError::Internal(format!("Failed to receive allocated page_id: {}", e))
-        })??;
-        self.page_table.insert(new_page_id, frame_id);
-
-        let page_arc = self.pool[frame_id].clone();
-        {
-            let mut page_writer = page_arc.write();
-            *page_writer = Page::new(new_page_id);
-            page_writer.pin_count.store(1, Ordering::Relaxed);
-        }
-
-        self.replacer_touch_and_set(frame_id, false)?;
-
-        Ok(page::new_write_guard(self.clone(), page_arc))
+        let mut meta = self.meta[frame_id].lock();
+        meta.page_id = page_id;
+        meta.is_dirty = false;
+        meta.pin_count = 0;
+        meta.lsn = 0;
+        Ok(())
     }
 
-    /// 获取一个只读页面。
-    pub fn fetch_page_read(self: &Arc<Self>, page_id: PageId) -> QuillSQLResult<ReadPageGuard> {
+    pub fn write_page_to_disk(&self, page_id: PageId, bytes: Bytes) -> QuillSQLResult<()> {
+        self.disk_scheduler
+            .schedule_write(page_id, bytes)?
+            .recv()
+            .map_err(|e| QuillSQLError::Internal(format!("Channel disconnected: {}", e)))??;
+        Ok(())
+    }
+
+    pub fn allocate_page_id(&self) -> QuillSQLResult<PageId> {
+        let rx = self.disk_scheduler.schedule_allocate()?;
+        let page_id = rx
+            .recv()
+            .map_err(|e| QuillSQLError::Internal(format!("Channel disconnected: {}", e)))??;
         if page_id == INVALID_PAGE_ID {
-            return Err(QuillSQLError::Storage(
-                "fetch_page_read: invalid page id".to_string(),
+            return Err(QuillSQLError::Internal(
+                "DiskScheduler returned INVALID_PAGE_ID".to_string(),
             ));
         }
-        // Robust retry to tolerate delete/evict races
-        let mut attempts = 0usize;
-        loop {
-            if let Ok(frame_id) = self.get_frame_for_page(page_id) {
-                let page_arc = self.pool[frame_id].clone();
-
-                // Validate mapping before pin
-                let reader = page_arc.read();
-                if reader.page_id() == page_id {
-                    // Pin now that mapping is validated
-                    reader.pin();
-                    // Mark non-evictable while pinned
-                    let _ = self.replacer_set_evictable(frame_id, false);
-                    drop(reader);
-                    return Ok(page::new_read_guard(self.clone(), page_arc));
-                } else {
-                    drop(reader);
-                    attempts += 1;
-                    if attempts > 128 {
-                        break;
-                    }
-                    std::hint::spin_loop();
-                    continue;
-                }
-            } else {
-                attempts += 1;
-                if attempts > 128 {
-                    break;
-                }
-                std::hint::spin_loop();
-                continue;
-            }
-        }
-        Err(QuillSQLError::Internal(format!(
-            "fetch_page_read: failed after {} retries",
-            attempts
-        )))
+        Ok(page_id)
     }
 
-    /// 获取一个可写页面。
-    pub fn fetch_page_write(self: &Arc<Self>, page_id: PageId) -> QuillSQLResult<WritePageGuard> {
-        if page_id == INVALID_PAGE_ID {
-            return Err(QuillSQLError::Storage(
-                "fetch_page_write: invalid page id".to_string(),
-            ));
-        }
-        let mut attempts = 0usize;
-        loop {
-            if let Ok(frame_id) = self.get_frame_for_page(page_id) {
-                let page_arc = self.pool[frame_id].clone();
-
-                // Validate mapping then pin
-                {
-                    let reader = page_arc.read();
-                    if reader.page_id() == page_id {
-                        reader.pin();
-                        // Mark non-evictable while pinned
-                        let _ = self.replacer_set_evictable(frame_id, false);
-                    } else {
-                        drop(reader);
-                        attempts += 1;
-                        if attempts > 128 {
-                            break;
-                        }
-                        std::hint::spin_loop();
-                        continue;
-                    }
-                    if false {
-                        eprintln!(
-                            "[LOCK DEBUG] thread={:?} attempt write page_id={}",
-                            std::thread::current().id(),
-                            reader.page_id()
-                        );
-                    }
-                }
-
-                let guard = page::new_write_guard(self.clone(), page_arc.clone());
-                if false {
-                    if let Some(r) = page_arc.try_read() {
-                        eprintln!(
-                            "[LOCK DEBUG] thread={:?} acquired write page_id={}",
-                            std::thread::current().id(),
-                            r.page_id()
-                        );
-                    } else {
-                        eprintln!(
-                            "[LOCK DEBUG] thread={:?} acquired write page_id=<busy>",
-                            std::thread::current().id()
-                        );
-                    }
-                }
-                return Ok(guard);
-            } else {
-                attempts += 1;
-                if attempts > 128 {
-                    break;
-                }
-                std::hint::spin_loop();
-                continue;
-            }
-        }
-        Err(QuillSQLError::Internal(format!(
-            "fetch_page_write: failed after {} retries",
-            attempts
-        )))
+    pub fn disk_scheduler(&self) -> Arc<DiskScheduler> {
+        self.disk_scheduler.clone()
     }
 
-    /// 完成 unpin 的后续处理：根据旧的 pin_count 决定是否可驱逐，并处理脏位。
-    /// 该函数必须在未持有页面锁的情况下调用，以避免与 fetch_page_write 的锁序形成死锁。
-    pub fn complete_unpin(
-        &self,
-        page_id: PageId,
-        is_dirty: bool,
-        old_pin_count: u32,
-        rec_lsn_hint: Option<Lsn>,
-    ) -> QuillSQLResult<()> {
-        if let Some(frame_id_ref) = self.page_table.get(&page_id) {
-            let frame_id = *frame_id_ref;
-            if is_dirty {
-                if let Some(mut p) = self.pool[frame_id].try_write() {
-                    p.is_dirty = true;
-                }
-                let lsn = rec_lsn_hint.unwrap_or_else(|| self.pool[frame_id].read().page_lsn);
-                self.note_dirty_page(page_id, lsn);
-            }
-            if old_pin_count == 1 {
-                self.replacer_set_evictable(frame_id, true)?;
-            }
-        }
-        Ok(())
-    }
-
-    /// 辅助函数：为给定的 page_id 查找或分配一个 frame。
-    fn get_frame_for_page(&self, page_id: PageId) -> QuillSQLResult<FrameId> {
-        if let Some(frame_id_ref) = self.page_table.get(&page_id) {
-            let frame_id = *frame_id_ref;
-            self.replacer_record_access(frame_id)?;
-            // record access for admission
-            if let Some(f) = &self.tiny_lfu {
-                f.write().admit_record(page_id as u64);
-            }
-            Ok(frame_id)
-        } else {
-            // Serialize concurrent loads for the same page_id
-            let (lock_arc, created_here) = if let Some(g) = self.inflight_loads.get(&page_id) {
-                (g.clone(), false)
-            } else {
-                let arc = Arc::new(Mutex::new(()));
-                self.inflight_loads.insert(page_id, arc.clone());
-                (arc, true)
-            };
-
-            let _lock_guard = lock_arc.lock();
-
-            // Re-check after acquiring inflight guard to avoid duplicate loads
-            if let Some(frame_id_ref2) = self.page_table.get(&page_id) {
-                let frame_id2 = *frame_id_ref2;
-                self.replacer_record_access(frame_id2)?;
-                return Ok(frame_id2);
-            }
-
-            // Optional admission: if LFU thinks it's cold and replacer is full, deny admission
-            if let Some(f) = &self.tiny_lfu {
-                let est = f.read().estimate(page_id as u64);
-                if est == 0 && self.free_list.read().is_empty() && self.replacer.read().size() == 0
-                {
-                    return Err(QuillSQLError::Storage(
-                        "Cannot allocate frame: admission denied and no space".to_string(),
-                    ));
-                }
-            }
-
-            let frame_id = match self.allocate_frame() {
-                Ok(fid) => fid,
-                Err(e) => {
-                    if created_here {
-                        self.inflight_loads.remove(&page_id);
-                    }
-                    return Err(e);
-                }
-            };
-
-            let page_data_bytes = match self.disk_scheduler.schedule_read(page_id) {
-                Ok(rx) => match rx.recv() {
-                    Ok(Ok(bytes)) => bytes,
-                    Ok(Err(e)) => {
-                        if created_here {
-                            self.inflight_loads.remove(&page_id);
-                        }
-                        return Err(e);
-                    }
-                    Err(e) => {
-                        if created_here {
-                            self.inflight_loads.remove(&page_id);
-                        }
-                        return Err(QuillSQLError::Internal(format!(
-                            "Channel disconnected: {}",
-                            e
-                        )));
-                    }
-                },
-                Err(e) => {
-                    if created_here {
-                        self.inflight_loads.remove(&page_id);
-                    }
-                    return Err(e);
-                }
-            };
-
-            let mut page_data_array = [0u8; PAGE_SIZE];
-            page_data_array.copy_from_slice(&page_data_bytes[..PAGE_SIZE]);
-
-            let page_arc = &self.pool[frame_id];
-            {
-                let mut page = page_arc.write();
-                *page = Page::new(page_id);
-                page.data = page_data_array;
-                // pin_count 将在调用者中设置
-            }
-
-            self.page_table.insert(page_id, frame_id);
-            if let Some(f) = &self.tiny_lfu {
-                f.write().admit_record(page_id as u64);
-            }
-            if created_here {
-                self.inflight_loads.remove(&page_id);
-            }
-
-            self.replacer_record_access(frame_id)?;
-            Ok(frame_id)
-        }
-    }
-
-    pub fn fetch_table_page(
-        self: &Arc<Self>,
-        page_id: PageId,
-        schema: SchemaRef,
-    ) -> QuillSQLResult<(ReadPageGuard, TablePage)> {
-        let guard = self.fetch_page_read(page_id)?;
-        // Guard exposes `data` directly; decode a typed view on demand
-        let (table_page, _) = TablePageCodec::decode(&guard.data, schema)?;
-        Ok((guard, table_page))
-    }
-
-    pub fn fetch_tree_page(
-        self: &Arc<Self>,
-        page_id: PageId,
-        key_schema: SchemaRef,
-    ) -> QuillSQLResult<(ReadPageGuard, BPlusTreePage)> {
-        let guard = self.fetch_page_read(page_id)?;
-        let (tree_page, _) = BPlusTreePageCodec::decode(&guard.data, key_schema.clone())?;
-        Ok((guard, tree_page))
-    }
-
-    pub fn fetch_tree_internal_page(
-        self: &Arc<Self>,
-        page_id: PageId,
-        key_schema: SchemaRef,
-    ) -> QuillSQLResult<(ReadPageGuard, BPlusTreeInternalPage)> {
-        let guard = self.fetch_page_read(page_id)?;
-        let (tree_internal_page, _) =
-            BPlusTreeInternalPageCodec::decode(&guard.data, key_schema.clone())?;
-        Ok((guard, tree_internal_page))
-    }
-
-    pub fn fetch_tree_leaf_page(
-        self: &Arc<Self>,
-        page_id: PageId,
-        key_schema: SchemaRef,
-    ) -> QuillSQLResult<(ReadPageGuard, BPlusTreeLeafPage)> {
-        let guard = self.fetch_page_read(page_id)?;
-        let (tree_leaf_page, _) = BPlusTreeLeafPageCodec::decode(&guard.data, key_schema.clone())?;
-        Ok((guard, tree_leaf_page))
-    }
-
-    /// Best-effort prefetch: fetch+drop to warm the cache without holding the pin.
-    pub fn prefetch_page(self: &Arc<Self>, page_id: PageId) -> QuillSQLResult<()> {
-        if let Ok(g) = self.fetch_page_read(page_id) {
-            drop(g);
-        }
-        Ok(())
-    }
-
-    pub fn fetch_header_page(
-        self: &Arc<Self>,
-        page_id: PageId,
-    ) -> QuillSQLResult<(ReadPageGuard, BPlusTreeHeaderPage)> {
-        let guard = self.fetch_page_read(page_id)?;
-        let (header_page, _) = BPlusTreeHeaderPageCodec::decode(&guard.data)?;
-        Ok((guard, header_page))
-    }
-
-    pub fn flush_page(&self, page_id: PageId) -> QuillSQLResult<bool> {
-        if let Some(frame_id_ref) = self.page_table.get(&page_id) {
-            let frame_id = *frame_id_ref;
-            let page_arc = self.pool[frame_id].clone();
-
-            // Hold write lock for the whole flush to avoid racing writers clearing dirty bit.
-            let mut guard = page_arc.write();
-            if !guard.is_dirty {
-                self.dirty_pages.remove(&page_id);
-                return Ok(false);
-            }
-
-            if let Some(wal) = self.wal_manager.read().clone() {
-                let durable_lsn = wal.durable_lsn();
-                if guard.page_lsn > durable_lsn {
-                    let target = guard.page_lsn;
-                    wal.flush(Some(target))?;
-                    if wal.durable_lsn() < target {
-                        return Err(QuillSQLError::Internal(format!(
-                            "Flush of page {} blocked: page_lsn={} > durable_lsn={}",
-                            page_id,
-                            guard.page_lsn,
-                            wal.durable_lsn()
-                        )));
-                    }
-                }
-            }
-            let data_bytes = Bytes::copy_from_slice(&guard.data);
-
-            self.disk_scheduler
-                .schedule_write(page_id, data_bytes)?
-                .recv()
-                .map_err(|e| QuillSQLError::Internal(format!("Channel disconnected: {}", e)))??;
-
-            guard.is_dirty = false;
-            self.dirty_pages.remove(&page_id);
-            Ok(true)
-        } else {
-            Ok(false)
-        }
-    }
-
-    pub fn flush_all_pages(&self) -> QuillSQLResult<()> {
-        if let Some(wal) = self.wal_manager.read().clone() {
-            wal.flush(None)?;
-        }
-        let dirty_ids: Vec<PageId> = self.dirty_pages.iter().map(|entry| *entry.key()).collect();
-        for page_id in dirty_ids {
-            let _ = self.flush_page(page_id)?;
-        }
-        Ok(())
-    }
-
-    pub fn delete_page(&self, page_id: PageId) -> QuillSQLResult<bool> {
-        let (lock_arc, created_here) = if let Some(g) = self.inflight_loads.get(&page_id) {
-            (g.clone(), false)
-        } else {
-            let arc = Arc::new(Mutex::new(()));
-            self.inflight_loads.insert(page_id, arc.clone());
-            (arc, true)
-        };
-
-        let mut inflight_lock = Some(lock_arc.lock());
-        let mut cleanup = |bpm: &BufferPoolManager| {
-            if let Some(g) = inflight_lock.take() {
-                drop(g);
-            }
-            if created_here {
-                bpm.inflight_loads.remove(&page_id);
-            }
-        };
-
-        let result = (|| {
-            loop {
-                if let Some(frame_ref) = self.page_table.get(&page_id) {
-                    let frame_id = *frame_ref;
-                    let page_arc = self.pool[frame_id].clone();
-                    drop(frame_ref);
-
-                    let mut page_writer = match page_arc.try_write() {
-                        Some(guard) => guard,
-                        None => {
-                            // 页面正在被其他读/写操作持有，删除失败且不修改页表
-                            return Ok(false);
-                        }
-                    };
-
-                    if page_writer.page_id() != page_id {
-                        // Frame was reused for another page; clean the stale mapping and retry
-                        drop(page_writer);
-                        let _ = self
-                            .page_table
-                            .remove_if(&page_id, |_, fid| *fid == frame_id);
-                        continue;
-                    }
-
-                    if page_writer.get_pin_count() > 0 {
-                        // 仍有 pin，无需继续，保持映射不变
-                        return Ok(false);
-                    }
-
-                    if self
-                        .page_table
-                        .remove_if(&page_id, |_, fid| *fid == frame_id)
-                        .is_none()
-                    {
-                        continue;
-                    }
-
-                    page_writer.destroy();
-                    self.dirty_pages.remove(&page_id);
-                    drop(page_writer);
-
-                    {
-                        let mut rep = self.replacer.write();
-                        let _ = rep.set_evictable(frame_id, true);
-                        let _ = rep.remove(frame_id);
-                    }
-
-                    self.free_list.write().push_back(frame_id);
-
-                    self.disk_scheduler
-                        .schedule_deallocate(page_id)?
-                        .recv()
-                        .map_err(|e| {
-                            QuillSQLError::Internal(format!("Channel disconnected: {}", e))
-                        })??;
-
-                    return Ok(true);
-                } else {
-                    // Page not in buffer pool, but we should still try to deallocate from disk.
-                    self.disk_scheduler
-                        .schedule_deallocate(page_id)?
-                        .recv()
-                        .map_err(|e| {
-                            QuillSQLError::Internal(format!("Channel disconnected: {}", e))
-                        })??;
-                    return Ok(true);
-                }
-            }
-        })();
-
-        cleanup(self);
-        result
-    }
-
-    fn allocate_frame(&self) -> QuillSQLResult<FrameId> {
-        // Try free list first
-        if let Some(frame_id) = self.free_list.write().pop_front() {
-            return Ok(frame_id);
-        }
-
-        // Then evict from replacer, with safety checks
-        loop {
-            let opt = { self.replacer.write().evict() };
-            let Some(frame_id) = opt else {
-                return Err(QuillSQLError::Storage(
-                    "Cannot allocate frame: buffer pool is full and all pages are pinned"
-                        .to_string(),
-                ));
-            };
-
-            let evicted_page_arc = self.pool[frame_id].clone();
-            // Use a scoped block to ensure the try_write guard (and Option) drop before next loop
-            let handled = {
-                let opt_guard = evicted_page_arc.try_write();
-                if let Some(evicted_page_writer) = opt_guard {
-                    let evicted_page_id = evicted_page_writer.page_id;
-                    if evicted_page_writer.get_pin_count() > 0 {
-                        drop(evicted_page_writer);
-                        let mut rep = self.replacer.write();
-                        rep.record_access(frame_id)?;
-                        rep.set_evictable(frame_id, true)?;
-                        false
-                    } else {
-                        let need_flush = evicted_page_writer.is_dirty;
-                        drop(evicted_page_writer);
-                        if need_flush {
-                            self.flush_page(evicted_page_id)?;
-                        }
-                        self.page_table.remove(&evicted_page_id);
-                        // signal handled and return after block
-                        // we cannot return here due to borrow; mark and handle below
-                        // store the decision in handled flag
-                        // but we need evicted_page_id only for flush which is done
-                        // so we can use a marker
-                        true
-                    }
-                } else {
-                    // Couldn't get exclusive lock; frame likely pinned. Try next.
-                    let mut rep = self.replacer.write();
-                    rep.record_access(frame_id)?;
-                    rep.set_evictable(frame_id, true)?;
-                    false
-                }
-            };
-            if handled {
-                return Ok(frame_id);
-            }
+    pub fn reset_frame(&self, frame_id: FrameId) {
+        unsafe {
+            self.frame_slice_mut(frame_id).fill(0);
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::buffer::buffer_pool::BufferPoolManager;
-    use crate::config::WalConfig;
-    use crate::recovery::wal_record::{
-        TransactionPayload, TransactionRecordKind, WalRecordPayload,
-    };
-    use crate::recovery::WalManager;
+    use super::*;
     use crate::storage::disk_manager::DiskManager;
-    use crate::storage::disk_scheduler::DiskScheduler;
-    use crate::utils::cache::Replacer;
-    use std::fs;
-    use std::sync::Arc;
     use tempfile::TempDir;
 
-    /// 辅助函数，用于为每个测试设置一个干净的环境。
-    /// 它会创建一个临时目录、DiskManager 和 BufferPoolManager。
-    fn setup_test_environment(
-        num_pages: usize,
-    ) -> (
-        TempDir, // RAII handle for the temp directory
-        Arc<BufferPoolManager>,
-    ) {
+    fn setup_pool(num_pages: usize) -> (TempDir, Arc<DiskScheduler>, BufferPool) {
         let temp_dir = TempDir::new().unwrap();
-        let db_path = temp_dir.path().join("test.db");
-
-        let disk_manager = Arc::new(DiskManager::try_new(db_path).unwrap());
-        let disk_scheduler = Arc::new(DiskScheduler::new(disk_manager));
-        let buffer_pool_manager = Arc::new(BufferPoolManager::new(num_pages, disk_scheduler));
-
-        (temp_dir, buffer_pool_manager)
+        let disk_manager = Arc::new(DiskManager::try_new(temp_dir.path().join("pool.db")).unwrap());
+        let scheduler = Arc::new(DiskScheduler::new(disk_manager));
+        let mut config = BufferPoolConfig::default();
+        config.buffer_pool_size = num_pages;
+        let pool = BufferPool::new_with_config(config, scheduler.clone());
+        (temp_dir, scheduler, pool)
     }
 
     #[test]
-    fn test_new_page_and_basic_fetch() {
-        let (_temp_dir, bpm) = setup_test_environment(10);
+    fn load_page_into_frame_populates_arena_and_meta() {
+        let (_tmp, scheduler, pool) = setup_pool(4);
+        let rx_alloc = scheduler.schedule_allocate().unwrap();
+        let page_id = rx_alloc.recv().unwrap().unwrap();
 
-        // 1. 创建一个新页面
-        let mut page0_guard = bpm.new_page().unwrap();
-        let page0_id = page0_guard.page_id();
+        let pattern = Bytes::copy_from_slice(&vec![0xAA; PAGE_SIZE]);
+        scheduler
+            .schedule_write(page_id, pattern.clone())
+            .unwrap()
+            .recv()
+            .unwrap()
+            .unwrap();
 
-        // 2. 写入一些数据
-        let test_data = b"Hello, World!";
-        page0_guard.data[..test_data.len()].copy_from_slice(test_data);
-        assert!(page0_guard.is_dirty); // 可变访问应该标记为脏页
+        let frame_id = pool.pop_free_frame().expect("free frame");
+        pool.load_page_into_frame(page_id, frame_id).unwrap();
 
-        // 3. 读取并验证数据
-        assert_eq!(&page0_guard.data[..test_data.len()], test_data);
-
-        // 4. 先释放写保护器，然后获取读保护器
-        drop(page0_guard);
-
-        let page0_read_guard = bpm.fetch_page_read(page0_id).unwrap();
-        assert_eq!(page0_read_guard.page_id(), page0_id);
-        assert_eq!(&page0_read_guard.data[..test_data.len()], test_data);
-        assert_eq!(page0_read_guard.pin_count(), 1);
-
-        // 5. Drop 读保护器
-        drop(page0_read_guard);
-
-        // 6. 确认 pin count 归零
-        let final_guard = bpm.fetch_page_read(page0_id).unwrap();
-        assert_eq!(final_guard.pin_count(), 1);
-        assert_eq!(final_guard.is_dirty, true); // 脏位应该保持
-    }
-
-    #[test]
-    fn test_unpin_and_eviction_logic() {
-        let (_temp_dir, bpm) = setup_test_environment(3);
-
-        // 1. 创建3个页面，填满缓冲池
-        let page1 = bpm.new_page().unwrap();
-        let page1_id = page1.page_id();
-        let page2 = bpm.new_page().unwrap();
-        let page2_id = page2.page_id();
-        let page3 = bpm.new_page().unwrap();
-        let page3_id = page3.page_id();
-
-        // 此时 replacer 为空，因为所有页面都被 pin 住
-        assert_eq!(bpm.replacer.read().size(), 0);
-
-        // 2. Drop page1，它应该变得可被驱逐
-        drop(page1);
-        assert_eq!(bpm.replacer.read().size(), 1);
-
-        // 3. Drop page2，它也应该变得可被驱逐
-        drop(page2);
-        assert_eq!(bpm.replacer.read().size(), 2);
-
-        // 4. 创建一个新的页面，这将触发驱逐
-        // LRU-K 策略下，page1_id 是最先被 unpin 的，应该被驱逐
-        let page4 = bpm.new_page().unwrap();
-        assert_ne!(page4.page_id(), page1_id);
-
-        // 5. 验证 page1 已经不在 page_table 中
-        assert!(bpm.page_table.get(&page1_id).is_none());
-        assert!(bpm.page_table.get(&page2_id).is_some());
-        assert!(bpm.page_table.get(&page3_id).is_some());
-
-        // 6. page3 仍然被 pin 住，所以 replacer 中只有一个 page2
-        assert_eq!(bpm.replacer.read().size(), 1);
-    }
-
-    #[test]
-    fn test_flush_page() {
-        let (temp_dir, bpm) = setup_test_environment(10);
-        let db_path = temp_dir.path().join("test.db");
-
-        // 1. 创建一个新页面并写入数据
-        let page_id = {
-            let mut guard = bpm.new_page().unwrap();
-            guard.data[0..4].copy_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
-            guard.page_id()
-            // guard 在此 drop，unpin 时 is_dirty 应该为 true
-        };
-
-        // 2. 调用 flush_page
-        let flush_result = bpm.flush_page(page_id).unwrap();
-        assert!(flush_result);
-
-        // 3. 验证页面的脏位已被清除
-        let guard = bpm.fetch_page_read(page_id).unwrap();
-        assert!(!guard.is_dirty);
-        drop(guard);
-
-        // 4. 验证数据确实被写入磁盘（不检查具体位置，因为DiskManager的实现细节可能不同）
-        let file_data = fs::read(db_path).unwrap();
-
-        // 搜索整个文件，确认数据已写入
-        let mut found = false;
-        for i in 0..=(file_data.len().saturating_sub(4)) {
-            if &file_data[i..i + 4] == &[0xDE, 0xAD, 0xBE, 0xEF] {
-                found = true;
-                break;
-            }
-        }
-
-        assert!(found, "Test data was not written to disk correctly");
-    }
-
-    #[test]
-    fn test_flush_requires_durable_wal() {
-        let (temp_dir, bpm) = setup_test_environment(4);
-        let wal_dir = temp_dir.path().join("wal");
-        let scheduler = bpm.disk_scheduler.clone();
-        let wal = Arc::new(
-            WalManager::new(
-                WalConfig {
-                    directory: wal_dir.clone(),
-                    ..WalConfig::default()
-                },
-                scheduler,
-                None,
-                None,
-            )
-            .expect("wal manager"),
-        );
-        bpm.set_wal_manager(wal.clone());
-
-        let page_id;
-        let lsn;
         {
-            let mut guard = bpm.new_page().expect("new page");
-            page_id = guard.page_id();
-            guard.data[0..4].copy_from_slice(b"walu");
-            lsn = wal
-                .append_record_with(|_ctx| {
-                    WalRecordPayload::Transaction(TransactionPayload {
-                        marker: TransactionRecordKind::Begin,
-                        txn_id: 1,
-                    })
-                })
-                .expect("append wal record")
-                .end_lsn;
-            guard.page_lsn = lsn;
+            let meta = pool.frame_meta(frame_id);
+            assert_eq!(meta.page_id, page_id);
+            assert_eq!(meta.pin_count, 0);
+            assert!(!meta.is_dirty);
+            assert_eq!(meta.lsn, 0);
         }
 
-        let flushed = bpm
-            .flush_page(page_id)
-            .expect("flush should auto-flush wal");
-        assert!(flushed, "page should flush once wal is durable");
-        assert!(wal.durable_lsn() >= lsn, "wal durable lsn should advance");
+        let data = unsafe { pool.frame_slice(frame_id) };
+        assert_eq!(data, pattern.as_ref());
+    }
 
-        let wal_files: Vec<_> = std::fs::read_dir(&wal_dir)
-            .expect("wal directory")
-            .filter_map(|entry| entry.ok())
-            .collect();
-        assert!(
-            !wal_files.is_empty(),
-            "wal flush should create segment file"
-        );
-        let total_size: u64 = wal_files
+    #[test]
+    fn write_page_to_disk_persists_arena_bytes() {
+        let (_tmp, scheduler, pool) = setup_pool(4);
+        let page_id = scheduler
+            .schedule_allocate()
+            .unwrap()
+            .recv()
+            .unwrap()
+            .unwrap();
+
+        let frame_id = pool.pop_free_frame().expect("free frame");
+        unsafe {
+            pool.frame_slice_mut(frame_id).fill(0x3C);
+        }
+        let payload = Bytes::copy_from_slice(unsafe { pool.frame_slice(frame_id) });
+        pool.write_page_to_disk(page_id, payload.clone()).unwrap();
+
+        let read_back = scheduler
+            .schedule_read(page_id)
+            .unwrap()
+            .recv()
+            .unwrap()
+            .unwrap();
+        assert!(read_back.iter().all(|b| *b == 0x3C));
+    }
+
+    #[test]
+    fn reset_frame_clears_data_and_meta() {
+        let (_tmp, scheduler, pool) = setup_pool(2);
+        let page_id = scheduler
+            .schedule_allocate()
+            .unwrap()
+            .recv()
+            .unwrap()
+            .unwrap();
+        let frame_id = pool.pop_free_frame().expect("free frame");
+
+        {
+            let mut meta = pool.frame_meta(frame_id);
+            meta.page_id = page_id;
+            meta.pin_count = 5;
+            meta.is_dirty = true;
+            meta.lsn = 99;
+        }
+        unsafe {
+            pool.frame_slice_mut(frame_id).fill(0x55);
+        }
+
+        pool.reset_frame(frame_id);
+        pool.clear_frame_meta(frame_id);
+
+        let meta = pool.frame_meta(frame_id);
+        assert_eq!(meta.page_id, INVALID_PAGE_ID);
+        assert_eq!(meta.pin_count, 0);
+        assert!(!meta.is_dirty);
+        assert_eq!(meta.lsn, 0);
+        drop(meta);
+
+        assert!(unsafe { pool.frame_slice(frame_id) }
             .iter()
-            .map(|entry| entry.metadata().map(|m| m.len()).unwrap_or(0))
-            .sum();
-        assert!(total_size > 0, "wal segment should contain data");
+            .all(|b| *b == 0));
     }
 
     #[test]
-    fn test_delete_page() {
-        let (_temp_dir, bpm) = setup_test_environment(10);
+    fn page_table_insert_lookup_and_remove() {
+        let (_tmp, scheduler, pool) = setup_pool(2);
+        let page_id = scheduler
+            .schedule_allocate()
+            .unwrap()
+            .recv()
+            .unwrap()
+            .unwrap();
+        let frame_id = 0;
 
-        // 1. 创建一些页面
-        let page1_id = bpm.new_page().unwrap().page_id();
-        drop(bpm.new_page().unwrap()); // unpin
+        pool.insert_mapping(page_id, frame_id);
+        assert_eq!(pool.lookup_frame(page_id), Some(frame_id));
+        assert!(pool.remove_mapping_if(page_id, frame_id));
+        assert!(pool.lookup_frame(page_id).is_none());
 
-        assert_eq!(bpm.page_table.len(), 2);
-        assert_eq!(bpm.free_list.read().len(), 8);
-
-        // 2. 删除一个未被 pin 的页面 (page1)
-        drop(bpm.fetch_page_read(page1_id).unwrap()); // unpin page1
-        let deleted = bpm.delete_page(page1_id).unwrap();
-        assert!(deleted);
-
-        // 3. 验证其已被移除
-        assert!(bpm.page_table.get(&page1_id).is_none());
-        assert_eq!(bpm.page_table.len(), 1);
-        assert_eq!(bpm.free_list.read().len(), 9); // free_list 增加
-        assert_eq!(bpm.replacer.read().size(), 1); // 另一个页面还在
-
-        // 4. 尝试获取被删除的页面，应该会从磁盘重新读取（内容为空）
-        let refetched_guard = bpm.fetch_page_read(page1_id).unwrap();
-        assert!(refetched_guard.data.iter().all(|&b| b == 0));
-    }
-
-    #[test]
-    fn test_delete_pinned_page_fails() {
-        let (_temp_dir, bpm) = setup_test_environment(10);
-
-        let guard = bpm.new_page().unwrap();
-        let page_id = guard.page_id();
-
-        // 尝试删除一个被 pin 的页面
-        let deleted = bpm.delete_page(page_id).unwrap();
-        assert!(!deleted); // 应该失败
-
-        // 验证页面仍然存在
-        assert!(bpm.page_table.get(&page_id).is_some());
-    }
-
-    #[test]
-    fn test_delete_page_concurrent_fetch_preserves_mapping() {
-        use std::sync::mpsc;
-        use std::thread;
-
-        let (_temp_dir, bpm) = setup_test_environment(6);
-
-        let page_id = {
-            let guard = bpm.new_page().unwrap();
-            let pid = guard.page_id();
-            drop(guard);
-            pid
-        };
-
-        // Ensure page exists in buffer pool and can be evicted initially
-        drop(bpm.fetch_page_read(page_id).unwrap());
-        assert!(bpm.page_table.get(&page_id).is_some());
-
-        let (ready_tx, ready_rx) = mpsc::channel();
-        let (release_tx, release_rx) = mpsc::channel();
-
-        let bpm_fetch = bpm.clone();
-        let fetcher = thread::spawn(move || {
-            let guard = bpm_fetch.fetch_page_read(page_id).unwrap();
-            ready_tx.send(()).unwrap();
-            release_rx.recv().unwrap();
-            drop(guard);
-        });
-
-        // Wait until the fetcher has pinned the page
-        ready_rx.recv().unwrap();
-
-        let frame_id = *bpm.page_table.get(&page_id).unwrap();
-        assert_eq!(bpm.pool[frame_id].read().get_pin_count(), 1);
-
-        // delete_page should fail because the page is currently pinned and keep the mapping intact
-        let deleted = bpm.delete_page(page_id).unwrap();
-        assert!(!deleted);
-        assert!(bpm.page_table.get(&page_id).is_some());
-
-        // Release the read guard so complete_unpin can mark it evictable again
-        release_tx.send(()).unwrap();
-        fetcher.join().unwrap();
-
-        let frame_id = *bpm.page_table.get(&page_id).unwrap();
-        assert_eq!(bpm.pool[frame_id].read().get_pin_count(), 0);
-        assert_eq!(bpm.replacer.read().size(), 1);
-
-        // Now delete should succeed because the page is no longer pinned
-        assert!(bpm.delete_page(page_id).unwrap());
-    }
-
-    #[test]
-    fn test_delete_page_stale_mapping_does_not_remove_new_page() {
-        let (_temp_dir, bpm) = setup_test_environment(6);
-
-        let page_a = bpm.new_page().unwrap().page_id();
-        let page_b = bpm.new_page().unwrap().page_id();
-
-        drop(bpm.fetch_page_read(page_a).unwrap());
-        drop(bpm.fetch_page_read(page_b).unwrap());
-
-        let frame_a = *bpm.page_table.get(&page_a).unwrap();
-        let frame_b = *bpm.page_table.get(&page_b).unwrap();
-        assert_ne!(frame_a, frame_b);
-
-        // Simulate a race where the page table temporarily points page_a at page_b's frame
-        bpm.page_table.insert(page_a, frame_b);
-
-        assert!(bpm.delete_page(page_a).unwrap());
-        assert!(bpm.page_table.get(&page_a).is_none());
-
-        let frame_b_after = *bpm.page_table.get(&page_b).unwrap();
-        assert_eq!(frame_b_after, frame_b);
-        assert_eq!(bpm.pool[frame_b_after].read().page_id(), page_b);
-    }
-
-    #[test]
-    fn test_buffer_pool_is_full() {
-        let (_temp_dir, bpm) = setup_test_environment(2);
-
-        // 创建两个页面，填满缓冲池，并且一直持有它们的 guard
-        let _page1 = bpm.new_page().unwrap();
-        let _page2 = bpm.new_page().unwrap();
-
-        // 此时缓冲池已满，且所有页面都被 pin 住，无法驱逐
-        assert_eq!(bpm.replacer.read().size(), 0);
-        assert!(bpm.free_list.read().is_empty());
-
-        // 尝试创建第三个页面，应该会失败
-        let page3_result = bpm.new_page();
-        assert!(page3_result.is_err());
-    }
-
-    #[test]
-    fn test_concurrent_reads_and_exclusive_write() {
-        let (_temp_dir, bpm) = setup_test_environment(10);
-
-        // 创建一个页面
-        let page_id = {
-            let mut guard = bpm.new_page().unwrap();
-            guard.data[0] = 42;
-            guard.page_id()
-        };
-
-        // 1. 获取一个读保护器
-        let read_guard1 = bpm.fetch_page_read(page_id).unwrap();
-        assert_eq!(read_guard1.data[0], 42);
-        assert_eq!(read_guard1.pin_count(), 1);
-        drop(read_guard1);
-
-        // 2. 验证写操作是独占的
-        let mut write_guard = bpm.fetch_page_write(page_id).unwrap();
-        write_guard.data[0] = 99;
-        assert_eq!(write_guard.data[0], 99);
-    }
-
-    #[test]
-    fn test_concurrent_same_page_fetch_single_frame() {
-        use std::thread;
-        let (_temp_dir, bpm) = setup_test_environment(8);
-
-        // Prepare a page on disk by allocating once
-        let page_id = bpm.new_page().unwrap().page_id();
-        // Unpin to allow others to fetch
-        drop(bpm.fetch_page_read(page_id).unwrap());
-
-        let threads = (0..8)
-            .map(|_| {
-                let bpm_c = bpm.clone();
-                thread::spawn(move || {
-                    for _ in 0..100 {
-                        let g = bpm_c.fetch_page_read(page_id).unwrap();
-                        assert_eq!(g.page_id(), page_id);
-                    }
-                })
-            })
-            .collect::<Vec<_>>();
-
-        for t in threads {
-            t.join().unwrap();
-        }
-
-        // Ensure only one frame is mapped to this page
-        let frame_id = bpm.page_table.get(&page_id).map(|r| *r).unwrap();
-        // Verify that the frame actually holds the page
-        assert_eq!(bpm.pool[frame_id].read().page_id(), page_id);
-    }
-
-    #[test]
-    fn test_delete_vs_fetch_race_safety() {
-        use std::thread;
-        let (_temp_dir, bpm) = setup_test_environment(8);
-
-        let page_id = bpm.new_page().unwrap().page_id();
-        drop(bpm.fetch_page_read(page_id).unwrap());
-
-        let bpm_del = bpm.clone();
-        let deleter = thread::spawn(move || {
-            // Try to delete repeatedly; it may fail if pinned, but must not corrupt state
-            for _ in 0..1000 {
-                let _ = bpm_del.delete_page(page_id).unwrap();
-            }
-        });
-
-        let bpm_fetch = bpm.clone();
-        let fetcher = thread::spawn(move || {
-            for _ in 0..1000 {
-                let _ = bpm_fetch.fetch_page_read(page_id).unwrap();
-            }
-        });
-
-        deleter.join().unwrap();
-        fetcher.join().unwrap();
-
-        // State must remain consistent: either mapped and readable, or not mapped but deletable
-        let frame_id_opt = bpm.page_table.get(&page_id).map(|r| *r);
-        if let Some(frame_id) = frame_id_opt {
-            assert_eq!(bpm.pool[frame_id].read().page_id(), page_id);
-        }
+        pool.insert_mapping(page_id, frame_id);
+        pool.remove_mapping(page_id);
+        assert!(pool.lookup_frame(page_id).is_none());
     }
 }
