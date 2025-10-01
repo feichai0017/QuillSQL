@@ -12,10 +12,11 @@ use crate::catalog::registry::global_index_registry;
 use crate::config::{IndexVacuumConfig, WalConfig};
 use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::optimizer::LogicalOptimizer;
-use crate::plan::logical_plan::LogicalPlan;
+use crate::plan::logical_plan::{LogicalPlan, TransactionScope};
 use crate::plan::PhysicalPlanner;
 use crate::recovery::wal_record::CheckpointPayload;
 use crate::recovery::{ControlFileManager, RecoveryManager, WalManager};
+use crate::session::SessionContext;
 use crate::utils::util::{pretty_format_logical_plan, pretty_format_physical_plan};
 use crate::{
     buffer::BufferPoolManager,
@@ -27,6 +28,7 @@ use crate::{
     storage::tuple::Tuple,
     transaction::{IsolationLevel, TransactionManager},
 };
+use sqlparser::ast::TransactionAccessMode;
 
 #[derive(Debug, Default, Clone)]
 pub struct WalOptions {
@@ -41,9 +43,10 @@ pub struct WalOptions {
     pub retain_segments: Option<usize>,
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct DatabaseOptions {
     pub wal: WalOptions,
+    pub default_isolation_level: Option<IsolationLevel>,
 }
 
 pub struct Database {
@@ -51,6 +54,7 @@ pub struct Database {
     pub(crate) catalog: Catalog,
     pub(crate) wal_manager: Arc<WalManager>,
     pub(crate) transaction_manager: Arc<TransactionManager>,
+    default_isolation: IsolationLevel,
     temp_dir: Option<TempDir>,
     checkpoint_stop: Arc<AtomicBool>,
     checkpoint_handle: Option<thread::JoinHandle<()>>,
@@ -132,6 +136,9 @@ impl Database {
             catalog,
             wal_manager,
             transaction_manager,
+            default_isolation: options
+                .default_isolation_level
+                .unwrap_or(IsolationLevel::ReadUncommitted),
             temp_dir: None,
             checkpoint_stop,
             checkpoint_handle,
@@ -218,6 +225,9 @@ impl Database {
             catalog,
             wal_manager,
             transaction_manager,
+            default_isolation: options
+                .default_isolation_level
+                .unwrap_or(IsolationLevel::ReadUncommitted),
             temp_dir: Some(temp_dir),
             checkpoint_stop,
             checkpoint_handle,
@@ -229,6 +239,15 @@ impl Database {
     }
 
     pub fn run(&mut self, sql: &str) -> QuillSQLResult<Vec<Tuple>> {
+        let mut session = SessionContext::new(self.default_isolation);
+        self.run_with_session(&mut session, sql)
+    }
+
+    pub fn run_with_session(
+        &mut self,
+        session: &mut SessionContext,
+        sql: &str,
+    ) -> QuillSQLResult<Vec<Tuple>> {
         let logical_plan = self.create_logical_plan(sql)?;
         debug!(
             "Logical Plan: \n{}",
@@ -241,34 +260,118 @@ impl Database {
             pretty_format_logical_plan(&logical_plan)
         );
 
-        // logical plan -> physical plan
         let physical_planner = PhysicalPlanner {
             catalog: &self.catalog,
         };
-        let physical_plan = physical_planner.create_physical_plan(optimized_logical_plan);
+        let physical_plan = physical_planner.create_physical_plan(optimized_logical_plan.clone());
         debug!(
             "Physical Plan: \n{}",
             pretty_format_physical_plan(&physical_plan)
         );
 
-        let mut txn = self
-            .transaction_manager
-            .begin(IsolationLevel::ReadUncommitted)?;
-        let execution_ctx =
-            ExecutionContext::new(&mut self.catalog, &mut txn, &self.transaction_manager);
-        let mut execution_engine = ExecutionEngine {
-            context: execution_ctx,
+        let execution_result = match optimized_logical_plan.clone() {
+            LogicalPlan::BeginTransaction(modes) => {
+                if session.has_active_transaction() {
+                    return Err(QuillSQLError::Execution(
+                        "transaction already active".to_string(),
+                    ));
+                }
+                let txn = self.transaction_manager.begin(
+                    modes.unwrap_effective_isolation(session.default_isolation()),
+                    modes
+                        .access_mode
+                        .unwrap_or(TransactionAccessMode::ReadWrite),
+                )?;
+                session.set_active_transaction(txn)?;
+                Ok(vec![])
+            }
+            LogicalPlan::CommitTransaction => {
+                let txn_ref = session
+                    .active_txn_mut()
+                    .ok_or_else(|| QuillSQLError::Execution("no active transaction".to_string()))?;
+                self.transaction_manager.commit(txn_ref)?;
+                session.take_active_transaction();
+                Ok(vec![])
+            }
+            LogicalPlan::RollbackTransaction => {
+                let txn_ref = session
+                    .active_txn_mut()
+                    .ok_or_else(|| QuillSQLError::Execution("no active transaction".to_string()))?;
+                self.transaction_manager.abort(txn_ref)?;
+                session.take_active_transaction();
+                Ok(vec![])
+            }
+            LogicalPlan::SetTransaction { scope, modes } => {
+                match scope {
+                    TransactionScope::Session => {
+                        session.apply_session_modes(&modes);
+                    }
+                    TransactionScope::Transaction => {
+                        session.apply_transaction_modes(&modes);
+                    }
+                }
+                Ok(vec![])
+            }
+            plan => {
+                let txn_existed = session.has_active_transaction();
+                if !txn_existed {
+                    let new_txn = self.transaction_manager.begin(
+                        session.default_isolation(),
+                        TransactionAccessMode::ReadWrite,
+                    )?;
+                    session.set_active_transaction(new_txn)?;
+                }
+
+                let execution_result = {
+                    let txn_ref = session
+                        .active_txn_mut()
+                        .expect("session must hold an active transaction");
+                    let execution_ctx = ExecutionContext::new(
+                        &mut self.catalog,
+                        txn_ref,
+                        &self.transaction_manager,
+                    );
+                    let mut execution_engine = ExecutionEngine {
+                        context: execution_ctx,
+                    };
+                    execution_engine.execute(Arc::new(physical_plan))
+                };
+
+                match execution_result {
+                    Ok(tuples) => {
+                        if !txn_existed && session.autocommit() {
+                            {
+                                let txn_ref = session
+                                    .active_txn_mut()
+                                    .expect("transaction should still be active");
+                                self.transaction_manager.commit(txn_ref)?;
+                            }
+                            session.take_active_transaction();
+                        }
+                        Ok(tuples)
+                    }
+                    Err(e) => {
+                        if txn_existed {
+                            if let Some(txn_ref) = session.active_txn_mut() {
+                                txn_ref.mark_tainted();
+                            }
+                        } else {
+                            if let Some(txn_ref) = session.active_txn_mut() {
+                                let _ = self.transaction_manager.abort(txn_ref);
+                            }
+                            session.take_active_transaction();
+                        }
+                        Err(e)
+                    }
+                }
+            }
         };
-        match execution_engine.execute(Arc::new(physical_plan)) {
-            Ok(tuples) => {
-                let _ = self.transaction_manager.commit(&mut txn);
-                Ok(tuples)
-            }
-            Err(e) => {
-                let _ = self.transaction_manager.abort(&mut txn);
-                Err(e)
-            }
-        }
+
+        execution_result
+    }
+
+    pub fn default_isolation(&self) -> IsolationLevel {
+        self.default_isolation
     }
 
     pub fn create_logical_plan(&mut self, sql: &str) -> QuillSQLResult<LogicalPlan> {

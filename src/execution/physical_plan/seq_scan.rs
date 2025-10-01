@@ -3,6 +3,7 @@ use std::sync::Mutex;
 use crate::catalog::SchemaRef;
 use crate::error::QuillSQLError;
 use crate::storage::table_heap::TableIterator;
+use crate::transaction::IsolationLevel;
 use crate::transaction::LockMode;
 use crate::utils::table_ref::TableReference;
 use crate::{
@@ -51,13 +52,19 @@ impl VolcanoExecutor for PhysicalSeqScan {
             ));
         };
         if let Some((rid, tuple)) = iterator.next()? {
-            context.txn_mgr.record_row_lock(
-                context.txn.id(),
-                self.table.clone(),
-                rid,
-                LockMode::Shared,
-            );
-            return Ok(Some(tuple));
+            return match context.txn.isolation_level() {
+                IsolationLevel::ReadUncommitted => Ok(Some(tuple)),
+                IsolationLevel::ReadCommitted => {
+                    context.lock_row_shared(&self.table, rid, false)?;
+                    let result = tuple.clone();
+                    context.unlock_row_shared(&self.table, rid)?;
+                    Ok(Some(result))
+                }
+                IsolationLevel::RepeatableRead | IsolationLevel::Serializable => {
+                    context.lock_row_shared(&self.table, rid, true)?;
+                    Ok(Some(tuple))
+                }
+            };
         }
         Ok(None)
     }

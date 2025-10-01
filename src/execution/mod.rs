@@ -12,6 +12,8 @@ use crate::{
     transaction::{LockMode, Transaction},
     utils::table_ref::TableReference,
 };
+use log::warn;
+use sqlparser::ast::TransactionAccessMode;
 pub trait VolcanoExecutor {
     fn init(&self, _context: &mut ExecutionContext) -> QuillSQLResult<()> {
         Ok(())
@@ -48,9 +50,38 @@ impl<'a> ExecutionContext<'a> {
         Ok(())
     }
 
-    pub fn lock_row_shared(&mut self, table: &TableReference, rid: crate::storage::page::RecordId) {
+    pub fn lock_row_shared(
+        &mut self,
+        table: &TableReference,
+        rid: crate::storage::page::RecordId,
+        retain: bool,
+    ) -> QuillSQLResult<()> {
+        let acquired =
+            self.txn_mgr
+                .try_acquire_row_lock(self.txn, table.clone(), rid, LockMode::Shared)?;
+        if !acquired {
+            return Err(QuillSQLError::Execution(
+                "failed to acquire shared row lock".to_string(),
+            ));
+        }
+        if retain {
+            self.txn_mgr
+                .record_shared_row_lock(self.txn.id(), table.clone(), rid);
+        } else {
+            // Track transient shared locks so subsequent attempts still go through the lock manager.
+            self.txn_mgr
+                .remove_row_key_marker(self.txn.id(), table, rid);
+        }
+        Ok(())
+    }
+
+    pub fn unlock_row_shared(
+        &mut self,
+        table: &TableReference,
+        rid: crate::storage::page::RecordId,
+    ) -> QuillSQLResult<()> {
         self.txn_mgr
-            .record_row_lock(self.txn.id(), table.clone(), rid, LockMode::Shared);
+            .try_unlock_shared_row(self.txn.id(), table, rid)
     }
 
     pub fn lock_row_exclusive(
@@ -65,6 +96,24 @@ impl<'a> ExecutionContext<'a> {
             return Err(QuillSQLError::Execution(
                 "failed to acquire row exclusive lock".to_string(),
             ));
+        }
+        Ok(())
+    }
+
+    /// Ensure that the current transaction is allowed to perform a write on the given table.
+    pub fn ensure_writable(&self, table: &TableReference, operation: &str) -> QuillSQLResult<()> {
+        if matches!(self.txn.access_mode(), TransactionAccessMode::ReadOnly) {
+            warn!(
+                "read-only txn {} attempted '{}' on {}",
+                self.txn.id(),
+                operation,
+                table.to_log_string()
+            );
+            return Err(QuillSQLError::Execution(format!(
+                "operation '{}' on table {} is not allowed in READ ONLY transaction",
+                operation,
+                table.to_log_string()
+            )));
         }
         Ok(())
     }

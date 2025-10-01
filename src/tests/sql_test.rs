@@ -1,5 +1,6 @@
 use crate::database::Database;
 use crate::error::QuillSQLError;
+use crate::session::SessionContext;
 use crate::storage::tuple::Tuple;
 use regex::Regex;
 use sqllogictest::{DBOutput, DefaultColumnType};
@@ -7,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 pub struct QuillSQLDB {
     db: Database,
+    session: SessionContext,
 }
 
 impl Default for QuillSQLDB {
@@ -17,8 +19,9 @@ impl Default for QuillSQLDB {
 
 impl QuillSQLDB {
     pub fn new() -> Self {
-        let db = Database::new_temp().unwrap();
-        Self { db }
+        let mut db = Database::new_temp().unwrap();
+        let session = SessionContext::new(db.default_isolation());
+        Self { db, session }
     }
 }
 
@@ -43,7 +46,7 @@ impl sqllogictest::DB for QuillSQLDB {
             let lower_sql = sql.trim_start().to_ascii_lowercase();
             lower_sql.starts_with("select") || lower_sql.starts_with("explain")
         };
-        let tuples = self.db.run(sql)?;
+        let tuples = self.db.run_with_session(&mut self.session, sql)?;
         if tuples.is_empty() {
             if is_query_sql {
                 return Ok(DBOutput::Rows {

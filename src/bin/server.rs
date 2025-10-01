@@ -4,6 +4,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use quill_sql::database::{Database, DatabaseOptions};
+use quill_sql::transaction::IsolationLevel;
+use std::str::FromStr;
 
 /// Shared app state holding a Database protected by a mutex
 #[derive(Clone)]
@@ -49,7 +51,16 @@ async fn main() {
     env_logger::init();
 
     // Build database (in-memory temp by default); WAL config centralized via DatabaseOptions/WalConfig defaults
-    let db_options = DatabaseOptions::default();
+    let default_isolation_level = std::env::var("QUILL_DEFAULT_ISOLATION")
+        .ok()
+        .as_deref()
+        .map(IsolationLevel::from_str)
+        .transpose()
+        .unwrap_or_else(|e| panic!("invalid QUILL_DEFAULT_ISOLATION: {}", e));
+    let db_options = DatabaseOptions {
+        default_isolation_level,
+        ..DatabaseOptions::default()
+    };
 
     let db = if let Ok(path) = std::env::var("QUILL_DB_FILE") {
         Database::new_on_disk_with_options(&path, db_options.clone()).expect("open db file")

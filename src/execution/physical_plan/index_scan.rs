@@ -2,6 +2,7 @@ use crate::catalog::SchemaRef;
 use crate::error::QuillSQLError;
 use crate::execution::{ExecutionContext, VolcanoExecutor};
 use crate::storage::index::btree_index::TreeIndexIterator;
+use crate::transaction::{IsolationLevel, LockMode};
 use crate::utils::table_ref::TableReference;
 use crate::{error::QuillSQLResult, storage::tuple::Tuple};
 use std::ops::{Bound, RangeBounds};
@@ -40,6 +41,15 @@ impl PhysicalIndexScan {
 
 impl VolcanoExecutor for PhysicalIndexScan {
     fn init(&self, context: &mut ExecutionContext) -> QuillSQLResult<()> {
+        // Lock table IS for RC/RR; RU keeps current behavior
+        if matches!(
+            context.txn.isolation_level(),
+            IsolationLevel::ReadCommitted
+                | IsolationLevel::RepeatableRead
+                | IsolationLevel::Serializable
+        ) {
+            context.lock_table(self.table_ref.clone(), LockMode::IntentionShared)?;
+        }
         let index = context
             .catalog
             .index(&self.table_ref, &self.index_name)?
@@ -82,7 +92,20 @@ impl VolcanoExecutor for PhysicalIndexScan {
                     }
                     continue;
                 }
-                return Ok(Some(table_heap.tuple(rid)?));
+                // Acquire S lock for RC/RR before returning tuple
+                return match context.txn.isolation_level() {
+                    IsolationLevel::ReadUncommitted => Ok(Some(table_heap.tuple(rid)?)),
+                    IsolationLevel::ReadCommitted => {
+                        context.lock_row_shared(&self.table_ref, rid, false)?;
+                        let tuple = table_heap.tuple(rid)?;
+                        context.unlock_row_shared(&self.table_ref, rid)?;
+                        Ok(Some(tuple))
+                    }
+                    IsolationLevel::RepeatableRead | IsolationLevel::Serializable => {
+                        context.lock_row_shared(&self.table_ref, rid, true)?;
+                        Ok(Some(table_heap.tuple(rid)?))
+                    }
+                };
             } else {
                 return Ok(None);
             }

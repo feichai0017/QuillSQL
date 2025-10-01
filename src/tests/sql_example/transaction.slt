@@ -1,0 +1,65 @@
+statement ok
+create table accounts(id integer primary key, balance integer)
+
+statement ok
+insert into accounts values (1, 100), (2, 200)
+
+statement ok
+update accounts set balance = 150 where id = 1
+
+query
+select * from accounts order by id
+----
+1 150
+2 200
+
+statement ok
+begin
+
+statement ok
+update accounts set balance = 175 where id = 2
+
+statement ok
+rollback
+
+query
+select * from accounts order by id
+----
+1 150
+2 200
+
+statement ok
+set transaction isolation level serializable
+
+statement ok
+begin
+
+statement ok
+update accounts set balance = 160 where id = 1
+
+statement ok
+commit
+
+query
+select * from accounts order by id
+----
+1 160
+2 200
+
+statement ok
+set session transaction isolation level read committed
+
+statement ok
+begin
+
+statement ok
+update accounts set balance = 195 where id = 2
+
+statement ok
+commit
+
+query
+select * from accounts order by id
+----
+1 160
+2 195

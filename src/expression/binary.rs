@@ -7,6 +7,17 @@ use crate::storage::tuple::Tuple;
 use crate::utils::scalar::ScalarValue;
 use std::cmp::Ordering;
 
+fn numeric_binary_op<F>(left: ScalarValue, right: ScalarValue, op: F) -> QuillSQLResult<ScalarValue>
+where
+    F: Fn(ScalarValue, ScalarValue) -> QuillSQLResult<ScalarValue>,
+{
+    let coercion_type =
+        DataType::comparison_numeric_coercion(&left.data_type(), &right.data_type())?;
+    let l_cast = left.cast_to(&coercion_type)?;
+    let r_cast = right.cast_to(&coercion_type)?;
+    op(l_cast, r_cast)
+}
+
 /// Binary expression
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct BinaryExpr {
@@ -20,8 +31,8 @@ pub struct BinaryExpr {
 
 impl ExprTrait for BinaryExpr {
     fn data_type(&self, input_schema: &Schema) -> QuillSQLResult<DataType> {
-        let _left_type = self.left.data_type(input_schema)?;
-        let _right_type = self.right.data_type(input_schema)?;
+        let left_type = self.left.data_type(input_schema)?;
+        let right_type = self.right.data_type(input_schema)?;
         match self.op {
             BinaryOp::Gt
             | BinaryOp::Lt
@@ -31,10 +42,9 @@ impl ExprTrait for BinaryExpr {
             | BinaryOp::NotEq
             | BinaryOp::And
             | BinaryOp::Or => Ok(DataType::Boolean),
-            BinaryOp::Plus => todo!(),
-            BinaryOp::Minus => todo!(),
-            BinaryOp::Multiply => todo!(),
-            BinaryOp::Divide => todo!(),
+            BinaryOp::Plus | BinaryOp::Minus | BinaryOp::Multiply | BinaryOp::Divide => {
+                DataType::comparison_numeric_coercion(&left_type, &right_type)
+            }
         }
     }
 
@@ -55,17 +65,21 @@ impl ExprTrait for BinaryExpr {
             BinaryOp::And => {
                 let l_bool = l.as_boolean()?;
                 let r_bool = r.as_boolean()?;
-                match (l_bool, r_bool) {
-                    (Some(v1), Some(v2)) => Ok((v1 && v2).into()),
-                    (Some(_), None) | (None, Some(_)) | (None, None) => {
-                        Ok(ScalarValue::Boolean(Some(false)))
-                    }
-                }
+                Ok(ScalarValue::Boolean(Some(
+                    l_bool.unwrap_or(false) && r_bool.unwrap_or(false),
+                )))
             }
-            _ => Err(QuillSQLError::NotSupport(format!(
-                "binary operator {:?} not support evaluating yet",
-                self.op
-            ))),
+            BinaryOp::Or => {
+                let l_bool = l.as_boolean()?;
+                let r_bool = r.as_boolean()?;
+                Ok(ScalarValue::Boolean(Some(
+                    l_bool.unwrap_or(false) || r_bool.unwrap_or(false),
+                )))
+            }
+            BinaryOp::Plus => numeric_binary_op(l, r, |a, b| a.wrapping_add(b)),
+            BinaryOp::Minus => numeric_binary_op(l, r, |a, b| a.wrapping_sub(b)),
+            BinaryOp::Multiply => numeric_binary_op(l, r, |a, b| a.wrapping_mul(b)),
+            BinaryOp::Divide => numeric_binary_op(l, r, |a, b| a.wrapping_div(b)),
         }
     }
 
