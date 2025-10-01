@@ -263,6 +263,17 @@ impl TransactionManager {
         }
     }
 
+    pub fn remove_row_key_marker(
+        &self,
+        txn_id: TransactionId,
+        table: &TableReference,
+        rid: RecordId,
+    ) {
+        if let Some(mut entry) = self.held_locks.get_mut(&txn_id) {
+            entry.row_keys.remove(&(table.clone(), rid));
+        }
+    }
+
     pub fn record_shared_row_lock(
         &self,
         txn_id: TransactionId,

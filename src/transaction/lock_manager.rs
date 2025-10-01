@@ -230,6 +230,19 @@ impl LockManager {
                 trace!("wait edge: txn={} blocking_on={:?}", txn_id, blockers);
                 if self.record_wait(txn_id, &blockers) {
                     warn!("deadlock detected: txn={}", txn_id);
+                    if let Some(mode) = prev_mode {
+                        if let Some(req) = queue_guard
+                            .requests
+                            .iter_mut()
+                            .find(|req| req.id == request_id)
+                        {
+                            req.mode = mode;
+                            req.granted = true;
+                        }
+                    } else {
+                        queue_guard.requests.retain(|req| req.id != request_id);
+                    }
+                    self.clear_wait_edges(txn_id);
                     return false;
                 }
             }

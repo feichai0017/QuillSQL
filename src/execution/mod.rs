@@ -67,6 +67,10 @@ impl<'a> ExecutionContext<'a> {
         if retain {
             self.txn_mgr
                 .record_shared_row_lock(self.txn.id(), table.clone(), rid);
+        } else {
+            // Track transient shared locks so subsequent attempts still go through the lock manager.
+            self.txn_mgr
+                .remove_row_key_marker(self.txn.id(), table, rid);
         }
         Ok(())
     }
