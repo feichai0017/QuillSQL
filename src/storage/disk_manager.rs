@@ -139,32 +139,38 @@ impl DiskManager {
         let mut is_new_file = false;
         let db_path_ref = db_path.as_ref();
         let (db_file, meta, direct_enabled) = if db_path_ref.exists() {
-            let (mut db_file, direct_ok) = Self::open_raw_file(db_path_ref, false, true)?;
-            let mut buf = vec![0; *META_PAGE_SIZE];
-            match db_file.read_exact(&mut buf) {
-                Ok(()) => {
-                    let (meta_page, _) = decode_meta_page(&buf)?;
-                    (db_file, meta_page, direct_ok)
-                }
-                Err(err) => {
-                    if let Some(raw) = err.raw_os_error() {
-                        if raw == libc::EINVAL {
-                            // Some platforms allow opening with O_DIRECT but fail when we actually
-                            // perform unaligned I/O (e.g. tmpfs). Retry the read with a buffered
-                            // handle so temp DBs can still function.
+            let (mut db_file, mut direct_ok) = Self::open_raw_file(db_path_ref, false, true)?;
+            let meta_page = if direct_ok {
+                let mut aligned = AlignedPageBuf::new_zeroed()?;
+                match db_file.read_exact(aligned.as_mut_slice()) {
+                    Ok(()) => {
+                        let (meta_page, _) = decode_meta_page(aligned.as_slice())?;
+                        meta_page
+                    }
+                    Err(err) => {
+                        if err.kind() == ErrorKind::InvalidInput
+                            || err.raw_os_error() == Some(libc::EINVAL)
+                        {
                             let (mut fallback_file, _) =
                                 Self::open_raw_file(db_path_ref, false, false)?;
+                            let mut buf = vec![0; *META_PAGE_SIZE];
                             fallback_file.read_exact(&mut buf)?;
                             let (meta_page, _) = decode_meta_page(&buf)?;
-                            (fallback_file, meta_page, false)
+                            db_file = fallback_file;
+                            direct_ok = false;
+                            meta_page
                         } else {
                             return Err(err.into());
                         }
-                    } else {
-                        return Err(err.into());
                     }
                 }
-            }
+            } else {
+                let mut buf = vec![0; *META_PAGE_SIZE];
+                db_file.read_exact(&mut buf)?;
+                let (meta_page, _) = decode_meta_page(&buf)?;
+                meta_page
+            };
+            (db_file, meta_page, direct_ok)
         } else {
             is_new_file = true;
             let (mut db_file, mut direct_ok) = Self::open_raw_file(db_path_ref, true, true)?;
