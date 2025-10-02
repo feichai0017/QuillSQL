@@ -84,7 +84,16 @@ pub struct DiskManager {
 }
 
 impl DiskManager {
-    fn open_raw_file(db_path: &Path, create: bool, direct: bool) -> std::io::Result<(File, bool)> {
+    fn open_raw_file(
+        db_path: &Path,
+        create: bool,
+        mut direct: bool,
+    ) -> std::io::Result<(File, bool)> {
+        if std::env::var("QUILL_DISABLE_DIRECT_IO")
+            .map_or(false, |v| v == "1" || v.eq_ignore_ascii_case("true"))
+        {
+            direct = false;
+        }
         let mut options = std::fs::OpenOptions::new();
         options.read(true).write(true);
         if create {
@@ -95,44 +104,16 @@ impl DiskManager {
             options.custom_flags(libc::O_DIRECT | libc::O_NOATIME);
         }
 
-        match options.open(db_path) {
-            Ok(file) => {
-                #[cfg(target_os = "linux")]
-                {
-                    // direct indicates whether the opened handle actually uses O_DIRECT.
-                    return Ok((file, direct));
-                }
-                #[cfg(not(target_os = "linux"))]
-                {
-                    return Ok((file, false));
-                }
+        options.open(db_path).map(|file| {
+            #[cfg(target_os = "linux")]
+            {
+                (file, direct)
             }
-            Err(err) => {
-                #[cfg(target_os = "linux")]
-                {
-                    // Some filesystems (tmpfs, overlays) reject O_DIRECT with EINVAL. In that
-                    // case we retry without custom flags instead of failing the entire startup.
-                    if direct && err.raw_os_error() == Some(libc::EINVAL) {
-                        warn!(
-                            "O_DIRECT unsupported for {:?}, falling back to buffered I/O",
-                            db_path
-                        );
-                        return Self::open_raw_file(db_path, create, false);
-                    }
-                }
-                #[cfg(target_os = "linux")]
-                warn!(
-                    "O_DIRECT unavailable ({}), falling back to buffered I/O",
-                    err
-                );
-                let mut fallback = std::fs::OpenOptions::new();
-                fallback.read(true).write(true);
-                if create {
-                    fallback.create(true);
-                }
-                fallback.open(db_path).map(|f| (f, false))
+            #[cfg(not(target_os = "linux"))]
+            {
+                (file, false)
             }
-        }
+        })
     }
 
     pub fn try_new(db_path: impl AsRef<Path>) -> QuillSQLResult<Self> {
