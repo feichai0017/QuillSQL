@@ -7,7 +7,7 @@ use std::slice;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::RwLock;
 use std::{
-    io::{Read, Seek, SeekFrom, Write},
+    io::{ErrorKind, Read, Seek, SeekFrom, Write},
     sync::{Mutex, MutexGuard},
 };
 
@@ -167,11 +167,37 @@ impl DiskManager {
             }
         } else {
             is_new_file = true;
-            let (mut db_file, direct_ok) = Self::open_raw_file(db_path_ref, true, true)?;
+            let (mut db_file, mut direct_ok) = Self::open_raw_file(db_path_ref, true, true)?;
             let meta_page = MetaPage::try_new()?;
             let meta_bytes = encode_meta_page(&meta_page);
-            #[allow(clippy::unused_io_amount)]
-            db_file.write(&meta_bytes)?;
+
+            if direct_ok {
+                let mut aligned = AlignedPageBuf::new_zeroed()?;
+                aligned.as_mut_slice().copy_from_slice(&meta_bytes);
+
+                if let Err(err) = db_file.write_all(aligned.as_slice()) {
+                    let mut need_fallback = err.kind() == ErrorKind::InvalidInput;
+                    #[cfg(target_os = "linux")]
+                    {
+                        if !need_fallback && err.raw_os_error() == Some(libc::EINVAL) {
+                            need_fallback = true;
+                        }
+                    }
+
+                    if need_fallback {
+                        let (mut fallback_file, _) =
+                            Self::open_raw_file(db_path_ref, false, false)?;
+                        fallback_file.write_all(&meta_bytes)?;
+                        db_file = fallback_file;
+                        direct_ok = false;
+                    } else {
+                        return Err(err.into());
+                    }
+                }
+            } else {
+                db_file.write_all(&meta_bytes)?;
+            }
+
             (db_file, meta_page, direct_ok)
         };
 
