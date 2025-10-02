@@ -4,11 +4,11 @@ use std::fs::File;
 use std::path::Path;
 use std::ptr::NonNull;
 use std::slice;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::RwLock;
 use std::{
     io::{Read, Seek, SeekFrom, Write},
-    sync::{atomic::AtomicU32, Mutex, MutexGuard},
+    sync::{Mutex, MutexGuard},
 };
 
 #[cfg(target_os = "linux")]
@@ -84,20 +84,23 @@ pub struct DiskManager {
 }
 
 impl DiskManager {
-    fn open_raw_file(db_path: &Path, create: bool) -> std::io::Result<(File, bool)> {
+    fn open_raw_file(db_path: &Path, create: bool, direct: bool) -> std::io::Result<(File, bool)> {
         let mut options = std::fs::OpenOptions::new();
         options.read(true).write(true);
         if create {
             options.create(true);
         }
         #[cfg(target_os = "linux")]
-        options.custom_flags(libc::O_DIRECT | libc::O_NOATIME);
+        if direct {
+            options.custom_flags(libc::O_DIRECT | libc::O_NOATIME);
+        }
 
         match options.open(db_path) {
             Ok(file) => {
                 #[cfg(target_os = "linux")]
                 {
-                    return Ok((file, true));
+                    // direct indicates whether the opened handle actually uses O_DIRECT.
+                    return Ok((file, direct));
                 }
                 #[cfg(not(target_os = "linux"))]
                 {
@@ -105,6 +108,18 @@ impl DiskManager {
                 }
             }
             Err(err) => {
+                #[cfg(target_os = "linux")]
+                {
+                    // Some filesystems (tmpfs, overlays) reject O_DIRECT with EINVAL. In that
+                    // case we retry without custom flags instead of failing the entire startup.
+                    if direct && err.raw_os_error() == Some(libc::EINVAL) {
+                        warn!(
+                            "O_DIRECT unsupported for {:?}, falling back to buffered I/O",
+                            db_path
+                        );
+                        return Self::open_raw_file(db_path, create, false);
+                    }
+                }
                 #[cfg(target_os = "linux")]
                 warn!(
                     "O_DIRECT unavailable ({}), falling back to buffered I/O",
@@ -124,14 +139,35 @@ impl DiskManager {
         let mut is_new_file = false;
         let db_path_ref = db_path.as_ref();
         let (db_file, meta, direct_enabled) = if db_path_ref.exists() {
-            let (mut db_file, direct_ok) = Self::open_raw_file(db_path_ref, false)?;
+            let (mut db_file, direct_ok) = Self::open_raw_file(db_path_ref, false, true)?;
             let mut buf = vec![0; *META_PAGE_SIZE];
-            db_file.read_exact(&mut buf)?;
-            let (meta_page, _) = decode_meta_page(&buf)?;
-            (db_file, meta_page, direct_ok)
+            match db_file.read_exact(&mut buf) {
+                Ok(()) => {
+                    let (meta_page, _) = decode_meta_page(&buf)?;
+                    (db_file, meta_page, direct_ok)
+                }
+                Err(err) => {
+                    if let Some(raw) = err.raw_os_error() {
+                        if raw == libc::EINVAL {
+                            // Some platforms allow opening with O_DIRECT but fail when we actually
+                            // perform unaligned I/O (e.g. tmpfs). Retry the read with a buffered
+                            // handle so temp DBs can still function.
+                            let (mut fallback_file, _) =
+                                Self::open_raw_file(db_path_ref, false, false)?;
+                            fallback_file.read_exact(&mut buf)?;
+                            let (meta_page, _) = decode_meta_page(&buf)?;
+                            (fallback_file, meta_page, false)
+                        } else {
+                            return Err(err.into());
+                        }
+                    } else {
+                        return Err(err.into());
+                    }
+                }
+            }
         } else {
             is_new_file = true;
-            let (mut db_file, direct_ok) = Self::open_raw_file(db_path_ref, true)?;
+            let (mut db_file, direct_ok) = Self::open_raw_file(db_path_ref, true, true)?;
             let meta_page = MetaPage::try_new()?;
             let meta_bytes = encode_meta_page(&meta_page);
             #[allow(clippy::unused_io_amount)]
