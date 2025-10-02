@@ -1,8 +1,9 @@
 use parking_lot::{Condvar, Mutex};
 use std::cmp;
+use std::convert::TryInto;
 use std::fmt;
-use std::fs;
-use std::io::{self, Read};
+use std::fs::{self, File};
+use std::io::{self, BufReader, ErrorKind, Read};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
@@ -17,7 +18,7 @@ use crate::recovery::wal_record::{
     build_frame, decode_frame, encode_body, CheckpointPayload, WalFrame, WalRecordPayload,
     WAL_CRC_LEN, WAL_HEADER_LEN,
 };
-use crate::storage::disk_scheduler::DiskScheduler;
+use crate::recovery::wal_runtime::WalRuntime;
 use bytes::Bytes;
 use dashmap::DashSet;
 
@@ -78,7 +79,6 @@ pub struct WalManager {
 impl WalManager {
     pub fn new(
         config: WalConfig,
-        scheduler: Arc<DiskScheduler>,
         init_state: Option<WalInitState>,
         control_file: Option<Arc<ControlFileManager>>,
     ) -> QuillSQLResult<Self> {
@@ -92,7 +92,8 @@ impl WalManager {
         } else {
             config.flush_coalesce_bytes
         };
-        let mut storage = WalStorage::new(config, scheduler)?;
+        let runtime = Arc::new(WalRuntime::new(WalRuntime::default_worker_count()));
+        let mut storage = WalStorage::new(config, runtime)?;
         let (durable_ptr, next_ptr, checkpoint_ptr, last_record_start, redo_start) =
             if let Some(state) = init_state {
                 (
@@ -329,14 +330,8 @@ impl WalManager {
     }
 
     pub fn reader(&self) -> QuillSQLResult<WalReader> {
-        let (directory, scheduler) = {
-            let guard = self.state.lock();
-            (
-                guard.storage.directory.clone(),
-                guard.storage.scheduler.clone(),
-            )
-        };
-        WalReader::new(directory, scheduler)
+        let directory = self.state.lock().storage.directory.clone();
+        WalReader::new(directory)
     }
 
     /// Returns true if this is the first touch of the page since last checkpoint.
@@ -372,12 +367,12 @@ struct WalStorage {
     segment_size: u64,
     sync_on_flush: bool,
     current_segment: WalSegmentInfo,
-    scheduler: Arc<DiskScheduler>,
+    runtime: Arc<WalRuntime>,
     retain_segments: usize,
 }
 
 impl WalStorage {
-    fn new(config: WalConfig, scheduler: Arc<DiskScheduler>) -> QuillSQLResult<Self> {
+    fn new(config: WalConfig, runtime: Arc<WalRuntime>) -> QuillSQLResult<Self> {
         fs::create_dir_all(&config.directory)?;
         let segment = Self::discover_latest_segment(&config.directory, config.segment_size)?;
         Ok(Self {
@@ -385,7 +380,7 @@ impl WalStorage {
             segment_size: config.segment_size,
             sync_on_flush: config.sync_on_flush,
             current_segment: segment,
-            scheduler,
+            runtime,
             retain_segments: config.retain_segments.max(1),
         })
     }
@@ -526,12 +521,9 @@ impl WalStorage {
             return Ok(());
         }
         let path = segment_path(&self.directory, self.current_segment.id);
-        let rx = self
-            .scheduler
-            .schedule_wal_write(path, offset, data, sync)
-            .map_err(|e| io_error(&e))?;
-        let res = rx.recv().map_err(|e| io::Error::other(e.to_string()))?;
-        res.map_err(|e| io_error(&e))
+        self.runtime
+            .write(&path, offset, data, sync)
+            .map_err(|e| io_error(&e))
     }
 }
 
@@ -555,81 +547,121 @@ impl WalRecord {
 }
 
 pub struct WalReader {
-    scheduler: Arc<DiskScheduler>,
     directory: PathBuf,
     segments: Vec<u64>,
     current_idx: usize,
-    offset: u64,
+    cursor: Option<SegmentCursor>,
 }
 
 impl WalReader {
-    pub fn new(directory: PathBuf, scheduler: Arc<DiskScheduler>) -> QuillSQLResult<Self> {
-        let segments = list_segments(&directory)?;
+    pub fn new(directory: PathBuf) -> QuillSQLResult<Self> {
+        let mut segments = list_segments(&directory)?;
+        segments.sort_unstable();
         Ok(Self {
-            scheduler,
             directory,
             segments,
             current_idx: 0,
-            offset: 0,
+            cursor: None,
         })
     }
 
     pub fn next_frame(&mut self) -> QuillSQLResult<Option<WalFrame>> {
-        const HEADER_LEN: usize = 4 + 2 + 8 + 8 + 1 + 1 + 4;
-        const CRC_LEN: usize = 4;
-
         loop {
-            let segment_id = match self.segments.get(self.current_idx) {
-                Some(id) => *id,
-                None => return Ok(None),
-            };
-            let path = segment_path(&self.directory, segment_id);
-
-            let header = self.read_exact(&path, self.offset, HEADER_LEN)?;
-            if header.is_empty() {
-                self.advance_segment();
-                continue;
-            }
-            if header.len() < HEADER_LEN {
-                return Err(QuillSQLError::Storage("Truncated WAL header".into()));
+            if self.cursor.is_none() {
+                if !self.open_next_segment()? {
+                    return Ok(None);
+                }
             }
 
-            let body_len = u32::from_le_bytes(header[24..28].try_into().unwrap()) as usize;
-            let body =
-                self.read_exact(&path, self.offset + HEADER_LEN as u64, body_len + CRC_LEN)?;
-            if body.len() < body_len + CRC_LEN {
-                return Err(QuillSQLError::Storage("Truncated WAL payload".into()));
+            if let Some(cursor) = self.cursor.as_mut() {
+                match cursor.read_frame()? {
+                    Some(frame) => return Ok(Some(frame)),
+                    None => {
+                        self.cursor = None;
+                        continue;
+                    }
+                }
             }
-
-            let mut frame_bytes = Vec::with_capacity(HEADER_LEN + body_len + CRC_LEN);
-            frame_bytes.extend_from_slice(&header);
-            frame_bytes.extend_from_slice(&body);
-            self.offset += (HEADER_LEN + body_len + CRC_LEN) as u64;
-
-            let (frame, consumed) = decode_frame(&frame_bytes)?;
-            if consumed != frame_bytes.len() {
-                return Err(QuillSQLError::Storage("WAL decode length mismatch".into()));
-            }
-            return Ok(Some(frame));
         }
     }
 
-    fn read_exact(&self, path: &Path, offset: u64, len: usize) -> QuillSQLResult<Vec<u8>> {
-        if len == 0 {
-            return Ok(Vec::new());
-        }
-        let rx = self
-            .scheduler
-            .schedule_wal_read(path.to_path_buf(), offset, len)?;
-        let result = rx
-            .recv()
-            .map_err(|e| QuillSQLError::Internal(format!("WAL reader recv failed: {}", e)))?;
-        result
-    }
-
-    fn advance_segment(&mut self) {
+    fn open_next_segment(&mut self) -> QuillSQLResult<bool> {
+        let Some(segment_id) = self.segments.get(self.current_idx).copied() else {
+            return Ok(false);
+        };
+        let path = segment_path(&self.directory, segment_id);
+        let cursor = SegmentCursor::open(segment_id, &path)?;
+        self.cursor = Some(cursor);
         self.current_idx += 1;
-        self.offset = 0;
+        Ok(true)
+    }
+}
+
+struct SegmentCursor {
+    len: u64,
+    offset: u64,
+    reader: BufReader<File>,
+}
+
+impl SegmentCursor {
+    fn open(_id: u64, path: &Path) -> QuillSQLResult<Self> {
+        let file = File::open(path)?;
+        let len = file.metadata()?.len();
+        Ok(Self {
+            len,
+            offset: 0,
+            reader: BufReader::new(file),
+        })
+    }
+
+    fn read_frame(&mut self) -> QuillSQLResult<Option<WalFrame>> {
+        if self.offset >= self.len {
+            return Ok(None);
+        }
+
+        let mut header_buf = [0u8; WAL_HEADER_LEN];
+        if let Err(err) = self.reader.read_exact(&mut header_buf) {
+            return match err.kind() {
+                ErrorKind::UnexpectedEof => {
+                    self.offset = self.len;
+                    Ok(None)
+                }
+                _ => Err(QuillSQLError::Io(err)),
+            };
+        }
+
+        let body_len = u32::from_le_bytes(header_buf[24..28].try_into().unwrap()) as usize;
+        let total_len = WAL_HEADER_LEN + body_len + WAL_CRC_LEN;
+        let mut rest = vec![0u8; total_len.saturating_sub(WAL_HEADER_LEN)];
+        if let Err(err) = self.reader.read_exact(&mut rest) {
+            return match err.kind() {
+                ErrorKind::UnexpectedEof => {
+                    self.offset = self.len;
+                    Ok(None)
+                }
+                _ => Err(QuillSQLError::Io(err)),
+            };
+        }
+
+        let mut frame_buf = Vec::with_capacity(total_len);
+        frame_buf.extend_from_slice(&header_buf);
+        frame_buf.extend_from_slice(&rest);
+
+        match decode_frame(&frame_buf) {
+            Ok((frame, consumed)) => {
+                self.offset = self.offset.saturating_add(consumed as u64);
+                Ok(Some(frame))
+            }
+            Err(QuillSQLError::Internal(message))
+                if message.contains("too short")
+                    || message.contains("truncated")
+                    || message.contains("CRC mismatch") =>
+            {
+                self.offset = self.len;
+                Ok(None)
+            }
+            Err(err) => Err(err),
+        }
     }
 }
 
@@ -741,32 +773,17 @@ mod tests {
     use crate::recovery::wal_record::{
         CheckpointPayload, TransactionPayload, TransactionRecordKind, WalRecordPayload,
     };
-    use crate::storage::disk_manager::DiskManager;
-    use crate::storage::disk_scheduler::DiskScheduler;
-    use std::path::Path;
-    use std::sync::Arc;
     use tempfile::TempDir;
 
     use super::WalManager;
 
-    fn build_scheduler(db_path: &Path) -> Arc<DiskScheduler> {
-        let disk_manager = Arc::new(DiskManager::try_new(db_path).expect("disk manager"));
-        Arc::new(DiskScheduler::new(disk_manager))
-    }
-
-    fn build_wal_manager_with_db(
-        tmp: &TempDir,
-        db_filename: &str,
-        mut config: WalConfig,
-    ) -> WalManager {
-        let db_path = tmp.path().join(db_filename);
+    fn build_wal_manager_with_config(tmp: &TempDir, mut config: WalConfig) -> WalManager {
         config.directory = tmp.path().join("wal");
-        let scheduler = build_scheduler(&db_path);
-        WalManager::new(config, scheduler, None, None).expect("wal manager")
+        WalManager::new(config, None, None).expect("wal manager")
     }
 
     fn build_wal_manager(tmp: &TempDir) -> WalManager {
-        build_wal_manager_with_db(tmp, "wal_test.db", WalConfig::default())
+        build_wal_manager_with_config(tmp, WalConfig::default())
     }
 
     #[test]
@@ -836,7 +853,7 @@ mod tests {
         let mut config = WalConfig::default();
         config.directory = wal_dir.clone();
 
-        let wal1 = build_wal_manager_with_db(&tmp, "wal_bootstrap.db", config.clone());
+        let wal1 = build_wal_manager_with_config(&tmp, config.clone());
         let l1 = wal1
             .append_record_with(|_| {
                 WalRecordPayload::Transaction(TransactionPayload {
@@ -859,7 +876,7 @@ mod tests {
         wal1.flush(None).expect("flush wal1");
         drop(wal1);
 
-        let wal2 = build_wal_manager_with_db(&tmp, "wal_bootstrap.db", config);
+        let wal2 = build_wal_manager_with_config(&tmp, config);
         assert_eq!(wal2.durable_lsn(), l2);
         assert_eq!(wal2.max_assigned_lsn(), l2);
 
@@ -880,8 +897,6 @@ mod tests {
     #[test]
     fn wal_recycles_segments_after_checkpoint() {
         let tmp = TempDir::new().expect("tempdir");
-        let db_path = tmp.path().join("wal_recycle.db");
-
         let mut config = WalConfig::default();
         config.directory = tmp.path().join("wal");
         config.segment_size = 64;
@@ -890,8 +905,7 @@ mod tests {
         let wal_dir = config.directory.clone();
         let segment_size = config.segment_size;
         let retain_segments = config.retain_segments;
-        let scheduler = build_scheduler(&db_path);
-        let wal = WalManager::new(config, scheduler, None, None).expect("wal manager");
+        let wal = WalManager::new(config, None, None).expect("wal manager");
 
         for i in 0..256 {
             wal.append_record_with(|_| {
@@ -947,7 +961,7 @@ mod tests {
         let mut config = WalConfig::default();
         config.buffer_capacity = 1;
         config.flush_coalesce_bytes = 64;
-        let wal = build_wal_manager_with_db(&tmp, "wal_auto_flush.db", config);
+        let wal = build_wal_manager_with_config(&tmp, config);
 
         let lsn = wal
             .append_record_with(|_| {

@@ -1,9 +1,5 @@
 use crate::error::QuillSQLResult;
-use sqlparser::{
-    ast::{Statement, TransactionMode},
-    dialect::PostgreSqlDialect,
-    parser::Parser,
-};
+use sqlparser::{ast::Statement, dialect::PostgreSqlDialect, parser::Parser};
 
 pub fn parse_sql(sql: &str) -> QuillSQLResult<Vec<Statement>> {
     // Lightweight rewrite for unsupported SHOW syntax under Postgres dialect

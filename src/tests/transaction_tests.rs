@@ -1,5 +1,3 @@
-#![cfg(test)]
-
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::Arc;
 use std::thread;
@@ -9,10 +7,8 @@ use crate::config::WalConfig;
 use crate::database::Database;
 use crate::recovery::WalManager;
 use crate::session::SessionContext;
-use crate::storage::disk_manager::DiskManager;
-use crate::storage::disk_scheduler::DiskScheduler;
 use crate::storage::page::RecordId;
-use crate::transaction::{IsolationLevel, LockMode, TransactionManager, TransactionState};
+use crate::transaction::{IsolationLevel, LockMode, TransactionManager};
 use crate::utils::scalar::ScalarValue;
 use crate::utils::table_ref::TableReference;
 use sqlparser::ast::TransactionAccessMode;
@@ -20,15 +16,11 @@ use tempfile::TempDir;
 
 fn create_manager(temp: &TempDir) -> TransactionManager {
     let wal_path = temp.path().join("wal");
-    let db_path = temp.path().join("test.db");
-
     let mut wal_config = WalConfig::default();
     wal_config.directory = wal_path;
     wal_config.sync_on_flush = false;
 
-    let disk_manager = Arc::new(DiskManager::try_new(db_path.to_str().unwrap()).unwrap());
-    let scheduler = Arc::new(DiskScheduler::new(disk_manager));
-    let wal = Arc::new(WalManager::new(wal_config, scheduler, None, None).unwrap());
+    let wal = Arc::new(WalManager::new(wal_config, None, None).unwrap());
 
     TransactionManager::new(wal, true)
 }

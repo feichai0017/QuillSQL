@@ -1,14 +1,8 @@
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy)]
-pub enum IOStrategy {
-    ThreadPool { workers: Option<usize> },
-    IoUring { queue_depth: Option<usize> },
-}
-
-#[derive(Debug, Clone, Copy)]
 pub struct IOSchedulerConfig {
-    /// Number of worker threads (for both ThreadPool and IoUring workers)
+    /// Number of io_uring worker threads (or fallback thread pool workers)
     pub workers: usize,
     /// IoUring queue depth (Linux only). Ignored on non-Linux.
     #[cfg(target_os = "linux")]
@@ -21,6 +15,8 @@ pub struct IOSchedulerConfig {
     pub iouring_sqpoll_idle_ms: Option<u32>,
     /// Whether the IO backend should force an fsync/fdatasync after writes.
     pub fsync_on_write: bool,
+    /// WAL handler worker threads (buffered I/O)
+    pub wal_workers: usize,
 }
 
 impl IOSchedulerConfig {
@@ -42,6 +38,7 @@ impl Default for IOSchedulerConfig {
             #[cfg(target_os = "linux")]
             iouring_sqpoll_idle_ms: None,
             fsync_on_write: true,
+            wal_workers: std::cmp::max(1, Self::default_workers() / 2),
         }
     }
 }

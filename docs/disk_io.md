@@ -1,4 +1,4 @@
-# Disk I/O — Scheduler, Thread Pool vs io_uring
+# Disk I/O — Scheduler, io_uring Data Pages & WAL Handler
 
 ## 1. Architecture
 
@@ -6,11 +6,12 @@
 - APIs (stable): `schedule_read(page_id)`, `schedule_write(page_id, Bytes)`, `schedule_read_pages(Vec<PageId>)`, `schedule_allocate()`, `schedule_deallocate(page_id)`.
 - Batch Reads: `ReadPages` submits a batch of single-page reads in-order; results preserve input order.
 
-## 2. Thread Pool Backend
+## 2. WAL Handler Backend (buffered I/O)
 
-- Each worker optionally holds a cloned `File` (Linux), using positional I/O (`read_at` / `write_at`) to avoid a global file mutex.
-- Concurrency: Parallelism ≈ worker count; each call is a syscall, suitable for portability and simplicity.
-- Durability: `write_page` flushes to the kernel buffer; fsync is not forced by default (lower latency, weaker durability). Higher-level components may call `flush_all_pages()` when needed.
+- Dedicated WAL handler threads perform sequential WAL writes/reads using buffered I/O (`write_all` / `read_exact`).
+- Configurable worker count (default half of CPU count, min 1).
+- Optional `sync` flag triggers `sync_data` for durability (used during checkpoints/group commit).
+- Keeps WAL semantics simple (variable length records, no direct I/O). Data pages remain on io_uring + O_DIRECT.
 
 ## 3. io_uring Backend (Linux)
 
@@ -21,13 +22,11 @@
 
 ## 4. Configuration
 
-- `config::IOStrategy` selects backend:
-  - `ThreadPool { workers: Option<usize> }`
-  - `IoUring { queue_depth: Option<usize> }`
-- `config::IOSchedulerConfig` consolidates runtime knobs:
-  - `workers`: default to CPU cores.
-  - `iouring_queue_depth` (Linux-only): default 256.
-  - `fsync_on_write`: `true` keeps durable writes, `false` skips `fdatasync` for latency-sensitive workloads.
+- `config::IOSchedulerConfig` knobs:
+  - `workers`: io_uring worker threads (default CPU cores).
+  - `wal_workers`: WAL handler threads (default workers/2).
+  - `iouring_queue_depth`, `iouring_fixed_buffers`, `iouring_sqpoll_idle_ms` (Linux).
+  - `fsync_on_write`: whether page writes issue fdatasync (WAL sync controlled separately).
 
 ## 5. Concurrency & Safety
 

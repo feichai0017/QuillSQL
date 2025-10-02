@@ -20,7 +20,7 @@ use crate::session::SessionContext;
 use crate::utils::util::{pretty_format_logical_plan, pretty_format_physical_plan};
 use crate::{
     catalog::Catalog,
-    execution::{ExecutionContext, ExecutionEngine},
+    execution::ExecutionEngine,
     plan::{LogicalPlanner, PlannerContext},
     storage::disk_manager::DiskManager,
     storage::disk_scheduler::DiskScheduler,
@@ -80,7 +80,6 @@ impl Database {
         let control_file = Arc::new(control_file);
         let wal_manager = Arc::new(WalManager::new(
             wal_config.clone(),
-            disk_scheduler.clone(),
             Some(wal_init),
             Some(control_file.clone()),
         )?);
@@ -166,7 +165,6 @@ impl Database {
         let control_file = Arc::new(control_file);
         let wal_manager = Arc::new(WalManager::new(
             wal_config.clone(),
-            disk_scheduler.clone(),
             Some(wal_init),
             Some(control_file.clone()),
         )?);
@@ -262,8 +260,8 @@ impl Database {
             pretty_format_physical_plan(&physical_plan)
         );
 
-        let execution_result = match optimized_logical_plan.clone() {
-            LogicalPlan::BeginTransaction(modes) => {
+        match optimized_logical_plan {
+            LogicalPlan::BeginTransaction(ref modes) => {
                 if session.has_active_transaction() {
                     return Err(QuillSQLError::Execution(
                         "transaction already active".to_string(),
@@ -283,7 +281,7 @@ impl Database {
                     .active_txn_mut()
                     .ok_or_else(|| QuillSQLError::Execution("no active transaction".to_string()))?;
                 self.transaction_manager.commit(txn_ref)?;
-                session.take_active_transaction();
+                session.clear_active_transaction();
                 Ok(vec![])
             }
             LogicalPlan::RollbackTransaction => {
@@ -291,76 +289,44 @@ impl Database {
                     .active_txn_mut()
                     .ok_or_else(|| QuillSQLError::Execution("no active transaction".to_string()))?;
                 self.transaction_manager.abort(txn_ref)?;
-                session.take_active_transaction();
+                session.clear_active_transaction();
                 Ok(vec![])
             }
-            LogicalPlan::SetTransaction { scope, modes } => {
+            LogicalPlan::SetTransaction {
+                ref scope,
+                ref modes,
+            } => {
                 match scope {
-                    TransactionScope::Session => {
-                        session.apply_session_modes(&modes);
-                    }
-                    TransactionScope::Transaction => {
-                        session.apply_transaction_modes(&modes);
-                    }
+                    TransactionScope::Session => session.apply_session_modes(modes),
+                    TransactionScope::Transaction => session.apply_transaction_modes(modes),
                 }
                 Ok(vec![])
             }
-            plan => {
-                let txn_existed = session.has_active_transaction();
-                if !txn_existed {
-                    let new_txn = self.transaction_manager.begin(
-                        session.default_isolation(),
-                        TransactionAccessMode::ReadWrite,
-                    )?;
-                    session.set_active_transaction(new_txn)?;
-                }
+            _ => {
+                let needs_cleanup = !session.has_active_transaction();
+                let autocommit = session.autocommit();
 
-                let execution_result = {
-                    let txn_ref = session
-                        .active_txn_mut()
-                        .expect("session must hold an active transaction");
-                    let execution_ctx = ExecutionContext::new(
+                let result = {
+                    let txn = session.ensure_active_transaction(&self.transaction_manager)?;
+                    let context = crate::execution::ExecutionContext::new(
                         &mut self.catalog,
-                        txn_ref,
+                        txn,
                         &self.transaction_manager,
                     );
-                    let mut execution_engine = ExecutionEngine {
-                        context: execution_ctx,
-                    };
-                    execution_engine.execute(Arc::new(physical_plan))
+                    let mut engine = ExecutionEngine { context };
+                    engine.execute(Arc::new(physical_plan))?
                 };
 
-                match execution_result {
-                    Ok(tuples) => {
-                        if !txn_existed && session.autocommit() {
-                            {
-                                let txn_ref = session
-                                    .active_txn_mut()
-                                    .expect("transaction should still be active");
-                                self.transaction_manager.commit(txn_ref)?;
-                            }
-                            session.take_active_transaction();
-                        }
-                        Ok(tuples)
+                if autocommit && needs_cleanup {
+                    if let Some(txn) = session.active_txn_mut() {
+                        self.transaction_manager.commit(txn)?;
                     }
-                    Err(e) => {
-                        if txn_existed {
-                            if let Some(txn_ref) = session.active_txn_mut() {
-                                txn_ref.mark_tainted();
-                            }
-                        } else {
-                            if let Some(txn_ref) = session.active_txn_mut() {
-                                let _ = self.transaction_manager.abort(txn_ref);
-                            }
-                            session.take_active_transaction();
-                        }
-                        Err(e)
-                    }
+                    session.clear_active_transaction();
                 }
-            }
-        };
 
-        execution_result
+                Ok(result)
+            }
+        }
     }
 
     pub fn default_isolation(&self) -> IsolationLevel {

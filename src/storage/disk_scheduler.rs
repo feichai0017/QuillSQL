@@ -1,15 +1,14 @@
 use super::disk_manager::DiskManager;
 use crate::buffer::PageId;
-use crate::config::{IOSchedulerConfig, IOStrategy};
+use crate::config::IOSchedulerConfig;
 use crate::error::{QuillSQLError, QuillSQLResult};
-use crate::storage::io::thread_pool;
-use crate::storage::io::IOBackend; // trait facade
 use bytes::{Bytes, BytesMut};
-use std::path::PathBuf;
-#[cfg(target_os = "linux")]
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::thread;
+
+#[cfg(target_os = "linux")]
+use crate::storage::io::io_uring;
 
 #[derive(Debug)]
 pub enum DiskError {
@@ -23,8 +22,6 @@ pub enum DiskResponse {
     Allocate { page_id: PageId },
     Error(QuillSQLError),
 }
-// IOStrategy and IOSchedulerConfig moved to crate::config
-
 // Type alias for the sender part of the result channel
 pub type DiskCommandResultSender<T> = Sender<QuillSQLResult<T>>;
 // Type alias for the receiver part of the result channel
@@ -54,19 +51,6 @@ pub enum DiskRequest {
         page_id: PageId,
         result_sender: DiskCommandResultSender<()>,
     },
-    WriteWal {
-        path: PathBuf,
-        offset: u64,
-        bytes: Bytes,
-        sync: bool,
-        result_sender: DiskCommandResultSender<()>,
-    },
-    ReadWal {
-        path: PathBuf,
-        offset: u64,
-        len: usize,
-        result_sender: DiskCommandResultSender<Vec<u8>>,
-    },
     Shutdown,
 }
 
@@ -74,11 +58,8 @@ pub enum DiskRequest {
 #[derive(Debug)]
 pub struct DiskScheduler {
     request_sender: Sender<DiskRequest>,
-    // Dispatcher thread receives all requests and forwards to workers
     dispatcher_thread: Option<thread::JoinHandle<()>>,
-    // Worker threads execute actual I/O tasks concurrently
     worker_threads: Vec<thread::JoinHandle<()>>,
-    /// Centralized runtime configuration
     pub config: IOSchedulerConfig,
 }
 
@@ -88,54 +69,21 @@ impl DiskScheduler {
     }
 
     pub fn new_with_config(disk_manager: Arc<DiskManager>, config: IOSchedulerConfig) -> Self {
-        let (request_sender, dispatcher_thread, worker_threads) =
-            thread_pool::start(disk_manager, config);
-
-        DiskScheduler {
-            request_sender,
-            dispatcher_thread: Some(dispatcher_thread),
-            worker_threads,
-            config,
+        #[cfg(target_os = "linux")]
+        {
+            let (request_sender, dispatcher_thread, worker_threads) =
+                spawn_runtime(disk_manager.clone(), config);
+            return DiskScheduler {
+                request_sender,
+                dispatcher_thread: Some(dispatcher_thread),
+                worker_threads,
+                config,
+            };
         }
-    }
 
-    /// Create scheduler with explicit strategy. IoUring currently logs and
-    /// falls back to thread-pool to preserve compatibility.
-    pub fn new_with_strategy(disk_manager: Arc<DiskManager>, strategy: IOStrategy) -> Self {
-        match strategy {
-            IOStrategy::ThreadPool { workers } => {
-                let mut cfg = IOSchedulerConfig::default();
-                if let Some(w) = workers {
-                    cfg.workers = w;
-                }
-                Self::new_with_config(disk_manager, cfg)
-            }
-            IOStrategy::IoUring { queue_depth } => {
-                Self::new_with_iouring(disk_manager, queue_depth)
-            }
-        }
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    fn new_with_iouring(disk_manager: Arc<DiskManager>, _queue_depth: Option<usize>) -> Self {
-        eprintln!("WARN: IoUring selected on non-Linux platform; falling back to thread-pool");
-        Self::new(disk_manager)
-    }
-
-    #[cfg(target_os = "linux")]
-    fn new_with_iouring(disk_manager: Arc<DiskManager>, queue_depth: Option<usize>) -> Self {
-        let mut config = IOSchedulerConfig::default();
-        if let Some(q) = queue_depth {
-            config.iouring_queue_depth = q;
-        }
-        let (request_sender, dispatcher_thread, worker_threads) =
-            crate::storage::io::iouring::start(disk_manager, config);
-
-        DiskScheduler {
-            request_sender,
-            dispatcher_thread: Some(dispatcher_thread),
-            worker_threads,
-            config,
+        #[cfg(not(target_os = "linux"))]
+        {
+            panic!("io_uring disk scheduler requires Linux");
         }
     }
 
@@ -214,65 +162,17 @@ impl DiskScheduler {
             })?;
         Ok(rx)
     }
-
-    pub fn schedule_wal_write(
-        &self,
-        path: PathBuf,
-        offset: u64,
-        bytes: Bytes,
-        sync: bool,
-    ) -> QuillSQLResult<DiskCommandResultReceiver<()>> {
-        let (tx, rx) = mpsc::channel();
-        self.request_sender
-            .send(DiskRequest::WriteWal {
-                path,
-                offset,
-                bytes,
-                sync,
-                result_sender: tx,
-            })
-            .map_err(|e| {
-                QuillSQLError::Internal(format!("Failed to send WAL write request: {}", e))
-            })?;
-        Ok(rx)
-    }
-
-    pub fn schedule_wal_read(
-        &self,
-        path: PathBuf,
-        offset: u64,
-        len: usize,
-    ) -> QuillSQLResult<DiskCommandResultReceiver<Vec<u8>>> {
-        let (tx, rx) = mpsc::channel();
-        self.request_sender
-            .send(DiskRequest::ReadWal {
-                path,
-                offset,
-                len,
-                result_sender: tx,
-            })
-            .map_err(|e| {
-                QuillSQLError::Internal(format!("Failed to send WAL read request: {}", e))
-            })?;
-        Ok(rx)
-    }
 }
 
 // Implement Drop for graceful shutdown
 impl Drop for DiskScheduler {
     fn drop(&mut self) {
-        // println!("DEBUG: DiskScheduler dropping. Sending Shutdown signal...");
-        // Send shutdown signal. Ignore error if channel already closed.
         let _ = self.request_sender.send(DiskRequest::Shutdown);
-
-        // Join dispatcher first
         if let Some(handle) = self.dispatcher_thread.take() {
             if let Err(e) = handle.join() {
                 log::error!("Disk dispatcher thread panicked: {:?}", e);
             }
         }
-
-        // Then join all workers
         for handle in self.worker_threads.drain(..) {
             if let Err(e) = handle.join() {
                 log::error!("Disk worker thread panicked: {:?}", e);
@@ -281,40 +181,73 @@ impl Drop for DiskScheduler {
     }
 }
 
-// ---- IOBackend facade for DiskScheduler (compatibility shim) ----
-impl IOBackend for DiskScheduler {
-    fn schedule_read(
-        &self,
-        page_id: PageId,
-    ) -> QuillSQLResult<DiskCommandResultReceiver<BytesMut>> {
-        Self::schedule_read(self, page_id)
+#[cfg(target_os = "linux")]
+fn spawn_runtime(
+    disk_manager: Arc<DiskManager>,
+    config: IOSchedulerConfig,
+) -> (
+    Sender<DiskRequest>,
+    thread::JoinHandle<()>,
+    Vec<thread::JoinHandle<()>>,
+) {
+    let worker_count = config.workers;
+    let (request_sender, request_receiver) = mpsc::channel::<DiskRequest>();
+
+    let mut worker_senders = Vec::with_capacity(worker_count);
+    let mut worker_threads = Vec::with_capacity(worker_count);
+    for i in 0..worker_count {
+        let (tx, rx) = mpsc::channel::<DiskRequest>();
+        worker_senders.push(tx);
+        let dm = disk_manager.clone();
+        let worker_config = config;
+        let entries = worker_config.iouring_queue_depth as u32;
+        let fixed_count = worker_config.iouring_fixed_buffers;
+        let sqpoll_idle = worker_config.iouring_sqpoll_idle_ms;
+        let fsync_on_write = worker_config.fsync_on_write;
+        let handle = thread::Builder::new()
+            .name(format!("disk-scheduler-iouring-worker-{}", i))
+            .spawn(move || {
+                io_uring::worker_loop(rx, dm, entries, fixed_count, sqpoll_idle, fsync_on_write);
+            })
+            .expect("Failed to spawn DiskScheduler io_uring worker thread");
+        worker_threads.push(handle);
     }
 
-    fn schedule_read_pages(
-        &self,
-        page_ids: Vec<PageId>,
-    ) -> QuillSQLResult<DiskCommandResultReceiver<Vec<BytesMut>>> {
-        Self::schedule_read_pages(self, page_ids)
-    }
+    let dispatcher_thread = thread::Builder::new()
+        .name("disk-scheduler-dispatcher".to_string())
+        .spawn(move || dispatcher_loop(request_receiver, worker_senders))
+        .expect("Failed to spawn DiskScheduler dispatcher thread");
 
-    fn schedule_write(
-        &self,
-        page_id: PageId,
-        data: Bytes,
-    ) -> QuillSQLResult<DiskCommandResultReceiver<()>> {
-        Self::schedule_write(self, page_id, data)
-    }
+    (request_sender, dispatcher_thread, worker_threads)
+}
 
-    fn schedule_allocate(&self) -> QuillSQLResult<Receiver<QuillSQLResult<PageId>>> {
-        Self::schedule_allocate(self)
+#[cfg(target_os = "linux")]
+fn dispatcher_loop(receiver: Receiver<DiskRequest>, workers: Vec<Sender<DiskRequest>>) {
+    log::debug!("DiskScheduler dispatcher started");
+    let mut rr = 0usize;
+    let worker_len = workers.len();
+    while let Ok(req) = receiver.recv() {
+        match req {
+            DiskRequest::Shutdown => {
+                for tx in &workers {
+                    let _ = tx.send(DiskRequest::Shutdown);
+                }
+                break;
+            }
+            other => {
+                if worker_len == 0 {
+                    log::error!("No io_uring workers available");
+                    break;
+                }
+                let idx = rr % worker_len;
+                rr = rr.wrapping_add(1);
+                if workers[idx].send(other).is_err() {
+                    log::error!("Failed to forward request to io_uring worker");
+                }
+            }
+        }
     }
-
-    fn schedule_deallocate(
-        &self,
-        page_id: PageId,
-    ) -> QuillSQLResult<DiskCommandResultReceiver<()>> {
-        Self::schedule_deallocate(self, page_id)
-    }
+    log::debug!("DiskScheduler dispatcher finished");
 }
 
 // --- Tests for DiskScheduler ---
@@ -570,12 +503,9 @@ mod tests {
     fn test_iouring_allocate_write_read() -> QuillSQLResult<()> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let dm = Arc::new(DiskManager::try_new(temp_dir.path().join("test.db")).unwrap());
-        let scheduler = Arc::new(DiskScheduler::new_with_strategy(
-            dm.clone(),
-            IOStrategy::IoUring {
-                queue_depth: Some(256),
-            },
-        ));
+        let mut cfg = IOSchedulerConfig::default();
+        cfg.iouring_queue_depth = 256;
+        let scheduler = Arc::new(DiskScheduler::new_with_config(dm.clone(), cfg));
 
         // allocate
         let rx_alloc = scheduler.schedule_allocate()?;
@@ -605,12 +535,9 @@ mod tests {
     fn test_iouring_concurrent_reads() -> QuillSQLResult<()> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let dm = Arc::new(DiskManager::try_new(temp_dir.path().join("test.db")).unwrap());
-        let scheduler = Arc::new(DiskScheduler::new_with_strategy(
-            dm.clone(),
-            IOStrategy::IoUring {
-                queue_depth: Some(256),
-            },
-        ));
+        let mut cfg = IOSchedulerConfig::default();
+        cfg.iouring_queue_depth = 256;
+        let scheduler = Arc::new(DiskScheduler::new_with_config(dm.clone(), cfg));
 
         let page_id = scheduler
             .schedule_allocate()?

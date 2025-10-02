@@ -1,6 +1,7 @@
 use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::transaction::{IsolationLevel, Transaction};
 use sqlparser::ast::TransactionAccessMode;
+use std::sync::Arc;
 /// Session-level state used to manage transactions and defaults for a client connection.
 pub struct SessionContext {
     default_isolation: IsolationLevel,
@@ -82,6 +83,33 @@ impl SessionContext {
 
     pub fn active_txn_mut(&mut self) -> Option<&mut Transaction> {
         self.active_txn.as_mut()
+    }
+
+    pub fn ensure_active_transaction(
+        &mut self,
+        txn_mgr: &Arc<crate::transaction::TransactionManager>,
+    ) -> QuillSQLResult<&mut Transaction> {
+        if self.active_txn.is_none() {
+            let isolation = self
+                .pending_session_isolation
+                .unwrap_or(self.default_isolation);
+            let access_mode = self
+                .pending_session_access
+                .unwrap_or(self.default_access_mode);
+            let mut txn = txn_mgr.begin(isolation, access_mode)?;
+            if let Some(isolation) = self.pending_session_isolation.take() {
+                self.default_isolation = isolation;
+                txn.set_isolation_level(isolation);
+            }
+            if let Some(mode) = self.pending_session_access.take() {
+                self.default_access_mode = mode;
+                txn.update_access_mode(mode);
+            }
+            self.active_txn = Some(txn);
+        }
+        self.active_txn
+            .as_mut()
+            .ok_or_else(|| QuillSQLError::Execution("failed to start transaction".to_string()))
     }
 
     pub fn set_active_transaction(&mut self, mut txn: Transaction) -> QuillSQLResult<()> {

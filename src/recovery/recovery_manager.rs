@@ -415,13 +415,12 @@ mod tests {
         let db_path = temp.path().join("test.db");
         let wal_dir = temp.path().join("wal");
 
-        let scheduler = build_scheduler(&db_path);
         let config = WalConfig {
             directory: wal_dir.clone(),
             sync_on_flush: false,
             ..WalConfig::default()
         };
-        let wal = Arc::new(WalManager::new(config.clone(), scheduler.clone(), None, None).unwrap());
+        let wal = Arc::new(WalManager::new(config.clone(), None, None).unwrap());
 
         let page_bytes = vec![0xAB; crate::buffer::PAGE_SIZE];
         wal.append_record_with(|_| {
@@ -436,7 +435,7 @@ mod tests {
         drop(wal);
 
         let scheduler = build_scheduler(&db_path);
-        let wal = Arc::new(WalManager::new(config, scheduler.clone(), None, None).unwrap());
+        let wal = Arc::new(WalManager::new(config, None, None).unwrap());
         let recovery = RecoveryManager::new(wal, scheduler.clone());
         let summary = recovery.replay().unwrap();
         assert_eq!(summary.redo_count, 1);
@@ -454,13 +453,12 @@ mod tests {
         let db_path = temp.path().join("delta.db");
         let wal_dir = temp.path().join("wal");
 
-        let scheduler = build_scheduler(&db_path);
         let config = WalConfig {
             directory: wal_dir.clone(),
             sync_on_flush: false,
             ..WalConfig::default()
         };
-        let wal = Arc::new(WalManager::new(config.clone(), scheduler.clone(), None, None).unwrap());
+        let wal = Arc::new(WalManager::new(config.clone(), None, None).unwrap());
 
         // Seed a page with zeros
         let zero = vec![0u8; crate::buffer::PAGE_SIZE];
@@ -488,7 +486,7 @@ mod tests {
         drop(wal);
 
         let scheduler = build_scheduler(&db_path);
-        let wal = Arc::new(WalManager::new(config, scheduler.clone(), None, None).unwrap());
+        let wal = Arc::new(WalManager::new(config, None, None).unwrap());
         let recovery = RecoveryManager::new(wal, scheduler.clone());
         let summary = recovery.replay().unwrap();
         assert!(summary.redo_count >= 2);
@@ -504,13 +502,12 @@ mod tests {
         let db_path = temp.path().join("loser.db");
         let wal_dir = temp.path().join("wal");
 
-        let scheduler = build_scheduler(&db_path);
         let config = WalConfig {
             directory: wal_dir.clone(),
             sync_on_flush: false,
             ..WalConfig::default()
         };
-        let wal = WalManager::new(config.clone(), scheduler.clone(), None, None).unwrap();
+        let wal = WalManager::new(config.clone(), None, None).unwrap();
 
         wal.append_record_with(|_| {
             WalRecordPayload::Transaction(TransactionPayload {
@@ -523,7 +520,7 @@ mod tests {
         drop(wal);
 
         let scheduler = build_scheduler(&db_path);
-        let wal = Arc::new(WalManager::new(config, scheduler.clone(), None, None).unwrap());
+        let wal = Arc::new(WalManager::new(config, None, None).unwrap());
         let recovery = RecoveryManager::new(wal, scheduler.clone());
         let summary = recovery.replay().unwrap();
         assert_eq!(summary.loser_transactions, vec![7]);
@@ -534,14 +531,13 @@ mod tests {
         let temp = TempDir::new().expect("tempdir");
         let db_path = temp.path().join("undo_insert.db");
         let wal_dir = temp.path().join("wal");
-
-        let scheduler = build_scheduler(&db_path);
         let config = WalConfig {
             directory: wal_dir.clone(),
             sync_on_flush: false,
             ..WalConfig::default()
         };
-        let wal = Arc::new(WalManager::new(config.clone(), scheduler.clone(), None, None).unwrap());
+        let wal = Arc::new(WalManager::new(config.clone(), None, None).unwrap());
+        let scheduler = build_scheduler(&db_path);
 
         // Build a page with 1 tuple (slot 0), not deleted
         let page_id = 3u32;
@@ -622,7 +618,7 @@ mod tests {
         // Reopen wal and run recovery (inject BufferPool to use TableHeap recovery APIs)
         let scheduler = build_scheduler(&db_path);
         let bpm = Arc::new(BufferManager::new(64, scheduler.clone()));
-        let wal = Arc::new(WalManager::new(config, scheduler.clone(), None, None).unwrap());
+        let wal = Arc::new(WalManager::new(config, None, None).unwrap());
         let recovery = RecoveryManager::new(wal, scheduler.clone()).with_buffer_pool(bpm);
         let _summary = recovery.replay().unwrap();
 
@@ -638,12 +634,11 @@ mod tests {
         let temp = TempDir::new().expect("tempdir");
         let db_path = temp.path().join("undo_update.db");
         let wal_dir = temp.path().join("wal");
-
-        let scheduler = build_scheduler(&db_path);
         let mut config = WalConfig::default();
         config.directory = wal_dir.clone();
         config.sync_on_flush = false;
-        let wal = Arc::new(WalManager::new(config.clone(), scheduler.clone(), None, None).unwrap());
+        let wal = Arc::new(WalManager::new(config.clone(), None, None).unwrap());
+        let scheduler = build_scheduler(&db_path);
 
         let page_id = 4u32;
         // Build header with 1 slot
@@ -743,7 +738,7 @@ mod tests {
         // Recover (inject BufferPool)
         let scheduler = build_scheduler(&db_path);
         let bpm = Arc::new(BufferManager::new(64, scheduler.clone()));
-        let wal = Arc::new(WalManager::new(config, scheduler.clone(), None, None).unwrap());
+        let wal = Arc::new(WalManager::new(config, None, None).unwrap());
         let recovery = RecoveryManager::new(wal, scheduler.clone()).with_buffer_pool(bpm);
         let _ = recovery.replay().unwrap();
 
@@ -761,12 +756,11 @@ mod tests {
         let temp = TempDir::new().expect("tempdir");
         let db_path = temp.path().join("undo_delete.db");
         let wal_dir = temp.path().join("wal");
-
         let scheduler = build_scheduler(&db_path);
         let mut config = WalConfig::default();
         config.directory = wal_dir.clone();
         config.sync_on_flush = false;
-        let wal = Arc::new(WalManager::new(config.clone(), scheduler.clone(), None, None).unwrap());
+        let wal = Arc::new(WalManager::new(config.clone(), None, None).unwrap());
 
         let page_id = 5u32;
         let old_meta = TupleMeta {
@@ -847,7 +841,7 @@ mod tests {
         // recover (inject BufferPool)
         let scheduler = build_scheduler(&db_path);
         let bpm = Arc::new(BufferManager::new(64, scheduler.clone()));
-        let wal = Arc::new(WalManager::new(config, scheduler.clone(), None, None).unwrap());
+        let wal = Arc::new(WalManager::new(config, None, None).unwrap());
         let recovery = RecoveryManager::new(wal, scheduler.clone()).with_buffer_pool(bpm);
         let _ = recovery.replay().unwrap();
 
@@ -864,12 +858,11 @@ mod tests {
         let temp = TempDir::new().expect("tempdir");
         let db_path = temp.path().join("idem.db");
         let wal_dir = temp.path().join("wal");
-
-        let scheduler = build_scheduler(&db_path);
         let mut config = WalConfig::default();
         config.directory = wal_dir.clone();
         config.sync_on_flush = false;
-        let wal = Arc::new(WalManager::new(config.clone(), scheduler.clone(), None, None).unwrap());
+        let wal = Arc::new(WalManager::new(config.clone(), None, None).unwrap());
+        let scheduler = build_scheduler(&db_path);
 
         // Seed a page with one visible tuple
         let page_id = 6u32;
@@ -939,7 +932,7 @@ mod tests {
         // First recovery (inject BufferPool)
         let scheduler = build_scheduler(&db_path);
         let bpm = Arc::new(BufferManager::new(64, scheduler.clone()));
-        let wal = Arc::new(WalManager::new(config.clone(), scheduler.clone(), None, None).unwrap());
+        let wal = Arc::new(WalManager::new(config.clone(), None, None).unwrap());
         let recovery = RecoveryManager::new(wal, scheduler.clone()).with_buffer_pool(bpm);
         let _ = recovery.replay().unwrap();
         let rx = scheduler.schedule_read(page_id).unwrap();
@@ -950,7 +943,7 @@ mod tests {
         // Second recovery (should not change page state) - inject BufferPool again
         let scheduler2 = build_scheduler(&db_path);
         let bpm2 = Arc::new(BufferManager::new(64, scheduler2.clone()));
-        let wal2 = Arc::new(WalManager::new(config, scheduler2.clone(), None, None).unwrap());
+        let wal2 = Arc::new(WalManager::new(config, None, None).unwrap());
         let recovery2 = RecoveryManager::new(wal2, scheduler2.clone()).with_buffer_pool(bpm2);
         let _ = recovery2.replay().unwrap();
         let rx2 = scheduler2.schedule_read(page_id).unwrap();
@@ -965,16 +958,22 @@ mod tests {
         let db_path = temp.path().join("dpt_segments.db");
         let wal_dir = temp.path().join("wal");
 
-        let scheduler = build_scheduler(&db_path);
         let mut config = WalConfig::default();
         config.directory = wal_dir.clone();
         config.sync_on_flush = false;
         config.segment_size = 1024; // force frequent rotation
-        let wal = Arc::new(WalManager::new(config.clone(), scheduler.clone(), None, None).unwrap());
+        let wal = Arc::new(WalManager::new(config.clone(), None, None).unwrap());
 
         // Write initial full page at pid=7
         let pid = 7u32;
         let base = vec![0u8; crate::buffer::PAGE_SIZE];
+        let scheduler = build_scheduler(&db_path);
+        scheduler
+            .schedule_write(pid, bytes::Bytes::from(base.clone()))
+            .unwrap()
+            .recv()
+            .unwrap()
+            .unwrap();
         wal.append_record_with(|_| {
             WalRecordPayload::PageWrite(PageWritePayload {
                 page_id: pid,
@@ -1019,7 +1018,7 @@ mod tests {
 
         // Recover and ensure deltas applied
         let scheduler = build_scheduler(&db_path);
-        let wal = Arc::new(WalManager::new(config, scheduler.clone(), None, None).unwrap());
+        let wal = Arc::new(WalManager::new(config, None, None).unwrap());
         let recovery = RecoveryManager::new(wal, scheduler.clone());
         let summary = recovery.replay().unwrap();
         assert!(summary.redo_count >= 1);
@@ -1041,11 +1040,10 @@ mod tests {
         let db_path = temp.path().join("fpw_delta.db");
         let wal_dir = temp.path().join("wal");
 
-        let scheduler = build_scheduler(&db_path);
         let mut config = WalConfig::default();
         config.directory = wal_dir.clone();
         config.sync_on_flush = false;
-        let wal = Arc::new(WalManager::new(config.clone(), scheduler.clone(), None, None).unwrap());
+        let wal = Arc::new(WalManager::new(config.clone(), None, None).unwrap());
 
         let pid = 8u32;
         // First touch should be FPW (simulate TableHeap behavior by writing a full page)
@@ -1074,7 +1072,7 @@ mod tests {
 
         // Recover and verify
         let scheduler = build_scheduler(&db_path);
-        let wal = Arc::new(WalManager::new(config, scheduler.clone(), None, None).unwrap());
+        let wal = Arc::new(WalManager::new(config, None, None).unwrap());
         let recovery = RecoveryManager::new(wal, scheduler.clone());
         let _ = recovery.replay().unwrap();
         let rx = scheduler.schedule_read(pid).unwrap();
@@ -1092,7 +1090,7 @@ mod tests {
         let mut config = WalConfig::default();
         config.directory = wal_dir.clone();
         config.sync_on_flush = false;
-        let wal = Arc::new(WalManager::new(config.clone(), scheduler.clone(), None, None).unwrap());
+        let wal = Arc::new(WalManager::new(config.clone(), None, None).unwrap());
 
         // Seed a page with one tuple of 16 bytes
         let page_id = 9u32;
@@ -1199,8 +1197,7 @@ mod tests {
         // First recovery should undo both updates and write two CLRs
         let scheduler1 = build_scheduler(&db_path);
         let bpm1 = Arc::new(BufferManager::new(64, scheduler1.clone()));
-        let wal1 =
-            Arc::new(WalManager::new(config.clone(), scheduler1.clone(), None, None).unwrap());
+        let wal1 = Arc::new(WalManager::new(config.clone(), None, None).unwrap());
         let recovery1 =
             RecoveryManager::new(wal1.clone(), scheduler1.clone()).with_buffer_pool(bpm1);
         let _ = recovery1.replay().unwrap();
@@ -1225,8 +1222,7 @@ mod tests {
         // Second recovery: no further changes
         let scheduler2 = build_scheduler(&db_path);
         let bpm2 = Arc::new(BufferManager::new(64, scheduler2.clone()));
-        let wal2 =
-            Arc::new(WalManager::new(config.clone(), scheduler2.clone(), None, None).unwrap());
+        let wal2 = Arc::new(WalManager::new(config.clone(), None, None).unwrap());
         let recovery2 = RecoveryManager::new(wal2, scheduler2.clone()).with_buffer_pool(bpm2);
         let _ = recovery2.replay().unwrap();
         let rx2 = scheduler2.schedule_read(page_id).unwrap();
@@ -1247,7 +1243,7 @@ mod tests {
         let mut config = WalConfig::default();
         config.directory = wal_dir.clone();
         config.sync_on_flush = false;
-        let wal = Arc::new(WalManager::new(config.clone(), scheduler.clone(), None, None).unwrap());
+        let wal = Arc::new(WalManager::new(config.clone(), None, None).unwrap());
 
         let pid_a = 10u32;
         let pid_b = 11u32;
@@ -1361,8 +1357,7 @@ mod tests {
         for _ in 0..2 {
             let scheduler_r = build_scheduler(&db_path);
             let bpm_r = Arc::new(BufferManager::new(64, scheduler_r.clone()));
-            let wal_r =
-                Arc::new(WalManager::new(config.clone(), scheduler_r.clone(), None, None).unwrap());
+            let wal_r = Arc::new(WalManager::new(config.clone(), None, None).unwrap());
             let recovery = RecoveryManager::new(wal_r, scheduler_r.clone()).with_buffer_pool(bpm_r);
             let _ = recovery.replay().unwrap();
 
