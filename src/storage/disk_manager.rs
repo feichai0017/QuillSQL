@@ -1,22 +1,80 @@
-use log::debug;
+use log::{debug, warn};
+use std::alloc::{alloc, alloc_zeroed, dealloc, Layout};
 use std::fs::File;
 use std::path::Path;
+use std::ptr::NonNull;
+use std::slice;
 use std::sync::atomic::Ordering;
 use std::sync::RwLock;
 use std::{
-    io::{Read, Seek, Write},
+    io::{Read, Seek, SeekFrom, Write},
     sync::{atomic::AtomicU32, Mutex, MutexGuard},
 };
+
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::OpenOptionsExt;
 
 use crate::error::{QuillSQLError, QuillSQLResult};
 
 use crate::buffer::{PageId, INVALID_PAGE_ID, PAGE_SIZE};
-use crate::storage::codec::{FreelistPageCodec, MetaPageCodec};
+use crate::storage::codec::FreelistPageCodec;
 use crate::storage::page::FreelistPage;
-use crate::storage::page::MetaPage;
-use crate::storage::page::META_PAGE_SIZE;
+use crate::storage::page::{decode_meta_page, encode_meta_page, MetaPage, META_PAGE_SIZE};
 
 static EMPTY_PAGE: [u8; PAGE_SIZE] = [0; PAGE_SIZE];
+
+/// Page-aligned buffer suitable for O_DIRECT transfers.
+pub(crate) struct AlignedPageBuf {
+    ptr: NonNull<u8>,
+    layout: Layout,
+}
+
+impl AlignedPageBuf {
+    pub(crate) fn new_zeroed() -> QuillSQLResult<Self> {
+        Self::allocate(true)
+    }
+
+    pub(crate) fn new_uninit() -> QuillSQLResult<Self> {
+        Self::allocate(false)
+    }
+
+    fn allocate(zeroed: bool) -> QuillSQLResult<Self> {
+        let layout = Layout::from_size_align(PAGE_SIZE, PAGE_SIZE)
+            .map_err(|_| QuillSQLError::Internal("Invalid PAGE_SIZE layout".into()))?;
+        let ptr = unsafe {
+            if zeroed {
+                alloc_zeroed(layout)
+            } else {
+                alloc(layout)
+            }
+        };
+        let Some(non_null) = NonNull::new(ptr) else {
+            return Err(QuillSQLError::Internal("Aligned allocation failed".into()));
+        };
+        Ok(Self {
+            ptr: non_null,
+            layout,
+        })
+    }
+
+    pub(crate) fn as_slice(&self) -> &[u8] {
+        unsafe { slice::from_raw_parts(self.ptr.as_ptr(), PAGE_SIZE) }
+    }
+
+    pub(crate) fn as_mut_slice(&mut self) -> &mut [u8] {
+        unsafe { slice::from_raw_parts_mut(self.ptr.as_ptr(), PAGE_SIZE) }
+    }
+
+    pub(crate) fn ptr(&self) -> *mut u8 {
+        self.ptr.as_ptr()
+    }
+}
+
+impl Drop for AlignedPageBuf {
+    fn drop(&mut self) {
+        unsafe { dealloc(self.ptr.as_ptr(), self.layout) };
+    }
+}
 
 #[derive(Debug)]
 pub struct DiskManager {
@@ -26,28 +84,59 @@ pub struct DiskManager {
 }
 
 impl DiskManager {
+    fn open_raw_file(db_path: &Path, create: bool) -> std::io::Result<(File, bool)> {
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).write(true);
+        if create {
+            options.create(true);
+        }
+        #[cfg(target_os = "linux")]
+        options.custom_flags(libc::O_DIRECT | libc::O_NOATIME);
+
+        match options.open(db_path) {
+            Ok(file) => {
+                #[cfg(target_os = "linux")]
+                {
+                    return Ok((file, true));
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    return Ok((file, false));
+                }
+            }
+            Err(err) => {
+                #[cfg(target_os = "linux")]
+                warn!(
+                    "O_DIRECT unavailable ({}), falling back to buffered I/O",
+                    err
+                );
+                let mut fallback = std::fs::OpenOptions::new();
+                fallback.read(true).write(true);
+                if create {
+                    fallback.create(true);
+                }
+                fallback.open(db_path).map(|f| (f, false))
+            }
+        }
+    }
+
     pub fn try_new(db_path: impl AsRef<Path>) -> QuillSQLResult<Self> {
         let mut is_new_file = false;
-        let (db_file, meta) = if db_path.as_ref().exists() {
-            let mut db_file = std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(db_path)?;
+        let db_path_ref = db_path.as_ref();
+        let (db_file, meta, direct_enabled) = if db_path_ref.exists() {
+            let (mut db_file, direct_ok) = Self::open_raw_file(db_path_ref, false)?;
             let mut buf = vec![0; *META_PAGE_SIZE];
             db_file.read_exact(&mut buf)?;
-            let (meta_page, _) = MetaPageCodec::decode(&buf)?;
-            (db_file, meta_page)
+            let (meta_page, _) = decode_meta_page(&buf)?;
+            (db_file, meta_page, direct_ok)
         } else {
             is_new_file = true;
-            let mut db_file = std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .open(db_path)?;
+            let (mut db_file, direct_ok) = Self::open_raw_file(db_path_ref, true)?;
             let meta_page = MetaPage::try_new()?;
+            let meta_bytes = encode_meta_page(&meta_page);
             #[allow(clippy::unused_io_amount)]
-            db_file.write(&MetaPageCodec::encode(&meta_page))?;
-            (db_file, meta_page)
+            db_file.write(&meta_bytes)?;
+            (db_file, meta_page, direct_ok)
         };
 
         // calculate next page id
@@ -69,6 +158,11 @@ impl DiskManager {
             db_file: Mutex::new(db_file),
             meta: RwLock::new(meta),
         };
+
+        #[cfg(target_os = "linux")]
+        if !direct_enabled {
+            warn!("DiskManager running without O_DIRECT; expect OS page cache usage");
+        }
 
         // new pages
         if is_new_file {
@@ -105,16 +199,16 @@ impl DiskManager {
             ));
         }
         let mut guard = self.db_file.lock().unwrap();
-        let mut buf = [0; PAGE_SIZE];
+        let mut aligned = AlignedPageBuf::new_zeroed()?;
 
-        // set offset and read page data
-        guard.seek(std::io::SeekFrom::Start(
+        guard.seek(SeekFrom::Start(
             (*META_PAGE_SIZE + (page_id - 1) as usize * PAGE_SIZE) as u64,
         ))?;
-        // Read buf.len() bytes of data from the file, and store the data in the buf array.
-        guard.read_exact(&mut buf)?;
+        guard.read_exact(aligned.as_mut_slice())?;
 
-        Ok(buf)
+        let mut page = [0u8; PAGE_SIZE];
+        page.copy_from_slice(aligned.as_slice());
+        Ok(page)
     }
 
     pub fn write_page(&self, page_id: PageId, data: &[u8]) -> QuillSQLResult<()> {
@@ -228,7 +322,8 @@ impl DiskManager {
     fn write_meta_page(&self) -> QuillSQLResult<()> {
         let mut guard = self.db_file.lock().unwrap();
         guard.seek(std::io::SeekFrom::Start(0))?;
-        guard.write_all(&MetaPageCodec::encode(&self.meta.read().unwrap()))?;
+        let encoded = encode_meta_page(&self.meta.read().unwrap());
+        guard.write_all(&encoded)?;
         guard.flush()?;
         Ok(())
     }
@@ -239,10 +334,17 @@ impl DiskManager {
         data: &[u8],
     ) -> QuillSQLResult<()> {
         // Seek to the start of the page in the database file and write the data.
-        guard.seek(std::io::SeekFrom::Start(
+        guard.seek(SeekFrom::Start(
             (*META_PAGE_SIZE + (page_id - 1) as usize * PAGE_SIZE) as u64,
         ))?;
-        guard.write_all(data)?;
+
+        if data.as_ptr() as usize % PAGE_SIZE == 0 {
+            guard.write_all(data)?;
+        } else {
+            let mut aligned = AlignedPageBuf::new_zeroed()?;
+            aligned.as_mut_slice().copy_from_slice(data);
+            guard.write_all(aligned.as_slice())?;
+        }
         guard.flush()?;
         Ok(())
     }
@@ -308,8 +410,6 @@ impl DiskManager {
 #[cfg(test)]
 mod tests {
     use crate::buffer::PAGE_SIZE;
-    use crate::storage::codec::MetaPageCodec;
-    use crate::storage::page::EMPTY_META_PAGE;
     use tempfile::TempDir;
 
     #[test]
@@ -336,10 +436,7 @@ mod tests {
         assert_eq!(page, page2.as_slice());
 
         let db_file_len = disk_manager.db_file_len().unwrap();
-        assert_eq!(
-            db_file_len as usize,
-            PAGE_SIZE * 7 + MetaPageCodec::encode(&EMPTY_META_PAGE).len()
-        );
+        assert_eq!(db_file_len as usize, PAGE_SIZE * 7 + PAGE_SIZE);
     }
 
     #[test]

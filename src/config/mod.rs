@@ -13,6 +13,12 @@ pub struct IOSchedulerConfig {
     /// IoUring queue depth (Linux only). Ignored on non-Linux.
     #[cfg(target_os = "linux")]
     pub iouring_queue_depth: usize,
+    /// Number of registered fixed buffers for io_uring (Linux only).
+    #[cfg(target_os = "linux")]
+    pub iouring_fixed_buffers: usize,
+    /// Optional SQPOLL idle time in milliseconds (Linux only).
+    #[cfg(target_os = "linux")]
+    pub iouring_sqpoll_idle_ms: Option<u32>,
     /// Whether the IO backend should force an fsync/fdatasync after writes.
     pub fsync_on_write: bool,
 }
@@ -31,6 +37,10 @@ impl Default for IOSchedulerConfig {
             workers: Self::default_workers(),
             #[cfg(target_os = "linux")]
             iouring_queue_depth: 256,
+            #[cfg(target_os = "linux")]
+            iouring_fixed_buffers: 256,
+            #[cfg(target_os = "linux")]
+            iouring_sqpoll_idle_ms: None,
             fsync_on_write: true,
         }
     }

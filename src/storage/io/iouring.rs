@@ -9,13 +9,15 @@ use std::fs::{self, File, OpenOptions};
 #[cfg(target_os = "linux")]
 use std::io;
 #[cfg(target_os = "linux")]
+use std::io::IoSliceMut;
+#[cfg(target_os = "linux")]
 use std::os::fd::AsRawFd;
 #[cfg(target_os = "linux")]
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "linux")]
 use std::sync::mpsc::{self, Receiver, Sender};
 #[cfg(target_os = "linux")]
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 #[cfg(target_os = "linux")]
 use std::thread;
 
@@ -28,7 +30,7 @@ use crate::error::QuillSQLError;
 #[cfg(target_os = "linux")]
 use crate::error::QuillSQLResult;
 #[cfg(target_os = "linux")]
-use crate::storage::disk_manager::DiskManager;
+use crate::storage::disk_manager::{AlignedPageBuf, DiskManager};
 #[cfg(target_os = "linux")]
 use crate::storage::disk_scheduler::DiskRequest;
 
@@ -42,26 +44,43 @@ struct PendingEntry {
 
 #[cfg(target_os = "linux")]
 enum PendingKind {
-    Read {
+    ReadFixed {
+        idx: usize,
+        sender: DiskResultSender<BytesMut>,
+    },
+    ReadVec {
         buffer: Vec<u8>,
         sender: DiskResultSender<BytesMut>,
     },
-    ReadBatch {
+    ReadBatchFixed {
+        idx: usize,
+        batch: *mut BatchState,
+        index: usize,
+    },
+    ReadBatchVec {
         buffer: Vec<u8>,
         batch: *mut BatchState,
         index: usize,
     },
-    Write {
-        _data: Bytes,
+    WriteFixed {
+        idx: usize,
+        state: *mut WriteState,
+    },
+    WriteVec {
         state: *mut WriteState,
     },
     Fsync {
         state: *mut WriteState,
     },
-    WalRead {
-        buffer: Vec<u8>,
-        sender: DiskResultSender<Vec<u8>>,
+    WalReadFixed {
+        idx: usize,
         expected: usize,
+        sender: DiskResultSender<Vec<u8>>,
+    },
+    WalReadVec {
+        buffer: Vec<u8>,
+        expected: usize,
+        sender: DiskResultSender<Vec<u8>>,
     },
 }
 
@@ -215,10 +234,79 @@ fn push_sqe(ring: &mut IoUring, sqe: io_uring::squeue::Entry) {
 }
 
 #[cfg(target_os = "linux")]
+struct FixedBufferPool {
+    buffers: Vec<AlignedPageBuf>,
+    free: Mutex<Vec<usize>>,
+}
+
+impl FixedBufferPool {
+    fn new(count: usize) -> QuillSQLResult<Self> {
+        if count > u16::MAX as usize {
+            return Err(QuillSQLError::Internal(
+                "io_uring fixed buffer count exceeds u16::MAX".into(),
+            ));
+        }
+        let mut buffers = Vec::with_capacity(count);
+        for _ in 0..count {
+            buffers.push(AlignedPageBuf::new_zeroed()?);
+        }
+        let mut free = Vec::with_capacity(count);
+        for idx in 0..count {
+            free.push(idx);
+        }
+        Ok(Self {
+            buffers,
+            free: Mutex::new(free),
+        })
+    }
+
+    fn register(&mut self, ring: &mut IoUring) -> io::Result<()> {
+        if self.buffers.is_empty() {
+            return Ok(());
+        }
+        let io_slices: Vec<IoSliceMut<'_>> = self
+            .buffers
+            .iter_mut()
+            .map(|buf| IoSliceMut::new(buf.as_mut_slice()))
+            .collect();
+        let ptr = io_slices.as_ptr() as *const libc::iovec;
+        let iovecs = unsafe { std::slice::from_raw_parts(ptr, io_slices.len()) };
+        unsafe { ring.submitter().register_buffers(iovecs) }
+    }
+
+    fn acquire(&self) -> Option<(usize, *mut u8)> {
+        let idx = self.free.lock().unwrap().pop()?;
+        let ptr = self.buffers[idx].ptr();
+        Some((idx, ptr))
+    }
+
+    fn release(&self, idx: usize) {
+        self.free.lock().unwrap().push(idx);
+    }
+
+    fn fill_from_slice(&mut self, idx: usize, data: &[u8]) {
+        let slice = self.buffers[idx].as_mut_slice();
+        slice[..data.len()].copy_from_slice(data);
+        if data.len() < PAGE_SIZE {
+            slice[data.len()..].fill(0);
+        }
+    }
+
+    fn extract_bytes(&self, idx: usize, len: usize) -> BytesMut {
+        BytesMut::from(&self.buffers[idx].as_slice()[..len])
+    }
+
+    fn extract_vec(&self, idx: usize, len: usize) -> Vec<u8> {
+        self.buffers[idx].as_slice()[..len].to_vec()
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn queue_read(
     ring: &mut IoUring,
     pending: &mut HashMap<u64, PendingEntry>,
     token_counter: &mut u64,
+    buffer_pool: &FixedBufferPool,
     fd: i32,
     page_id: PageId,
     sender: DiskResultSender<BytesMut>,
@@ -226,19 +314,34 @@ fn queue_read(
     use crate::storage::page::META_PAGE_SIZE;
 
     let token = next_token(token_counter);
-    let mut buffer = vec![0u8; PAGE_SIZE];
     let offset = (*META_PAGE_SIZE + (page_id - 1) as usize * PAGE_SIZE) as u64;
-    let read_e = opcode::Read::new(types::Fd(fd), buffer.as_mut_ptr(), PAGE_SIZE as u32)
-        .offset(offset)
-        .build()
-        .user_data(token);
 
-    push_sqe(ring, read_e);
-
-    let entry = PendingEntry {
-        kind: PendingKind::Read { buffer, sender },
-    };
-    pending.insert(token, entry);
+    if let Some((idx, ptr)) = buffer_pool.acquire() {
+        let read_e = opcode::ReadFixed::new(types::Fd(fd), ptr, PAGE_SIZE as u32, idx as u16)
+            .offset(offset)
+            .build()
+            .user_data(token);
+        push_sqe(ring, read_e);
+        pending.insert(
+            token,
+            PendingEntry {
+                kind: PendingKind::ReadFixed { idx, sender },
+            },
+        );
+    } else {
+        let mut buffer = vec![0u8; PAGE_SIZE];
+        let read_e = opcode::Read::new(types::Fd(fd), buffer.as_mut_ptr(), PAGE_SIZE as u32)
+            .offset(offset)
+            .build()
+            .user_data(token);
+        push_sqe(ring, read_e);
+        pending.insert(
+            token,
+            PendingEntry {
+                kind: PendingKind::ReadVec { buffer, sender },
+            },
+        );
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -246,6 +349,7 @@ fn queue_read_batch(
     ring: &mut IoUring,
     pending: &mut HashMap<u64, PendingEntry>,
     token_counter: &mut u64,
+    buffer_pool: &FixedBufferPool,
     fd: i32,
     page_ids: Vec<PageId>,
     sender: DiskResultSender<Vec<BytesMut>>,
@@ -263,25 +367,41 @@ fn queue_read_batch(
 
     for (index, page_id) in page_ids.into_iter().enumerate() {
         let token = next_token(token_counter);
-        let mut buffer = vec![0u8; PAGE_SIZE];
         let offset = (*META_PAGE_SIZE + (page_id - 1) as usize * PAGE_SIZE) as u64;
-        let read_e = opcode::Read::new(types::Fd(fd), buffer.as_mut_ptr(), PAGE_SIZE as u32)
-            .offset(offset)
-            .build()
-            .user_data(token);
-
-        push_sqe(ring, read_e);
-
-        pending.insert(
-            token,
-            PendingEntry {
-                kind: PendingKind::ReadBatch {
-                    buffer,
-                    batch: batch_ptr,
-                    index,
+        if let Some((idx, ptr)) = buffer_pool.acquire() {
+            let read_e = opcode::ReadFixed::new(types::Fd(fd), ptr, PAGE_SIZE as u32, idx as u16)
+                .offset(offset)
+                .build()
+                .user_data(token);
+            push_sqe(ring, read_e);
+            pending.insert(
+                token,
+                PendingEntry {
+                    kind: PendingKind::ReadBatchFixed {
+                        idx,
+                        batch: batch_ptr,
+                        index,
+                    },
                 },
-            },
-        );
+            );
+        } else {
+            let mut buffer = vec![0u8; PAGE_SIZE];
+            let read_e = opcode::Read::new(types::Fd(fd), buffer.as_mut_ptr(), PAGE_SIZE as u32)
+                .offset(offset)
+                .build()
+                .user_data(token);
+            push_sqe(ring, read_e);
+            pending.insert(
+                token,
+                PendingEntry {
+                    kind: PendingKind::ReadBatchVec {
+                        buffer,
+                        batch: batch_ptr,
+                        index,
+                    },
+                },
+            );
+        }
     }
 }
 
@@ -290,6 +410,7 @@ fn queue_write(
     ring: &mut IoUring,
     pending: &mut HashMap<u64, PendingEntry>,
     token_counter: &mut u64,
+    buffer_pool: &mut FixedBufferPool,
     fd: i32,
     page_id: PageId,
     data: Bytes,
@@ -303,22 +424,38 @@ fn queue_write(
 
     let write_token = next_token(token_counter);
     let offset = (*META_PAGE_SIZE + (page_id - 1) as usize * PAGE_SIZE) as u64;
-    let write_entry = opcode::Write::new(types::Fd(fd), data.as_ptr(), PAGE_SIZE as u32)
-        .offset(offset)
-        .build()
-        .user_data(write_token);
 
-    push_sqe(ring, write_entry);
-
-    pending.insert(
-        write_token,
-        PendingEntry {
-            kind: PendingKind::Write {
-                _data: data,
-                state: state_ptr,
-            },
-        },
-    );
+    if !data.is_empty() {
+        if let Some((idx, ptr)) = buffer_pool.acquire() {
+            buffer_pool.fill_from_slice(idx, &data);
+            let entry = opcode::WriteFixed::new(types::Fd(fd), ptr, data.len() as u32, idx as u16)
+                .offset(offset)
+                .build()
+                .user_data(write_token);
+            push_sqe(ring, entry);
+            pending.insert(
+                write_token,
+                PendingEntry {
+                    kind: PendingKind::WriteFixed {
+                        idx,
+                        state: state_ptr,
+                    },
+                },
+            );
+        } else {
+            let entry = opcode::Write::new(types::Fd(fd), data.as_ptr(), data.len() as u32)
+                .offset(offset)
+                .build()
+                .user_data(write_token);
+            push_sqe(ring, entry);
+            pending.insert(
+                write_token,
+                PendingEntry {
+                    kind: PendingKind::WriteVec { state: state_ptr },
+                },
+            );
+        }
+    }
 
     if fsync_on_write {
         let fsync_token = next_token(token_counter);
@@ -343,6 +480,7 @@ fn queue_wal_write(
     ring: &mut IoUring,
     pending: &mut HashMap<u64, PendingEntry>,
     token_counter: &mut u64,
+    buffer_pool: &mut FixedBufferPool,
     wal_handles: &mut HashMap<PathBuf, WalFileHandle>,
     path: PathBuf,
     offset: u64,
@@ -378,20 +516,35 @@ fn queue_wal_write(
 
     if !data.is_empty() {
         let write_token = next_token(token_counter);
-        let write_entry = opcode::Write::new(types::Fd(fd), data.as_ptr(), data.len() as u32)
-            .offset(offset)
-            .build()
-            .user_data(write_token);
-        push_sqe(ring, write_entry);
-        pending.insert(
-            write_token,
-            PendingEntry {
-                kind: PendingKind::Write {
-                    _data: data.clone(),
-                    state: state_ptr,
+        if let Some((idx, ptr)) = buffer_pool.acquire() {
+            buffer_pool.fill_from_slice(idx, &data);
+            let entry = opcode::WriteFixed::new(types::Fd(fd), ptr, data.len() as u32, idx as u16)
+                .offset(offset)
+                .build()
+                .user_data(write_token);
+            push_sqe(ring, entry);
+            pending.insert(
+                write_token,
+                PendingEntry {
+                    kind: PendingKind::WriteFixed {
+                        idx,
+                        state: state_ptr,
+                    },
                 },
-            },
-        );
+            );
+        } else {
+            let entry = opcode::Write::new(types::Fd(fd), data.as_ptr(), data.len() as u32)
+                .offset(offset)
+                .build()
+                .user_data(write_token);
+            push_sqe(ring, entry);
+            pending.insert(
+                write_token,
+                PendingEntry {
+                    kind: PendingKind::WriteVec { state: state_ptr },
+                },
+            );
+        }
     }
 
     if sync {
@@ -417,6 +570,7 @@ fn queue_wal_read(
     ring: &mut IoUring,
     pending: &mut HashMap<u64, PendingEntry>,
     token_counter: &mut u64,
+    buffer_pool: &mut FixedBufferPool,
     wal_handles: &mut HashMap<PathBuf, WalFileHandle>,
     path: PathBuf,
     offset: u64,
@@ -428,23 +582,41 @@ fn queue_wal_read(
         return Ok(());
     }
     let fd = ensure_wal_handle(wal_handles, &path)?;
-    let mut buffer = vec![0u8; len];
     let token = next_token(token_counter);
-    let read_entry = opcode::Read::new(types::Fd(fd), buffer.as_mut_ptr(), len as u32)
-        .offset(offset)
-        .build()
-        .user_data(token);
-    push_sqe(ring, read_entry);
-    pending.insert(
-        token,
-        PendingEntry {
-            kind: PendingKind::WalRead {
-                buffer,
-                sender,
-                expected: len,
+    if let Some((idx, ptr)) = buffer_pool.acquire() {
+        let entry = opcode::ReadFixed::new(types::Fd(fd), ptr, len as u32, idx as u16)
+            .offset(offset)
+            .build()
+            .user_data(token);
+        push_sqe(ring, entry);
+        pending.insert(
+            token,
+            PendingEntry {
+                kind: PendingKind::WalReadFixed {
+                    idx,
+                    expected: len,
+                    sender,
+                },
             },
-        },
-    );
+        );
+    } else {
+        let mut buffer = vec![0u8; len];
+        let entry = opcode::Read::new(types::Fd(fd), buffer.as_mut_ptr(), len as u32)
+            .offset(offset)
+            .build()
+            .user_data(token);
+        push_sqe(ring, entry);
+        pending.insert(
+            token,
+            PendingEntry {
+                kind: PendingKind::WalReadVec {
+                    buffer,
+                    expected: len,
+                    sender,
+                },
+            },
+        );
+    }
     Ok(())
 }
 
@@ -504,16 +676,33 @@ fn handle_request_direct(
     disk_manager: &Arc<DiskManager>,
     fsync_on_write: bool,
     wal_handles: &mut HashMap<PathBuf, WalFileHandle>,
+    buffer_pool: &mut FixedBufferPool,
 ) {
     match request {
         DiskRequest::ReadPage {
             page_id,
             result_sender,
-        } => queue_read(ring, pending, token_counter, fd, page_id, result_sender),
+        } => queue_read(
+            ring,
+            pending,
+            token_counter,
+            buffer_pool,
+            fd,
+            page_id,
+            result_sender,
+        ),
         DiskRequest::ReadPages {
             page_ids,
             result_sender,
-        } => queue_read_batch(ring, pending, token_counter, fd, page_ids, result_sender),
+        } => queue_read_batch(
+            ring,
+            pending,
+            token_counter,
+            buffer_pool,
+            fd,
+            page_ids,
+            result_sender,
+        ),
         DiskRequest::WritePage {
             page_id,
             data,
@@ -522,6 +711,7 @@ fn handle_request_direct(
             ring,
             pending,
             token_counter,
+            buffer_pool,
             fd,
             page_id,
             data,
@@ -539,6 +729,7 @@ fn handle_request_direct(
                 ring,
                 pending,
                 token_counter,
+                buffer_pool,
                 wal_handles,
                 path,
                 offset,
@@ -557,6 +748,7 @@ fn handle_request_direct(
                 ring,
                 pending,
                 token_counter,
+                buffer_pool,
                 wal_handles,
                 path,
                 offset,
@@ -574,7 +766,7 @@ fn handle_request_direct(
             let _ = result_sender.send(disk_manager.deallocate_page(page_id));
         }
         DiskRequest::Shutdown => {
-            unreachable!("Shutdown handled earlier");
+            log::debug!("Disk I/O io_uring worker received Shutdown signal.");
         }
     }
 }
@@ -583,68 +775,112 @@ fn handle_request_direct(
 fn drain_completions(
     ring: &mut IoUring,
     pending: &mut HashMap<u64, PendingEntry>,
+    buffer_pool: &FixedBufferPool,
     fsync_on_write: bool,
 ) {
     while let Some(cqe) = ring.completion().next() {
         let token = cqe.user_data();
-        let entry = match pending.remove(&token) {
-            Some(entry) => entry,
-            None => continue,
-        };
-
-        let result_code = cqe.result();
-
-        match entry.kind {
-            PendingKind::Read { buffer, sender } => {
-                let outcome = parse_read_result(result_code, buffer);
-                if let Err(err) = sender.send(outcome) {
-                    log::error!("io_uring read result send failed: {}", err);
+        if let Some(entry) = pending.remove(&token) {
+            let result_code = cqe.result();
+            match entry.kind {
+                PendingKind::ReadFixed { idx, sender } => {
+                    let bytes = buffer_pool.extract_bytes(idx, PAGE_SIZE);
+                    buffer_pool.release(idx);
+                    let outcome = parse_read_result(result_code, bytes.to_vec());
+                    if let Err(err) = sender.send(outcome.map(BytesMut::from)) {
+                        log::error!("io_uring read fixed result send failed: {}", err);
+                    }
                 }
-            }
-            PendingKind::ReadBatch {
-                buffer,
-                batch,
-                index,
-            } => {
-                let outcome = parse_read_result(result_code, buffer);
-                unsafe {
-                    let batch_ref = &mut *batch;
-                    if let Some(result) = batch_ref.record_result(index, outcome) {
-                        if let Err(err) = batch_ref.sender.send(result) {
-                            log::error!("io_uring batch read send failed: {}", err);
+                PendingKind::ReadVec { buffer, sender } => {
+                    let outcome = parse_read_result(result_code, buffer);
+                    if let Err(err) = sender.send(outcome.map(BytesMut::from)) {
+                        log::error!("io_uring read result send failed: {}", err);
+                    }
+                }
+                PendingKind::ReadBatchFixed { idx, batch, index } => {
+                    let bytes = buffer_pool.extract_bytes(idx, PAGE_SIZE);
+                    buffer_pool.release(idx);
+                    let outcome = Ok(bytes);
+                    unsafe {
+                        let batch_ref = &mut *batch;
+                        if let Some(result) = batch_ref.record_result(index, outcome) {
+                            if let Err(err) = batch_ref.sender.send(result) {
+                                log::error!("io_uring batch read send failed: {}", err);
+                            }
+                            drop(Box::from_raw(batch));
                         }
-                        drop(Box::from_raw(batch));
                     }
                 }
-            }
-            PendingKind::Write { _data: _, state } => {
-                let outcome = parse_write_result(result_code);
-                unsafe {
-                    let state_ref = &mut *state;
-                    let finished = state_ref.record(outcome);
-                    if finished {
-                        drop(Box::from_raw(state));
+                PendingKind::ReadBatchVec {
+                    buffer,
+                    batch,
+                    index,
+                } => {
+                    let outcome = parse_read_result(result_code, buffer).map(BytesMut::from);
+                    unsafe {
+                        let batch_ref = &mut *batch;
+                        if let Some(result) = batch_ref.record_result(index, outcome) {
+                            if let Err(err) = batch_ref.sender.send(result) {
+                                log::error!("io_uring batch read send failed: {}", err);
+                            }
+                            drop(Box::from_raw(batch));
+                        }
                     }
                 }
-            }
-            PendingKind::Fsync { state } => {
-                let outcome = parse_fsync_result(result_code, fsync_on_write);
-                unsafe {
-                    let state_ref = &mut *state;
-                    let finished = state_ref.record(outcome);
-                    if finished {
-                        drop(Box::from_raw(state));
+                PendingKind::WriteFixed { idx, state } => {
+                    buffer_pool.release(idx);
+                    let outcome = parse_write_result(result_code);
+                    unsafe {
+                        let state_ref = &mut *state;
+                        let finished = state_ref.record(outcome);
+                        if finished {
+                            drop(Box::from_raw(state));
+                        }
                     }
                 }
-            }
-            PendingKind::WalRead {
-                buffer,
-                sender,
-                expected,
-            } => {
-                let outcome = parse_wal_read_result(result_code, buffer, expected);
-                if let Err(err) = sender.send(outcome) {
-                    log::error!("io_uring wal read result send failed: {}", err);
+                PendingKind::WriteVec { state } => {
+                    let outcome = parse_write_result(result_code);
+                    unsafe {
+                        let state_ref = &mut *state;
+                        let finished = state_ref.record(outcome);
+                        if finished {
+                            drop(Box::from_raw(state));
+                        }
+                    }
+                }
+                PendingKind::WalReadFixed {
+                    idx,
+                    expected,
+                    sender,
+                } => {
+                    let mut vec = buffer_pool.extract_vec(idx, expected);
+                    buffer_pool.release(idx);
+                    vec.truncate(expected);
+                    if let Err(err) = sender.send(parse_wal_read_result(result_code, vec, expected))
+                    {
+                        log::error!("io_uring wal read fixed result send failed: {}", err);
+                    }
+                }
+                PendingKind::WalReadVec {
+                    buffer,
+                    expected,
+                    sender,
+                } => {
+                    if let Err(err) =
+                        sender.send(parse_wal_read_result(result_code, buffer, expected))
+                    {
+                        log::error!("io_uring wal read vec result send failed: {}", err);
+                    }
+                }
+                PendingKind::Fsync { state } => {
+                    let outcome = parse_fsync_result(result_code, fsync_on_write);
+                    unsafe {
+                        let state_ref = &mut *state;
+                        let finished = state_ref.record(outcome);
+                        if finished {
+                            drop(Box::from_raw(state));
+                        }
+                    }
                 }
             }
         }
@@ -723,10 +959,19 @@ pub fn start(
         worker_senders.push(tx);
         let dm = disk_manager.clone();
         let entries = config.iouring_queue_depth as u32;
+        let fixed_count = config.iouring_fixed_buffers;
+        let sqpoll_idle = config.iouring_sqpoll_idle_ms;
         let handle = thread::Builder::new()
             .name(format!("disk-scheduler-iouring-worker-{}", i))
             .spawn(move || {
-                io_uring_worker_loop(rx, dm, entries, config.fsync_on_write);
+                io_uring_worker_loop(
+                    rx,
+                    dm,
+                    entries,
+                    fixed_count,
+                    sqpoll_idle,
+                    config.fsync_on_write,
+                );
             })
             .expect("Failed to spawn DiskScheduler io_uring worker thread");
         worker_threads.push(handle);
@@ -747,10 +992,21 @@ fn io_uring_worker_loop(
     receiver: Receiver<DiskRequest>,
     disk_manager: Arc<DiskManager>,
     entries: u32,
+    fixed_buffers: usize,
+    sqpoll_idle: Option<u32>,
     fsync_on_write: bool,
 ) {
     log::debug!("Disk I/O io_uring worker thread started.");
-    let mut ring = IoUring::new(entries).expect("io_uring init failed");
+    let mut builder = IoUring::builder();
+    if let Some(idle) = sqpoll_idle {
+        builder.setup_sqpoll(idle);
+    }
+    let mut ring = builder.build(entries).expect("io_uring init failed");
+
+    let mut buffer_pool = FixedBufferPool::new(fixed_buffers).expect("create fixed buffer pool");
+    buffer_pool
+        .register(&mut ring)
+        .expect("register fixed buffers");
 
     // Clone a dedicated File for this worker to get a stable fd
     let file = disk_manager
@@ -765,7 +1021,7 @@ fn io_uring_worker_loop(
 
     while !shutdown || !pending.is_empty() {
         // Always process completions first to reduce queue pressure.
-        drain_completions(&mut ring, &mut pending, fsync_on_write);
+        drain_completions(&mut ring, &mut pending, &buffer_pool, fsync_on_write);
 
         if shutdown && pending.is_empty() {
             break;
@@ -783,6 +1039,7 @@ fn io_uring_worker_loop(
                         &mut ring,
                         &mut pending,
                         &mut token_counter,
+                        &buffer_pool,
                         fd,
                         page_id,
                         result_sender,
@@ -796,6 +1053,7 @@ fn io_uring_worker_loop(
                         &mut ring,
                         &mut pending,
                         &mut token_counter,
+                        &buffer_pool,
                         fd,
                         page_ids,
                         result_sender,
@@ -810,6 +1068,7 @@ fn io_uring_worker_loop(
                         &mut ring,
                         &mut pending,
                         &mut token_counter,
+                        &mut buffer_pool,
                         fd,
                         page_id,
                         data,
@@ -828,6 +1087,7 @@ fn io_uring_worker_loop(
                         &mut ring,
                         &mut pending,
                         &mut token_counter,
+                        &mut buffer_pool,
                         &mut wal_handles,
                         path,
                         offset,
@@ -846,6 +1106,7 @@ fn io_uring_worker_loop(
                         &mut ring,
                         &mut pending,
                         &mut token_counter,
+                        &mut buffer_pool,
                         &mut wal_handles,
                         path,
                         offset,
@@ -894,6 +1155,7 @@ fn io_uring_worker_loop(
                             &disk_manager,
                             fsync_on_write,
                             &mut wal_handles,
+                            &mut buffer_pool,
                         );
                     }
                 },
@@ -912,7 +1174,7 @@ fn io_uring_worker_loop(
     }
 
     // Final drain to deliver any remaining completions before exit.
-    drain_completions(&mut ring, &mut pending, fsync_on_write);
+    drain_completions(&mut ring, &mut pending, &buffer_pool, fsync_on_write);
 
     log::debug!("Disk I/O io_uring worker thread finished.");
 }
