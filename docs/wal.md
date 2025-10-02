@@ -15,35 +15,36 @@ This approach provides two primary benefits:
 Our WAL implementation is inspired by the ARIES recovery algorithm and consists of several key components that work in concert.
 
 ```
-+-------------------+   writes   +-----------------+   flushes   +-----------------+
-| Execution Engine  |----------->|   WalManager    |------------>|   WAL Files     |
-| (e.g., TableHeap) |            | (in-memory buf) |<---------- | (.log segments) |
-+-------------------+            +-----------------+ (WalWriter) +-----------------+
-         |                                |               ^
-(modifies pages)                        (triggers)      | (reads for recovery)
-         v                                v               |
-+-------------------+  (dirty pages) +---------------+   |
-|  Buffer Pool Mgr  |<------------->|  Checkpointer |   |
-+-------------------+                +---------------+   |
-         | (flushes pages)                               |
-         v                                               |
-+-------------------+                +-------------------+
-|  Data Files (.db) |                |  RecoveryManager  |
++-------------------+   writes   +-----------------+   queued    +-----------------+
+| Execution Engine  |----------->|   WalManager    |-----------> |   WalRuntime    |
+| (e.g., TableHeap) |            | (in-memory buf) |   (MPSC)    | (worker pool)   |
++-------------------+            +-----------------+             +-----------------+
+        |                                  |                              |
+(modifies pages)                       (flushes)                     (reads/writes)
+        v                                  v                              v
++-------------------+  (dirty pages) +---------------+            +----------------+
+|  Buffer Pool Mgr  |<------------->|  Checkpointer |----------->|   WAL Files    |
++-------------------+                +---------------+            +----------------+
+        |  (flushes pages)                                            ^
+        v                                                             |
++-------------------+                +-------------------+            |
+|  Data Files (.db) |                |  RecoveryManager  |<-----------+
 +-------------------+                +-------------------+
 ```
 
 -   **`WalManager` (`src/recovery/wal.rs`)**: The central coordinator of the WAL system.
     -   **Responsibilities**: Assigns unique Log Sequence Numbers (LSNs), manages an in-memory log buffer, and provides the primary interface (`append_record_with`) for other parts of the system to write log records. It also tracks the `durable_lsn`—the LSN up to which logs have been successfully flushed to disk.
-    -   **FPW (First-Page-Write)**: It tracks pages modified since the last checkpoint to enforce a full-page write for the first modification, protecting against torn-page scenarios during recovery.
+    -   **FPW (First-Page-Write)**: Tracks pages modified since the last checkpoint to enforce a full-page write for the first modification, protecting against torn-page scenarios during recovery.
+    -   **I/O Runtime Integration**: `WalManager` delegates actual file reads/writes to `WalRuntime`, a small buffered I/O worker pool that keeps WAL traffic off the io_uring data path.
 
--   **`WalWriter` (Background Thread)**: An optional background thread that periodically flushes the `WalManager`'s buffer to disk. This helps in smoothing out I/O spikes and reduces latency for transaction commits in asynchronous mode.
+-   **`WalRuntime` (`src/recovery/wal_runtime.rs`)**: A lightweight worker pool that owns the file handles for WAL segments. It consumes queued read/write commands, performs buffered `write_all` / `read_exact`, and optionally calls `sync_data` for durability. The runtime hides OS-level errors behind `QuillSQLError` and guarantees ordered completion for callers waiting on durability.
 
 -   **`Checkpointer` (Background Thread)**: A periodic process crucial for bounding recovery time.
     -   **Responsibilities**:
         1.  Writes a `Checkpoint` record to the WAL. This record contains a snapshot of the current state, including the list of active transactions (ATT) and the Dirty Page Table (DPT). The DPT lists all pages that are dirty in the buffer pool, along with the LSN of the log record that first made them dirty (`recLSN`).
         2.  After a checkpoint is durable, it triggers the recycling of old, no-longer-needed WAL segment files, preventing infinite log growth.
 
--   **`RecoveryManager` (`src/recovery/recovery_manager.rs`)**: The engine that performs crash recovery upon database startup. It implements a three-phase recovery process.
+-   **`RecoveryManager` (`src/recovery/recovery_manager.rs`)**: The engine that performs crash recovery upon database startup. It implements a three-phase recovery process and talks to the shared `DiskScheduler` (backed by io_uring) for data-page redo/undo. WAL replay and data I/O remain decoupled but reside in the same module for tighter invariants.
 
 -   **`ControlFile` (`src/recovery/control_file.rs`)**: A small, critical file (`control.dat`) that bootstraps the recovery process. It stores essential metadata like the system identifier, WAL segment size, and, most importantly, the LSN of the last successful checkpoint.
 
