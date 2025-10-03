@@ -329,26 +329,16 @@ mod tests {
     use super::*;
     use crate::config::WalConfig;
     use crate::recovery::WalManager;
-    use crate::storage::disk_manager::DiskManager;
-    use crate::storage::disk_scheduler::DiskScheduler;
-    use std::path::Path;
     use tempfile::TempDir;
-
-    fn build_scheduler(path: &Path) -> Arc<DiskScheduler> {
-        let disk_manager = Arc::new(DiskManager::try_new(path).expect("disk manager"));
-        Arc::new(DiskScheduler::new(disk_manager))
-    }
 
     fn build_wal(temp_dir: &TempDir) -> Arc<WalManager> {
         let wal_path = temp_dir.path().join("wal");
-        let db_path = temp_dir.path().join("test.db");
         let config = WalConfig {
             directory: wal_path,
             sync_on_flush: false,
             ..WalConfig::default()
         };
-        let scheduler = build_scheduler(&db_path);
-        Arc::new(WalManager::new(config, scheduler, None, None).expect("wal manager"))
+        Arc::new(WalManager::new(config, None, None).expect("wal manager"))
     }
 
     #[test]

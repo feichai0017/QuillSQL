@@ -1,3 +1,4 @@
+pub mod background;
 pub mod buffer;
 pub mod catalog;
 pub mod config;

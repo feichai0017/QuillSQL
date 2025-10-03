@@ -19,7 +19,7 @@ impl Default for QuillSQLDB {
 
 impl QuillSQLDB {
     pub fn new() -> Self {
-        let mut db = Database::new_temp().unwrap();
+        let db = Database::new_temp().unwrap();
         let session = SessionContext::new(db.default_isolation());
         Self { db, session }
     }

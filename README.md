@@ -14,6 +14,7 @@
 - **Transaction control**: `BEGIN/COMMIT/ROLLBACK`, `SET TRANSACTION`, `SET SESSION TRANSACTION`, enforced `READ ONLY`, row/table locks
 - **B+Tree index**: OLC readers, B-link pages, latch crabbing, range scan iterator
 - **Buffer manager**: LRU-K + TinyLFU, WAL-aware dirty tracking, prefetch API, background writer
+- **Asynchronous storage**: Linux `io_uring` data-plane for table/index pages plus a buffered WAL runtime for sequential log I/O
 - **Streaming / Prefetch**: Large sequential scans bypass the cache via a small direct I/O ring buffer; targeted prefetch warms hot paths without pins
 - **WAL & Recovery (ARIES-inspired)**: FPW + PageDelta, DPT, chained CLR, per-transaction undo chains, idempotent replays
 - **Information schema**: `information_schema.schemas`, `tables`, `columns`, `indexes`
@@ -124,6 +125,7 @@ EXPLAIN SELECT id, COUNT(*) FROM t GROUP BY id ORDER BY id;
 - Not yet supported: `DROP`, `ALTER`, MVCC, predicate locking.
 - Not implemented: outer joins (Left/Right/Full), arithmetic expressions, table/subquery aliases
 - `ORDER BY` `DESC` / `NULLS FIRST|LAST` currently affects sorting only (not storage layout)
+- Storage uses Linux `io_uring`; non-Linux platforms currently require a fallback backend (planned).
 
 ## 🧪 Testing
 

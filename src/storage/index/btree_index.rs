@@ -1685,7 +1685,7 @@ mod tests {
         let scheduler = Arc::new(DiskScheduler::new(dm));
         let mut cfg = WalConfig::default();
         cfg.directory = wal_dir.to_path_buf();
-        let wal = Arc::new(WalManager::new(cfg, scheduler.clone(), None, None).unwrap());
+        let wal = Arc::new(WalManager::new(cfg, None, None).unwrap());
         let bpm = Arc::new(BufferManager::new(bpm_pages, scheduler.clone()));
         bpm.set_wal_manager(wal.clone());
         (bpm, wal, scheduler)
@@ -1729,7 +1729,7 @@ mod tests {
         let scheduler2 = Arc::new(DiskScheduler::new(dm2));
         let mut cfg2 = WalConfig::default();
         cfg2.directory = wal_dir.clone();
-        let wal2 = Arc::new(WalManager::new(cfg2, scheduler2.clone(), None, None).unwrap());
+        let wal2 = Arc::new(WalManager::new(cfg2, None, None).unwrap());
         let rm = RecoveryManager::new(wal2.clone(), scheduler2.clone());
         let _summary = rm.replay().unwrap();
 
