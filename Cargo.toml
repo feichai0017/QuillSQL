@@ -27,7 +27,7 @@ fastrand = "2.0"
 thiserror = "2.0.12"
 nom = "7.0.0"
 logos = "0.15.0"
-strum = { version = "0.26", features = ["derive"]}
+strum = { version = "0.26", features = ["derive"] }
 sqlparser = "0.34.0"
 clap = { version = "4.3.19", features = ["derive", "cargo"] }
 sqllogictest = "0.13.0"

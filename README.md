@@ -133,6 +133,18 @@ EXPLAIN SELECT id, COUNT(*) FROM t GROUP BY id ORDER BY id;
 cargo test -q
 ```
 
+## 📊 Benchmark Skeleton
+
+1. 占位版 `mini_tpcc` / `mini_tpch` / `chbench` workload
+2. `cargo bench --bench tpc`：产出 Criterion 报告（若要对比 SQLite，请在环境中安装 `sqlite3` CLI）
+3. 数据位于 `target/criterion/...`
+
+## 🔧 Performance Toolkit
+
+- `scripts/perf/capture.sh`: scaffold for perf/eBPF trace collection.
+- `scripts/perf/process.sh`: placeholder for flamegraph/post-processing pipeline.
+- `docs/perf_playbook.md`: living guide for profiling workflow and bottleneck annotations.
+
 ## ⚙️ Configuration
 
 Minimal environment variables (runtime only)
