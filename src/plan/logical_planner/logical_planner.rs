@@ -5,6 +5,7 @@ use crate::plan::logical_plan::{LogicalPlan, OrderByExpr, TransactionModes, Tran
 use crate::sql::ast;
 use crate::sql::ast::Value;
 use crate::utils::table_ref::TableReference;
+use sqlparser::ast::ObjectType;
 
 pub struct PlannerContext<'a> {
     pub catalog: &'a Catalog,
@@ -28,6 +29,21 @@ impl<'a> LogicalPlanner<'a> {
                 columns,
                 ..
             } => self.plan_create_index(name, table_name, columns),
+            ast::Statement::Drop {
+                object_type,
+                if_exists,
+                names,
+                cascade,
+                restrict: _,
+                purge,
+            } => match object_type {
+                ObjectType::Table => self.plan_drop_table(names, *if_exists, *cascade, *purge),
+                ObjectType::Index => self.plan_drop_index(names, *if_exists, *cascade, *purge),
+                other => Err(QuillSQLError::NotSupport(format!(
+                    "DROP {} is not supported",
+                    other
+                ))),
+            },
             ast::Statement::Query(query) => self.plan_query(query),
             ast::Statement::Insert {
                 table_name,

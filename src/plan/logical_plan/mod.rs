@@ -2,6 +2,8 @@ mod aggregate;
 mod create_index;
 mod create_table;
 mod delete;
+mod drop_index;
+mod drop_table;
 mod empty_relation;
 mod filter;
 mod insert;
@@ -18,6 +20,8 @@ pub use aggregate::Aggregate;
 pub use create_index::CreateIndex;
 pub use create_table::CreateTable;
 pub use delete::Delete;
+pub use drop_index::DropIndex;
+pub use drop_table::DropTable;
 pub use empty_relation::EmptyRelation;
 pub use filter::Filter;
 pub use insert::Insert;
@@ -43,6 +47,8 @@ use std::sync::Arc;
 pub enum LogicalPlan {
     CreateTable(CreateTable),
     CreateIndex(CreateIndex),
+    DropTable(DropTable),
+    DropIndex(DropIndex),
     Filter(Filter),
     Insert(Insert),
     Join(Join),
@@ -81,6 +87,8 @@ impl LogicalPlan {
             LogicalPlan::Aggregate(Aggregate { schema, .. }) => schema,
             LogicalPlan::Update(_) => &UPDATE_OUTPUT_SCHEMA_REF,
             LogicalPlan::Delete(_) => &DELETE_OUTPUT_SCHEMA_REF,
+            LogicalPlan::DropTable(_) => &EMPTY_SCHEMA_REF,
+            LogicalPlan::DropIndex(_) => &EMPTY_SCHEMA_REF,
             LogicalPlan::BeginTransaction(_)
             | LogicalPlan::CommitTransaction
             | LogicalPlan::RollbackTransaction
@@ -99,6 +107,8 @@ impl LogicalPlan {
             LogicalPlan::Aggregate(Aggregate { input, .. }) => vec![input],
             LogicalPlan::CreateTable(_)
             | LogicalPlan::CreateIndex(_)
+            | LogicalPlan::DropTable(_)
+            | LogicalPlan::DropIndex(_)
             | LogicalPlan::TableScan(_)
             | LogicalPlan::Values(_)
             | LogicalPlan::Update(_)
@@ -252,6 +262,8 @@ impl LogicalPlan {
             })),
             LogicalPlan::CreateTable(_)
             | LogicalPlan::CreateIndex(_)
+            | LogicalPlan::DropTable(_)
+            | LogicalPlan::DropIndex(_)
             | LogicalPlan::TableScan(_)
             | LogicalPlan::Values(_)
             | LogicalPlan::Update(_)
@@ -270,6 +282,8 @@ impl std::fmt::Display for LogicalPlan {
         match self {
             LogicalPlan::CreateTable(v) => write!(f, "{v}"),
             LogicalPlan::CreateIndex(v) => write!(f, "{v}"),
+            LogicalPlan::DropTable(v) => write!(f, "{v}"),
+            LogicalPlan::DropIndex(v) => write!(f, "{v}"),
             LogicalPlan::Filter(v) => write!(f, "{v}"),
             LogicalPlan::Insert(v) => write!(f, "{v}"),
             LogicalPlan::Join(v) => write!(f, "{v}"),

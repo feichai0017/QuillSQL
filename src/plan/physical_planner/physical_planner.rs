@@ -2,14 +2,15 @@ use crate::catalog::{Catalog, Schema, DEFAULT_SCHEMA_NAME};
 use std::sync::Arc;
 
 use crate::plan::logical_plan::{
-    Aggregate, CreateIndex, CreateTable, EmptyRelation, Filter, Insert, Join, Limit, LogicalPlan,
-    Project, Sort, TableScan, Values,
+    Aggregate, CreateIndex, CreateTable, DropIndex, DropTable, EmptyRelation, Filter, Insert, Join,
+    Limit, LogicalPlan, Project, Sort, TableScan, Values,
 };
 
 use crate::execution::physical_plan::{
-    PhysicalAggregate, PhysicalCreateIndex, PhysicalCreateTable, PhysicalDelete, PhysicalEmpty,
-    PhysicalFilter, PhysicalIndexScan, PhysicalInsert, PhysicalLimit, PhysicalNestedLoopJoin,
-    PhysicalPlan, PhysicalProject, PhysicalSeqScan, PhysicalSort, PhysicalUpdate, PhysicalValues,
+    PhysicalAggregate, PhysicalCreateIndex, PhysicalCreateTable, PhysicalDelete, PhysicalDropIndex,
+    PhysicalDropTable, PhysicalEmpty, PhysicalFilter, PhysicalIndexScan, PhysicalInsert,
+    PhysicalLimit, PhysicalNestedLoopJoin, PhysicalPlan, PhysicalProject, PhysicalSeqScan,
+    PhysicalSort, PhysicalUpdate, PhysicalValues,
 };
 
 pub struct PhysicalPlanner<'a> {
@@ -43,6 +44,25 @@ impl PhysicalPlanner<'_> {
                 table.clone(),
                 table_schema.clone(),
                 columns.clone(),
+            )),
+            LogicalPlan::DropTable(DropTable { 
+                name, 
+                if_exists 
+            }) => {
+                PhysicalPlan::DropTable(PhysicalDropTable::new(
+                name.clone(), 
+                *if_exists))
+            }
+            LogicalPlan::DropIndex(DropIndex {
+                name,
+                schema,
+                catalog,
+                if_exists,
+            }) => PhysicalPlan::DropIndex(PhysicalDropIndex::new(
+                name.clone(),
+                schema.clone(),
+                catalog.clone(),
+                *if_exists,
             )),
             LogicalPlan::Insert(Insert {
                 table,

@@ -18,7 +18,6 @@
 - **Streaming / Prefetch**: Large sequential scans bypass the cache via a small direct I/O ring buffer; targeted prefetch warms hot paths without pins
 - **WAL & Recovery (ARIES-inspired)**: FPW + PageDelta, DPT, chained CLR, per-transaction undo chains, idempotent replays
 - **Information schema**: `information_schema.schemas`, `tables`, `columns`, `indexes`
-- **Now supports**: `SHOW DATABASES`, `SHOW TABLES`, `EXPLAIN`, `DELETE`
 - **Docs**: [Architecture](docs/architecture.md) · [Buffer Pool](docs/buffer_pool.md) · [B+ Tree Index](docs/btree_index.md) · [Disk I/O](docs/disk_io.md) · [WAL & Recovery](docs/wal.md) · [Transactions](docs/transactions.md)
 
 ---
@@ -96,6 +95,15 @@ EXPLAIN SELECT id, COUNT(*) FROM t GROUP BY id ORDER BY id;
     CREATE INDEX idx_t_id ON t(id);
     ```
 
+- **DROP**
+  - `DROP TABLE [IF EXISTS] <name>`
+  - `DROP INDEX [IF EXISTS] <name>`
+  - Example:
+    ```sql
+    DROP INDEX IF EXISTS idx_orders_user_id;
+    DROP TABLE orders;
+    ```
+
 - **INSERT**
   - `INSERT INTO ... VALUES (...)` and `INSERT INTO ... SELECT ...`
 
@@ -122,7 +130,7 @@ EXPLAIN SELECT id, COUNT(*) FROM t GROUP BY id ORDER BY id;
 
 ## ⚠️ Current Limitations
 
-- Not yet supported: `DROP`, `ALTER`, MVCC, predicate locking.
+- Not yet supported: `ALTER`, MVCC, predicate locking.
 - Not implemented: outer joins (Left/Right/Full), arithmetic expressions, table/subquery aliases
 - `ORDER BY` `DESC` / `NULLS FIRST|LAST` currently affects sorting only (not storage layout)
 - Storage uses Linux `io_uring`; non-Linux platforms currently require a fallback backend (planned).

@@ -1,0 +1,26 @@
+statement ok
+create table drop_t (id int primary key)
+
+statement ok
+create index drop_t_idx on drop_t(id)
+
+statement ok
+drop index drop_t_idx
+
+statement ok
+drop index if exists drop_t_idx
+
+statement ok
+create index drop_t_idx on drop_t(id)
+
+statement ok
+drop table drop_t
+
+statement ok
+drop table if exists drop_t
+
+statement error
+drop table drop_t
+
+statement error
+drop index drop_t_idx

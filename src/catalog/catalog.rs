@@ -12,13 +12,15 @@ use crate::storage::disk_manager::DiskManager;
 use crate::storage::page::{
     BPLUS_INTERNAL_PAGE_MAX_SIZE, BPLUS_LEAF_PAGE_MAX_SIZE, EMPTY_TUPLE_META,
 };
+use crate::storage::table_heap::{TableHeap, TableIterator};
 use crate::storage::tuple::Tuple;
+use crate::transaction::TransactionId;
+use crate::utils::scalar::ScalarValue;
 use crate::utils::table_ref::TableReference;
 use crate::{
     buffer::BufferManager,
     error::{QuillSQLError, QuillSQLResult},
     storage::index::btree_index::BPlusTreeIndex,
-    storage::table_heap::TableHeap,
 };
 
 pub static DEFAULT_CATALOG_NAME: &str = "quillsql";
@@ -62,6 +64,8 @@ impl CatalogTable {
         }
     }
 }
+
+const SYSTEM_TXN_ID: TransactionId = 0;
 
 impl Catalog {
     pub fn new(buffer_pool: Arc<BufferManager>, disk_manager: Arc<DiskManager>) -> Self {
@@ -201,6 +205,45 @@ impl Catalog {
         }
 
         Ok(table_heap)
+    }
+
+    pub fn drop_table(&mut self, table_ref: &TableReference) -> QuillSQLResult<bool> {
+        let catalog_name = table_ref
+            .catalog()
+            .unwrap_or(DEFAULT_CATALOG_NAME)
+            .to_string();
+        let schema_name = table_ref
+            .schema()
+            .unwrap_or(DEFAULT_SCHEMA_NAME)
+            .to_string();
+        let table_name = table_ref.table().to_string();
+
+        if schema_name == INFORMATION_SCHEMA_NAME {
+            return Err(QuillSQLError::Execution(
+                "dropping information_schema tables is not allowed".to_string(),
+            ));
+        }
+
+        let Some(schema) = self.schemas.get_mut(&schema_name) else {
+            return Ok(false);
+        };
+
+        let Some(catalog_table) = schema.tables.remove(&table_name) else {
+            return Ok(false);
+        };
+
+        for index_name in catalog_table.indexes.keys() {
+            self.unregister_index_variants(
+                &catalog_name,
+                &schema_name,
+                &table_name,
+                table_ref,
+                index_name,
+            );
+        }
+
+        self.remove_table_metadata(&catalog_name, &schema_name, &table_name)?;
+        Ok(true)
     }
 
     pub fn table_heap(&self, table_ref: &TableReference) -> QuillSQLResult<Arc<TableHeap>> {
@@ -348,6 +391,76 @@ impl Catalog {
         Ok(b_plus_tree_index)
     }
 
+    pub fn drop_index(
+        &mut self,
+        table_ref: &TableReference,
+        index_name: &str,
+    ) -> QuillSQLResult<bool> {
+        let catalog_name = table_ref
+            .catalog()
+            .unwrap_or(DEFAULT_CATALOG_NAME)
+            .to_string();
+        let schema_name = table_ref
+            .schema()
+            .unwrap_or(DEFAULT_SCHEMA_NAME)
+            .to_string();
+        let table_name = table_ref.table().to_string();
+
+        if schema_name == INFORMATION_SCHEMA_NAME {
+            return Err(QuillSQLError::Execution(
+                "dropping indexes on information_schema tables is not allowed".to_string(),
+            ));
+        }
+
+        let Some(schema) = self.schemas.get_mut(&schema_name) else {
+            return Ok(false);
+        };
+        let Some(table) = schema.tables.get_mut(&table_name) else {
+            return Ok(false);
+        };
+
+        if table.indexes.remove(index_name).is_none() {
+            return Ok(false);
+        }
+
+        self.unregister_index_variants(
+            &catalog_name,
+            &schema_name,
+            &table_name,
+            table_ref,
+            index_name,
+        );
+
+        self.remove_index_metadata(&catalog_name, &schema_name, &table_name, index_name)?;
+
+        Ok(true)
+    }
+
+    pub fn find_index_owner(
+        &self,
+        catalog_hint: Option<&str>,
+        schema_hint: Option<&str>,
+        index_name: &str,
+    ) -> Option<TableReference> {
+        let catalog_name = catalog_hint.unwrap_or(DEFAULT_CATALOG_NAME);
+
+        if let Some(schema_name) = schema_hint {
+            return self.find_index_in_schema(catalog_name, schema_name, index_name);
+        }
+
+        for (schema_name, _schema) in &self.schemas {
+            if schema_name == INFORMATION_SCHEMA_NAME {
+                continue;
+            }
+            if let Some(table_ref) =
+                self.find_index_in_schema(catalog_name, schema_name, index_name)
+            {
+                return Some(table_ref);
+            }
+        }
+        None
+    }
+
     pub fn index(
         &self,
         table_ref: &TableReference,
@@ -423,6 +536,221 @@ impl Catalog {
             global_index_registry().register(table_ref.clone(), idx_name, idx.clone(), table_heap);
         }
         Ok(())
+    }
+
+    fn find_index_in_schema(
+        &self,
+        catalog_name: &str,
+        schema_name: &str,
+        index_name: &str,
+    ) -> Option<TableReference> {
+        if schema_name == INFORMATION_SCHEMA_NAME {
+            return None;
+        }
+        let schema = self.schemas.get(schema_name)?;
+        for (table_name, table) in &schema.tables {
+            if table.indexes.contains_key(index_name) {
+                if catalog_name == DEFAULT_CATALOG_NAME {
+                    if schema_name == DEFAULT_SCHEMA_NAME {
+                        return Some(TableReference::Bare {
+                            table: table_name.clone(),
+                        });
+                    }
+                    return Some(TableReference::Partial {
+                        schema: schema_name.to_string(),
+                        table: table_name.clone(),
+                    });
+                }
+                return Some(TableReference::Full {
+                    catalog: catalog_name.to_string(),
+                    schema: schema_name.to_string(),
+                    table: table_name.clone(),
+                });
+            }
+        }
+        None
+    }
+
+    fn remove_table_metadata(
+        &mut self,
+        catalog_name: &str,
+        schema_name: &str,
+        table_name: &str,
+    ) -> QuillSQLResult<()> {
+        let (tables_heap, columns_heap, indexes_heap) = {
+            let information_schema =
+                self.schemas.get(INFORMATION_SCHEMA_NAME).ok_or_else(|| {
+                    QuillSQLError::Internal(
+                        "catalog schema information_schema not created yet".to_string(),
+                    )
+                })?;
+            let tables_heap = information_schema
+                .tables
+                .get(INFORMATION_SCHEMA_TABLES)
+                .ok_or_else(|| {
+                    QuillSQLError::Internal(
+                        "table information_schema.tables not created yet".to_string(),
+                    )
+                })?
+                .table
+                .clone();
+            let columns_heap = information_schema
+                .tables
+                .get(INFORMATION_SCHEMA_COLUMNS)
+                .ok_or_else(|| {
+                    QuillSQLError::Internal(
+                        "table information_schema.columns not created yet".to_string(),
+                    )
+                })?
+                .table
+                .clone();
+            let indexes_heap = information_schema
+                .tables
+                .get(INFORMATION_SCHEMA_INDEXES)
+                .ok_or_else(|| {
+                    QuillSQLError::Internal(
+                        "table information_schema.indexes not created yet".to_string(),
+                    )
+                })?
+                .table
+                .clone();
+            (tables_heap, columns_heap, indexes_heap)
+        };
+
+        Self::delete_matching_rows(tables_heap, |tuple| {
+            let ScalarValue::Varchar(Some(catalog)) = tuple.value(0)? else {
+                return Ok(false);
+            };
+            let ScalarValue::Varchar(Some(schema)) = tuple.value(1)? else {
+                return Ok(false);
+            };
+            let ScalarValue::Varchar(Some(table)) = tuple.value(2)? else {
+                return Ok(false);
+            };
+            Ok(catalog == catalog_name && schema == schema_name && table == table_name)
+        })?;
+
+        Self::delete_matching_rows(columns_heap, |tuple| {
+            let ScalarValue::Varchar(Some(catalog)) = tuple.value(0)? else {
+                return Ok(false);
+            };
+            let ScalarValue::Varchar(Some(schema)) = tuple.value(1)? else {
+                return Ok(false);
+            };
+            let ScalarValue::Varchar(Some(table)) = tuple.value(2)? else {
+                return Ok(false);
+            };
+            Ok(catalog == catalog_name && schema == schema_name && table == table_name)
+        })?;
+
+        Self::delete_matching_rows(indexes_heap, |tuple| {
+            let ScalarValue::Varchar(Some(catalog)) = tuple.value(0)? else {
+                return Ok(false);
+            };
+            let ScalarValue::Varchar(Some(schema)) = tuple.value(1)? else {
+                return Ok(false);
+            };
+            let ScalarValue::Varchar(Some(table)) = tuple.value(2)? else {
+                return Ok(false);
+            };
+            Ok(catalog == catalog_name && schema == schema_name && table == table_name)
+        })?;
+
+        Ok(())
+    }
+
+    fn remove_index_metadata(
+        &mut self,
+        catalog_name: &str,
+        schema_name: &str,
+        table_name: &str,
+        index_name: &str,
+    ) -> QuillSQLResult<()> {
+        let indexes_heap = {
+            let information_schema =
+                self.schemas.get(INFORMATION_SCHEMA_NAME).ok_or_else(|| {
+                    QuillSQLError::Internal(
+                        "catalog schema information_schema not created yet".to_string(),
+                    )
+                })?;
+            information_schema
+                .tables
+                .get(INFORMATION_SCHEMA_INDEXES)
+                .ok_or_else(|| {
+                    QuillSQLError::Internal(
+                        "table information_schema.indexes not created yet".to_string(),
+                    )
+                })?
+                .table
+                .clone()
+        };
+
+        Self::delete_matching_rows(indexes_heap, |tuple| {
+            let ScalarValue::Varchar(Some(catalog)) = tuple.value(0)? else {
+                return Ok(false);
+            };
+            let ScalarValue::Varchar(Some(schema)) = tuple.value(1)? else {
+                return Ok(false);
+            };
+            let ScalarValue::Varchar(Some(table)) = tuple.value(2)? else {
+                return Ok(false);
+            };
+            let ScalarValue::Varchar(Some(index)) = tuple.value(3)? else {
+                return Ok(false);
+            };
+            Ok(catalog == catalog_name
+                && schema == schema_name
+                && table == table_name
+                && index == index_name)
+        })?;
+
+        Ok(())
+    }
+
+    fn delete_matching_rows<F>(heap: Arc<TableHeap>, mut predicate: F) -> QuillSQLResult<()>
+    where
+        F: FnMut(&Tuple) -> QuillSQLResult<bool>,
+    {
+        let mut iterator = TableIterator::new(heap.clone(), ..);
+        while let Some((rid, tuple)) = iterator.next()? {
+            if predicate(&tuple)? {
+                heap.delete_tuple(rid, SYSTEM_TXN_ID)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn unregister_index_variants(
+        &self,
+        catalog_name: &str,
+        schema_name: &str,
+        table_name: &str,
+        original_ref: &TableReference,
+        index_name: &str,
+    ) {
+        let registry = global_index_registry();
+        registry.unregister(original_ref, index_name);
+        registry.unregister(
+            &TableReference::Bare {
+                table: table_name.to_string(),
+            },
+            index_name,
+        );
+        registry.unregister(
+            &TableReference::Partial {
+                schema: schema_name.to_string(),
+                table: table_name.to_string(),
+            },
+            index_name,
+        );
+        registry.unregister(
+            &TableReference::Full {
+                catalog: catalog_name.to_string(),
+                schema: schema_name.to_string(),
+                table: table_name.to_string(),
+            },
+            index_name,
+        );
     }
 }
 

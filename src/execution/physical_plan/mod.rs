@@ -2,6 +2,8 @@ mod aggregate;
 mod create_index;
 mod create_table;
 mod delete;
+mod drop_index;
+mod drop_table;
 mod empty;
 mod filter;
 mod index_scan;
@@ -18,6 +20,8 @@ pub use aggregate::PhysicalAggregate;
 pub use create_index::PhysicalCreateIndex;
 pub use create_table::PhysicalCreateTable;
 pub use delete::PhysicalDelete;
+pub use drop_index::PhysicalDropIndex;
+pub use drop_table::PhysicalDropTable;
 pub use empty::PhysicalEmpty;
 pub use filter::PhysicalFilter;
 pub use index_scan::PhysicalIndexScan;
@@ -54,6 +58,8 @@ pub enum PhysicalPlan {
     Aggregate(PhysicalAggregate),
     CreateTable(PhysicalCreateTable),
     CreateIndex(PhysicalCreateIndex),
+    DropTable(PhysicalDropTable),
+    DropIndex(PhysicalDropIndex),
 }
 
 impl PhysicalPlan {
@@ -73,6 +79,8 @@ impl PhysicalPlan {
             PhysicalPlan::Empty(_)
             | PhysicalPlan::CreateTable(_)
             | PhysicalPlan::CreateIndex(_)
+            | PhysicalPlan::DropTable(_)
+            | PhysicalPlan::DropIndex(_)
             | PhysicalPlan::SeqScan(_)
             | PhysicalPlan::IndexScan(_)
             | PhysicalPlan::Update(_)
@@ -88,6 +96,8 @@ impl VolcanoExecutor for PhysicalPlan {
             PhysicalPlan::Empty(op) => op.init(context),
             PhysicalPlan::CreateTable(op) => op.init(context),
             PhysicalPlan::CreateIndex(op) => op.init(context),
+            PhysicalPlan::DropTable(op) => op.init(context),
+            PhysicalPlan::DropIndex(op) => op.init(context),
             PhysicalPlan::Insert(op) => op.init(context),
             PhysicalPlan::Values(op) => op.init(context),
             PhysicalPlan::Project(op) => op.init(context),
@@ -108,6 +118,8 @@ impl VolcanoExecutor for PhysicalPlan {
             PhysicalPlan::Empty(op) => op.next(context),
             PhysicalPlan::CreateTable(op) => op.next(context),
             PhysicalPlan::CreateIndex(op) => op.next(context),
+            PhysicalPlan::DropTable(op) => op.next(context),
+            PhysicalPlan::DropIndex(op) => op.next(context),
             PhysicalPlan::Insert(op) => op.next(context),
             PhysicalPlan::Values(op) => op.next(context),
             PhysicalPlan::Project(op) => op.next(context),
@@ -128,6 +140,8 @@ impl VolcanoExecutor for PhysicalPlan {
             Self::Empty(op) => op.output_schema(),
             Self::CreateTable(op) => op.output_schema(),
             Self::CreateIndex(op) => op.output_schema(),
+            Self::DropTable(op) => op.output_schema(),
+            Self::DropIndex(op) => op.output_schema(),
             Self::Insert(op) => op.output_schema(),
             Self::Values(op) => op.output_schema(),
             Self::Project(op) => op.output_schema(),
@@ -150,6 +164,8 @@ impl std::fmt::Display for PhysicalPlan {
             Self::Empty(op) => write!(f, "{op}"),
             Self::CreateTable(op) => write!(f, "{op}"),
             Self::CreateIndex(op) => write!(f, "{op}"),
+            Self::DropTable(op) => write!(f, "{op}"),
+            Self::DropIndex(op) => write!(f, "{op}"),
             Self::Insert(op) => write!(f, "{op}"),
             Self::Values(op) => write!(f, "{op}"),
             Self::Project(op) => write!(f, "{op}"),
