@@ -87,7 +87,8 @@ This document gives a high-level overview of QuillSQL’s end-to-end architectur
   - `prefetch_page` API lets iterators warm the cache without pinning; background writer periodically drains dirty pages so foreground work stays responsive.
 
 - Disk I/O
-  - Asynchronous scheduler thread (channels) handles Read/Write/Allocate/Deallocate.
+  - `DiskScheduler` fronts a dispatcher + io_uring worker pool; foreground threads enqueue read/write/alloc requests and wait on a response channel.
+  - WAL runtime threads use buffered I/O with cached segment handles, staying off the data-page io_uring path.
 
 - Web Service
   - Axum router exposes `/api/sql` and `/api/sql_batch`; serves static `public/` and `docs/`.
