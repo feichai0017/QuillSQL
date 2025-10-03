@@ -1,3 +1,4 @@
+use crate::background::{BackgroundWorkers, WorkerHandle, WorkerKind, WorkerMetadata};
 use log::{debug, warn};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -9,13 +10,13 @@ use tempfile::TempDir;
 use crate::buffer::{BufferManager, BUFFER_POOL_SIZE};
 use crate::catalog::load_catalog_data;
 use crate::catalog::registry::global_index_registry;
-use crate::config::{IndexVacuumConfig, WalConfig};
+use crate::config::{background_config, IndexVacuumConfig, WalConfig};
 use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::optimizer::LogicalOptimizer;
 use crate::plan::logical_plan::{LogicalPlan, TransactionScope};
 use crate::plan::PhysicalPlanner;
 use crate::recovery::wal_record::CheckpointPayload;
-use crate::recovery::{ControlFileManager, RecoveryManager, WalManager};
+use crate::recovery::{ControlFileManager, RecoveryManager, WalManager, WalWriterHandle};
 use crate::session::SessionContext;
 use crate::utils::util::{pretty_format_logical_plan, pretty_format_physical_plan};
 use crate::{
@@ -51,14 +52,11 @@ pub struct DatabaseOptions {
 pub struct Database {
     pub(crate) buffer_pool: Arc<BufferManager>,
     pub(crate) catalog: Catalog,
+    background_workers: BackgroundWorkers,
     pub(crate) wal_manager: Arc<WalManager>,
     pub(crate) transaction_manager: Arc<TransactionManager>,
     default_isolation: IsolationLevel,
     temp_dir: Option<TempDir>,
-    checkpoint_stop: Arc<AtomicBool>,
-    checkpoint_handle: Option<thread::JoinHandle<()>>,
-    bg_writer_stop: Arc<AtomicBool>,
-    bg_writer_handle: Option<thread::JoinHandle<()>>,
 }
 impl Database {
     pub fn new_on_disk(db_path: &str) -> QuillSQLResult<Self> {
@@ -87,8 +85,13 @@ impl Database {
             wal_manager.clone(),
             synchronous_commit,
         ));
-        if let Some(interval) = wal_config.writer_interval_ms {
-            wal_manager.start_background_flush(Duration::from_millis(interval))?;
+
+        let worker_cfg = background_config(&wal_config, IndexVacuumConfig::default());
+        let mut background_workers = BackgroundWorkers::new();
+        if let Some(interval) = worker_cfg.wal_writer_interval {
+            if let Some(handle) = wal_manager.start_background_flush(interval)? {
+                background_workers.register(wal_writer_worker(handle, interval));
+            }
         }
         buffer_pool.set_wal_manager(wal_manager.clone());
 
@@ -111,34 +114,29 @@ impl Database {
             );
         }
 
-        let (checkpoint_stop, checkpoint_handle) = spawn_checkpoint_worker(
+        background_workers.register_opt(spawn_checkpoint_worker(
             wal_manager.clone(),
             buffer_pool.clone(),
             transaction_manager.clone(),
-            wal_config.checkpoint_interval_ms,
-        );
+            worker_cfg.checkpoint_interval,
+        ));
 
-        let (bg_writer_stop, bg_writer_handle) = spawn_bg_writer(
+        background_workers.register_opt(spawn_bg_writer(
             buffer_pool.clone(),
-            std::env::var("QUILL_BG_WRITER_INTERVAL_MS")
-                .ok()
-                .and_then(|v| v.parse::<u64>().ok()),
-            IndexVacuumConfig::default(),
-        );
+            worker_cfg.bg_writer_interval,
+            worker_cfg.vacuum,
+        ));
 
         let mut db = Self {
             buffer_pool,
             catalog,
+            background_workers,
             wal_manager,
             transaction_manager,
             default_isolation: options
                 .default_isolation_level
                 .unwrap_or(IsolationLevel::ReadUncommitted),
             temp_dir: None,
-            checkpoint_stop,
-            checkpoint_handle,
-            bg_writer_stop,
-            bg_writer_handle,
         };
         load_catalog_data(&mut db)?;
         Ok(db)
@@ -172,8 +170,13 @@ impl Database {
             wal_manager.clone(),
             synchronous_commit,
         ));
-        if let Some(interval) = wal_config.writer_interval_ms {
-            wal_manager.start_background_flush(Duration::from_millis(interval))?;
+
+        let worker_cfg = background_config(&wal_config, IndexVacuumConfig::default());
+        let mut background_workers = BackgroundWorkers::new();
+        if let Some(interval) = worker_cfg.wal_writer_interval {
+            if let Some(handle) = wal_manager.start_background_flush(interval)? {
+                background_workers.register(wal_writer_worker(handle, interval));
+            }
         }
         buffer_pool.set_wal_manager(wal_manager.clone());
 
@@ -196,34 +199,29 @@ impl Database {
             );
         }
 
-        let (checkpoint_stop, checkpoint_handle) = spawn_checkpoint_worker(
+        background_workers.register_opt(spawn_checkpoint_worker(
             wal_manager.clone(),
             buffer_pool.clone(),
             transaction_manager.clone(),
-            wal_config.checkpoint_interval_ms,
-        );
+            worker_cfg.checkpoint_interval,
+        ));
 
-        let (bg_writer_stop, bg_writer_handle) = spawn_bg_writer(
+        background_workers.register_opt(spawn_bg_writer(
             buffer_pool.clone(),
-            std::env::var("QUILL_BG_WRITER_INTERVAL_MS")
-                .ok()
-                .and_then(|v| v.parse::<u64>().ok()),
-            IndexVacuumConfig::default(),
-        );
+            worker_cfg.bg_writer_interval,
+            worker_cfg.vacuum,
+        ));
 
         let mut db = Self {
             buffer_pool,
             catalog,
+            background_workers,
             wal_manager,
             transaction_manager,
             default_isolation: options
                 .default_isolation_level
                 .unwrap_or(IsolationLevel::ReadUncommitted),
             temp_dir: Some(temp_dir),
-            checkpoint_stop,
-            checkpoint_handle,
-            bg_writer_stop,
-            bg_writer_handle,
         };
         load_catalog_data(&mut db)?;
         Ok(db)
@@ -363,18 +361,7 @@ impl Database {
 
 impl Drop for Database {
     fn drop(&mut self) {
-        self.checkpoint_stop.store(true, Ordering::Relaxed);
-        if let Some(handle) = self.checkpoint_handle.take() {
-            if let Err(join_err) = handle.join() {
-                warn!("Checkpoint worker terminated with panic: {:?}", join_err);
-            }
-        }
-        self.bg_writer_stop.store(true, Ordering::Relaxed);
-        if let Some(handle) = self.bg_writer_handle.take() {
-            if let Err(join_err) = handle.join() {
-                warn!("BG writer terminated with panic: {:?}", join_err);
-            }
-        }
+        self.background_workers.shutdown_all();
     }
 }
 
@@ -454,113 +441,138 @@ fn wal_config_for_temp(temp_root: &Path, overrides: &WalOptions) -> WalConfig {
     config
 }
 
+fn wal_writer_worker(handle: WalWriterHandle, interval: Duration) -> WorkerHandle {
+    WorkerHandle::new(
+        WorkerMetadata {
+            kind: WorkerKind::WalWriter,
+            interval: Some(interval),
+        },
+        move || {
+            if let Err(err) = handle.stop() {
+                warn!("Failed to stop WAL writer: {}", err);
+            }
+        },
+        None,
+    )
+}
+
 fn spawn_checkpoint_worker(
     wal_manager: Arc<WalManager>,
     buffer_pool: Arc<BufferManager>,
     transaction_manager: Arc<TransactionManager>,
-    interval_ms: Option<u64>,
-) -> (Arc<AtomicBool>, Option<thread::JoinHandle<()>>) {
-    let stop = Arc::new(AtomicBool::new(false));
-    let Some(ms) = interval_ms else {
-        return (stop, None);
+    interval: Option<Duration>,
+) -> Option<WorkerHandle> {
+    let Some(interval) = interval else {
+        return None;
     };
-    if ms == 0 {
-        return (stop, None);
+    if interval.is_zero() {
+        return None;
     }
-    let stop_flag = stop.clone();
     let wal = wal_manager.clone();
     let bp = buffer_pool.clone();
     let txn_mgr = transaction_manager.clone();
-    let interval = Duration::from_millis(ms);
-    let handle = thread::Builder::new()
-        .name("checkpoint-worker".into())
-        .spawn(move || {
-            while !stop_flag.load(Ordering::Relaxed) {
-                let dirty_pages = bp.dirty_page_ids();
-                let dpt_snapshot = bp.dirty_page_table_snapshot();
-                let active_txns = txn_mgr.active_transactions();
-                let last_lsn = wal.max_assigned_lsn();
 
-                if last_lsn != 0 {
-                    if let Err(e) = wal.flush_until(last_lsn) {
-                        warn!("Checkpoint flush failed: {}", e);
-                    }
-                    let payload = CheckpointPayload {
-                        last_lsn,
-                        dirty_pages,
-                        active_transactions: active_txns,
-                        dpt: dpt_snapshot,
-                    };
-                    if let Err(e) = wal.log_checkpoint(payload) {
-                        warn!("Checkpoint write failed: {}", e);
-                    }
-                }
+    spawn_periodic_worker(
+        "checkpoint-worker",
+        WorkerKind::Checkpoint,
+        interval,
+        move || {
+            let dirty_pages = bp.dirty_page_ids();
+            let dpt_snapshot = bp.dirty_page_table_snapshot();
+            let active_txns = txn_mgr.active_transactions();
+            let last_lsn = wal.max_assigned_lsn();
 
-                if stop_flag.load(Ordering::Relaxed) {
-                    break;
+            if last_lsn != 0 {
+                if let Err(e) = wal.flush_until(last_lsn) {
+                    warn!("Checkpoint flush failed: {}", e);
                 }
-                thread::sleep(interval);
+                let payload = CheckpointPayload {
+                    last_lsn,
+                    dirty_pages,
+                    active_transactions: active_txns,
+                    dpt: dpt_snapshot,
+                };
+                if let Err(e) = wal.log_checkpoint(payload) {
+                    warn!("Checkpoint write failed: {}", e);
+                }
             }
-        })
-        .map(Some)
-        .unwrap_or_else(|err| {
-            warn!("Failed to spawn checkpoint worker: {}", err);
-            None
-        });
-
-    (stop, handle)
+        },
+    )
 }
 
 fn spawn_bg_writer(
     buffer_pool: Arc<BufferManager>,
-    interval_ms: Option<u64>,
+    interval: Option<Duration>,
     vacuum_cfg: IndexVacuumConfig,
-) -> (Arc<AtomicBool>, Option<thread::JoinHandle<()>>) {
-    let stop = Arc::new(AtomicBool::new(false));
-    let Some(ms) = interval_ms else {
-        return (stop, None);
+) -> Option<WorkerHandle> {
+    let Some(interval) = interval else {
+        return None;
     };
-    if ms == 0 {
-        return (stop, None);
+    if interval.is_zero() {
+        return None;
     }
-    let stop_flag = stop.clone();
     let bp = buffer_pool.clone();
-    let interval = Duration::from_millis(ms);
-    let handle = thread::Builder::new()
-        .name("bg-writer".into())
-        .spawn(move || {
-            while !stop_flag.load(Ordering::Relaxed) {
-                // Flush a small batch of dirty pages per cycle
-                let dirty_ids = bp.dirty_page_ids();
-                for page_id in dirty_ids.into_iter().take(16) {
-                    let _ = bp.flush_page(page_id);
-                }
-
-                // Opportunistic index lazy cleanup based on pending_garbage counters.
-                // Global registry is read-only and cheap to iterate.
-                let registry = global_index_registry();
-                for (idx, heap) in registry.iter().take(16) {
-                    let pending = idx.take_pending_garbage();
-                    if pending >= vacuum_cfg.trigger_threshold {
-                        // conservative predicate using heap meta only (no txn watermarks here):
-                        // delete-marked tuples are always globally invisible for readers.
-                        let _ = idx.lazy_cleanup_with(
-                            |rid| heap.tuple_meta(*rid).map(|m| m.is_deleted).unwrap_or(false),
-                            Some(vacuum_cfg.batch_limit),
-                        );
-                    }
-                }
-
-                if stop_flag.load(Ordering::Relaxed) {
-                    break;
-                }
-                thread::sleep(interval);
+    spawn_periodic_worker(
+        "bg-writer",
+        WorkerKind::BufferPoolWriter,
+        interval,
+        move || {
+            let dirty_ids = bp.dirty_page_ids();
+            for page_id in dirty_ids.into_iter().take(16) {
+                let _ = bp.flush_page(page_id);
             }
-        })
-        .map(Some)
-        .unwrap_or_else(|err| {
-            warn!("Failed to spawn bg writer: {}", err);
+
+            let registry = global_index_registry();
+            for (idx, heap) in registry.iter().take(16) {
+                let pending = idx.take_pending_garbage();
+                if pending >= vacuum_cfg.trigger_threshold {
+                    let _ = idx.lazy_cleanup_with(
+                        |rid| heap.tuple_meta(*rid).map(|m| m.is_deleted).unwrap_or(false),
+                        Some(vacuum_cfg.batch_limit),
+                    );
+                }
+            }
+        },
+    )
+}
+
+fn spawn_periodic_worker<F>(
+    name: &str,
+    kind: WorkerKind,
+    interval: Duration,
+    mut tick: F,
+) -> Option<WorkerHandle>
+where
+    F: FnMut() + Send + 'static,
+{
+    let stop_flag = Arc::new(AtomicBool::new(false));
+    let thread_flag = Arc::clone(&stop_flag);
+
+    match thread::Builder::new().name(name.into()).spawn(move || {
+        while !thread_flag.load(Ordering::Relaxed) {
+            tick();
+            if thread_flag.load(Ordering::Relaxed) {
+                break;
+            }
+            thread::sleep(interval);
+        }
+    }) {
+        Ok(join_handle) => {
+            let stop_handle = Arc::clone(&stop_flag);
+            Some(WorkerHandle::new(
+                WorkerMetadata {
+                    kind,
+                    interval: Some(interval),
+                },
+                move || {
+                    stop_handle.store(true, Ordering::Release);
+                },
+                Some(join_handle),
+            ))
+        }
+        Err(err) => {
+            warn!("Failed to spawn {}: {}", name, err);
             None
-        });
-    (stop, handle)
+        }
+    }
 }

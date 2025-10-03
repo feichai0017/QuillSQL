@@ -5,6 +5,9 @@ use std::thread::{self, JoinHandle};
 
 use bytes::Bytes;
 use parking_lot::Mutex;
+use std::collections::{hash_map::Entry, HashMap};
+use std::fs::{File, OpenOptions};
+use std::io::{Seek, SeekFrom, Write};
 
 use crate::error::{QuillSQLError, QuillSQLResult};
 
@@ -115,6 +118,8 @@ impl Drop for WalRuntime {
 }
 
 fn worker_loop(receiver: Arc<Mutex<Receiver<WalCommand>>>) {
+    let mut file_cache: HashMap<PathBuf, File> = HashMap::new();
+
     loop {
         let command = {
             let guard = receiver.lock();
@@ -129,9 +134,10 @@ fn worker_loop(receiver: Arc<Mutex<Receiver<WalCommand>>>) {
                 sync,
                 responder,
             }) => {
-                let result = wal_write(&path, offset, &bytes, sync);
+                let log_path = path.clone();
+                let result = wal_write_cached(&mut file_cache, path, offset, &bytes, sync);
                 if responder.send(result).is_err() {
-                    log::error!("WAL write responder dropped: {:?}", path);
+                    log::error!("WAL write responder dropped: {:?}", log_path);
                 }
             }
             Ok(WalCommand::Read {
@@ -150,15 +156,24 @@ fn worker_loop(receiver: Arc<Mutex<Receiver<WalCommand>>>) {
     }
 }
 
-fn wal_write(path: &Path, offset: u64, bytes: &[u8], sync: bool) -> QuillSQLResult<()> {
-    use std::fs::OpenOptions;
-    use std::io::{Seek, SeekFrom, Write};
-
-    let mut file = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .read(true)
-        .open(path)?;
+fn wal_write_cached(
+    cache: &mut HashMap<PathBuf, File>,
+    path: PathBuf,
+    offset: u64,
+    bytes: &[u8],
+    sync: bool,
+) -> QuillSQLResult<()> {
+    let file = match cache.entry(path.clone()) {
+        Entry::Occupied(entry) => entry.into_mut(),
+        Entry::Vacant(entry) => {
+            let file = OpenOptions::new()
+                .create(true)
+                .write(true)
+                .read(true)
+                .open(&path)?;
+            entry.insert(file)
+        }
+    };
 
     if !bytes.is_empty() {
         file.seek(SeekFrom::Start(offset))?;

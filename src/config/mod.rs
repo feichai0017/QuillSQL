@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::time::Duration;
 
 #[derive(Debug, Clone, Copy)]
 pub struct IOSchedulerConfig {
@@ -75,6 +76,43 @@ pub struct WalConfig {
     pub synchronous_commit: bool,
     pub checkpoint_interval_ms: Option<u64>,
     pub retain_segments: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct BackgroundConfig {
+    pub wal_writer_interval: Option<Duration>,
+    pub checkpoint_interval: Option<Duration>,
+    pub bg_writer_interval: Option<Duration>,
+    pub vacuum: IndexVacuumConfig,
+}
+
+pub fn background_config(
+    wal_config: &WalConfig,
+    vacuum_cfg: IndexVacuumConfig,
+) -> BackgroundConfig {
+    let wal_writer_interval = wal_config.writer_interval_ms.and_then(duration_from_ms);
+    let checkpoint_interval = wal_config.checkpoint_interval_ms.and_then(duration_from_ms);
+
+    let env_interval = std::env::var("QUILL_BG_WRITER_INTERVAL_MS")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok());
+    let bg_interval_ms = env_interval.unwrap_or(vacuum_cfg.interval_ms);
+    let bg_writer_interval = duration_from_ms(bg_interval_ms);
+
+    BackgroundConfig {
+        wal_writer_interval,
+        checkpoint_interval,
+        bg_writer_interval,
+        vacuum: vacuum_cfg,
+    }
+}
+
+fn duration_from_ms(ms: u64) -> Option<Duration> {
+    if ms == 0 {
+        None
+    } else {
+        Some(Duration::from_millis(ms))
+    }
 }
 
 impl Default for WalConfig {

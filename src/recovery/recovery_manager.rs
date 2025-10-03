@@ -1,13 +1,14 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 
 use crate::buffer::{BufferManager, PAGE_SIZE};
 use crate::error::QuillSQLResult;
+use crate::recovery::control_file::ControlFileSnapshot;
 use crate::recovery::wal_record::{
     CheckpointPayload, ClrPayload, HeapRecordPayload, PageDeltaPayload, PageWritePayload,
-    TransactionPayload, TransactionRecordKind, WalRecordPayload,
+    TransactionRecordKind, WalFrame, WalRecordPayload,
 };
 use crate::recovery::{Lsn, WalManager};
 use crate::storage::codec::TablePageHeaderCodec;
@@ -48,98 +49,33 @@ impl RecoveryManager {
             Err(_) => return Ok(RecoverySummary::default()),
         };
 
-        let mut frames = Vec::new();
-        let mut checkpoint: Option<(Lsn, CheckpointPayload)> = None;
+        let control_snapshot = self.wal.control_file().map(|ctrl| ctrl.snapshot());
+        let mut checkpoints = CheckpointState::new(control_snapshot);
+        let mut undo_index = UndoIndex::default();
+
+        let mut has_frames = false;
         while let Some(frame) = reader.next_frame()? {
-            if let WalRecordPayload::Checkpoint(payload) = &frame.payload {
-                checkpoint = Some((frame.lsn, payload.clone()));
-            }
-            frames.push(frame);
+            has_frames = true;
+            checkpoints.observe(&frame);
+            undo_index.observe(&frame);
         }
 
-        if frames.is_empty() {
+        if !has_frames {
             return Ok(RecoverySummary::default());
         }
 
-        let mut frame_index = HashMap::with_capacity(frames.len());
-        for (idx, frame) in frames.iter().enumerate() {
-            frame_index.insert(frame.lsn, idx);
-        }
+        let start_lsn = checkpoints.start_lsn();
 
-        let cf_snapshot = self.wal.control_file().map(|ctrl| ctrl.snapshot());
-        let (start_lsn, mut active_txns) = if let Some((checkpoint_lsn, payload)) = checkpoint {
-            let checkpoint_redo_start = cf_snapshot
-                .map(|snap| snap.checkpoint_redo_start)
-                .filter(|redo| *redo >= payload.last_lsn && *redo <= checkpoint_lsn)
-                .unwrap_or_else(|| {
-                    payload
-                        .dpt
-                        .iter()
-                        .map(|(_, lsn)| *lsn)
-                        .min()
-                        .unwrap_or(payload.last_lsn)
-                });
-            let active: HashSet<u64> = payload.active_transactions.iter().copied().collect();
-            (checkpoint_redo_start, active)
-        } else {
-            (0, HashSet::new())
-        };
-
+        let mut redo_reader = self.wal.reader()?;
         let mut redo_count = 0usize;
-        let mut undo_heads: HashMap<u64, Option<Lsn>> = HashMap::new();
-        let mut undo_links: HashMap<Lsn, Option<Lsn>> = HashMap::new();
-        for frame in frames.iter() {
-            match &frame.payload {
-                WalRecordPayload::Heap(rec) => {
-                    let txn_id = match rec {
-                        HeapRecordPayload::Insert(p) => p.op_txn_id,
-                        HeapRecordPayload::Update(p) => p.op_txn_id,
-                        HeapRecordPayload::Delete(p) => p.op_txn_id,
-                    };
-                    let prev = undo_heads.get(&txn_id).copied().flatten();
-                    undo_links.insert(frame.lsn, prev);
-                    undo_heads.insert(txn_id, Some(frame.lsn));
-                }
-                WalRecordPayload::Clr(clr) => {
-                    let next = if clr.undo_next_lsn == 0 {
-                        None
-                    } else {
-                        Some(clr.undo_next_lsn)
-                    };
-                    undo_links.insert(frame.lsn, next);
-                    undo_heads.insert(clr.txn_id, next);
-                }
-                WalRecordPayload::Transaction(tx) => {
-                    self.update_active_transactions(&mut active_txns, tx, &mut undo_heads);
-                }
-                WalRecordPayload::Checkpoint(_) => {}
-                _ => {}
-            }
-
+        while let Some(frame) = redo_reader.next_frame()? {
             if frame.lsn < start_lsn {
                 continue;
             }
-
-            match &frame.payload {
-                WalRecordPayload::PageWrite(payload) => {
-                    self.redo_page_write(payload.clone())?;
-                    redo_count += 1;
-                }
-                WalRecordPayload::PageDelta(payload) => {
-                    self.redo_page_delta(payload.clone())?;
-                    redo_count += 1;
-                }
-                WalRecordPayload::Checkpoint(_) => {}
-                WalRecordPayload::Clr(_) => {
-                    // CLR redo is a no-op
-                }
-                WalRecordPayload::Heap(_) => {}
-                WalRecordPayload::Transaction(_) => {}
-            }
+            redo_count += self.redo_if_needed(&frame)?;
         }
 
-        let mut losers: Vec<u64> = active_txns.clone().into_iter().collect();
-        losers.sort_unstable();
+        let losers = undo_index.active_transactions();
 
         if !losers.is_empty() {
             log::warn!(
@@ -149,30 +85,33 @@ impl RecoveryManager {
         }
 
         // Logical UNDO pass (reverse order): apply only loser heap records, and write CLR
-        if !active_txns.is_empty() {
-            for txn_id in active_txns.iter().copied() {
-                let mut head = undo_heads.get(&txn_id).copied().flatten();
-                while let Some(lsn) = head {
-                    let next = undo_links.get(&lsn).copied().flatten();
-                    if let Some(frame_idx) = frame_index.get(&lsn) {
-                        if let Some(WalRecordPayload::Heap(rec)) =
-                            frames.get(*frame_idx).map(|f| &f.payload)
-                        {
-                            self.undo_heap_record(rec)?;
-                            let undo_next = next.unwrap_or(0);
-                            let _ = self.wal.append_record_with(|_| {
-                                WalRecordPayload::Clr(ClrPayload {
-                                    txn_id,
-                                    undone_lsn: lsn,
-                                    undo_next_lsn: undo_next,
-                                })
-                            })?;
-                        }
+        let mut max_clr_lsn = 0;
+        for txn_id in losers.iter().copied() {
+            let mut cursor = undo_index.head_for(txn_id);
+            while let Some(lsn) = cursor {
+                let Some(entry) = undo_index.entry(lsn) else {
+                    break;
+                };
+                if let Some(rec) = entry.payload.clone() {
+                    self.undo_heap_record(&rec)?;
+                    let undo_next = entry.next.unwrap_or(0);
+                    let clr = self.wal.append_record_with(|_| {
+                        WalRecordPayload::Clr(ClrPayload {
+                            txn_id,
+                            undone_lsn: lsn,
+                            undo_next_lsn: undo_next,
+                        })
+                    })?;
+                    if clr.end_lsn > max_clr_lsn {
+                        max_clr_lsn = clr.end_lsn;
                     }
-
-                    head = next;
                 }
+                cursor = entry.next;
             }
+        }
+
+        if max_clr_lsn != 0 {
+            self.wal.flush_until(max_clr_lsn)?;
         }
 
         Ok(RecoverySummary {
@@ -180,6 +119,37 @@ impl RecoveryManager {
             redo_count,
             loser_transactions: losers,
         })
+    }
+
+    fn redo_if_needed(&self, frame: &WalFrame) -> QuillSQLResult<usize> {
+        match &frame.payload {
+            WalRecordPayload::PageWrite(payload) => {
+                if !self.page_requires_redo(payload.page_id, frame.lsn)? {
+                    return Ok(0);
+                }
+                self.redo_page_write(payload.clone())?;
+                Ok(1)
+            }
+            WalRecordPayload::PageDelta(payload) => {
+                if !self.page_requires_redo(payload.page_id, frame.lsn)? {
+                    return Ok(0);
+                }
+                self.redo_page_delta(payload.clone())?;
+                Ok(1)
+            }
+            _ => Ok(0),
+        }
+    }
+
+    fn page_requires_redo(&self, page_id: u32, record_lsn: Lsn) -> QuillSQLResult<bool> {
+        if let Some(bpm) = &self.buffer_pool {
+            match bpm.fetch_page_read(page_id) {
+                Ok(guard) => Ok(guard.lsn() < record_lsn),
+                Err(_) => Ok(true),
+            }
+        } else {
+            Ok(true)
+        }
     }
 
     fn redo_page_write(&self, payload: PageWritePayload) -> QuillSQLResult<()> {
@@ -193,7 +163,6 @@ impl RecoveryManager {
     }
 
     fn redo_page_delta(&self, payload: PageDeltaPayload) -> QuillSQLResult<()> {
-        use bytes::BytesMut;
         // Read current page image
         let rx = self.disk_scheduler.schedule_read(payload.page_id)?;
         let buf: BytesMut = rx.recv().map_err(|e| {
@@ -232,23 +201,6 @@ impl RecoveryManager {
             crate::error::QuillSQLError::Internal(format!("WAL recovery write recv failed: {}", e))
         })??;
         Ok(())
-    }
-
-    fn update_active_transactions(
-        &self,
-        active: &mut HashSet<u64>,
-        txn: &TransactionPayload,
-        undo_heads: &mut HashMap<u64, Option<Lsn>>,
-    ) {
-        match txn.marker {
-            TransactionRecordKind::Begin => {
-                active.insert(txn.txn_id);
-            }
-            TransactionRecordKind::Commit | TransactionRecordKind::Abort => {
-                active.remove(&txn.txn_id);
-                undo_heads.insert(txn.txn_id, None);
-            }
-        }
     }
 
     /// Undo heap-level changes using recover APIs (respects rewritten undo chains).
@@ -327,7 +279,6 @@ impl RecoveryManager {
             let _ = bpm.flush_page(page_id);
             return Ok(());
         }
-        use bytes::BytesMut;
         let rx = self.disk_scheduler.schedule_read(page_id)?;
         let buf: BytesMut = rx.recv().map_err(|e| {
             crate::error::QuillSQLError::Internal(format!("WAL recovery read recv failed: {}", e))
@@ -383,6 +334,127 @@ impl RecoveryManager {
             crate::error::QuillSQLError::Internal(format!("WAL recovery write recv failed: {}", e))
         })??;
         Ok(())
+    }
+}
+
+#[derive(Default)]
+struct CheckpointState {
+    latest: Option<(Lsn, CheckpointPayload)>,
+    snapshot: Option<ControlFileSnapshot>,
+}
+
+impl CheckpointState {
+    fn new(snapshot: Option<ControlFileSnapshot>) -> Self {
+        Self {
+            latest: None,
+            snapshot,
+        }
+    }
+
+    fn observe(&mut self, frame: &WalFrame) {
+        if let WalRecordPayload::Checkpoint(payload) = &frame.payload {
+            self.latest = Some((frame.lsn, payload.clone()));
+        }
+    }
+
+    fn start_lsn(&self) -> Lsn {
+        if let Some((checkpoint_lsn, payload)) = &self.latest {
+            self.snapshot
+                .map(|snap| snap.checkpoint_redo_start)
+                .filter(|redo| *redo >= payload.last_lsn && *redo <= *checkpoint_lsn)
+                .unwrap_or_else(|| {
+                    payload
+                        .dpt
+                        .iter()
+                        .map(|(_, lsn)| *lsn)
+                        .min()
+                        .unwrap_or(payload.last_lsn)
+                })
+        } else {
+            0
+        }
+    }
+}
+
+#[derive(Clone)]
+struct UndoRecord {
+    next: Option<Lsn>,
+    payload: Option<HeapRecordPayload>,
+}
+
+#[derive(Default)]
+struct UndoIndex {
+    heads: HashMap<u64, Option<Lsn>>,
+    entries: HashMap<Lsn, UndoRecord>,
+    active: HashSet<u64>,
+}
+
+impl UndoIndex {
+    fn observe(&mut self, frame: &WalFrame) {
+        match &frame.payload {
+            WalRecordPayload::Heap(rec) => {
+                let txn_id = heap_txn_id(rec);
+                let prev = self.head_for(txn_id);
+                self.entries.insert(
+                    frame.lsn,
+                    UndoRecord {
+                        next: prev,
+                        payload: Some(rec.clone()),
+                    },
+                );
+                self.heads.insert(txn_id, Some(frame.lsn));
+                self.active.insert(txn_id);
+            }
+            WalRecordPayload::Clr(clr) => {
+                let next = if clr.undo_next_lsn == 0 {
+                    None
+                } else {
+                    Some(clr.undo_next_lsn)
+                };
+                self.entries.insert(
+                    frame.lsn,
+                    UndoRecord {
+                        next,
+                        payload: None,
+                    },
+                );
+                self.heads.insert(clr.txn_id, next);
+                self.active.insert(clr.txn_id);
+            }
+            WalRecordPayload::Transaction(tx) => match tx.marker {
+                TransactionRecordKind::Begin => {
+                    self.active.insert(tx.txn_id);
+                    self.heads.entry(tx.txn_id).or_insert(None);
+                }
+                TransactionRecordKind::Commit | TransactionRecordKind::Abort => {
+                    self.active.remove(&tx.txn_id);
+                    self.heads.insert(tx.txn_id, None);
+                }
+            },
+            _ => {}
+        }
+    }
+
+    fn head_for(&self, txn_id: u64) -> Option<Lsn> {
+        self.heads.get(&txn_id).copied().flatten()
+    }
+
+    fn entry(&self, lsn: Lsn) -> Option<UndoRecord> {
+        self.entries.get(&lsn).cloned()
+    }
+
+    fn active_transactions(&self) -> Vec<u64> {
+        let mut txns: Vec<u64> = self.active.iter().copied().collect();
+        txns.sort_unstable();
+        txns
+    }
+}
+
+fn heap_txn_id(rec: &HeapRecordPayload) -> u64 {
+    match rec {
+        HeapRecordPayload::Insert(p) => p.op_txn_id,
+        HeapRecordPayload::Update(p) => p.op_txn_id,
+        HeapRecordPayload::Delete(p) => p.op_txn_id,
     }
 }
 

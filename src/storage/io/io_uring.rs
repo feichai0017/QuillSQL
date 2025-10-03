@@ -47,6 +47,7 @@ enum PendingKind {
     },
     WriteVec {
         state: Rc<RefCell<WriteState>>,
+        _buffer: Bytes,
     },
     Fsync {
         state: Rc<RefCell<WriteState>>,
@@ -394,7 +395,8 @@ fn queue_write(
                 },
             );
         } else {
-            let entry = opcode::Write::new(types::Fd(fd), data.as_ptr(), data.len() as u32)
+            let buffer = data.clone();
+            let entry = opcode::Write::new(types::Fd(fd), buffer.as_ptr(), buffer.len() as u32)
                 .offset(offset)
                 .build()
                 .user_data(write_token);
@@ -404,6 +406,7 @@ fn queue_write(
                 PendingEntry {
                     kind: PendingKind::WriteVec {
                         state: Rc::clone(&state),
+                        _buffer: buffer,
                     },
                 },
             );
@@ -529,7 +532,7 @@ fn drain_completions(
                 PendingKind::ReadBatchFixed { idx, batch, index } => {
                     let bytes = buffer_pool.extract_bytes(idx, PAGE_SIZE);
                     buffer_pool.release(idx);
-                    let outcome = Ok(bytes);
+                    let outcome = parse_read_result(result_code, bytes.to_vec());
                     let mut batch_ref = batch.borrow_mut();
                     if let Some(result) = batch_ref.record_result(index, outcome) {
                         if let Err(err) = batch_ref.sender.send(result) {
@@ -555,7 +558,7 @@ fn drain_completions(
                     let outcome = parse_write_result(result_code);
                     let _ = state.borrow_mut().record(outcome);
                 }
-                PendingKind::WriteVec { state } => {
+                PendingKind::WriteVec { state, .. } => {
                     let outcome = parse_write_result(result_code);
                     let _ = state.borrow_mut().record(outcome);
                 }

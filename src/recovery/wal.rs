@@ -76,6 +76,34 @@ pub struct WalManager {
     touched_pages: DashSet<PageId>,
 }
 
+pub struct WalWriterHandle {
+    manager: Option<Arc<WalManager>>,
+}
+
+impl WalWriterHandle {
+    fn new(manager: Arc<WalManager>) -> Self {
+        Self {
+            manager: Some(manager),
+        }
+    }
+
+    pub fn stop(mut self) -> QuillSQLResult<()> {
+        if let Some(manager) = self.manager.take() {
+            manager.stop_background_writer()
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl Drop for WalWriterHandle {
+    fn drop(&mut self) {
+        if let Some(manager) = self.manager.take() {
+            let _ = manager.stop_background_writer();
+        }
+    }
+}
+
 impl WalManager {
     pub fn new(
         config: WalConfig,
@@ -221,20 +249,23 @@ impl WalManager {
         self.last_checkpoint.load(Ordering::Acquire)
     }
 
-    pub fn start_background_flush(self: &Arc<Self>, interval: Duration) -> QuillSQLResult<()> {
+    pub fn start_background_flush(
+        self: &Arc<Self>,
+        interval: Duration,
+    ) -> QuillSQLResult<Option<WalWriterHandle>> {
         if interval.is_zero() {
-            return Ok(());
+            return Ok(None);
         }
         let mut guard = self.writer.lock();
         if guard.is_some() {
-            return Ok(());
+            return Ok(None);
         }
         let runtime = WalWriterRuntime::spawn(Arc::downgrade(self), interval)?;
         *guard = Some(runtime);
-        Ok(())
+        Ok(Some(WalWriterHandle::new(Arc::clone(self))))
     }
 
-    pub fn stop_background_flush(&self) -> QuillSQLResult<()> {
+    fn stop_background_writer(&self) -> QuillSQLResult<()> {
         if let Some(runtime) = self.writer.lock().take() {
             runtime.stop()?;
         }
