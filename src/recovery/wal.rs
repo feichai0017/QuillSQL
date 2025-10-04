@@ -1,8 +1,9 @@
 pub mod codec;
+pub mod page;
 
 use parking_lot::{Condvar, Mutex};
 use std::cmp;
-use std::convert::TryInto;
+use std::collections::VecDeque;
 use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, BufReader, ErrorKind, Read};
@@ -19,6 +20,9 @@ use crate::recovery::control_file::{ControlFileManager, WalInitState};
 use crate::recovery::wal::codec::{
     decode_frame, encode_body, encode_frame, CheckpointPayload, WalFrame, WAL_CRC_LEN,
     WAL_HEADER_LEN,
+};
+use crate::recovery::wal::page::{
+    WalFrameContinuation, WalPage, WalPageFragmentKind, WAL_PAGE_SIZE,
 };
 use crate::recovery::wal_record::WalRecordPayload;
 use crate::recovery::wal_runtime::WalRuntime;
@@ -209,7 +213,8 @@ impl WalManager {
         guard.last_record_start = start_lsn;
 
         let should_flush = guard.buffer.len() >= self.max_buffer_records
-            || guard.buffer_bytes >= self.flush_coalesce_bytes;
+            || guard.buffer_bytes >= self.flush_coalesce_bytes
+            || guard.buffer_bytes >= WAL_PAGE_SIZE;
         drop(guard);
 
         self.last_record_start.store(start_lsn, Ordering::Release);
@@ -403,6 +408,8 @@ struct WalStorage {
     current_segment: WalSegmentInfo,
     runtime: Arc<WalRuntime>,
     retain_segments: usize,
+    open_page: Option<WalPage>,
+    last_page_end_lsn: Lsn,
 }
 
 impl WalStorage {
@@ -416,49 +423,140 @@ impl WalStorage {
             current_segment: segment,
             runtime,
             retain_segments: config.retain_segments.max(1),
+            open_page: None,
+            last_page_end_lsn: 0,
         })
     }
 
     fn recover_offsets(&mut self) -> QuillSQLResult<(Lsn, Lsn)> {
         let segments = list_segments(&self.directory)?;
-        let mut next_offset = 0u64;
+        let mut next_lsn = 0u64;
         let mut last_record_start = 0u64;
+        let mut pending_fragment = Vec::new();
+        let mut physical_offset = 0u64;
 
         for segment_id in segments {
             let path = segment_path(&self.directory, segment_id);
-            let mut file = match fs::File::open(&path) {
+            let file = match fs::File::open(&path) {
                 Ok(f) => f,
                 Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
                 Err(e) => return Err(QuillSQLError::Io(e)),
             };
-
-            let mut buf = Vec::new();
-            file.read_to_end(&mut buf)?;
-
-            let mut local_offset = 0usize;
+            let metadata = file.metadata()?;
+            let mut reader = io::BufReader::new(file);
             let segment_base = (segment_id.saturating_sub(1)) * self.segment_size;
-            while local_offset < buf.len() {
-                match decode_frame(&buf[local_offset..]) {
-                    Ok((_frame, consumed)) => {
-                        let record_start = segment_base + local_offset as u64;
-                        last_record_start = record_start;
-                        local_offset += consumed;
-                        next_offset = segment_base + local_offset as u64;
+            let mut segment_consumed = 0u64;
+            pending_fragment.clear();
+
+            while segment_consumed + WAL_PAGE_SIZE as u64 <= metadata.len() {
+                let mut page_buf = vec![0u8; WAL_PAGE_SIZE];
+                if let Err(err) = reader.read_exact(&mut page_buf) {
+                    if err.kind() == io::ErrorKind::UnexpectedEof {
+                        break;
                     }
+                    return Err(QuillSQLError::Io(err));
+                }
+
+                let page = match WalPage::unpack_frames(&page_buf) {
+                    Ok(page) => page,
                     Err(QuillSQLError::Internal(message))
-                        if message.contains("too short")
-                            || message.contains("truncated")
-                            || message.contains("CRC mismatch") =>
+                        if message.contains("truncated")
+                            || message.contains("CRC mismatch")
+                            || message.contains("Invalid WAL page magic") =>
                     {
-                        // Treat partial tail or torn frame as end-of-log and stop scanning.
                         break;
                     }
                     Err(err) => return Err(err),
+                };
+
+                if !page.has_payload() {
+                    break;
                 }
+
+                let mut stop_segment = false;
+                for slot in page.fragments() {
+                    let start = slot.offset as usize;
+                    let end = start + slot.len as usize;
+                    let fragment = &page.payload()[start..end];
+                    match slot.kind {
+                        WalPageFragmentKind::Complete => {
+                            pending_fragment.clear();
+                            match decode_frame(fragment) {
+                                Ok((frame, _)) => {
+                                    let frame_len = fragment.len() as u64;
+                                    last_record_start = frame.lsn;
+                                    next_lsn = frame.lsn.saturating_add(frame_len);
+                                }
+                                Err(QuillSQLError::Internal(message))
+                                    if message.contains("too short")
+                                        || message.contains("truncated")
+                                        || message.contains("CRC mismatch") =>
+                                {
+                                    stop_segment = true;
+                                    pending_fragment.clear();
+                                    break;
+                                }
+                                Err(err) => return Err(err),
+                            }
+                        }
+                        WalPageFragmentKind::Start => {
+                            pending_fragment.clear();
+                            pending_fragment.extend_from_slice(fragment);
+                        }
+                        WalPageFragmentKind::Middle => {
+                            if pending_fragment.is_empty() {
+                                stop_segment = true;
+                                pending_fragment.clear();
+                                break;
+                            }
+                            pending_fragment.extend_from_slice(fragment);
+                        }
+                        WalPageFragmentKind::End => {
+                            if pending_fragment.is_empty() {
+                                stop_segment = true;
+                                pending_fragment.clear();
+                                break;
+                            }
+                            pending_fragment.extend_from_slice(fragment);
+                            let frame_bytes = std::mem::take(&mut pending_fragment);
+                            match decode_frame(&frame_bytes) {
+                                Ok((frame, _)) => {
+                                    let frame_len = frame_bytes.len() as u64;
+                                    last_record_start = frame.lsn;
+                                    next_lsn = frame.lsn.saturating_add(frame_len);
+                                }
+                                Err(QuillSQLError::Internal(message))
+                                    if message.contains("too short")
+                                        || message.contains("truncated")
+                                        || message.contains("CRC mismatch") =>
+                                {
+                                    stop_segment = true;
+                                    pending_fragment.clear();
+                                    break;
+                                }
+                                Err(err) => return Err(err),
+                            }
+                        }
+                    }
+                }
+
+                if stop_segment {
+                    break;
+                }
+                segment_consumed += WAL_PAGE_SIZE as u64;
             }
+
+            physical_offset = segment_base + segment_consumed;
         }
 
-        Ok((next_offset, last_record_start))
+        self.last_page_end_lsn = next_lsn;
+        let segment_index = physical_offset / self.segment_size;
+        self.current_segment = WalSegmentInfo {
+            id: segment_index + 1,
+            size: physical_offset % self.segment_size,
+        };
+
+        Ok((next_lsn, last_record_start))
     }
 
     fn recycle_segments(&mut self, keep_from_lsn: Lsn) -> QuillSQLResult<()> {
@@ -483,15 +581,47 @@ impl WalStorage {
     }
 
     fn append_records(&mut self, records: &[WalRecord]) -> std::io::Result<()> {
-        for record in records {
-            let len = record.encoded_len();
-            if self.current_segment.size + len > self.segment_size {
-                self.rotate_segment()?;
+        let mut queue: Vec<WalRecord> = records.iter().cloned().collect();
+        let mut carry: Option<WalFrameContinuation> = None;
+
+        if let Some(page) = self.open_page.take() {
+            let (page, leftover, next_carry) = page.continue_pack(queue);
+            queue = leftover;
+            carry = next_carry;
+
+            if page.is_full() {
+                self.write_page(&page)?;
+            } else {
+                if let Some(lsn) = page.last_end_lsn() {
+                    self.last_page_end_lsn = lsn;
+                }
+                self.open_page = Some(page);
             }
-            let offset = self.current_segment.size;
-            self.write_bytes(offset, record.payload.clone(), false)?;
-            self.current_segment.size += len;
         }
+
+        while !queue.is_empty() || carry.is_some() {
+            let (page, leftover, next_carry) =
+                WalPage::pack_frames(self.last_page_end_lsn, queue, carry);
+            queue = leftover;
+            carry = next_carry;
+
+            if !page.has_payload() {
+                break;
+            }
+
+            if page.is_full() {
+                self.write_page(&page)?;
+            } else {
+                if let Some(lsn) = page.last_end_lsn() {
+                    self.last_page_end_lsn = lsn;
+                }
+                self.open_page = Some(page);
+                break;
+            }
+        }
+
+        debug_assert!(carry.is_none());
+
         Ok(())
     }
 
@@ -505,8 +635,28 @@ impl WalStorage {
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
+        if let Some(page) = self.open_page.take() {
+            self.write_page(&page)?;
+        }
         if self.sync_on_flush {
             self.write_bytes(self.current_segment.size, Bytes::new(), true)?;
+        }
+        Ok(())
+    }
+
+    fn write_page(&mut self, page: &WalPage) -> std::io::Result<()> {
+        if !page.has_payload() {
+            return Ok(());
+        }
+        if self.current_segment.size + WAL_PAGE_SIZE as u64 > self.segment_size {
+            self.rotate_segment()?;
+        }
+        let offset = self.current_segment.size;
+        let bytes = Bytes::from(page.to_bytes());
+        self.write_bytes(offset, bytes, false)?;
+        self.current_segment.size += WAL_PAGE_SIZE as u64;
+        if let Some(lsn) = page.last_end_lsn() {
+            self.last_page_end_lsn = lsn;
         }
         Ok(())
     }
@@ -635,6 +785,8 @@ struct SegmentCursor {
     len: u64,
     offset: u64,
     reader: BufReader<File>,
+    fragment_buf: Vec<u8>,
+    ready_frames: VecDeque<WalFrame>,
 }
 
 impl SegmentCursor {
@@ -645,56 +797,103 @@ impl SegmentCursor {
             len,
             offset: 0,
             reader: BufReader::new(file),
+            fragment_buf: Vec::new(),
+            ready_frames: VecDeque::new(),
         })
     }
 
     fn read_frame(&mut self) -> QuillSQLResult<Option<WalFrame>> {
-        if self.offset >= self.len {
-            return Ok(None);
-        }
-
-        let mut header_buf = [0u8; WAL_HEADER_LEN];
-        if let Err(err) = self.reader.read_exact(&mut header_buf) {
-            return match err.kind() {
-                ErrorKind::UnexpectedEof => {
-                    self.offset = self.len;
-                    Ok(None)
-                }
-                _ => Err(QuillSQLError::Io(err)),
-            };
-        }
-
-        let body_len = u32::from_le_bytes(header_buf[24..28].try_into().unwrap()) as usize;
-        let total_len = WAL_HEADER_LEN + body_len + WAL_CRC_LEN;
-        let mut rest = vec![0u8; total_len.saturating_sub(WAL_HEADER_LEN)];
-        if let Err(err) = self.reader.read_exact(&mut rest) {
-            return match err.kind() {
-                ErrorKind::UnexpectedEof => {
-                    self.offset = self.len;
-                    Ok(None)
-                }
-                _ => Err(QuillSQLError::Io(err)),
-            };
-        }
-
-        let mut frame_buf = Vec::with_capacity(total_len);
-        frame_buf.extend_from_slice(&header_buf);
-        frame_buf.extend_from_slice(&rest);
-
-        match decode_frame(&frame_buf) {
-            Ok((frame, consumed)) => {
-                self.offset = self.offset.saturating_add(consumed as u64);
-                Ok(Some(frame))
+        loop {
+            if let Some(frame) = self.ready_frames.pop_front() {
+                return Ok(Some(frame));
             }
-            Err(QuillSQLError::Internal(message))
-                if message.contains("too short")
-                    || message.contains("truncated")
-                    || message.contains("CRC mismatch") =>
-            {
-                self.offset = self.len;
-                Ok(None)
+
+            if self.offset >= self.len {
+                return Ok(None);
             }
-            Err(err) => Err(err),
+
+            let mut page_buf = vec![0u8; WAL_PAGE_SIZE];
+            if let Err(err) = self.reader.read_exact(&mut page_buf) {
+                return match err.kind() {
+                    ErrorKind::UnexpectedEof => {
+                        self.offset = self.len;
+                        Ok(None)
+                    }
+                    _ => Err(QuillSQLError::Io(err)),
+                };
+            }
+            self.offset = self.offset.saturating_add(WAL_PAGE_SIZE as u64);
+
+            match WalPage::unpack_frames(&page_buf) {
+                Ok(page) => {
+                    if !page.has_payload() {
+                        self.offset = self.len;
+                        return Ok(None);
+                    }
+                    for slot in page.fragments() {
+                        let start = slot.offset as usize;
+                        let end = start + slot.len as usize;
+                        let fragment = &page.payload()[start..end];
+                        match slot.kind {
+                            WalPageFragmentKind::Complete => {
+                                self.fragment_buf.clear();
+                                match decode_frame(fragment) {
+                                    Ok((frame, _)) => self.ready_frames.push_back(frame),
+                                    Err(QuillSQLError::Internal(message))
+                                        if message.contains("too short")
+                                            || message.contains("truncated")
+                                            || message.contains("CRC mismatch") =>
+                                    {
+                                        self.offset = self.len;
+                                        return Ok(None);
+                                    }
+                                    Err(err) => return Err(err),
+                                }
+                            }
+                            WalPageFragmentKind::Start => {
+                                self.fragment_buf.clear();
+                                self.fragment_buf.extend_from_slice(fragment);
+                            }
+                            WalPageFragmentKind::Middle => {
+                                if self.fragment_buf.is_empty() {
+                                    self.offset = self.len;
+                                    return Ok(None);
+                                }
+                                self.fragment_buf.extend_from_slice(fragment);
+                            }
+                            WalPageFragmentKind::End => {
+                                if self.fragment_buf.is_empty() {
+                                    self.offset = self.len;
+                                    return Ok(None);
+                                }
+                                self.fragment_buf.extend_from_slice(fragment);
+                                let frame_bytes = std::mem::take(&mut self.fragment_buf);
+                                match decode_frame(&frame_bytes) {
+                                    Ok((frame, _)) => self.ready_frames.push_back(frame),
+                                    Err(QuillSQLError::Internal(message))
+                                        if message.contains("too short")
+                                            || message.contains("truncated")
+                                            || message.contains("CRC mismatch") =>
+                                    {
+                                        self.offset = self.len;
+                                        return Ok(None);
+                                    }
+                                    Err(err) => return Err(err),
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(QuillSQLError::Internal(message))
+                    if message.contains("truncated")
+                        || message.contains("CRC mismatch")
+                        || message.contains("Invalid WAL page magic") =>
+                {
+                    self.offset = self.len;
+                    return Ok(None);
+                }
+                Err(err) => return Err(err),
+            }
         }
     }
 }
@@ -938,7 +1137,6 @@ mod tests {
         config.retain_segments = 1;
         config.writer_interval_ms = None;
         let wal_dir = config.directory.clone();
-        let segment_size = config.segment_size;
         let retain_segments = config.retain_segments;
         let wal = WalManager::new(config, None, None).expect("wal manager");
 
@@ -964,14 +1162,9 @@ mod tests {
         wal.log_checkpoint(payload).expect("checkpoint");
         wal.flush(None).expect("final flush");
 
-        let keep_segment_id = 1 + (last_lsn / segment_size);
-        let min_keep = keep_segment_id
-            .saturating_sub(retain_segments as u64)
-            .max(1);
-
         drop(wal);
 
-        let remaining_ids: Vec<u64> = std::fs::read_dir(&wal_dir)
+        let mut remaining_ids: Vec<u64> = std::fs::read_dir(&wal_dir)
             .expect("wal dir")
             .filter_map(|entry| {
                 entry.ok().and_then(|e| {
@@ -981,6 +1174,10 @@ mod tests {
                 })
             })
             .collect();
+
+        remaining_ids.sort_unstable();
+        let max_id = *remaining_ids.last().unwrap_or(&0);
+        let min_keep = max_id.saturating_sub(retain_segments as u64).max(1);
 
         assert!(
             remaining_ids.iter().all(|id| *id >= min_keep),
