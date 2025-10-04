@@ -7,10 +7,9 @@ use crate::error::QuillSQLResult;
 use crate::recovery::resource_manager::{
     register_resource_manager, RedoContext, ResourceManager, UndoContext,
 };
-use crate::recovery::wal_record::{
-    decode_heap, HeapRecordPayload, ResourceManagerId, TupleMetaRepr, WalFrame,
-};
+use crate::recovery::wal::codec::{ResourceManagerId, WalFrame};
 use crate::storage::codec::TablePageHeaderCodec;
+use crate::storage::heap::wal_codec::{decode_heap_record, HeapRecordPayload, TupleMetaRepr};
 use crate::storage::page::{RecordId, TupleMeta};
 use crate::storage::table_heap::TableHeap;
 use std::sync::OnceLock;
@@ -20,7 +19,7 @@ struct HeapResourceManager;
 
 impl HeapResourceManager {
     fn decode_payload(&self, frame: &WalFrame) -> QuillSQLResult<HeapRecordPayload> {
-        decode_heap(&frame.body, frame.info)
+        decode_heap_record(&frame.body, frame.info)
     }
 
     fn heap_txn_id(payload: &HeapRecordPayload) -> u64 {

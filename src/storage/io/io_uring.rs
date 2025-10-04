@@ -2,8 +2,7 @@ use bytes::{Bytes, BytesMut};
 use io_uring::{opcode, types, IoUring};
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::io;
-use std::io::IoSliceMut;
+use std::io::{self, ErrorKind, IoSliceMut};
 use std::os::fd::AsRawFd;
 use std::rc::Rc;
 use std::sync::mpsc::{Receiver, Sender};
@@ -228,7 +227,24 @@ impl FixedBufferPool {
             .collect();
         let ptr = io_slices.as_ptr() as *const libc::iovec;
         let iovecs = unsafe { std::slice::from_raw_parts(ptr, io_slices.len()) };
-        unsafe { ring.submitter().register_buffers(iovecs) }
+        match unsafe { ring.submitter().register_buffers(iovecs) } {
+            Ok(()) => Ok(()),
+            Err(err)
+                if err.kind() == ErrorKind::OutOfMemory
+                    || err.raw_os_error() == Some(libc::ENOMEM)
+                    || err.kind() == ErrorKind::InvalidInput
+                    || err.raw_os_error() == Some(libc::EINVAL) =>
+            {
+                log::warn!(
+                    "io_uring buffer registration failed ({}); falling back to heap buffers",
+                    err
+                );
+                self.buffers.clear();
+                self.free.lock().unwrap().clear();
+                Ok(())
+            }
+            Err(err) => Err(err),
+        }
     }
 
     fn acquire(&self) -> Option<(usize, *mut u8)> {

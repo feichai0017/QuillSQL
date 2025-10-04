@@ -81,36 +81,59 @@ pub struct DiskManager {
     next_page_id: AtomicU32,
     db_file: Mutex<File>,
     pub meta: RwLock<MetaPage>,
+    direct_io: bool,
 }
 
 impl DiskManager {
-    fn open_raw_file(
-        db_path: &Path,
-        create: bool,
-        mut direct: bool,
-    ) -> std::io::Result<(File, bool)> {
-        if std::env::var("QUILL_DISABLE_DIRECT_IO")
-            .map_or(false, |v| v == "1" || v.eq_ignore_ascii_case("true"))
-        {
-            direct = false;
+    fn open_raw_file(db_path: &Path, create: bool, direct: bool) -> std::io::Result<(File, bool)> {
+        let mut request_direct = direct
+            && !std::env::var("QUILL_DISABLE_DIRECT_IO")
+                .map_or(false, |v| v == "1" || v.eq_ignore_ascii_case("true"));
+
+        #[cfg(target_os = "linux")]
+        if request_direct {
+            let mut direct_opts = std::fs::OpenOptions::new();
+            direct_opts.read(true).write(true);
+            if create {
+                direct_opts.create(true);
+            }
+            direct_opts.custom_flags(libc::O_DIRECT | libc::O_NOATIME);
+            match direct_opts.open(db_path) {
+                Ok(file) => return Ok((file, true)),
+                Err(err) => {
+                    let needs_fallback = err.kind() == ErrorKind::InvalidInput
+                        || err.raw_os_error() == Some(libc::EINVAL);
+                    if !needs_fallback {
+                        return Err(err);
+                    }
+                    debug!(
+                        "Direct I/O not available for {}: {}. Falling back to buffered mode",
+                        db_path.display(),
+                        err
+                    );
+                    request_direct = false;
+                }
+            }
         }
+
         let mut options = std::fs::OpenOptions::new();
         options.read(true).write(true);
         if create {
             options.create(true);
         }
         #[cfg(target_os = "linux")]
-        if direct {
-            options.custom_flags(libc::O_DIRECT | libc::O_NOATIME);
+        if request_direct {
+            options.custom_flags(libc::O_NOATIME);
         }
 
         options.open(db_path).map(|file| {
             #[cfg(target_os = "linux")]
             {
-                (file, direct)
+                (file, request_direct)
             }
             #[cfg(not(target_os = "linux"))]
             {
+                let _ = request_direct;
                 (file, false)
             }
         })
@@ -206,6 +229,7 @@ impl DiskManager {
             // can access the file at the same time among multiple threads.
             db_file: Mutex::new(db_file),
             meta: RwLock::new(meta),
+            direct_io: direct_enabled,
         };
 
         #[cfg(target_os = "linux")]
@@ -273,7 +297,7 @@ impl DiskManager {
             )));
         }
         let mut guard = self.db_file.lock().unwrap();
-        Self::write_page_internal(&mut guard, page_id, data)
+        self.write_page_internal(&mut guard, page_id, data)
     }
 
     pub fn allocate_page(&self) -> QuillSQLResult<PageId> {
@@ -286,7 +310,7 @@ impl DiskManager {
             let page_id = self.next_page_id.fetch_add(1, Ordering::SeqCst);
 
             // Write an empty page (all zeros) to the allocated page.
-            Self::write_page_internal(&mut guard, page_id, &EMPTY_PAGE)?;
+            self.write_page_internal(&mut guard, page_id, &EMPTY_PAGE)?;
 
             Ok(page_id)
         }
@@ -308,7 +332,7 @@ impl DiskManager {
         // Write an empty page (all zeros) to the deallocated page.
         // But this page is not deallocated, only data will be written with null or zeros.
         let mut guard = self.db_file.lock().unwrap();
-        Self::write_page_internal(&mut guard, page_id, &EMPTY_PAGE)?;
+        self.write_page_internal(&mut guard, page_id, &EMPTY_PAGE)?;
         drop(guard);
 
         self.freelist_push(page_id)?;
@@ -372,12 +396,21 @@ impl DiskManager {
         let mut guard = self.db_file.lock().unwrap();
         guard.seek(std::io::SeekFrom::Start(0))?;
         let encoded = encode_meta_page(&self.meta.read().unwrap());
-        guard.write_all(&encoded)?;
-        guard.flush()?;
+        if self.direct_io && encoded.as_ptr() as usize % PAGE_SIZE != 0 {
+            let mut aligned = AlignedPageBuf::new_zeroed()?;
+            aligned.as_mut_slice().copy_from_slice(&encoded);
+            guard.write_all(aligned.as_slice())?;
+        } else {
+            guard.write_all(&encoded)?;
+        }
+        if !self.direct_io {
+            guard.flush()?;
+        }
         Ok(())
     }
 
     fn write_page_internal(
+        &self,
         guard: &mut MutexGuard<File>,
         page_id: PageId,
         data: &[u8],
@@ -394,7 +427,9 @@ impl DiskManager {
             aligned.as_mut_slice().copy_from_slice(data);
             guard.write_all(aligned.as_slice())?;
         }
-        guard.flush()?;
+        if !self.direct_io {
+            guard.flush()?;
+        }
         Ok(())
     }
 

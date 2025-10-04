@@ -8,11 +8,13 @@ use std::ops::RangeBounds;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
-use crate::recovery::wal_record::{
-    HeapDeletePayload, HeapInsertPayload, HeapRecordPayload, HeapUpdatePayload, PageDeltaPayload,
-    PageWritePayload, RelationIdent, TupleMetaRepr, WalRecordPayload,
-};
+use crate::recovery::wal::codec::{PageDeltaPayload, PageWritePayload};
+use crate::recovery::wal_record::WalRecordPayload;
 use crate::storage::codec::TupleCodec;
+use crate::storage::heap::wal_codec::{
+    HeapDeletePayload, HeapInsertPayload, HeapRecordPayload, HeapUpdatePayload, RelationIdent,
+    TupleMetaRepr,
+};
 use crate::storage::tuple::Tuple;
 use crate::utils::ring_buffer::RingBuffer;
 

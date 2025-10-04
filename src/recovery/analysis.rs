@@ -1,6 +1,6 @@
 use crate::error::QuillSQLResult;
 use crate::recovery::control_file::ControlFileSnapshot;
-use crate::recovery::wal_record::{
+use crate::recovery::wal::codec::{
     decode_checkpoint, CheckpointPayload, ResourceManagerId, WalFrame,
 };
 use crate::recovery::Lsn;
