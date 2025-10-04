@@ -9,7 +9,7 @@ jobs:
   rust:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.81
+      image: rust:nightly
       options: --security-opt seccomp=unconfined
     steps:
       - uses: actions/checkout@v4
