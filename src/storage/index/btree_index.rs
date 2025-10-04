@@ -84,7 +84,6 @@ pub struct BPlusTreeIndex {
     pub pending_garbage: AtomicUsize,
 }
 
-
 impl BPlusTreeIndex {
     /// Write a modified index page back to the buffer with WAL (FPW/Delta) just like table heap.
     /// This centralizes crash-consistent updates for header/leaf/internal pages.
