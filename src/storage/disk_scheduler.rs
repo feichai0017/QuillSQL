@@ -3,6 +3,7 @@ use crate::buffer::PageId;
 use crate::config::IOSchedulerConfig;
 use crate::error::{QuillSQLError, QuillSQLResult};
 use bytes::{Bytes, BytesMut};
+use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::thread;
@@ -42,6 +43,17 @@ pub enum DiskRequest {
     WritePage {
         page_id: PageId,
         data: Bytes,
+        result_sender: DiskCommandResultSender<()>,
+    },
+    WriteWal {
+        path: PathBuf,
+        offset: u64,
+        data: Bytes,
+        sync: bool,
+        result_sender: DiskCommandResultSender<()>,
+    },
+    FsyncWal {
+        path: PathBuf,
         result_sender: DiskCommandResultSender<()>,
     },
     AllocatePage {
@@ -116,6 +128,44 @@ impl DiskScheduler {
                 result_sender: tx,
             })
             .map_err(|e| QuillSQLError::Internal(format!("Failed to send Write request: {}", e)))?;
+        Ok(rx)
+    }
+
+    pub fn schedule_wal_write(
+        &self,
+        path: PathBuf,
+        offset: u64,
+        data: Bytes,
+        sync: bool,
+    ) -> QuillSQLResult<DiskCommandResultReceiver<()>> {
+        let (tx, rx) = mpsc::channel();
+        self.request_sender
+            .send(DiskRequest::WriteWal {
+                path,
+                offset,
+                data,
+                sync,
+                result_sender: tx,
+            })
+            .map_err(|e| {
+                QuillSQLError::Internal(format!("Failed to send WAL write request: {}", e))
+            })?;
+        Ok(rx)
+    }
+
+    pub fn schedule_wal_fsync(
+        &self,
+        path: PathBuf,
+    ) -> QuillSQLResult<DiskCommandResultReceiver<()>> {
+        let (tx, rx) = mpsc::channel();
+        self.request_sender
+            .send(DiskRequest::FsyncWal {
+                path,
+                result_sender: tx,
+            })
+            .map_err(|e| {
+                QuillSQLError::Internal(format!("Failed to send WAL fsync request: {}", e))
+            })?;
         Ok(rx)
     }
 

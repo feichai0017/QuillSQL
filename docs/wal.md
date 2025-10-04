@@ -15,10 +15,10 @@ This approach provides two primary benefits:
 Our WAL implementation is inspired by the ARIES recovery algorithm and consists of several key components that work in concert.
 
 ```
-+-------------------+   writes   +-----------------+   queued    +-----------------+
-| Execution Engine  |----------->|   WalManager    |-----------> |   WalRuntime    |
-| (e.g., TableHeap) |            | (in-memory buf) |   (MPSC)    | (worker pool)   |
-+-------------------+            +-----------------+             +-----------------+
++-------------------+   writes   +-----------------+   queued    +-----------------------+
+| Execution Engine  |----------->|   WalManager    |-----------> | DiskScheduler/io_uring |
+| (e.g., TableHeap) |            | (in-memory buf) |   (MPSC)    | (shared worker pool)  |
++-------------------+            +-----------------+             +-----------------------+
         |                                  |                              |
 (modifies pages)                       (flushes)                     (reads/writes)
         v                                  v                              v
@@ -35,9 +35,7 @@ Our WAL implementation is inspired by the ARIES recovery algorithm and consists 
 -   **`WalManager` (`src/recovery/wal.rs`)**: The central coordinator of the WAL system.
     -   **Responsibilities**: Assigns unique Log Sequence Numbers (LSNs), manages an in-memory log buffer, and provides the primary interface (`append_record_with`) for other parts of the system to write log records. It also tracks the `durable_lsn`—the LSN up to which logs have been successfully flushed to disk.
     -   **FPW (First-Page-Write)**: Tracks pages modified since the last checkpoint to enforce a full-page write for the first modification, protecting against torn-page scenarios during recovery.
-    -   **I/O Runtime Integration**: `WalManager` delegates actual file reads/writes to `WalRuntime`, a small buffered I/O worker pool that keeps WAL traffic off the io_uring data path.
-
--   **`WalRuntime` (`src/recovery/wal_runtime.rs`)**: A lightweight worker pool that owns the file handles for WAL segments. It consumes queued read/write commands, performs buffered `write_all` / `read_exact`, and optionally calls `sync_data` for durability. The runtime hides OS-level errors behind `QuillSQLError` and guarantees ordered completion for callers waiting on durability.
+    -   **I/O Runtime Integration**: `WalManager` now submits WAL writes directly to the shared `DiskScheduler` io_uring workers. Each flush request enqueues sequential writes (and optional `fdatasync`) and waits for the corresponding completion events to guarantee durability ordering.
 
 -   **`Checkpointer` (Background Thread)**: A periodic process crucial for bounding recovery time.
     -   **Responsibilities**:

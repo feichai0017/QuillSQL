@@ -76,10 +76,11 @@ impl Database {
         let (control_file, wal_init) =
             ControlFileManager::load_or_init(&wal_config.directory, wal_config.segment_size)?;
         let control_file = Arc::new(control_file);
-        let wal_manager = Arc::new(WalManager::new(
+        let wal_manager = Arc::new(WalManager::new_with_scheduler(
             wal_config.clone(),
             Some(wal_init),
             Some(control_file.clone()),
+            disk_scheduler.clone(),
         )?);
         let transaction_manager = Arc::new(TransactionManager::new(
             wal_manager.clone(),
@@ -161,10 +162,11 @@ impl Database {
         let (control_file, wal_init) =
             ControlFileManager::load_or_init(&wal_config.directory, wal_config.segment_size)?;
         let control_file = Arc::new(control_file);
-        let wal_manager = Arc::new(WalManager::new(
+        let wal_manager = Arc::new(WalManager::new_with_scheduler(
             wal_config.clone(),
             Some(wal_init),
             Some(control_file.clone()),
+            disk_scheduler.clone(),
         )?);
         let transaction_manager = Arc::new(TransactionManager::new(
             wal_manager.clone(),
