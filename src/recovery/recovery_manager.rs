@@ -1,19 +1,13 @@
-use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use bytes::{Bytes, BytesMut};
-
-use crate::buffer::{BufferManager, PAGE_SIZE};
+use crate::buffer::BufferManager;
 use crate::error::QuillSQLResult;
-use crate::recovery::control_file::ControlFileSnapshot;
-use crate::recovery::wal_record::{
-    CheckpointPayload, ClrPayload, HeapRecordPayload, PageDeltaPayload, PageWritePayload,
-    TransactionRecordKind, WalFrame, WalRecordPayload,
-};
+use crate::recovery::analysis::{AnalysisPass, AnalysisResult};
+use crate::recovery::redo::RedoExecutor;
+use crate::recovery::undo::{UndoExecutor, UndoOutcome};
+use crate::recovery::wal_record::WalFrame;
 use crate::recovery::{Lsn, WalManager};
-use crate::storage::codec::TablePageHeaderCodec;
 use crate::storage::disk_scheduler::DiskScheduler;
-use crate::storage::table_heap::TableHeap;
 
 pub struct RecoveryManager {
     wal: Arc<WalManager>,
@@ -50,64 +44,48 @@ impl RecoveryManager {
         };
 
         let control_snapshot = self.wal.control_file().map(|ctrl| ctrl.snapshot());
-        let mut checkpoints = CheckpointState::new(control_snapshot);
-        let mut undo_index = UndoIndex::default();
+        let mut analysis = AnalysisPass::new(control_snapshot);
+        let mut undo = UndoExecutor::new(
+            self.wal.clone(),
+            self.disk_scheduler.clone(),
+            self.buffer_pool.clone(),
+        );
+        let redo = RedoExecutor::new(self.disk_scheduler.clone(), self.buffer_pool.clone());
 
-        let mut has_frames = false;
+        let mut frames: Vec<WalFrame> = Vec::new();
         while let Some(frame) = reader.next_frame()? {
-            has_frames = true;
-            checkpoints.observe(&frame);
-            undo_index.observe(&frame);
+            analysis.observe(&frame);
+            undo.observe(&frame);
+            frames.push(frame);
         }
+
+        let AnalysisResult {
+            start_lsn,
+            has_frames,
+        } = analysis.finalize()?;
 
         if !has_frames {
             return Ok(RecoverySummary::default());
         }
 
-        let start_lsn = checkpoints.start_lsn();
-
-        let mut redo_reader = self.wal.reader()?;
         let mut redo_count = 0usize;
-        while let Some(frame) = redo_reader.next_frame()? {
+        for frame in &frames {
             if frame.lsn < start_lsn {
                 continue;
             }
-            redo_count += self.redo_if_needed(&frame)?;
+            redo_count += redo.apply(frame)?;
         }
 
-        let losers = undo_index.active_transactions();
+        let UndoOutcome {
+            loser_transactions,
+            max_clr_lsn,
+        } = undo.finalize()?;
 
-        if !losers.is_empty() {
+        if !loser_transactions.is_empty() {
             log::warn!(
                 "Recovery completed with {} outstanding transaction(s) requiring undo",
-                losers.len()
+                loser_transactions.len()
             );
-        }
-
-        // Logical UNDO pass (reverse order): apply only loser heap records, and write CLR
-        let mut max_clr_lsn = 0;
-        for txn_id in losers.iter().copied() {
-            let mut cursor = undo_index.head_for(txn_id);
-            while let Some(lsn) = cursor {
-                let Some(entry) = undo_index.entry(lsn) else {
-                    break;
-                };
-                if let Some(rec) = entry.payload.clone() {
-                    self.undo_heap_record(&rec)?;
-                    let undo_next = entry.next.unwrap_or(0);
-                    let clr = self.wal.append_record_with(|_| {
-                        WalRecordPayload::Clr(ClrPayload {
-                            txn_id,
-                            undone_lsn: lsn,
-                            undo_next_lsn: undo_next,
-                        })
-                    })?;
-                    if clr.end_lsn > max_clr_lsn {
-                        max_clr_lsn = clr.end_lsn;
-                    }
-                }
-                cursor = entry.next;
-            }
         }
 
         if max_clr_lsn != 0 {
@@ -117,344 +95,8 @@ impl RecoveryManager {
         Ok(RecoverySummary {
             start_lsn,
             redo_count,
-            loser_transactions: losers,
+            loser_transactions,
         })
-    }
-
-    fn redo_if_needed(&self, frame: &WalFrame) -> QuillSQLResult<usize> {
-        match &frame.payload {
-            WalRecordPayload::PageWrite(payload) => {
-                if !self.page_requires_redo(payload.page_id, frame.lsn)? {
-                    return Ok(0);
-                }
-                self.redo_page_write(payload.clone())?;
-                Ok(1)
-            }
-            WalRecordPayload::PageDelta(payload) => {
-                if !self.page_requires_redo(payload.page_id, frame.lsn)? {
-                    return Ok(0);
-                }
-                self.redo_page_delta(payload.clone())?;
-                Ok(1)
-            }
-            _ => Ok(0),
-        }
-    }
-
-    fn page_requires_redo(&self, page_id: u32, record_lsn: Lsn) -> QuillSQLResult<bool> {
-        if let Some(bpm) = &self.buffer_pool {
-            match bpm.fetch_page_read(page_id) {
-                Ok(guard) => Ok(guard.lsn() < record_lsn),
-                Err(_) => Ok(true),
-            }
-        } else {
-            Ok(true)
-        }
-    }
-
-    fn redo_page_write(&self, payload: PageWritePayload) -> QuillSQLResult<()> {
-        debug_assert_eq!(payload.page_image.len(), PAGE_SIZE);
-        let bytes = Bytes::from(payload.page_image);
-        let rx = self.disk_scheduler.schedule_write(payload.page_id, bytes)?;
-        rx.recv().map_err(|e| {
-            crate::error::QuillSQLError::Internal(format!("WAL recovery write recv failed: {}", e))
-        })??;
-        Ok(())
-    }
-
-    fn redo_page_delta(&self, payload: PageDeltaPayload) -> QuillSQLResult<()> {
-        // Read current page image
-        let rx = self.disk_scheduler.schedule_read(payload.page_id)?;
-        let buf: BytesMut = rx.recv().map_err(|e| {
-            crate::error::QuillSQLError::Internal(format!("WAL recovery read recv failed: {}", e))
-        })??;
-        if buf.len() != PAGE_SIZE {
-            return Err(crate::error::QuillSQLError::Internal(format!(
-                "Unexpected page size {} while applying delta",
-                buf.len()
-            )));
-        }
-        let mut page_bytes = buf.to_vec();
-        let start = payload.offset as usize;
-        if start >= PAGE_SIZE {
-            return Err(crate::error::QuillSQLError::Internal(format!(
-                "PageDelta start out of bounds: offset={} page_size={}",
-                start, PAGE_SIZE
-            )));
-        }
-        let end = match start.checked_add(payload.data.len()) {
-            Some(e) if e <= PAGE_SIZE => e,
-            _ => {
-                return Err(crate::error::QuillSQLError::Internal(format!(
-                    "PageDelta out of bounds: offset={} len={} page_size={}",
-                    start,
-                    payload.data.len(),
-                    PAGE_SIZE
-                )))
-            }
-        };
-        page_bytes[start..end].copy_from_slice(&payload.data);
-        let rxw = self
-            .disk_scheduler
-            .schedule_write(payload.page_id, Bytes::from(page_bytes))?;
-        rxw.recv().map_err(|e| {
-            crate::error::QuillSQLError::Internal(format!("WAL recovery write recv failed: {}", e))
-        })??;
-        Ok(())
-    }
-
-    /// Undo heap-level changes using recover APIs (respects rewritten undo chains).
-    fn undo_heap_record(&self, rec: &HeapRecordPayload) -> QuillSQLResult<()> {
-        match rec {
-            HeapRecordPayload::Insert(body) => {
-                self.apply_tuple_meta_flag(body.page_id, body.slot_id as usize, true)
-            }
-            HeapRecordPayload::Update(body) => {
-                if let (Some(old_meta), Some(old_bytes)) =
-                    (&body.old_tuple_meta, &body.old_tuple_data)
-                {
-                    self.restore_tuple(body.page_id, body.slot_id as usize, *old_meta, old_bytes)
-                } else {
-                    Ok(())
-                }
-            }
-            HeapRecordPayload::Delete(body) => {
-                if let Some(old_bytes) = &body.old_tuple_data {
-                    self.restore_tuple(
-                        body.page_id,
-                        body.slot_id as usize,
-                        body.old_tuple_meta,
-                        old_bytes,
-                    )
-                } else {
-                    self.apply_tuple_meta_flag(body.page_id, body.slot_id as usize, false)
-                }
-            }
-        }
-    }
-
-    /// Helper: set or clear is_deleted flag for a slot's TupleMeta (recovery path).
-    fn apply_tuple_meta_flag(
-        &self,
-        page_id: u32,
-        slot_idx: usize,
-        deleted: bool,
-    ) -> QuillSQLResult<()> {
-        // Prefer buffer_pool path: read header to get current meta, toggle flag, persist via recovery API
-        if let Some(bpm) = &self.buffer_pool {
-            let rid = crate::storage::page::RecordId::new(page_id, slot_idx as u32);
-            // Read current meta from header without decoding tuple payload
-            let guard = bpm.fetch_page_read(page_id)?;
-            let (header, _hdr_len) = TablePageHeaderCodec::decode(guard.data())?;
-            drop(guard);
-            if slot_idx >= header.tuple_infos.len() {
-                return Ok(());
-            }
-            let mut new_meta = header.tuple_infos[slot_idx].meta;
-            new_meta.is_deleted = deleted;
-            let heap = TableHeap::recovery_view(bpm.clone());
-            let _ = heap.recover_set_tuple_meta(rid, new_meta);
-            // Ensure visibility to disk for tests that read via DiskScheduler directly
-            let _ = bpm.flush_page(page_id);
-            return Ok(());
-        }
-        Ok(())
-    }
-
-    /// Helper: restore tuple meta and bytes for a slot.
-    fn restore_tuple(
-        &self,
-        page_id: u32,
-        slot_idx: usize,
-        _old_meta: crate::recovery::wal_record::TupleMetaRepr,
-        old_bytes: &[u8],
-    ) -> QuillSQLResult<()> {
-        if let Some(bpm) = &self.buffer_pool {
-            let heap = TableHeap::recovery_view(bpm.clone());
-            let rid = crate::storage::page::RecordId::new(page_id, slot_idx as u32);
-            let _ = heap.recover_set_tuple_bytes(rid, old_bytes);
-            let restored_meta: crate::storage::page::TupleMeta = _old_meta.into();
-            let _ = heap.recover_set_tuple_meta(rid, restored_meta);
-            // Flush to make changes visible to direct disk reads
-            let _ = bpm.flush_page(page_id);
-            return Ok(());
-        }
-        let rx = self.disk_scheduler.schedule_read(page_id)?;
-        let buf: BytesMut = rx.recv().map_err(|e| {
-            crate::error::QuillSQLError::Internal(format!("WAL recovery read recv failed: {}", e))
-        })??;
-        let page_bytes = buf.to_vec();
-        // Decode header to locate tuple slot
-        let (mut header, _hdr_len) = TablePageHeaderCodec::decode(&page_bytes)?;
-        if slot_idx >= header.tuple_infos.len() {
-            return Ok(());
-        }
-        // Build new packed layout from existing tuples, replacing target with old_bytes
-        let tuple_count = header.tuple_infos.len();
-        let mut tuples_bytes: Vec<Vec<u8>> = Vec::with_capacity(tuple_count);
-        for i in 0..tuple_count {
-            let info = &header.tuple_infos[i];
-            let slice = &page_bytes[info.offset as usize..(info.offset + info.size) as usize];
-            if i == slot_idx {
-                tuples_bytes.push(old_bytes.to_vec());
-            } else {
-                tuples_bytes.push(slice.to_vec());
-            }
-        }
-        // Repack from page tail
-        let mut tail = PAGE_SIZE;
-        for i in 0..tuple_count {
-            let size = tuples_bytes[i].len();
-            tail = tail.saturating_sub(size);
-            header.tuple_infos[i].offset = tail as u16;
-            header.tuple_infos[i].size = size as u16;
-        }
-        // Restore meta from old_meta for the target slot
-        let restored_meta: crate::storage::page::TupleMeta = _old_meta.into();
-        header.tuple_infos[slot_idx].meta = restored_meta;
-        // Re-encode header and rebuild page bytes
-        let new_header_bytes = TablePageHeaderCodec::encode(&header);
-        // Reset page buffer to zeros
-        let mut new_page = vec![0u8; PAGE_SIZE];
-        // Copy header (cap to page size)
-        let max_hdr = std::cmp::min(new_header_bytes.len(), PAGE_SIZE);
-        new_page[0..max_hdr].copy_from_slice(&new_header_bytes[..max_hdr]);
-        // Copy tuples into their new offsets
-        for i in 0..tuple_count {
-            let off = header.tuple_infos[i].offset as usize;
-            let sz = header.tuple_infos[i].size as usize;
-            if off + sz <= PAGE_SIZE {
-                new_page[off..off + sz].copy_from_slice(&tuples_bytes[i][..sz]);
-            }
-        }
-        let rxw = self
-            .disk_scheduler
-            .schedule_write(page_id, bytes::Bytes::from(new_page))?;
-        rxw.recv().map_err(|e| {
-            crate::error::QuillSQLError::Internal(format!("WAL recovery write recv failed: {}", e))
-        })??;
-        Ok(())
-    }
-}
-
-#[derive(Default)]
-struct CheckpointState {
-    latest: Option<(Lsn, CheckpointPayload)>,
-    snapshot: Option<ControlFileSnapshot>,
-}
-
-impl CheckpointState {
-    fn new(snapshot: Option<ControlFileSnapshot>) -> Self {
-        Self {
-            latest: None,
-            snapshot,
-        }
-    }
-
-    fn observe(&mut self, frame: &WalFrame) {
-        if let WalRecordPayload::Checkpoint(payload) = &frame.payload {
-            self.latest = Some((frame.lsn, payload.clone()));
-        }
-    }
-
-    fn start_lsn(&self) -> Lsn {
-        if let Some((checkpoint_lsn, payload)) = &self.latest {
-            self.snapshot
-                .map(|snap| snap.checkpoint_redo_start)
-                .filter(|redo| *redo >= payload.last_lsn && *redo <= *checkpoint_lsn)
-                .unwrap_or_else(|| {
-                    payload
-                        .dpt
-                        .iter()
-                        .map(|(_, lsn)| *lsn)
-                        .min()
-                        .unwrap_or(payload.last_lsn)
-                })
-        } else {
-            0
-        }
-    }
-}
-
-#[derive(Clone)]
-struct UndoRecord {
-    next: Option<Lsn>,
-    payload: Option<HeapRecordPayload>,
-}
-
-#[derive(Default)]
-struct UndoIndex {
-    heads: HashMap<u64, Option<Lsn>>,
-    entries: HashMap<Lsn, UndoRecord>,
-    active: HashSet<u64>,
-}
-
-impl UndoIndex {
-    fn observe(&mut self, frame: &WalFrame) {
-        match &frame.payload {
-            WalRecordPayload::Heap(rec) => {
-                let txn_id = heap_txn_id(rec);
-                let prev = self.head_for(txn_id);
-                self.entries.insert(
-                    frame.lsn,
-                    UndoRecord {
-                        next: prev,
-                        payload: Some(rec.clone()),
-                    },
-                );
-                self.heads.insert(txn_id, Some(frame.lsn));
-                self.active.insert(txn_id);
-            }
-            WalRecordPayload::Clr(clr) => {
-                let next = if clr.undo_next_lsn == 0 {
-                    None
-                } else {
-                    Some(clr.undo_next_lsn)
-                };
-                self.entries.insert(
-                    frame.lsn,
-                    UndoRecord {
-                        next,
-                        payload: None,
-                    },
-                );
-                self.heads.insert(clr.txn_id, next);
-                self.active.insert(clr.txn_id);
-            }
-            WalRecordPayload::Transaction(tx) => match tx.marker {
-                TransactionRecordKind::Begin => {
-                    self.active.insert(tx.txn_id);
-                    self.heads.entry(tx.txn_id).or_insert(None);
-                }
-                TransactionRecordKind::Commit | TransactionRecordKind::Abort => {
-                    self.active.remove(&tx.txn_id);
-                    self.heads.insert(tx.txn_id, None);
-                }
-            },
-            _ => {}
-        }
-    }
-
-    fn head_for(&self, txn_id: u64) -> Option<Lsn> {
-        self.heads.get(&txn_id).copied().flatten()
-    }
-
-    fn entry(&self, lsn: Lsn) -> Option<UndoRecord> {
-        self.entries.get(&lsn).cloned()
-    }
-
-    fn active_transactions(&self) -> Vec<u64> {
-        let mut txns: Vec<u64> = self.active.iter().copied().collect();
-        txns.sort_unstable();
-        txns
-    }
-}
-
-fn heap_txn_id(rec: &HeapRecordPayload) -> u64 {
-    match rec {
-        HeapRecordPayload::Insert(p) => p.op_txn_id,
-        HeapRecordPayload::Update(p) => p.op_txn_id,
-        HeapRecordPayload::Delete(p) => p.op_txn_id,
     }
 }
 
@@ -462,7 +104,10 @@ fn heap_txn_id(rec: &HeapRecordPayload) -> u64 {
 mod tests {
     use super::RecoveryManager;
     use crate::buffer::{BufferManager, INVALID_PAGE_ID};
-    use crate::config::WalConfig;
+    use crate::config::{IOSchedulerConfig, WalConfig};
+    use crate::recovery::analysis::{AnalysisPass, AnalysisResult};
+    use crate::recovery::redo::RedoExecutor;
+    use crate::recovery::undo::{UndoExecutor, UndoOutcome};
     use crate::recovery::wal_record::{
         PageDeltaPayload, PageWritePayload, TransactionPayload, TransactionRecordKind,
         WalRecordPayload,
@@ -477,8 +122,51 @@ mod tests {
     use tempfile::TempDir;
 
     fn build_scheduler(db_path: &Path) -> Arc<DiskScheduler> {
+        std::env::set_var("QUILL_DISABLE_DIRECT_IO", "1");
         let disk_manager = Arc::new(DiskManager::try_new(db_path).expect("disk manager"));
-        Arc::new(DiskScheduler::new(disk_manager))
+        let mut io_config = IOSchedulerConfig::default();
+        io_config.workers = 1;
+        #[cfg(target_os = "linux")]
+        {
+            io_config.iouring_queue_depth = 8;
+            io_config.iouring_fixed_buffers = 8;
+        }
+        Arc::new(DiskScheduler::new_with_config(disk_manager, io_config))
+    }
+
+    fn run_stage_pipeline(
+        wal: Arc<WalManager>,
+        scheduler: Arc<DiskScheduler>,
+        buffer_pool: Option<Arc<BufferManager>>,
+    ) -> (AnalysisResult, UndoOutcome, usize) {
+        let mut reader = wal.reader().expect("wal reader");
+        let control_snapshot = wal.control_file().map(|ctrl| ctrl.snapshot());
+        let mut analysis = AnalysisPass::new(control_snapshot);
+        let mut undo = UndoExecutor::new(wal.clone(), scheduler.clone(), buffer_pool.clone());
+        let redo = RedoExecutor::new(scheduler, buffer_pool);
+        let mut frames = Vec::new();
+        while let Some(frame) = reader.next_frame().expect("wal frame") {
+            analysis.observe(&frame);
+            undo.observe(&frame);
+            frames.push(frame);
+        }
+        let analysis_result = analysis.finalize().expect("analysis finalize");
+        if !analysis_result.has_frames {
+            return (analysis_result, UndoOutcome::default(), 0);
+        }
+        let mut redo_count = 0usize;
+        for frame in &frames {
+            if frame.lsn < analysis_result.start_lsn {
+                continue;
+            }
+            redo_count += redo.apply(frame).expect("redo apply");
+        }
+        let undo_outcome = undo.finalize().expect("undo finalize");
+        if undo_outcome.max_clr_lsn != 0 {
+            wal.flush_until(undo_outcome.max_clr_lsn)
+                .expect("wal flush until");
+        }
+        (analysis_result, undo_outcome, redo_count)
     }
 
     #[test]
@@ -507,10 +195,17 @@ mod tests {
         drop(wal);
 
         let scheduler = build_scheduler(&db_path);
-        let wal = Arc::new(WalManager::new(config, None, None).unwrap());
+        let wal = Arc::new(WalManager::new(config.clone(), None, None).unwrap());
+        let (analysis, undo_outcome, redo_count) =
+            run_stage_pipeline(wal.clone(), scheduler.clone(), None);
+        assert!(analysis.has_frames);
+        assert_eq!(analysis.start_lsn, 0);
+        assert_eq!(redo_count, 1);
+        assert!(undo_outcome.loser_transactions.is_empty());
+
         let recovery = RecoveryManager::new(wal, scheduler.clone());
         let summary = recovery.replay().unwrap();
-        assert_eq!(summary.redo_count, 1);
+        assert_eq!(summary.redo_count, redo_count);
         assert!(summary.loser_transactions.is_empty());
 
         let rx = scheduler.schedule_read(1).unwrap();
@@ -558,10 +253,17 @@ mod tests {
         drop(wal);
 
         let scheduler = build_scheduler(&db_path);
-        let wal = Arc::new(WalManager::new(config, None, None).unwrap());
+        let wal = Arc::new(WalManager::new(config.clone(), None, None).unwrap());
+        let (analysis, undo_outcome, redo_count) =
+            run_stage_pipeline(wal.clone(), scheduler.clone(), None);
+        assert!(analysis.has_frames);
+        assert_eq!(analysis.start_lsn, 0);
+        assert_eq!(redo_count, 2);
+        assert!(undo_outcome.loser_transactions.is_empty());
+
         let recovery = RecoveryManager::new(wal, scheduler.clone());
         let summary = recovery.replay().unwrap();
-        assert!(summary.redo_count >= 2);
+        assert_eq!(summary.redo_count, redo_count);
 
         let rx = scheduler.schedule_read(2).unwrap();
         let data = rx.recv().unwrap().unwrap();
@@ -592,10 +294,17 @@ mod tests {
         drop(wal);
 
         let scheduler = build_scheduler(&db_path);
-        let wal = Arc::new(WalManager::new(config, None, None).unwrap());
+        let wal = Arc::new(WalManager::new(config.clone(), None, None).unwrap());
+        let (analysis, undo_outcome, redo_count) =
+            run_stage_pipeline(wal.clone(), scheduler.clone(), None);
+        assert!(analysis.has_frames);
+        assert_eq!(redo_count, 0);
+        assert_eq!(undo_outcome.loser_transactions, vec![7]);
+
         let recovery = RecoveryManager::new(wal, scheduler.clone());
         let summary = recovery.replay().unwrap();
-        assert_eq!(summary.loser_transactions, vec![7]);
+        assert_eq!(summary.redo_count, redo_count);
+        assert_eq!(summary.loser_transactions, undo_outcome.loser_transactions);
     }
 
     #[test]
@@ -690,9 +399,17 @@ mod tests {
         // Reopen wal and run recovery (inject BufferPool to use TableHeap recovery APIs)
         let scheduler = build_scheduler(&db_path);
         let bpm = Arc::new(BufferManager::new(64, scheduler.clone()));
-        let wal = Arc::new(WalManager::new(config, None, None).unwrap());
+        let wal = Arc::new(WalManager::new(config.clone(), None, None).unwrap());
+        let (analysis, undo_outcome, redo_count) =
+            run_stage_pipeline(wal.clone(), scheduler.clone(), Some(bpm.clone()));
+        assert!(analysis.has_frames);
+        assert_eq!(redo_count, 0);
+        assert_eq!(undo_outcome.loser_transactions, vec![1]);
+        assert!(undo_outcome.max_clr_lsn > 0);
+
         let recovery = RecoveryManager::new(wal, scheduler.clone()).with_buffer_pool(bpm);
-        let _summary = recovery.replay().unwrap();
+        let summary = recovery.replay().unwrap();
+        assert_eq!(summary.loser_transactions, undo_outcome.loser_transactions);
 
         // Verify header is_deleted flipped to true
         let rx = scheduler.schedule_read(page_id).unwrap();
@@ -810,9 +527,18 @@ mod tests {
         // Recover (inject BufferPool)
         let scheduler = build_scheduler(&db_path);
         let bpm = Arc::new(BufferManager::new(64, scheduler.clone()));
-        let wal = Arc::new(WalManager::new(config, None, None).unwrap());
+        let wal = Arc::new(WalManager::new(config.clone(), None, None).unwrap());
+        let (analysis, undo_outcome, redo_count) =
+            run_stage_pipeline(wal.clone(), scheduler.clone(), Some(bpm.clone()));
+        assert!(analysis.has_frames);
+        assert_eq!(redo_count, 0);
+        assert_eq!(undo_outcome.loser_transactions, vec![2]);
+        assert!(undo_outcome.max_clr_lsn > 0);
+
         let recovery = RecoveryManager::new(wal, scheduler.clone()).with_buffer_pool(bpm);
-        let _ = recovery.replay().unwrap();
+        let summary = recovery.replay().unwrap();
+        assert_eq!(summary.redo_count, redo_count);
+        assert_eq!(summary.loser_transactions, undo_outcome.loser_transactions);
 
         // Verify old bytes restored and size back to 16
         let rx = scheduler.schedule_read(page_id).unwrap();
@@ -913,9 +639,18 @@ mod tests {
         // recover (inject BufferPool)
         let scheduler = build_scheduler(&db_path);
         let bpm = Arc::new(BufferManager::new(64, scheduler.clone()));
-        let wal = Arc::new(WalManager::new(config, None, None).unwrap());
+        let wal = Arc::new(WalManager::new(config.clone(), None, None).unwrap());
+        let (analysis, undo_outcome, redo_count) =
+            run_stage_pipeline(wal.clone(), scheduler.clone(), Some(bpm.clone()));
+        assert!(analysis.has_frames);
+        assert_eq!(redo_count, 0);
+        assert_eq!(undo_outcome.loser_transactions, vec![6]);
+        assert!(undo_outcome.max_clr_lsn > 0);
+
         let recovery = RecoveryManager::new(wal, scheduler.clone()).with_buffer_pool(bpm);
-        let _ = recovery.replay().unwrap();
+        let summary = recovery.replay().unwrap();
+        assert_eq!(summary.redo_count, redo_count);
+        assert_eq!(summary.loser_transactions, undo_outcome.loser_transactions);
 
         let rx = scheduler.schedule_read(page_id).unwrap();
         let data = rx.recv().unwrap().unwrap();
@@ -1005,8 +740,17 @@ mod tests {
         let scheduler = build_scheduler(&db_path);
         let bpm = Arc::new(BufferManager::new(64, scheduler.clone()));
         let wal = Arc::new(WalManager::new(config.clone(), None, None).unwrap());
+        let (analysis1, outcome1, redo_count1) =
+            run_stage_pipeline(wal.clone(), scheduler.clone(), Some(bpm.clone()));
+        assert!(analysis1.has_frames);
+        assert_eq!(redo_count1, 0);
+        assert_eq!(outcome1.loser_transactions, vec![10]);
+        assert!(outcome1.max_clr_lsn > 0);
+
         let recovery = RecoveryManager::new(wal, scheduler.clone()).with_buffer_pool(bpm);
-        let _ = recovery.replay().unwrap();
+        let summary1 = recovery.replay().unwrap();
+        assert_eq!(summary1.redo_count, redo_count1);
+        assert_eq!(summary1.loser_transactions, outcome1.loser_transactions);
         let rx = scheduler.schedule_read(page_id).unwrap();
         let data1 = rx.recv().unwrap().unwrap();
         let (hdr1, _c1) = TablePageHeaderCodec::decode(&data1).unwrap();
@@ -1016,8 +760,16 @@ mod tests {
         let scheduler2 = build_scheduler(&db_path);
         let bpm2 = Arc::new(BufferManager::new(64, scheduler2.clone()));
         let wal2 = Arc::new(WalManager::new(config, None, None).unwrap());
+        let (analysis2, outcome2, redo_count2) =
+            run_stage_pipeline(wal2.clone(), scheduler2.clone(), Some(bpm2.clone()));
+        assert!(analysis2.has_frames);
+        assert_eq!(redo_count2, 0);
+        assert_eq!(outcome2.loser_transactions, vec![10]);
+
         let recovery2 = RecoveryManager::new(wal2, scheduler2.clone()).with_buffer_pool(bpm2);
-        let _ = recovery2.replay().unwrap();
+        let summary2 = recovery2.replay().unwrap();
+        assert_eq!(summary2.redo_count, redo_count2);
+        assert_eq!(summary2.loser_transactions, outcome2.loser_transactions);
         let rx2 = scheduler2.schedule_read(page_id).unwrap();
         let data2 = rx2.recv().unwrap().unwrap();
         let (hdr2, _c2) = TablePageHeaderCodec::decode(&data2).unwrap();
@@ -1090,10 +842,16 @@ mod tests {
 
         // Recover and ensure deltas applied
         let scheduler = build_scheduler(&db_path);
-        let wal = Arc::new(WalManager::new(config, None, None).unwrap());
+        let wal = Arc::new(WalManager::new(config.clone(), None, None).unwrap());
+        let (analysis, undo_outcome, redo_count) =
+            run_stage_pipeline(wal.clone(), scheduler.clone(), None);
+        assert!(analysis.has_frames);
+        assert!(redo_count >= 1);
+        assert!(undo_outcome.loser_transactions.is_empty());
+
         let recovery = RecoveryManager::new(wal, scheduler.clone());
         let summary = recovery.replay().unwrap();
-        assert!(summary.redo_count >= 1);
+        assert_eq!(summary.redo_count, redo_count);
 
         let rx = scheduler.schedule_read(pid).unwrap();
         let data = rx.recv().unwrap().unwrap();
