@@ -12,7 +12,6 @@ use crate::storage::codec::{
     BPlusTreeHeaderPageCodec, BPlusTreeInternalPageCodec, BPlusTreeLeafPageCodec,
     BPlusTreePageCodec,
 };
-use crate::storage::index::Index;
 use crate::storage::page::{BPlusTreeHeaderPage, BPlusTreeInternalPage};
 use crate::storage::page::{BPlusTreeLeafPage, BPlusTreePage, RecordId};
 
@@ -85,20 +84,6 @@ pub struct BPlusTreeIndex {
     pub pending_garbage: AtomicUsize,
 }
 
-impl Index for BPlusTreeIndex {
-    fn key_schema(&self) -> &SchemaRef {
-        &self.key_schema
-    }
-    fn insert(&self, key: &Tuple, value: RecordId) -> QuillSQLResult<()> {
-        self.insert(key, value)
-    }
-    fn get(&self, key: &Tuple) -> QuillSQLResult<Option<RecordId>> {
-        self.get(key)
-    }
-    fn delete(&self, key: &Tuple) -> QuillSQLResult<()> {
-        self.delete(key)
-    }
-}
 
 impl BPlusTreeIndex {
     /// Write a modified index page back to the buffer with WAL (FPW/Delta) just like table heap.

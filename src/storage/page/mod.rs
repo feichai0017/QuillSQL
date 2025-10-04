@@ -1,6 +1,5 @@
 mod btree_page;
 mod freelist_page;
-pub mod hash_page;
 mod meta_page;
 mod table_page;
 
