@@ -25,7 +25,8 @@ use crate::recovery::wal::page::{
     WalFrameContinuation, WalPage, WalPageFragmentKind, WAL_PAGE_SIZE,
 };
 use crate::recovery::wal_record::WalRecordPayload;
-use crate::recovery::wal_runtime::WalRuntime;
+use crate::storage::disk_manager::DiskManager;
+use crate::storage::disk_scheduler::{DiskCommandResultReceiver, DiskScheduler};
 use bytes::Bytes;
 use dashmap::DashSet;
 
@@ -117,6 +118,16 @@ impl WalManager {
         init_state: Option<WalInitState>,
         control_file: Option<Arc<ControlFileManager>>,
     ) -> QuillSQLResult<Self> {
+        let scheduler = Self::default_scheduler(&config)?;
+        Self::new_with_scheduler(config, init_state, control_file, scheduler)
+    }
+
+    pub fn new_with_scheduler(
+        config: WalConfig,
+        init_state: Option<WalInitState>,
+        control_file: Option<Arc<ControlFileManager>>,
+        scheduler: Arc<DiskScheduler>,
+    ) -> QuillSQLResult<Self> {
         let max_buffer_records = if config.buffer_capacity == 0 {
             usize::MAX
         } else {
@@ -127,8 +138,7 @@ impl WalManager {
         } else {
             config.flush_coalesce_bytes
         };
-        let runtime = Arc::new(WalRuntime::new(WalRuntime::default_worker_count()));
-        let mut storage = WalStorage::new(config, runtime)?;
+        let mut storage = WalStorage::new(config, scheduler)?;
         let (durable_ptr, next_ptr, checkpoint_ptr, last_record_start, redo_start) =
             if let Some(state) = init_state {
                 (
@@ -283,18 +293,21 @@ impl WalManager {
     pub fn flush(&self, target: Option<Lsn>) -> QuillSQLResult<Lsn> {
         let recycle_lsn = self.last_checkpoint.load(Ordering::Acquire);
 
-        let new_durable = {
+        let (desired, tickets) = {
             let mut guard = self.state.lock();
+            let current_durable = self.durable_lsn();
             let highest_buffered = guard
                 .buffer
                 .last()
                 .map(|r| r.end_lsn)
-                .unwrap_or(self.durable_lsn());
-            let desired = target.filter(|lsn| *lsn != 0).unwrap_or(highest_buffered);
-            let desired = cmp::min(self.max_assigned_lsn(), desired);
-            if desired <= self.durable_lsn() {
+                .unwrap_or(current_durable);
+            let mut desired = target.filter(|lsn| *lsn != 0).unwrap_or(highest_buffered);
+            desired = cmp::min(self.max_assigned_lsn(), desired);
+
+            if desired <= current_durable {
                 guard.storage.recycle_segments(recycle_lsn)?;
-                return Ok(self.durable_lsn());
+                drop(guard);
+                return Ok(current_durable);
             }
 
             let flush_count = guard
@@ -313,18 +326,42 @@ impl WalManager {
             }
 
             guard.storage.recycle_segments(recycle_lsn)?;
-
-            cmp::max(self.durable_lsn(), desired)
+            let ready = guard.storage.take_ready(desired);
+            (desired, ready)
         };
 
-        self.durable_lsn.store(new_durable, Ordering::Release);
+        self.wait_for_flush_tickets(tickets)?;
+        self.durable_lsn.store(desired, Ordering::Release);
         self.persist_control_file()?;
         self.flush_cond.notify_all();
-        Ok(new_durable)
+        Ok(desired)
     }
 
     pub fn pending_records(&self) -> Vec<WalRecord> {
         self.state.lock().buffer.clone()
+    }
+
+    fn default_scheduler(config: &WalConfig) -> QuillSQLResult<Arc<DiskScheduler>> {
+        fs::create_dir_all(&config.directory)?;
+        let db_path = config.directory.join("wal_scheduler.db");
+        let disk_manager = Arc::new(DiskManager::try_new(&db_path)?);
+        Ok(Arc::new(DiskScheduler::new(disk_manager)))
+    }
+
+    fn wait_for_flush_tickets(&self, tickets: Vec<WalFlushTicket>) -> QuillSQLResult<()> {
+        for ticket in tickets {
+            match ticket.receiver.recv() {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => return Err(err),
+                Err(err) => {
+                    return Err(QuillSQLError::Internal(format!(
+                        "WAL flush completion dropped: {}",
+                        err
+                    )))
+                }
+            }
+        }
+        Ok(())
     }
 
     fn persist_control_file(&self) -> QuillSQLResult<()> {
@@ -406,14 +443,21 @@ struct WalStorage {
     segment_size: u64,
     sync_on_flush: bool,
     current_segment: WalSegmentInfo,
-    runtime: Arc<WalRuntime>,
+    scheduler: Arc<DiskScheduler>,
     retain_segments: usize,
     open_page: Option<WalPage>,
     last_page_end_lsn: Lsn,
+    last_sync_request: Lsn,
+    pending: VecDeque<WalFlushTicket>,
+}
+
+struct WalFlushTicket {
+    lsn: Lsn,
+    receiver: DiskCommandResultReceiver<()>,
 }
 
 impl WalStorage {
-    fn new(config: WalConfig, runtime: Arc<WalRuntime>) -> QuillSQLResult<Self> {
+    fn new(config: WalConfig, scheduler: Arc<DiskScheduler>) -> QuillSQLResult<Self> {
         fs::create_dir_all(&config.directory)?;
         let segment = Self::discover_latest_segment(&config.directory, config.segment_size)?;
         Ok(Self {
@@ -421,10 +465,12 @@ impl WalStorage {
             segment_size: config.segment_size,
             sync_on_flush: config.sync_on_flush,
             current_segment: segment,
-            runtime,
+            scheduler,
             retain_segments: config.retain_segments.max(1),
             open_page: None,
             last_page_end_lsn: 0,
+            last_sync_request: 0,
+            pending: VecDeque::new(),
         })
     }
 
@@ -550,6 +596,7 @@ impl WalStorage {
         }
 
         self.last_page_end_lsn = next_lsn;
+        self.last_sync_request = next_lsn;
         let segment_index = physical_offset / self.segment_size;
         self.current_segment = WalSegmentInfo {
             id: segment_index + 1,
@@ -638,10 +685,32 @@ impl WalStorage {
         if let Some(page) = self.open_page.take() {
             self.write_page(&page)?;
         }
-        if self.sync_on_flush {
-            self.write_bytes(self.current_segment.size, Bytes::new(), true)?;
+        if self.sync_on_flush && self.last_page_end_lsn > self.last_sync_request {
+            if let Some(receiver) =
+                self.write_bytes(self.current_segment.size, Bytes::new(), true)?
+            {
+                self.last_sync_request = self.last_page_end_lsn;
+                self.pending.push_back(WalFlushTicket {
+                    lsn: self.last_sync_request,
+                    receiver,
+                });
+            }
         }
         Ok(())
+    }
+
+    fn take_ready(&mut self, upto: Lsn) -> Vec<WalFlushTicket> {
+        let mut ready = Vec::new();
+        while let Some(front) = self.pending.front() {
+            if front.lsn <= upto {
+                if let Some(ticket) = self.pending.pop_front() {
+                    ready.push(ticket);
+                }
+            } else {
+                break;
+            }
+        }
+        ready
     }
 
     fn write_page(&mut self, page: &WalPage) -> std::io::Result<()> {
@@ -653,10 +722,17 @@ impl WalStorage {
         }
         let offset = self.current_segment.size;
         let bytes = Bytes::from(page.to_bytes());
-        self.write_bytes(offset, bytes, false)?;
+        let receiver = self.write_bytes(offset, bytes, false)?;
         self.current_segment.size += WAL_PAGE_SIZE as u64;
         if let Some(lsn) = page.last_end_lsn() {
             self.last_page_end_lsn = lsn;
+        }
+        let ticket_lsn = self.last_page_end_lsn;
+        if let Some(receiver) = receiver {
+            self.pending.push_back(WalFlushTicket {
+                lsn: ticket_lsn,
+                receiver,
+            });
         }
         Ok(())
     }
@@ -700,14 +776,29 @@ impl WalStorage {
         Ok(latest)
     }
 
-    fn write_bytes(&self, offset: u64, data: Bytes, sync: bool) -> std::io::Result<()> {
+    fn write_bytes(
+        &self,
+        offset: u64,
+        data: Bytes,
+        sync: bool,
+    ) -> std::io::Result<Option<DiskCommandResultReceiver<()>>> {
         if data.is_empty() && !sync {
-            return Ok(());
+            return Ok(None);
         }
         let path = segment_path(&self.directory, self.current_segment.id);
-        self.runtime
-            .write(&path, offset, data, sync)
-            .map_err(|e| io_error(&e))
+        if data.is_empty() {
+            let receiver = self
+                .scheduler
+                .schedule_wal_fsync(path)
+                .map_err(|e| io_error(&e))?;
+            Ok(Some(receiver))
+        } else {
+            let receiver = self
+                .scheduler
+                .schedule_wal_write(path, offset, data, sync)
+                .map_err(|e| io_error(&e))?;
+            Ok(Some(receiver))
+        }
     }
 }
 
@@ -1007,13 +1098,23 @@ mod tests {
         CheckpointPayload, ResourceManagerId, TransactionPayload, TransactionRecordKind,
         WalRecordPayload,
     };
+    use crate::storage::disk_manager::DiskManager;
+    use crate::storage::disk_scheduler::DiskScheduler;
+    use std::sync::Arc;
     use tempfile::TempDir;
 
     use super::WalManager;
 
+    fn build_scheduler(tmp: &TempDir) -> Arc<DiskScheduler> {
+        let db_path = tmp.path().join("wal_test.db");
+        let disk_manager = Arc::new(DiskManager::try_new(&db_path).expect("disk manager"));
+        Arc::new(DiskScheduler::new(disk_manager))
+    }
+
     fn build_wal_manager_with_config(tmp: &TempDir, mut config: WalConfig) -> WalManager {
         config.directory = tmp.path().join("wal");
-        WalManager::new(config, None, None).expect("wal manager")
+        let scheduler = build_scheduler(tmp);
+        WalManager::new_with_scheduler(config, None, None, scheduler).expect("wal manager")
     }
 
     fn build_wal_manager(tmp: &TempDir) -> WalManager {
@@ -1126,6 +1227,43 @@ mod tests {
         assert!(l3 > l2);
         wal2.flush(None).expect("flush wal2");
         assert_eq!(wal2.durable_lsn(), l3);
+    }
+
+    #[test]
+    fn flush_until_advances_in_order() {
+        let tmp = TempDir::new().expect("tempdir");
+        let wal = build_wal_manager(&tmp);
+
+        let first = wal
+            .append_record_with(|_| {
+                WalRecordPayload::Transaction(TransactionPayload {
+                    marker: TransactionRecordKind::Begin,
+                    txn_id: 42,
+                })
+            })
+            .expect("append begin")
+            .end_lsn;
+
+        let second = wal
+            .append_record_with(|_| {
+                WalRecordPayload::Transaction(TransactionPayload {
+                    marker: TransactionRecordKind::Commit,
+                    txn_id: 42,
+                })
+            })
+            .expect("append commit")
+            .end_lsn;
+
+        assert!(second > first);
+        assert_eq!(wal.durable_lsn(), 0);
+
+        let dur = wal.flush_until(first).expect("flush first");
+        assert_eq!(dur, first);
+        assert_eq!(wal.durable_lsn(), first);
+
+        let dur = wal.flush_until(second).expect("flush second");
+        assert_eq!(dur, second);
+        assert_eq!(wal.durable_lsn(), second);
     }
 
     #[test]

@@ -6,7 +6,6 @@ pub mod resource_manager;
 pub mod undo;
 pub mod wal;
 pub mod wal_record;
-pub mod wal_runtime;
 
 pub use control_file::{ControlFileManager, ControlFileSnapshot, WalInitState};
 pub use recovery_manager::RecoveryManager;

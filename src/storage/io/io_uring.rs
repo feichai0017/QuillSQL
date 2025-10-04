@@ -2,8 +2,10 @@ use bytes::{Bytes, BytesMut};
 use io_uring::{opcode, types, IoUring};
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::fs::OpenOptions;
 use std::io::{self, ErrorKind, IoSliceMut};
 use std::os::fd::AsRawFd;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -43,13 +45,16 @@ enum PendingKind {
     WriteFixed {
         idx: usize,
         state: Rc<RefCell<WriteState>>,
+        len: usize,
     },
     WriteVec {
         state: Rc<RefCell<WriteState>>,
         _buffer: Bytes,
+        len: usize,
     },
     Fsync {
         state: Rc<RefCell<WriteState>>,
+        required: bool,
     },
 }
 
@@ -268,6 +273,48 @@ impl FixedBufferPool {
     }
 }
 
+struct WalFileEntry {
+    _path: PathBuf,
+    _file: std::fs::File,
+    fd: i32,
+}
+
+struct WalFileCache {
+    files: HashMap<PathBuf, WalFileEntry>,
+}
+
+impl WalFileCache {
+    fn new() -> Self {
+        Self {
+            files: HashMap::new(),
+        }
+    }
+
+    fn fd_for(&mut self, path: &Path) -> io::Result<i32> {
+        if let Some(entry) = self.files.get(path) {
+            return Ok(entry.fd);
+        }
+
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(path)?;
+        let fd = file.as_raw_fd();
+        let entry = WalFileEntry {
+            _path: path.to_path_buf(),
+            _file: file,
+            fd,
+        };
+        self.files.insert(path.to_path_buf(), entry);
+        Ok(fd)
+    }
+}
+
 fn queue_read(
     ring: &mut IoUring,
     pending: &mut HashMap<u64, PendingEntry>,
@@ -407,6 +454,7 @@ fn queue_write(
                     kind: PendingKind::WriteFixed {
                         idx,
                         state: Rc::clone(&state),
+                        len: data.len(),
                     },
                 },
             );
@@ -423,6 +471,7 @@ fn queue_write(
                     kind: PendingKind::WriteVec {
                         state: Rc::clone(&state),
                         _buffer: buffer,
+                        len: data.len(),
                     },
                 },
             );
@@ -441,10 +490,99 @@ fn queue_write(
         pending.insert(
             fsync_token,
             PendingEntry {
-                kind: PendingKind::Fsync { state },
+                kind: PendingKind::Fsync {
+                    state,
+                    required: true,
+                },
             },
         );
     }
+}
+
+fn queue_wal_write(
+    ring: &mut IoUring,
+    pending: &mut HashMap<u64, PendingEntry>,
+    token_counter: &mut u64,
+    fd: i32,
+    offset: u64,
+    data: Bytes,
+    sender: DiskResultSender<()>,
+    sync: bool,
+) {
+    let has_data = !data.is_empty();
+    let pending_ops = (if has_data { 1 } else { 0 }) + if sync { 1 } else { 0 };
+
+    if pending_ops == 0 {
+        if let Err(err) = sender.send(Ok(())) {
+            log::error!("io_uring WAL write result send failed: {}", err);
+        }
+        return;
+    }
+
+    let state = Rc::new(RefCell::new(WriteState::new(sender, pending_ops as u8)));
+
+    if has_data {
+        let write_token = next_token(token_counter);
+        let buffer = data.clone();
+        let entry = opcode::Write::new(types::Fd(fd), buffer.as_ptr(), buffer.len() as u32)
+            .offset(offset)
+            .build()
+            .user_data(write_token);
+        push_sqe(ring, entry);
+        pending.insert(
+            write_token,
+            PendingEntry {
+                kind: PendingKind::WriteVec {
+                    state: Rc::clone(&state),
+                    _buffer: buffer,
+                    len: data.len(),
+                },
+            },
+        );
+    }
+
+    if sync {
+        let fsync_token = next_token(token_counter);
+        let fsync_entry = opcode::Fsync::new(types::Fd(fd))
+            .flags(types::FsyncFlags::DATASYNC)
+            .build()
+            .user_data(fsync_token);
+        push_sqe(ring, fsync_entry);
+        pending.insert(
+            fsync_token,
+            PendingEntry {
+                kind: PendingKind::Fsync {
+                    state,
+                    required: true,
+                },
+            },
+        );
+    }
+}
+
+fn queue_wal_fsync(
+    ring: &mut IoUring,
+    pending: &mut HashMap<u64, PendingEntry>,
+    token_counter: &mut u64,
+    fd: i32,
+    sender: DiskResultSender<()>,
+) {
+    let state = Rc::new(RefCell::new(WriteState::new(sender, 1)));
+    let fsync_token = next_token(token_counter);
+    let fsync_entry = opcode::Fsync::new(types::Fd(fd))
+        .flags(types::FsyncFlags::DATASYNC)
+        .build()
+        .user_data(fsync_token);
+    push_sqe(ring, fsync_entry);
+    pending.insert(
+        fsync_token,
+        PendingEntry {
+            kind: PendingKind::Fsync {
+                state,
+                required: true,
+            },
+        },
+    );
 }
 
 fn handle_request_direct(
@@ -456,6 +594,7 @@ fn handle_request_direct(
     disk_manager: &Arc<DiskManager>,
     fsync_on_write: bool,
     buffer_pool: &mut FixedBufferPool,
+    wal_files: &mut WalFileCache,
 ) -> bool {
     match request {
         DiskRequest::ReadPage {
@@ -503,6 +642,40 @@ fn handle_request_direct(
                 fsync_on_write,
             );
         }
+        DiskRequest::WriteWal {
+            path,
+            offset,
+            data,
+            sync,
+            result_sender,
+        } => match wal_files.fd_for(&path) {
+            Ok(wal_fd) => {
+                queue_wal_write(
+                    ring,
+                    pending,
+                    token_counter,
+                    wal_fd,
+                    offset,
+                    data,
+                    result_sender,
+                    sync,
+                );
+            }
+            Err(err) => {
+                let _ = result_sender.send(Err(QuillSQLError::Io(err)));
+            }
+        },
+        DiskRequest::FsyncWal {
+            path,
+            result_sender,
+        } => match wal_files.fd_for(&path) {
+            Ok(wal_fd) => {
+                queue_wal_fsync(ring, pending, token_counter, wal_fd, result_sender);
+            }
+            Err(err) => {
+                let _ = result_sender.send(Err(QuillSQLError::Io(err)));
+            }
+        },
         DiskRequest::AllocatePage { result_sender } => {
             let _ = result_sender.send(disk_manager.allocate_page());
         }
@@ -524,7 +697,6 @@ fn drain_completions(
     ring: &mut IoUring,
     pending: &mut HashMap<u64, PendingEntry>,
     buffer_pool: &FixedBufferPool,
-    fsync_on_write: bool,
 ) {
     while let Some(cqe) = ring.completion().next() {
         let token = cqe.user_data();
@@ -569,17 +741,17 @@ fn drain_completions(
                         }
                     }
                 }
-                PendingKind::WriteFixed { idx, state } => {
+                PendingKind::WriteFixed { idx, state, len } => {
                     buffer_pool.release(idx);
-                    let outcome = parse_write_result(result_code);
+                    let outcome = parse_write_result(result_code, len);
                     let _ = state.borrow_mut().record(outcome);
                 }
-                PendingKind::WriteVec { state, .. } => {
-                    let outcome = parse_write_result(result_code);
+                PendingKind::WriteVec { state, len, .. } => {
+                    let outcome = parse_write_result(result_code, len);
                     let _ = state.borrow_mut().record(outcome);
                 }
-                PendingKind::Fsync { state } => {
-                    let outcome = parse_fsync_result(result_code, fsync_on_write);
+                PendingKind::Fsync { state, required } => {
+                    let outcome = parse_fsync_result(result_code, required);
                     let _ = state.borrow_mut().record(outcome);
                 }
             }
@@ -604,14 +776,14 @@ fn parse_read_result(code: i32, buffer: Vec<u8>) -> QuillSQLResult<BytesMut> {
     }
 }
 
-fn parse_write_result(code: i32) -> QuillSQLResult<()> {
+fn parse_write_result(code: i32, expected: usize) -> QuillSQLResult<()> {
     if code < 0 {
         let err = io::Error::from_raw_os_error(-code);
         Err(QuillSQLError::Storage(format!(
             "io_uring write failed: {}",
             err
         )))
-    } else if code as usize != PAGE_SIZE {
+    } else if code as usize != expected {
         Err(QuillSQLError::Storage(format!(
             "io_uring short write: {} bytes",
             code
@@ -621,8 +793,8 @@ fn parse_write_result(code: i32) -> QuillSQLResult<()> {
     }
 }
 
-fn parse_fsync_result(code: i32, fsync_on_write: bool) -> QuillSQLResult<()> {
-    if !fsync_on_write {
+fn parse_fsync_result(code: i32, required: bool) -> QuillSQLResult<()> {
+    if !required {
         return Ok(());
     }
     if code < 0 {
@@ -670,10 +842,11 @@ pub(crate) fn worker_loop(
     let mut pending: HashMap<u64, PendingEntry> = HashMap::new();
     let mut token_counter: u64 = 1;
     let mut shutdown = false;
+    let mut wal_files = WalFileCache::new();
 
     while !shutdown || !pending.is_empty() {
         // Always process completions first to reduce queue pressure.
-        drain_completions(&mut ring, &mut pending, &buffer_pool, fsync_on_write);
+        drain_completions(&mut ring, &mut pending, &buffer_pool);
 
         if shutdown && pending.is_empty() {
             break;
@@ -691,6 +864,7 @@ pub(crate) fn worker_loop(
                 &disk_manager,
                 fsync_on_write,
                 &mut buffer_pool,
+                &mut wal_files,
             ) {
                 shutdown = true;
                 break;
@@ -715,6 +889,7 @@ pub(crate) fn worker_loop(
                             &disk_manager,
                             fsync_on_write,
                             &mut buffer_pool,
+                            &mut wal_files,
                         ) {
                             shutdown = true;
                         }
@@ -735,7 +910,7 @@ pub(crate) fn worker_loop(
     }
 
     // Final drain to deliver any remaining completions before exit.
-    drain_completions(&mut ring, &mut pending, &buffer_pool, fsync_on_write);
+    drain_completions(&mut ring, &mut pending, &buffer_pool);
 
     log::debug!("Disk I/O io_uring worker thread finished.");
 }

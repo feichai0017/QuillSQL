@@ -135,6 +135,14 @@ mod tests {
         Arc::new(DiskScheduler::new_with_config(disk_manager, io_config))
     }
 
+    fn build_wal(config: WalConfig, db_path: &Path) -> (Arc<WalManager>, Arc<DiskScheduler>) {
+        let scheduler = build_scheduler(db_path);
+        let wal = Arc::new(
+            WalManager::new_with_scheduler(config, None, None, scheduler.clone()).unwrap(),
+        );
+        (wal, scheduler)
+    }
+
     fn run_stage_pipeline(
         wal: Arc<WalManager>,
         scheduler: Arc<DiskScheduler>,
@@ -181,7 +189,7 @@ mod tests {
             sync_on_flush: false,
             ..WalConfig::default()
         };
-        let wal = Arc::new(WalManager::new(config.clone(), None, None).unwrap());
+        let (wal, seed_scheduler) = build_wal(config.clone(), &db_path);
 
         let page_bytes = vec![0xAB; crate::buffer::PAGE_SIZE];
         wal.append_record_with(|_| {
@@ -200,9 +208,9 @@ mod tests {
         assert!(seg_size >= 2 * WAL_PAGE_SIZE as u64);
 
         drop(wal);
+        drop(seed_scheduler);
 
-        let scheduler = build_scheduler(&db_path);
-        let wal = Arc::new(WalManager::new(config.clone(), None, None).unwrap());
+        let (wal, scheduler) = build_wal(config.clone(), &db_path);
         let (analysis, undo_outcome, redo_count) =
             run_stage_pipeline(wal.clone(), scheduler.clone(), None);
         assert!(analysis.has_frames);
@@ -232,7 +240,7 @@ mod tests {
             sync_on_flush: false,
             ..WalConfig::default()
         };
-        let wal = Arc::new(WalManager::new(config.clone(), None, None).unwrap());
+        let (wal, seed_scheduler) = build_wal(config.clone(), &db_path);
 
         // Seed a page with zeros
         let zero = vec![0u8; crate::buffer::PAGE_SIZE];
@@ -258,9 +266,9 @@ mod tests {
         .unwrap();
         wal.flush(None).unwrap();
         drop(wal);
+        drop(seed_scheduler);
 
-        let scheduler = build_scheduler(&db_path);
-        let wal = Arc::new(WalManager::new(config.clone(), None, None).unwrap());
+        let (wal, scheduler) = build_wal(config.clone(), &db_path);
         let (analysis, undo_outcome, redo_count) =
             run_stage_pipeline(wal.clone(), scheduler.clone(), None);
         assert!(analysis.has_frames);
@@ -288,7 +296,7 @@ mod tests {
             sync_on_flush: false,
             ..WalConfig::default()
         };
-        let wal = WalManager::new(config.clone(), None, None).unwrap();
+        let (wal, seed_scheduler) = build_wal(config.clone(), &db_path);
 
         wal.append_record_with(|_| {
             WalRecordPayload::Transaction(TransactionPayload {
@@ -299,9 +307,9 @@ mod tests {
         .expect("append begin");
         wal.flush(None).unwrap();
         drop(wal);
+        drop(seed_scheduler);
 
-        let scheduler = build_scheduler(&db_path);
-        let wal = Arc::new(WalManager::new(config.clone(), None, None).unwrap());
+        let (wal, scheduler) = build_wal(config.clone(), &db_path);
         let (analysis, undo_outcome, redo_count) =
             run_stage_pipeline(wal.clone(), scheduler.clone(), None);
         assert!(analysis.has_frames);
@@ -324,8 +332,7 @@ mod tests {
             sync_on_flush: false,
             ..WalConfig::default()
         };
-        let wal = Arc::new(WalManager::new(config.clone(), None, None).unwrap());
-        let scheduler = build_scheduler(&db_path);
+        let (wal, scheduler) = build_wal(config.clone(), &db_path);
 
         // Build a page with 1 tuple (slot 0), not deleted
         let page_id = 3u32;
@@ -402,11 +409,11 @@ mod tests {
         .unwrap();
         wal.flush(None).unwrap();
         drop(wal);
+        drop(scheduler);
 
         // Reopen wal and run recovery (inject BufferPool to use TableHeap recovery APIs)
-        let scheduler = build_scheduler(&db_path);
+        let (wal, scheduler) = build_wal(config.clone(), &db_path);
         let bpm = Arc::new(BufferManager::new(64, scheduler.clone()));
-        let wal = Arc::new(WalManager::new(config.clone(), None, None).unwrap());
         let (analysis, undo_outcome, redo_count) =
             run_stage_pipeline(wal.clone(), scheduler.clone(), Some(bpm.clone()));
         assert!(analysis.has_frames);
@@ -433,8 +440,7 @@ mod tests {
         let mut config = WalConfig::default();
         config.directory = wal_dir.clone();
         config.sync_on_flush = false;
-        let wal = Arc::new(WalManager::new(config.clone(), None, None).unwrap());
-        let scheduler = build_scheduler(&db_path);
+        let (wal, scheduler) = build_wal(config.clone(), &db_path);
 
         let page_id = 4u32;
         // Build header with 1 slot
