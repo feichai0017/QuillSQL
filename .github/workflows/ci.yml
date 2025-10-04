@@ -8,14 +8,13 @@ on:
 jobs:
   rust:
     runs-on: ubuntu-latest
-    container:
-      image: rust:nightly
-      options: --security-opt seccomp=unconfined
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install components
-        run: rustup component add rustfmt clippy
+      - name: Install nightly toolchain
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
 
