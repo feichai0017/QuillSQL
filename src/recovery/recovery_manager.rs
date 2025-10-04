@@ -108,6 +108,7 @@ mod tests {
     use crate::recovery::analysis::{AnalysisPass, AnalysisResult};
     use crate::recovery::redo::RedoExecutor;
     use crate::recovery::undo::{UndoExecutor, UndoOutcome};
+    use crate::recovery::wal::page::WAL_PAGE_SIZE;
     use crate::recovery::wal_record::{
         HeapRecordPayload, HeapUpdatePayload, PageDeltaPayload, PageWritePayload, RelationIdent,
         TransactionPayload, TransactionRecordKind, TupleMetaRepr, WalRecordPayload,
@@ -192,6 +193,12 @@ mod tests {
         })
         .unwrap();
         wal.flush(None).unwrap();
+
+        let seg_path = wal_dir.join("wal_0000000000000001.log");
+        let seg_size = std::fs::metadata(&seg_path).expect("wal segment").len();
+        assert_eq!(seg_size % WAL_PAGE_SIZE as u64, 0);
+        assert!(seg_size >= 2 * WAL_PAGE_SIZE as u64);
+
         drop(wal);
 
         let scheduler = build_scheduler(&db_path);
