@@ -8,14 +8,14 @@ on:
 jobs:
   rust:
     runs-on: ubuntu-latest
+    container:
+      image: rust:1.81
+      options: --security-opt seccomp=unconfined
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          override: true
-          components: rustfmt, clippy
+      - name: Install components
+        run: rustup component add rustfmt clippy
 
       - uses: Swatinem/rust-cache@v2
 
@@ -33,5 +33,7 @@ jobs:
     needs: rust
     steps:
       - uses: actions/checkout@v4
+
+      # 仅构建镜像，不在 Dockerfile 里跑测试
       - name: Build Docker image (no push)
-        run: docker build -t quillsql-ci .
+        run: docker build --pull -t quillsql-ci .
