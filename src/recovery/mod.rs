@@ -1,5 +1,8 @@
+pub mod analysis;
 pub mod control_file;
 pub mod recovery_manager;
+pub mod redo;
+pub mod undo;
 pub mod wal;
 pub mod wal_record;
 pub mod wal_runtime;
