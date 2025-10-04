@@ -29,7 +29,7 @@ pub const WAL_VERSION: u16 = 2;
 pub const WAL_HEADER_LEN: usize = 4 + 2 + 8 + 8 + 1 + 1 + 4;
 pub const WAL_CRC_LEN: usize = 4;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum ResourceManagerId {
     Page = 1,
@@ -232,7 +232,7 @@ pub struct WalFrame {
     pub prev_lsn: Lsn,
     pub rmid: ResourceManagerId,
     pub info: u8,
-    pub payload: WalRecordPayload,
+    pub body: Vec<u8>,
 }
 
 impl WalRecordPayload {
@@ -299,32 +299,13 @@ fn decode_frame_v2(bytes: &[u8]) -> QuillSQLResult<(WalFrame, usize)> {
         ));
     }
 
-    let payload = match rmid {
-        ResourceManagerId::Page => match info {
-            0 => WalRecordPayload::PageWrite(decode_page_write(body)?),
-            1 => WalRecordPayload::PageDelta(decode_page_delta(body)?),
-            other => {
-                return Err(QuillSQLError::Internal(format!(
-                    "Unknown Page info kind: {}",
-                    other
-                )))
-            }
-        },
-        ResourceManagerId::Transaction => {
-            WalRecordPayload::Transaction(decode_transaction(body, info)?)
-        }
-        ResourceManagerId::Heap => WalRecordPayload::Heap(decode_heap(body, info)?),
-        ResourceManagerId::Checkpoint => WalRecordPayload::Checkpoint(decode_checkpoint(body)?),
-        ResourceManagerId::Clr => WalRecordPayload::Clr(decode_clr(body)?),
-    };
-
     Ok((
         WalFrame {
             lsn,
             prev_lsn,
             rmid,
             info,
-            payload,
+            body: body.to_vec(),
         },
         total_len,
     ))
@@ -363,17 +344,15 @@ fn decode_frame_v1(bytes: &[u8]) -> QuillSQLResult<(WalFrame, usize)> {
         ));
     }
 
-    let (info, payload) = match rmid {
-        ResourceManagerId::Page => (0, WalRecordPayload::PageWrite(decode_page_write(body)?)),
+    let info = match rmid {
+        ResourceManagerId::Page => 0,
         ResourceManagerId::Transaction => {
             if body.len() != 9 {
                 return Err(QuillSQLError::Internal(
                     "Legacy transaction payload must be 9 bytes".to_string(),
                 ));
             }
-            let marker = body[8];
-            let payload = WalRecordPayload::Transaction(decode_transaction(&body[..8], marker)?);
-            (marker, payload)
+            body[8]
         }
         ResourceManagerId::Heap => {
             if body.is_empty() {
@@ -381,14 +360,9 @@ fn decode_frame_v1(bytes: &[u8]) -> QuillSQLResult<(WalFrame, usize)> {
                     "Legacy heap payload missing kind byte".to_string(),
                 ));
             }
-            let kind = body[0];
-            let payload = WalRecordPayload::Heap(decode_heap(&body[1..], kind)?);
-            (kind, payload)
+            body[0]
         }
-        ResourceManagerId::Checkpoint => {
-            (0, WalRecordPayload::Checkpoint(decode_checkpoint(body)?))
-        }
-        ResourceManagerId::Clr => (0, WalRecordPayload::Clr(decode_clr(body)?)),
+        ResourceManagerId::Checkpoint | ResourceManagerId::Clr => 0,
     };
 
     Ok((
@@ -397,7 +371,13 @@ fn decode_frame_v1(bytes: &[u8]) -> QuillSQLResult<(WalFrame, usize)> {
             prev_lsn: lsn.saturating_sub(1),
             rmid,
             info,
-            payload,
+            body: match rmid {
+                ResourceManagerId::Page
+                | ResourceManagerId::Checkpoint
+                | ResourceManagerId::Clr => body.to_vec(),
+                ResourceManagerId::Transaction => body[..8].to_vec(),
+                ResourceManagerId::Heap => body[1..].to_vec(),
+            },
         },
         total_len,
     ))
@@ -469,7 +449,7 @@ fn encode_page_delta(body: &PageDeltaPayload) -> Vec<u8> {
     buf
 }
 
-fn decode_page_write(bytes: &[u8]) -> QuillSQLResult<PageWritePayload> {
+pub(crate) fn decode_page_write(bytes: &[u8]) -> QuillSQLResult<PageWritePayload> {
     if bytes.len() < 4 + 8 + 4 {
         return Err(QuillSQLError::Internal(
             "PageWrite payload too short".to_string(),
@@ -491,7 +471,7 @@ fn decode_page_write(bytes: &[u8]) -> QuillSQLResult<PageWritePayload> {
     })
 }
 
-fn decode_page_delta(bytes: &[u8]) -> QuillSQLResult<PageDeltaPayload> {
+pub(crate) fn decode_page_delta(bytes: &[u8]) -> QuillSQLResult<PageDeltaPayload> {
     if bytes.len() < 4 + 8 + 2 + 4 {
         return Err(QuillSQLError::Internal(
             "PageDelta payload too short".to_string(),
@@ -531,7 +511,7 @@ fn encode_clr(body: &ClrPayload) -> Vec<u8> {
     buf
 }
 
-fn decode_transaction(bytes: &[u8], info: u8) -> QuillSQLResult<TransactionPayload> {
+pub(crate) fn decode_transaction(bytes: &[u8], info: u8) -> QuillSQLResult<TransactionPayload> {
     if bytes.len() != 8 {
         return Err(QuillSQLError::Internal(
             "Transaction payload must be 8 bytes".to_string(),
@@ -542,7 +522,7 @@ fn decode_transaction(bytes: &[u8], info: u8) -> QuillSQLResult<TransactionPaylo
     Ok(TransactionPayload { marker, txn_id })
 }
 
-fn decode_clr(bytes: &[u8]) -> QuillSQLResult<ClrPayload> {
+pub(crate) fn decode_clr(bytes: &[u8]) -> QuillSQLResult<ClrPayload> {
     if bytes.len() < 24 {
         return Err(QuillSQLError::Internal("CLR body too small".to_string()));
     }
@@ -582,7 +562,7 @@ fn encode_checkpoint(body: &CheckpointPayload) -> Vec<u8> {
     buf
 }
 
-fn decode_checkpoint(bytes: &[u8]) -> QuillSQLResult<CheckpointPayload> {
+pub(crate) fn decode_checkpoint(bytes: &[u8]) -> QuillSQLResult<CheckpointPayload> {
     if bytes.len() < 8 + 4 + 4 {
         return Err(QuillSQLError::Internal(
             "Checkpoint payload too short".to_string(),
@@ -653,7 +633,7 @@ fn encode_heap(payload: &HeapRecordPayload) -> (u8, Vec<u8>) {
     }
 }
 
-fn decode_heap(bytes: &[u8], info: u8) -> QuillSQLResult<HeapRecordPayload> {
+pub(crate) fn decode_heap(bytes: &[u8], info: u8) -> QuillSQLResult<HeapRecordPayload> {
     match HeapRecordKind::try_from(info)? {
         HeapRecordKind::Insert => Ok(HeapRecordPayload::Insert(decode_heap_insert(bytes)?)),
         HeapRecordKind::Update => Ok(HeapRecordPayload::Update(decode_heap_update(bytes)?)),
@@ -927,18 +907,14 @@ mod tests {
         let bytes = payload.encode(100, 99);
         let (frame, len) = decode_frame(&bytes).unwrap();
         assert_eq!(len, bytes.len());
-        match frame.payload {
-            WalRecordPayload::PageWrite(body) => {
-                assert_eq!(frame.lsn, 100);
-                assert_eq!(frame.prev_lsn, 99);
-                assert_eq!(frame.rmid, ResourceManagerId::Page);
-                assert_eq!(frame.info, 0);
-                assert_eq!(body.page_id, 42);
-                assert_eq!(body.prev_page_lsn, 7);
-                assert_eq!(body.page_image, vec![1, 2, 3, 4, 5]);
-            }
-            _ => panic!("unexpected payload variant"),
-        }
+        assert_eq!(frame.lsn, 100);
+        assert_eq!(frame.prev_lsn, 99);
+        assert_eq!(frame.rmid, ResourceManagerId::Page);
+        assert_eq!(frame.info, 0);
+        let body = decode_page_write(&frame.body).unwrap();
+        assert_eq!(body.page_id, 42);
+        assert_eq!(body.prev_page_lsn, 7);
+        assert_eq!(body.page_image, vec![1, 2, 3, 4, 5]);
     }
 
     #[test]
@@ -969,14 +945,10 @@ mod tests {
         assert_eq!(decoded.prev_lsn, lsn - 1);
         assert_eq!(decoded.rmid, ResourceManagerId::Page);
         assert_eq!(decoded.info, 0);
-        match decoded.payload {
-            WalRecordPayload::PageWrite(restored) => {
-                assert_eq!(restored.page_id, payload.page_id);
-                assert_eq!(restored.prev_page_lsn, payload.prev_page_lsn);
-                assert_eq!(restored.page_image, payload.page_image);
-            }
-            other => panic!("unexpected payload variant: {:?}", other),
-        }
+        let restored = decode_page_write(&decoded.body).unwrap();
+        assert_eq!(restored.page_id, payload.page_id);
+        assert_eq!(restored.prev_page_lsn, payload.prev_page_lsn);
+        assert_eq!(restored.page_image, payload.page_image);
     }
 
     #[test]
@@ -990,19 +962,15 @@ mod tests {
         let bytes = payload.encode(200, 150);
         let (frame, len) = decode_frame(&bytes).unwrap();
         assert_eq!(len, bytes.len());
-        match frame.payload {
-            WalRecordPayload::PageDelta(body) => {
-                assert_eq!(frame.lsn, 200);
-                assert_eq!(frame.prev_lsn, 150);
-                assert_eq!(frame.rmid, ResourceManagerId::Page);
-                assert_eq!(frame.info, 1);
-                assert_eq!(body.page_id, 7);
-                assert_eq!(body.prev_page_lsn, 3);
-                assert_eq!(body.offset, 10);
-                assert_eq!(body.data, vec![9, 8, 7, 6]);
-            }
-            _ => panic!("unexpected payload variant"),
-        }
+        assert_eq!(frame.lsn, 200);
+        assert_eq!(frame.prev_lsn, 150);
+        assert_eq!(frame.rmid, ResourceManagerId::Page);
+        assert_eq!(frame.info, 1);
+        let body = decode_page_delta(&frame.body).unwrap();
+        assert_eq!(body.page_id, 7);
+        assert_eq!(body.prev_page_lsn, 3);
+        assert_eq!(body.offset, 10);
+        assert_eq!(body.data, vec![9, 8, 7, 6]);
     }
 
     #[test]
@@ -1014,17 +982,13 @@ mod tests {
         let bytes = payload.encode(200, 150);
         let (frame, len) = decode_frame(&bytes).unwrap();
         assert_eq!(len, bytes.len());
-        match frame.payload {
-            WalRecordPayload::Transaction(body) => {
-                assert_eq!(frame.lsn, 200);
-                assert_eq!(frame.prev_lsn, 150);
-                assert_eq!(frame.rmid, ResourceManagerId::Transaction);
-                assert_eq!(frame.info, TransactionRecordKind::Commit as u8);
-                assert_eq!(body.marker, TransactionRecordKind::Commit);
-                assert_eq!(body.txn_id, 88);
-            }
-            _ => panic!("unexpected payload variant"),
-        }
+        assert_eq!(frame.lsn, 200);
+        assert_eq!(frame.prev_lsn, 150);
+        assert_eq!(frame.rmid, ResourceManagerId::Transaction);
+        assert_eq!(frame.info, TransactionRecordKind::Commit as u8);
+        let body = decode_transaction(&frame.body, frame.info).unwrap();
+        assert_eq!(body.marker, TransactionRecordKind::Commit);
+        assert_eq!(body.txn_id, 88);
     }
 
     #[test]
@@ -1044,20 +1008,19 @@ mod tests {
         let bytes = payload.encode(55, 54);
         let (frame, consumed) = decode_frame(&bytes).unwrap();
         assert_eq!(consumed, bytes.len());
-        match frame.payload {
-            WalRecordPayload::Heap(HeapRecordPayload::Insert(body)) => {
-                assert_eq!(frame.lsn, 55);
-                assert_eq!(frame.prev_lsn, 54);
-                assert_eq!(frame.rmid, ResourceManagerId::Heap);
-                assert_eq!(frame.info, HeapRecordKind::Insert as u8);
-                assert_eq!(body.relation.root_page_id, 10);
-                assert_eq!(body.page_id, 12);
-                assert_eq!(body.slot_id, 2);
-                assert_eq!(body.tuple_meta.insert_txn_id, 1);
-                assert_eq!(body.tuple_data, vec![7, 8, 9]);
-            }
+        assert_eq!(frame.lsn, 55);
+        assert_eq!(frame.prev_lsn, 54);
+        assert_eq!(frame.rmid, ResourceManagerId::Heap);
+        assert_eq!(frame.info, HeapRecordKind::Insert as u8);
+        let body = match decode_heap(&frame.body, frame.info).unwrap() {
+            HeapRecordPayload::Insert(body) => body,
             other => panic!("unexpected payload variant: {:?}", other),
-        }
+        };
+        assert_eq!(body.relation.root_page_id, 10);
+        assert_eq!(body.page_id, 12);
+        assert_eq!(body.slot_id, 2);
+        assert_eq!(body.tuple_meta.insert_txn_id, 1);
+        assert_eq!(body.tuple_data, vec![7, 8, 9]);
     }
 
     #[test]
@@ -1083,24 +1046,23 @@ mod tests {
         let bytes = payload.encode(77, 70);
         let (frame, consumed) = decode_frame(&bytes).unwrap();
         assert_eq!(consumed, bytes.len());
-        match frame.payload {
-            WalRecordPayload::Heap(HeapRecordPayload::Update(body)) => {
-                assert_eq!(frame.lsn, 77);
-                assert_eq!(frame.prev_lsn, 70);
-                assert_eq!(frame.rmid, ResourceManagerId::Heap);
-                assert_eq!(frame.info, HeapRecordKind::Update as u8);
-                assert_eq!(body.relation.root_page_id, 99);
-                assert_eq!(body.page_id, 44);
-                assert_eq!(body.slot_id, 5);
-                assert_eq!(body.new_tuple_meta.insert_txn_id, 11);
-                assert_eq!(body.new_tuple_data, vec![1, 2, 3, 4]);
-                let old_meta = body.old_tuple_meta.unwrap();
-                let old_data = body.old_tuple_data.unwrap();
-                assert!(old_meta.is_deleted);
-                assert_eq!(old_data, vec![9, 9, 9]);
-            }
+        assert_eq!(frame.lsn, 77);
+        assert_eq!(frame.prev_lsn, 70);
+        assert_eq!(frame.rmid, ResourceManagerId::Heap);
+        assert_eq!(frame.info, HeapRecordKind::Update as u8);
+        let body = match decode_heap(&frame.body, frame.info).unwrap() {
+            HeapRecordPayload::Update(body) => body,
             other => panic!("unexpected payload variant: {:?}", other),
-        }
+        };
+        assert_eq!(body.relation.root_page_id, 99);
+        assert_eq!(body.page_id, 44);
+        assert_eq!(body.slot_id, 5);
+        assert_eq!(body.new_tuple_meta.insert_txn_id, 11);
+        assert_eq!(body.new_tuple_data, vec![1, 2, 3, 4]);
+        let old_meta = body.old_tuple_meta.unwrap();
+        let old_data = body.old_tuple_data.unwrap();
+        assert!(old_meta.is_deleted);
+        assert_eq!(old_data, vec![9, 9, 9]);
     }
 
     #[test]
@@ -1120,22 +1082,21 @@ mod tests {
         let bytes = payload.encode(88, 87);
         let (frame, consumed) = decode_frame(&bytes).unwrap();
         assert_eq!(consumed, bytes.len());
-        match frame.payload {
-            WalRecordPayload::Heap(HeapRecordPayload::Delete(body)) => {
-                assert_eq!(frame.lsn, 88);
-                assert_eq!(frame.prev_lsn, 87);
-                assert_eq!(frame.rmid, ResourceManagerId::Heap);
-                assert_eq!(frame.info, HeapRecordKind::Delete as u8);
-                assert_eq!(body.relation.root_page_id, 7);
-                assert_eq!(body.page_id, 3);
-                assert_eq!(body.slot_id, 1);
-                let old_meta = body.old_tuple_meta;
-                assert_eq!(old_meta.delete_txn_id, 4);
-                assert!(old_meta.is_deleted);
-                assert!(body.old_tuple_data.is_none());
-            }
+        assert_eq!(frame.lsn, 88);
+        assert_eq!(frame.prev_lsn, 87);
+        assert_eq!(frame.rmid, ResourceManagerId::Heap);
+        assert_eq!(frame.info, HeapRecordKind::Delete as u8);
+        let body = match decode_heap(&frame.body, frame.info).unwrap() {
+            HeapRecordPayload::Delete(body) => body,
             other => panic!("unexpected payload variant: {:?}", other),
-        }
+        };
+        assert_eq!(body.relation.root_page_id, 7);
+        assert_eq!(body.page_id, 3);
+        assert_eq!(body.slot_id, 1);
+        let old_meta = body.old_tuple_meta;
+        assert_eq!(old_meta.delete_txn_id, 4);
+        assert!(old_meta.is_deleted);
+        assert!(body.old_tuple_data.is_none());
     }
 
     #[test]
@@ -1149,19 +1110,15 @@ mod tests {
         let bytes = payload.encode(999, 900);
         let (frame, consumed) = decode_frame(&bytes).unwrap();
         assert_eq!(consumed, bytes.len());
-        match frame.payload {
-            WalRecordPayload::Checkpoint(body) => {
-                assert_eq!(frame.lsn, 999);
-                assert_eq!(frame.prev_lsn, 900);
-                assert_eq!(frame.rmid, ResourceManagerId::Checkpoint);
-                assert_eq!(frame.info, 0);
-                assert_eq!(body.last_lsn, 123);
-                assert_eq!(body.dirty_pages, vec![10, 11, 12]);
-                assert_eq!(body.active_transactions, vec![1, 2, 3]);
-                assert_eq!(body.dpt, vec![(10, 1000), (11, 1100)]);
-            }
-            other => panic!("unexpected payload variant: {:?}", other),
-        }
+        assert_eq!(frame.lsn, 999);
+        assert_eq!(frame.prev_lsn, 900);
+        assert_eq!(frame.rmid, ResourceManagerId::Checkpoint);
+        assert_eq!(frame.info, 0);
+        let body = decode_checkpoint(&frame.body).unwrap();
+        assert_eq!(body.last_lsn, 123);
+        assert_eq!(body.dirty_pages, vec![10, 11, 12]);
+        assert_eq!(body.active_transactions, vec![1, 2, 3]);
+        assert_eq!(body.dpt, vec![(10, 1000), (11, 1100)]);
     }
 
     #[test]
@@ -1174,12 +1131,9 @@ mod tests {
         let rec = WalRecordPayload::Clr(payload.clone());
         let bytes = rec.encode(200, 150);
         let (frame, _len) = decode_frame(&bytes).unwrap();
-        match frame.payload {
-            WalRecordPayload::Clr(p) => {
-                assert_eq!(p.txn_id, payload.txn_id);
-                assert_eq!(p.undone_lsn, payload.undone_lsn);
-            }
-            _ => panic!("wrong kind"),
-        }
+        assert_eq!(frame.rmid, ResourceManagerId::Clr);
+        let p = decode_clr(&frame.body).unwrap();
+        assert_eq!(p.txn_id, payload.txn_id);
+        assert_eq!(p.undone_lsn, payload.undone_lsn);
     }
 }

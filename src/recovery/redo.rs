@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
-use bytes::{Bytes, BytesMut};
-
-use crate::buffer::{BufferManager, PAGE_SIZE};
+use crate::buffer::BufferManager;
 use crate::error::QuillSQLResult;
-use crate::recovery::wal_record::{PageDeltaPayload, PageWritePayload, WalFrame, WalRecordPayload};
-use crate::recovery::Lsn;
+use crate::recovery::resource_manager::{
+    ensure_default_resource_managers_registered, get_resource_manager, RedoContext,
+};
+use crate::recovery::wal_record::WalFrame;
 use crate::storage::disk_scheduler::DiskScheduler;
 
 pub struct RedoExecutor {
@@ -18,6 +18,7 @@ impl RedoExecutor {
         disk_scheduler: Arc<DiskScheduler>,
         buffer_pool: Option<Arc<BufferManager>>,
     ) -> Self {
+        ensure_default_resource_managers_registered();
         Self {
             disk_scheduler,
             buffer_pool,
@@ -25,84 +26,14 @@ impl RedoExecutor {
     }
 
     pub fn apply(&self, frame: &WalFrame) -> QuillSQLResult<usize> {
-        match &frame.payload {
-            WalRecordPayload::PageWrite(payload) => {
-                if !self.page_requires_redo(payload.page_id, frame.lsn)? {
-                    return Ok(0);
-                }
-                self.redo_page_write(payload.clone())?;
-                Ok(1)
-            }
-            WalRecordPayload::PageDelta(payload) => {
-                if !self.page_requires_redo(payload.page_id, frame.lsn)? {
-                    return Ok(0);
-                }
-                self.redo_page_delta(payload.clone())?;
-                Ok(1)
-            }
-            _ => Ok(0),
-        }
-    }
-
-    fn page_requires_redo(&self, page_id: u32, record_lsn: Lsn) -> QuillSQLResult<bool> {
-        if let Some(bpm) = &self.buffer_pool {
-            match bpm.fetch_page_read(page_id) {
-                Ok(guard) => Ok(guard.lsn() < record_lsn),
-                Err(_) => Ok(true),
-            }
+        if let Some(manager) = get_resource_manager(frame.rmid) {
+            let ctx = RedoContext {
+                disk_scheduler: self.disk_scheduler.clone(),
+                buffer_pool: self.buffer_pool.clone(),
+            };
+            manager.redo(frame, &ctx)
         } else {
-            Ok(true)
+            Ok(0)
         }
-    }
-
-    fn redo_page_write(&self, payload: PageWritePayload) -> QuillSQLResult<()> {
-        debug_assert_eq!(payload.page_image.len(), PAGE_SIZE);
-        let bytes = Bytes::from(payload.page_image);
-        let rx = self.disk_scheduler.schedule_write(payload.page_id, bytes)?;
-        rx.recv().map_err(|e| {
-            crate::error::QuillSQLError::Internal(format!("WAL recovery write recv failed: {}", e))
-        })??;
-        Ok(())
-    }
-
-    fn redo_page_delta(&self, payload: PageDeltaPayload) -> QuillSQLResult<()> {
-        // Read current page image
-        let rx = self.disk_scheduler.schedule_read(payload.page_id)?;
-        let buf: BytesMut = rx.recv().map_err(|e| {
-            crate::error::QuillSQLError::Internal(format!("WAL recovery read recv failed: {}", e))
-        })??;
-        if buf.len() != PAGE_SIZE {
-            return Err(crate::error::QuillSQLError::Internal(format!(
-                "Unexpected page size {} while applying delta",
-                buf.len()
-            )));
-        }
-        let mut page_bytes = buf.to_vec();
-        let start = payload.offset as usize;
-        if start >= PAGE_SIZE {
-            return Err(crate::error::QuillSQLError::Internal(format!(
-                "PageDelta start out of bounds: offset={} page_size={}",
-                start, PAGE_SIZE
-            )));
-        }
-        let end = match start.checked_add(payload.data.len()) {
-            Some(e) if e <= PAGE_SIZE => e,
-            _ => {
-                return Err(crate::error::QuillSQLError::Internal(format!(
-                    "PageDelta out of bounds: offset={} len={} page_size={}",
-                    start,
-                    payload.data.len(),
-                    PAGE_SIZE
-                )))
-            }
-        };
-        page_bytes[start..end].copy_from_slice(&payload.data);
-        let rxw = self
-            .disk_scheduler
-            .schedule_write(payload.page_id, Bytes::from(page_bytes))?;
-        rxw.recv().map_err(|e| {
-            crate::error::QuillSQLError::Internal(format!("WAL recovery write recv failed: {}", e))
-        })??;
-        Ok(())
     }
 }

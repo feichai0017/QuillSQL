@@ -45,13 +45,8 @@ impl PhysicalPlanner<'_> {
                 table_schema.clone(),
                 columns.clone(),
             )),
-            LogicalPlan::DropTable(DropTable { 
-                name, 
-                if_exists 
-            }) => {
-                PhysicalPlan::DropTable(PhysicalDropTable::new(
-                name.clone(), 
-                *if_exists))
+            LogicalPlan::DropTable(DropTable { name, if_exists }) => {
+                PhysicalPlan::DropTable(PhysicalDropTable::new(name.clone(), *if_exists))
             }
             LogicalPlan::DropIndex(DropIndex {
                 name,

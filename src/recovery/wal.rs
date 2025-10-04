@@ -802,7 +802,8 @@ impl Drop for WalManager {
 mod tests {
     use crate::config::WalConfig;
     use crate::recovery::wal_record::{
-        CheckpointPayload, TransactionPayload, TransactionRecordKind, WalRecordPayload,
+        CheckpointPayload, ResourceManagerId, TransactionPayload, TransactionRecordKind,
+        WalRecordPayload,
     };
     use tempfile::TempDir;
 
@@ -1029,13 +1030,10 @@ mod tests {
             seen.push(frame);
         }
         assert_eq!(seen.len(), 1);
-        match &seen[0].payload {
-            WalRecordPayload::Checkpoint(observed) => {
-                assert_eq!(observed.last_lsn, payload.last_lsn);
-                assert_eq!(observed.dirty_pages, payload.dirty_pages);
-                assert_eq!(observed.active_transactions, payload.active_transactions);
-            }
-            other => panic!("expected checkpoint, got {:?}", other),
-        }
+        assert_eq!(seen[0].rmid, ResourceManagerId::Checkpoint);
+        let observed = crate::recovery::wal_record::decode_checkpoint(&seen[0].body).unwrap();
+        assert_eq!(observed.last_lsn, payload.last_lsn);
+        assert_eq!(observed.dirty_pages, payload.dirty_pages);
+        assert_eq!(observed.active_transactions, payload.active_transactions);
     }
 }
