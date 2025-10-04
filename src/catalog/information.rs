@@ -16,14 +16,14 @@ pub static INFORMATION_SCHEMA_TABLES: &str = "tables";
 pub static INFORMATION_SCHEMA_COLUMNS: &str = "columns";
 pub static INFORMATION_SCHEMA_INDEXES: &str = "indexes";
 
-pub static SCHEMAS_SCHMEA: LazyLock<SchemaRef> = LazyLock::new(|| {
+pub static SCHEMAS_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
     Arc::new(Schema::new(vec![
         Column::new("catalog", DataType::Varchar(None), false),
         Column::new("schema", DataType::Varchar(None), false),
     ]))
 });
 
-pub static TABLES_SCHMEA: LazyLock<SchemaRef> = LazyLock::new(|| {
+pub static TABLES_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
     Arc::new(Schema::new(vec![
         Column::new("table_catalog", DataType::Varchar(None), false),
         Column::new("table_schema", DataType::Varchar(None), false),
@@ -32,7 +32,7 @@ pub static TABLES_SCHMEA: LazyLock<SchemaRef> = LazyLock::new(|| {
     ]))
 });
 
-pub static COLUMNS_SCHMEA: LazyLock<SchemaRef> = LazyLock::new(|| {
+pub static COLUMNS_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
     Arc::new(Schema::new(vec![
         Column::new("table_catalog", DataType::Varchar(None), false),
         Column::new("table_schema", DataType::Varchar(None), false),
@@ -44,7 +44,7 @@ pub static COLUMNS_SCHMEA: LazyLock<SchemaRef> = LazyLock::new(|| {
     ]))
 });
 
-pub static INDEXES_SCHMEA: LazyLock<SchemaRef> = LazyLock::new(|| {
+pub static INDEXES_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
     Arc::new(Schema::new(vec![
         Column::new("table_catalog", DataType::Varchar(None), false),
         Column::new("table_schema", DataType::Varchar(None), false),
@@ -85,28 +85,28 @@ fn load_information_schema(catalog: &mut Catalog) -> QuillSQLResult<()> {
     let information_schema_schemas_last_page_id = load_table_last_page_id(
         catalog,
         information_schema_schemas_first_page_id,
-        SCHEMAS_SCHMEA.clone(),
+        SCHEMAS_SCHEMA.clone(),
     )?;
     let information_schema_tables_last_page_id = load_table_last_page_id(
         catalog,
         information_schema_tables_first_page_id,
-        TABLES_SCHMEA.clone(),
+        TABLES_SCHEMA.clone(),
     )?;
     let information_schema_columns_last_page_id = load_table_last_page_id(
         catalog,
         information_schema_columns_first_page_id,
-        COLUMNS_SCHMEA.clone(),
+        COLUMNS_SCHEMA.clone(),
     )?;
     let information_schema_indexes_last_page_id = load_table_last_page_id(
         catalog,
         information_schema_indexes_first_page_id,
-        INDEXES_SCHMEA.clone(),
+        INDEXES_SCHEMA.clone(),
     )?;
 
     let mut information_schema = CatalogSchema::new(INFORMATION_SCHEMA_NAME);
 
     let schemas_table = TableHeap {
-        schema: SCHEMAS_SCHMEA.clone(),
+        schema: SCHEMAS_SCHEMA.clone(),
         buffer_pool: catalog.buffer_pool.clone(),
         first_page_id: AtomicPageId::new(information_schema_schemas_first_page_id),
         last_page_id: AtomicPageId::new(information_schema_schemas_last_page_id),
@@ -117,7 +117,7 @@ fn load_information_schema(catalog: &mut Catalog) -> QuillSQLResult<()> {
     );
 
     let tables_table = TableHeap {
-        schema: TABLES_SCHMEA.clone(),
+        schema: TABLES_SCHEMA.clone(),
         buffer_pool: catalog.buffer_pool.clone(),
         first_page_id: AtomicPageId::new(information_schema_tables_first_page_id),
         last_page_id: AtomicPageId::new(information_schema_tables_last_page_id),
@@ -128,7 +128,7 @@ fn load_information_schema(catalog: &mut Catalog) -> QuillSQLResult<()> {
     );
 
     let columns_table = TableHeap {
-        schema: COLUMNS_SCHMEA.clone(),
+        schema: COLUMNS_SCHEMA.clone(),
         buffer_pool: catalog.buffer_pool.clone(),
         first_page_id: AtomicPageId::new(information_schema_columns_first_page_id),
         last_page_id: AtomicPageId::new(information_schema_columns_last_page_id),
@@ -139,7 +139,7 @@ fn load_information_schema(catalog: &mut Catalog) -> QuillSQLResult<()> {
     );
 
     let indexes_table = TableHeap {
-        schema: INDEXES_SCHMEA.clone(),
+        schema: INDEXES_SCHEMA.clone(),
         buffer_pool: catalog.buffer_pool.clone(),
         first_page_id: AtomicPageId::new(information_schema_indexes_first_page_id),
         last_page_id: AtomicPageId::new(information_schema_indexes_last_page_id),

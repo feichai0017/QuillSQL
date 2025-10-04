@@ -4,9 +4,9 @@ use std::sync::Arc;
 
 use super::registry::global_index_registry;
 use crate::catalog::{
-    key_schema_to_varchar, SchemaRef, COLUMNS_SCHMEA, INDEXES_SCHMEA, INFORMATION_SCHEMA_COLUMNS,
+    key_schema_to_varchar, SchemaRef, COLUMNS_SCHEMA, INDEXES_SCHEMA, INFORMATION_SCHEMA_COLUMNS,
     INFORMATION_SCHEMA_INDEXES, INFORMATION_SCHEMA_NAME, INFORMATION_SCHEMA_SCHEMAS,
-    INFORMATION_SCHEMA_TABLES, SCHEMAS_SCHMEA, TABLES_SCHMEA,
+    INFORMATION_SCHEMA_TABLES, SCHEMAS_SCHEMA, TABLES_SCHEMA,
 };
 use crate::storage::disk_manager::DiskManager;
 use crate::storage::page::{
@@ -102,7 +102,7 @@ impl Catalog {
         };
 
         let tuple = Tuple::new(
-            SCHEMAS_SCHMEA.clone(),
+            SCHEMAS_SCHEMA.clone(),
             vec![
                 DEFAULT_CATALOG_NAME.to_string().into(),
                 schema_name.clone().into(),
@@ -167,7 +167,7 @@ impl Catalog {
         };
 
         let tuple = Tuple::new(
-            TABLES_SCHMEA.clone(),
+            TABLES_SCHEMA.clone(),
             vec![
                 catalog_name.clone().into(),
                 catalog_schema_name.clone().into(),
@@ -188,7 +188,7 @@ impl Catalog {
         for col in schema.columns.iter() {
             let sql_type: sqlparser::ast::DataType = (&col.data_type).into();
             let tuple = Tuple::new(
-                COLUMNS_SCHMEA.clone(),
+                COLUMNS_SCHEMA.clone(),
                 vec![
                     catalog_name.clone().into(),
                     catalog_schema_name.clone().into(),
@@ -372,7 +372,7 @@ impl Catalog {
         };
 
         let tuple = Tuple::new(
-            INDEXES_SCHMEA.clone(),
+            INDEXES_SCHEMA.clone(),
             vec![
                 catalog_name.clone().into(),
                 catalog_schema_name.clone().into(),
