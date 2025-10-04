@@ -1,6 +1,8 @@
 use crate::error::QuillSQLResult;
 use crate::recovery::control_file::ControlFileSnapshot;
-use crate::recovery::wal_record::{CheckpointPayload, WalFrame, WalRecordPayload};
+use crate::recovery::wal_record::{
+    decode_checkpoint, CheckpointPayload, ResourceManagerId, WalFrame,
+};
 use crate::recovery::Lsn;
 
 #[derive(Debug, Default, Clone)]
@@ -26,8 +28,10 @@ impl AnalysisPass {
 
     pub fn observe(&mut self, frame: &WalFrame) {
         self.has_frames = true;
-        if let WalRecordPayload::Checkpoint(payload) = &frame.payload {
-            self.latest = Some((frame.lsn, payload.clone()));
+        if frame.rmid == ResourceManagerId::Checkpoint {
+            if let Ok(payload) = decode_checkpoint(&frame.body) {
+                self.latest = Some((frame.lsn, payload));
+            }
         }
     }
 

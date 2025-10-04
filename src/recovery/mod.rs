@@ -2,6 +2,7 @@ pub mod analysis;
 pub mod control_file;
 pub mod recovery_manager;
 pub mod redo;
+pub mod resource_manager;
 pub mod undo;
 pub mod wal;
 pub mod wal_record;
@@ -13,6 +14,6 @@ pub use wal::{
     Lsn, WalAppendContext, WalAppendResult, WalManager, WalReader, WalRecord, WalWriterHandle,
 };
 pub use wal_record::{
-    decode_frame, CheckpointPayload, PageWritePayload, TransactionPayload, TransactionRecordKind,
-    WalFrame, WalRecordPayload,
+    decode_frame, CheckpointPayload, PageWritePayload, ResourceManagerId, TransactionPayload,
+    TransactionRecordKind, WalFrame, WalRecordPayload,
 };
