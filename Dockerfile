@@ -1,4 +1,8 @@
 FROM rust:1.82 as builder
+
+# Install and use the nightly toolchain to support Edition 2024 dependencies
+RUN rustup toolchain install nightly
+RUN rustup default nightly
 WORKDIR /app
 
 # Pre-cache deps
