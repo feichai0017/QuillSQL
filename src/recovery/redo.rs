@@ -5,7 +5,7 @@ use crate::error::QuillSQLResult;
 use crate::recovery::resource_manager::{
     ensure_default_resource_managers_registered, get_resource_manager, RedoContext,
 };
-use crate::recovery::wal_record::WalFrame;
+use crate::recovery::wal::codec::WalFrame;
 use crate::storage::disk_scheduler::DiskScheduler;
 
 pub struct RedoExecutor {

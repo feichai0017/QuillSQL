@@ -15,7 +15,7 @@ use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::optimizer::LogicalOptimizer;
 use crate::plan::logical_plan::{LogicalPlan, TransactionScope};
 use crate::plan::PhysicalPlanner;
-use crate::recovery::wal_record::CheckpointPayload;
+use crate::recovery::wal::codec::CheckpointPayload;
 use crate::recovery::{ControlFileManager, RecoveryManager, WalManager, WalWriterHandle};
 use crate::session::SessionContext;
 use crate::utils::util::{pretty_format_logical_plan, pretty_format_physical_plan};

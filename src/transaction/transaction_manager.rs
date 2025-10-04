@@ -3,9 +3,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::error::{QuillSQLError, QuillSQLResult};
-use crate::recovery::wal_record::{
-    ClrPayload, TransactionPayload, TransactionRecordKind, WalRecordPayload,
-};
+use crate::recovery::wal::codec::{ClrPayload, TransactionPayload, TransactionRecordKind};
+use crate::recovery::wal_record::WalRecordPayload;
 use crate::recovery::{Lsn, WalManager};
 use crate::storage::page::RecordId;
 use crate::transaction::{

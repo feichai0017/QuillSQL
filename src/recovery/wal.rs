@@ -1,3 +1,5 @@
+pub mod codec;
+
 use parking_lot::{Condvar, Mutex};
 use std::cmp;
 use std::convert::TryInto;
@@ -14,10 +16,11 @@ use crate::buffer::PageId;
 use crate::config::WalConfig;
 use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::recovery::control_file::{ControlFileManager, WalInitState};
-use crate::recovery::wal_record::{
-    build_frame, decode_frame, encode_body, CheckpointPayload, WalFrame, WalRecordPayload,
-    WAL_CRC_LEN, WAL_HEADER_LEN,
+use crate::recovery::wal::codec::{
+    decode_frame, encode_body, encode_frame, CheckpointPayload, WalFrame, WAL_CRC_LEN,
+    WAL_HEADER_LEN,
 };
+use crate::recovery::wal_record::WalRecordPayload;
 use crate::recovery::wal_runtime::WalRuntime;
 use bytes::Bytes;
 use dashmap::DashSet;
@@ -191,11 +194,11 @@ impl WalManager {
             end_lsn: end_lsn_preview,
         };
         let payload = build(preview_ctx);
-        let (rmid, info, body_bytes) = encode_body(&payload);
-        let frame_len = WAL_HEADER_LEN + body_bytes.len() + WAL_CRC_LEN;
+        let frame_bytes = encode_frame(start_lsn, prev_start, &payload);
+        let frame_len = frame_bytes.len();
         debug_assert_eq!(frame_len, preview_frame_len);
         let end_lsn = start_lsn + frame_len as u64;
-        let encoded = Bytes::from(build_frame(start_lsn, prev_start, rmid, info, &body_bytes));
+        let encoded = Bytes::from(frame_bytes);
 
         guard.buffer.push(WalRecord {
             start_lsn,

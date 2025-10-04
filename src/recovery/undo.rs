@@ -6,10 +6,10 @@ use crate::error::QuillSQLResult;
 use crate::recovery::resource_manager::{
     ensure_default_resource_managers_registered, get_resource_manager, UndoContext,
 };
-use crate::recovery::wal_record::{
+use crate::recovery::wal::codec::{
     decode_clr, decode_transaction, ClrPayload, ResourceManagerId, TransactionRecordKind, WalFrame,
-    WalRecordPayload,
 };
+use crate::recovery::wal_record::WalRecordPayload;
 use crate::recovery::{Lsn, WalManager};
 use crate::storage::disk_scheduler::DiskScheduler;
 

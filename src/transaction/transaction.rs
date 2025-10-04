@@ -1,9 +1,9 @@
 use crate::error::QuillSQLResult;
-use crate::recovery::wal_record::{
-    HeapDeletePayload, HeapInsertPayload, HeapRecordPayload, HeapUpdatePayload, TupleMetaRepr,
-};
 use crate::recovery::Lsn;
 use crate::storage::codec::TupleCodec;
+use crate::storage::heap::wal_codec::{
+    HeapDeletePayload, HeapInsertPayload, HeapRecordPayload, HeapUpdatePayload, TupleMetaRepr,
+};
 use crate::storage::index::btree_index::BPlusTreeIndex;
 use crate::storage::page::{RecordId, TupleMeta};
 use crate::storage::table_heap::TableHeap;

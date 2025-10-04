@@ -6,7 +6,7 @@ use std::sync::OnceLock;
 
 use crate::buffer::BufferManager;
 use crate::error::{QuillSQLError, QuillSQLResult};
-use crate::recovery::wal_record::{
+use crate::recovery::wal::codec::{
     decode_page_delta, decode_page_write, ResourceManagerId, WalFrame,
 };
 use crate::recovery::Lsn;
@@ -71,7 +71,7 @@ impl PageResourceManager {
     fn redo_page_write(
         &self,
         ctx: &RedoContext,
-        payload: crate::recovery::wal_record::PageWritePayload,
+        payload: crate::recovery::wal::codec::PageWritePayload,
     ) -> QuillSQLResult<()> {
         debug_assert_eq!(payload.page_image.len(), crate::buffer::PAGE_SIZE);
         let bytes = bytes::Bytes::from(payload.page_image);
@@ -85,7 +85,7 @@ impl PageResourceManager {
     fn redo_page_delta(
         &self,
         ctx: &RedoContext,
-        payload: crate::recovery::wal_record::PageDeltaPayload,
+        payload: crate::recovery::wal::codec::PageDeltaPayload,
     ) -> QuillSQLResult<()> {
         let rx = ctx.disk_scheduler.schedule_read(payload.page_id)?;
         let buf: bytes::BytesMut = rx.recv().map_err(|e| {

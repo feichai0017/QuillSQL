@@ -5,7 +5,7 @@ use crate::error::QuillSQLResult;
 use crate::recovery::analysis::{AnalysisPass, AnalysisResult};
 use crate::recovery::redo::RedoExecutor;
 use crate::recovery::undo::{UndoExecutor, UndoOutcome};
-use crate::recovery::wal_record::WalFrame;
+use crate::recovery::wal::codec::WalFrame;
 use crate::recovery::{Lsn, WalManager};
 use crate::storage::disk_scheduler::DiskScheduler;
 
