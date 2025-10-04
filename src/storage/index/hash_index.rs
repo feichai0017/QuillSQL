@@ -10,7 +10,7 @@ use std::hash::Hasher;
 use std::sync::Arc;
 use std::sync::RwLock;
 
-/// A minimal extendible-hash-like index skeleton backed by bucket pages.
+/// A minimal extendable-hash-like index skeleton backed by bucket pages.
 /// Directory is implicit (power-of-two split), for parity with BusTub style.
 #[derive(Debug)]
 pub struct HashIndex {
