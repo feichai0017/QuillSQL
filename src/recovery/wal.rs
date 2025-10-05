@@ -842,10 +842,8 @@ impl WalReader {
 
     pub fn next_frame(&mut self) -> QuillSQLResult<Option<WalFrame>> {
         loop {
-            if self.cursor.is_none() {
-                if !self.open_next_segment()? {
-                    return Ok(None);
-                }
+            if self.cursor.is_none() && !self.open_next_segment()? {
+                return Ok(None);
             }
 
             if let Some(cursor) = self.cursor.as_mut() {
@@ -856,6 +854,8 @@ impl WalReader {
                         continue;
                     }
                 }
+            } else {
+                return Ok(None);
             }
         }
     }

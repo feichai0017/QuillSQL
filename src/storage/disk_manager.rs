@@ -33,7 +33,7 @@ impl AlignedPageBuf {
     pub(crate) fn new_zeroed() -> QuillSQLResult<Self> {
         Self::allocate(true)
     }
-    
+
     #[allow(dead_code)]
     pub(crate) fn new_uninit() -> QuillSQLResult<Self> {
         Self::allocate(false)

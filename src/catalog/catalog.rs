@@ -448,7 +448,7 @@ impl Catalog {
             return self.find_index_in_schema(catalog_name, schema_name, index_name);
         }
 
-        for (schema_name, _schema) in &self.schemas {
+        for schema_name in self.schemas.keys() {
             if schema_name == INFORMATION_SCHEMA_NAME {
                 continue;
             }

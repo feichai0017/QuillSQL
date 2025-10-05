@@ -68,6 +68,12 @@ pub struct BackgroundWorkers {
     workers: Vec<WorkerHandle>,
 }
 
+impl Default for BackgroundWorkers {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BackgroundWorkers {
     pub fn new() -> Self {
         Self {

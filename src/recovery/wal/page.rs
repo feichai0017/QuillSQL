@@ -10,6 +10,7 @@ const WAL_PAGE_VERSION: u16 = 1;
 const WAL_PAGE_HEADER_LEN: usize = 4 + 2 + 2 + 8 + 2 + 2;
 const WAL_PAGE_SLOT_LEN: usize = 8;
 
+/// Header for a WalPage, containing metadata about the page itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WalPageHeader {
     pub magic: u32,
@@ -53,6 +54,8 @@ impl WalPageHeader {
     }
 }
 
+/// Describes whether a fragment in a WalPage is a self-contained record
+/// or part of a larger record that spans multiple pages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WalPageFragmentKind {
     Complete,
@@ -85,6 +88,8 @@ impl WalPageFragmentKind {
     }
 }
 
+/// A slot in the WalPage's slot directory. It points to a specific
+/// fragment within the page's payload area.
 #[derive(Debug, Clone, Copy)]
 pub struct WalPageSlot {
     pub offset: u16,
@@ -114,6 +119,8 @@ impl WalPageSlot {
     }
 }
 
+/// Represents a WalRecord that is being carried over to the next WalPage
+/// because it could not fit entirely in the previous one.
 #[derive(Clone)]
 pub struct WalFrameContinuation {
     pub record: WalRecord,
@@ -126,6 +133,28 @@ impl WalFrameContinuation {
     }
 }
 
+/// A WalPage is a fixed-size (e.g., 4KB) block within a WAL segment file.
+/// It contains a header, a payload area for raw data, and a slot directory
+/// that describes the fragments packed into the payload.
+///
+/// The payload and slot directory grow towards each other from opposite ends of the page.
+///
+/// WalPage On-disk Layout (4KB):
+/// ------------------------------------------------------------------------------------------
+/// | WalPageHeader | Payload Data (grows forward) | ... Free Space ... | Slot Array (grows backward) |
+/// ------------------------------------------------------------------------------------------
+///
+/// WalPageHeader (20 bytes):
+/// ------------------------------------------------------------------------------------------
+/// | Magic (u32) | Ver (u16) | Flags (u16) | PrevPageLSN (u64) | PayloadSize (u16) | SlotCount (u16) |
+/// ------------------------------------------------------------------------------------------
+///
+/// WalPageSlot (8 bytes):
+/// -----------------------------------------------------------------
+/// | Offset (u16) | Length (u16) | Kind (u8) | Reserved (3) |
+/// -----------------------------------------------------------------
+/// - Offset/Length: Point to a fragment within this page's Payload Data.
+/// - Kind: Indicates if the fragment is a Complete, Start, Middle, or End piece of a WalFrame.
 #[derive(Clone)]
 pub struct WalPage {
     header: WalPageHeader,
