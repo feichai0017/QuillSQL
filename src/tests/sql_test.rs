@@ -79,6 +79,7 @@ fn sqllogictest() {
     }
 }
 
+#[allow(dead_code)]
 fn read_dir_recursive<P: AsRef<Path>>(path: P) -> Vec<PathBuf> {
     let mut dst = vec![];
     read_dir_recursive_impl(&mut dst, path.as_ref());

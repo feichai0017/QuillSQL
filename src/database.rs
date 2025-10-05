@@ -56,7 +56,7 @@ pub struct Database {
     pub(crate) wal_manager: Arc<WalManager>,
     pub(crate) transaction_manager: Arc<TransactionManager>,
     default_isolation: IsolationLevel,
-    temp_dir: Option<TempDir>,
+    _temp_dir: Option<TempDir>,
 }
 impl Database {
     pub fn new_on_disk(db_path: &str) -> QuillSQLResult<Self> {
@@ -137,7 +137,7 @@ impl Database {
             default_isolation: options
                 .default_isolation_level
                 .unwrap_or(IsolationLevel::ReadUncommitted),
-            temp_dir: None,
+            _temp_dir: None,
         };
         load_catalog_data(&mut db)?;
         Ok(db)
@@ -223,7 +223,7 @@ impl Database {
             default_isolation: options
                 .default_isolation_level
                 .unwrap_or(IsolationLevel::ReadUncommitted),
-            temp_dir: Some(temp_dir),
+            _temp_dir: Some(temp_dir),
         };
         load_catalog_data(&mut db)?;
         Ok(db)

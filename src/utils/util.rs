@@ -70,6 +70,7 @@ pub fn page_bytes_to_array(bytes: &[u8]) -> [u8; PAGE_SIZE] {
     data
 }
 
+#[allow(dead_code)]
 pub(crate) fn pretty_format_index_tree(index: &BPlusTreeIndex) -> QuillSQLResult<String> {
     let mut display = String::new();
 
