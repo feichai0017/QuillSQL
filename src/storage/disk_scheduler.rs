@@ -373,7 +373,6 @@ fn spawn_runtime(
     (sender, worker_threads)
 }
 
-
 // --- Tests for DiskScheduler ---
 #[cfg(test)]
 mod tests {
