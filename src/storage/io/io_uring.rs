@@ -7,14 +7,14 @@ use std::io::{self, ErrorKind, IoSliceMut};
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::mpsc::{Receiver, Sender};
+use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
 use crate::buffer::{PageId, PAGE_SIZE};
 use crate::error::QuillSQLError;
 use crate::error::QuillSQLResult;
 use crate::storage::disk_manager::{AlignedPageBuf, DiskManager};
-use crate::storage::disk_scheduler::DiskRequest;
+use crate::storage::disk_scheduler::{DiskRequest, RequestReceiver};
 use crate::storage::page::META_PAGE_SIZE;
 
 type DiskResultSender<T> = Sender<QuillSQLResult<T>>;
@@ -816,7 +816,7 @@ fn page_file_offset(page_id: PageId) -> u64 {
 }
 
 pub(crate) fn worker_loop(
-    receiver: Receiver<DiskRequest>,
+    receiver: RequestReceiver,
     disk_manager: Arc<DiskManager>,
     entries: u32,
     fixed_buffers: usize,
@@ -855,7 +855,7 @@ pub(crate) fn worker_loop(
         }
 
         let mut received_any = false;
-        while let Ok(request) = receiver.try_recv() {
+        while let Some(request) = receiver.try_recv() {
             received_any = true;
             if handle_request_direct(
                 request,
@@ -873,6 +873,10 @@ pub(crate) fn worker_loop(
             }
         }
 
+        if receiver.is_shutdown() {
+            shutdown = true;
+        }
+
         if shutdown && pending.is_empty() {
             break;
         }
@@ -880,24 +884,22 @@ pub(crate) fn worker_loop(
         if pending.is_empty() {
             // No outstanding I/O: block waiting for next request.
             match receiver.recv() {
-                Ok(req) => match req {
-                    other => {
-                        if handle_request_direct(
-                            other,
-                            &mut ring,
-                            &mut pending,
-                            &mut token_counter,
-                            fd,
-                            &disk_manager,
-                            fsync_on_write,
-                            &mut buffer_pool,
-                            &mut wal_files,
-                        ) {
-                            shutdown = true;
-                        }
+                Some(req) => {
+                    if handle_request_direct(
+                        req,
+                        &mut ring,
+                        &mut pending,
+                        &mut token_counter,
+                        fd,
+                        &disk_manager,
+                        fsync_on_write,
+                        &mut buffer_pool,
+                        &mut wal_files,
+                    ) {
+                        shutdown = true;
                     }
-                },
-                Err(_) => {
+                }
+                None => {
                     shutdown = true;
                 }
             }
