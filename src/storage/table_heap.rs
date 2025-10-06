@@ -1,9 +1,16 @@
 use crate::buffer::{AtomicPageId, PageId, WritePageGuard, INVALID_PAGE_ID};
 use crate::catalog::{SchemaRef, EMPTY_SCHEMA_REF};
+use crate::config::TableScanConfig;
 use crate::storage::codec::TablePageCodec;
+use crate::storage::disk_scheduler::{DiskCommandResultReceiver, DiskScheduler};
 use crate::storage::page::{RecordId, TablePage, TupleMeta, INVALID_RID};
-use crate::{buffer::BufferManager, error::QuillSQLResult};
+use crate::{
+    buffer::BufferManager,
+    error::{QuillSQLError, QuillSQLResult},
+};
+use bytes::BytesMut;
 use std::collections::Bound;
+use std::collections::VecDeque;
 use std::ops::RangeBounds;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
@@ -481,10 +488,88 @@ enum ScanStrategy {
     /// Existing behavior: go through buffer pool (page_table/LRU-K)
     Cached,
     /// Streaming with generic ring buffer holding decoded tuples
-    Streaming {
-        ring: RingBuffer<(RecordId, Tuple)>,
-        next_pid: u32,
-    },
+    Streaming(StreamScanState),
+}
+
+#[derive(Debug)]
+struct StreamScanState {
+    ring: RingBuffer<(RecordId, Tuple)>,
+    first_page: bool,
+    prefetch: StreamPrefetchState,
+}
+
+#[derive(Debug)]
+struct StreamPrefetchState {
+    pending: VecDeque<PageId>,
+    inflight: VecDeque<StreamBatch>,
+    ready: VecDeque<(PageId, BytesMut)>,
+    readahead: usize,
+    exhausted: bool,
+}
+
+#[derive(Debug)]
+struct StreamBatch {
+    page_ids: Vec<PageId>,
+    rx: DiskCommandResultReceiver<Vec<BytesMut>>,
+}
+
+impl StreamPrefetchState {
+    fn ensure_ready(&mut self, scheduler: &Arc<DiskScheduler>) -> QuillSQLResult<()> {
+        while !self.exhausted && self.ready.is_empty() {
+            let capacity = self
+                .readahead
+                .saturating_sub(self.ready.len() + self.inflight.len());
+            if capacity > 0 && !self.pending.is_empty() {
+                self.schedule_batch(scheduler, capacity)?;
+                continue;
+            }
+            if let Some(batch) = self.inflight.pop_front() {
+                let buffers = batch.rx.recv().map_err(|e| {
+                    QuillSQLError::Internal(format!("DiskScheduler channel disconnected: {}", e))
+                })??;
+                for (pid, bytes) in batch.page_ids.into_iter().zip(buffers.into_iter()) {
+                    self.ready.push_back((pid, bytes));
+                }
+            } else {
+                self.exhausted = true;
+            }
+        }
+        Ok(())
+    }
+
+    fn maybe_schedule(&mut self, scheduler: &Arc<DiskScheduler>) -> QuillSQLResult<()> {
+        if self.exhausted {
+            return Ok(());
+        }
+        let capacity = self
+            .readahead
+            .saturating_sub(self.ready.len() + self.inflight.len());
+        if capacity == 0 || self.pending.is_empty() {
+            return Ok(());
+        }
+        self.schedule_batch(scheduler, capacity)
+    }
+
+    fn schedule_batch(
+        &mut self,
+        scheduler: &Arc<DiskScheduler>,
+        limit: usize,
+    ) -> QuillSQLResult<()> {
+        let mut ids = Vec::with_capacity(limit);
+        while ids.len() < limit {
+            if let Some(pid) = self.pending.pop_front() {
+                ids.push(pid);
+            } else {
+                break;
+            }
+        }
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let rx = scheduler.schedule_read_pages(ids.clone())?;
+        self.inflight.push_back(StreamBatch { page_ids: ids, rx });
+        Ok(())
+    }
 }
 
 impl TableIterator {
@@ -501,7 +586,7 @@ impl TableIterator {
         let end = range.end_bound().cloned();
 
         // Centralized config (remove env): use TableScanConfig defaults
-        let cfg = crate::config::TableScanConfig::default();
+        let cfg = TableScanConfig::default();
         let pool_quarter = (heap.buffer_pool.buffer_pool().capacity().max(1) / 4) as u32;
         let threshold: u32 = cfg.stream_threshold_pages.unwrap_or(pool_quarter.max(1));
         let readahead: usize = cfg.readahead_pages;
@@ -528,21 +613,32 @@ impl TableIterator {
         };
 
         let strategy = if use_streaming {
-            // Build initial ring by decoding from buffer pool pages
-            // Use tuple-buffered ring: approximate tuples per page as 1024 to avoid frequent refills
-            let ring_cap = readahead.max(1).saturating_mul(1024);
-            let ring = RingBuffer::with_capacity(ring_cap);
-            // We keep construction minimal here; pages are pulled in next()
-            // Determine starting page id based on start_bound
+            let tuple_ring_cap = readahead.max(1).saturating_mul(1024);
+            let ring = RingBuffer::with_capacity(tuple_ring_cap);
             let default_first = heap.first_page_id.load(Ordering::SeqCst);
             let start_pid = match &start {
                 Bound::Included(r) | Bound::Excluded(r) => r.page_id,
                 Bound::Unbounded => default_first,
             };
-            ScanStrategy::Streaming {
+            let mut pending = VecDeque::new();
+            let exhausted = if start_pid == INVALID_PAGE_ID {
+                true
+            } else {
+                pending.push_back(start_pid);
+                false
+            };
+            let prefetch = StreamPrefetchState {
+                pending,
+                inflight: VecDeque::new(),
+                ready: VecDeque::new(),
+                readahead: readahead.max(1),
+                exhausted,
+            };
+            ScanStrategy::Streaming(StreamScanState {
                 ring,
-                next_pid: start_pid,
-            }
+                first_page: true,
+                prefetch,
+            })
         } else {
             ScanStrategy::Cached
         };
@@ -571,28 +667,21 @@ impl TableIterator {
         let start_bound_cloned = self.start_bound.clone();
 
         // Streaming strategy (only supports full scan). For other ranges fallback to Cached.
-        if let ScanStrategy::Streaming { ring, next_pid } = &mut self.strategy {
+        if let ScanStrategy::Streaming(state) = &mut self.strategy {
             // Initialize on first call
             if !self.started {
                 self.started = true;
-                if *next_pid == INVALID_PAGE_ID {
+                if state.prefetch.exhausted {
                     self.ended = true;
                     return Ok(None);
                 }
                 // Ensure disk visibility for streaming reads
                 self.heap.buffer_pool.flush_all_pages()?;
-                fill_stream_ring(
-                    &heap_arc,
-                    schema.clone(),
-                    &start_bound_cloned,
-                    ring,
-                    next_pid,
-                    true,
-                )?;
+                fill_stream_ring(&heap_arc, schema.clone(), &start_bound_cloned, state)?;
             }
 
             loop {
-                if let Some((rid, tuple)) = ring.pop() {
+                if let Some((rid, tuple)) = state.ring.pop() {
                     // Respect end bound
                     match &self.end_bound {
                         Bound::Unbounded => return Ok(Some((rid, tuple))),
@@ -611,20 +700,15 @@ impl TableIterator {
                         }
                     }
                 } else {
-                    if *next_pid == INVALID_PAGE_ID {
+                    if state.prefetch.exhausted {
                         self.ended = true;
                         return Ok(None);
                     }
-                    fill_stream_ring(
-                        &heap_arc,
-                        schema.clone(),
-                        &start_bound_cloned,
-                        ring,
-                        next_pid,
-                        false,
-                    )?;
-                    if ring.is_empty() {
-                        self.ended = true;
+                    fill_stream_ring(&heap_arc, schema.clone(), &start_bound_cloned, state)?;
+                    if state.ring.is_empty() {
+                        if state.prefetch.exhausted {
+                            self.ended = true;
+                        }
                         return Ok(None);
                     }
                 }
@@ -724,15 +808,23 @@ fn fill_stream_ring(
     heap: &Arc<TableHeap>,
     schema: SchemaRef,
     start_bound: &Bound<RecordId>,
-    ring: &mut RingBuffer<(RecordId, Tuple)>,
-    next_pid: &mut u32,
-    is_first: bool,
+    state: &mut StreamScanState,
 ) -> QuillSQLResult<()> {
-    let mut pid = *next_pid;
-    while ring.len() < ring.capacity() && pid != INVALID_PAGE_ID {
-        let (g, page) = heap.buffer_pool.fetch_table_page(pid, schema.clone())?;
-        drop(g);
-        let start_slot = if is_first {
+    let scheduler = heap.buffer_pool.buffer_pool().disk_scheduler();
+    while state.ring.len() < state.ring.capacity() && !state.prefetch.exhausted {
+        state.prefetch.ensure_ready(&scheduler)?;
+        let Some((pid, bytes)) = state.prefetch.ready.pop_front() else {
+            break;
+        };
+
+        let (page, _) = TablePageCodec::decode(&bytes, schema.clone())?;
+        if page.header.next_page_id != INVALID_PAGE_ID {
+            state.prefetch.pending.push_back(page.header.next_page_id);
+        }
+        state.prefetch.maybe_schedule(&scheduler)?;
+
+        let start_slot = if state.first_page {
+            state.first_page = false;
             match start_bound {
                 Bound::Included(r) if r.page_id == pid => r.slot_num as usize,
                 Bound::Excluded(r) if r.page_id == pid => r.slot_num as usize + 1,
@@ -741,17 +833,19 @@ fn fill_stream_ring(
         } else {
             0
         };
+
         for slot in start_slot..page.header.num_tuples as usize {
             let rid = RecordId::new(pid, slot as u32);
-            let (meta, t) = page.tuple(slot as u16)?;
+            let (meta, tuple) = page.tuple(slot as u16)?;
             if meta.is_deleted {
                 continue;
             }
-            ring.push((rid, t));
+            state.ring.push((rid, tuple));
+            if state.ring.len() >= state.ring.capacity() {
+                break;
+            }
         }
-        pid = page.header.next_page_id;
     }
-    *next_pid = pid;
     Ok(())
 }
 
