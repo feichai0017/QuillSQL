@@ -706,21 +706,22 @@ fn drain_completions(
                 PendingKind::ReadFixed { idx, sender } => {
                     let bytes = buffer_pool.extract_bytes(idx, PAGE_SIZE);
                     buffer_pool.release(idx);
-                    let outcome = parse_read_result(result_code, bytes.to_vec());
-                    if let Err(err) = sender.send(outcome.map(BytesMut::from)) {
+                    let outcome = parse_read_result(result_code, bytes);
+                    if let Err(err) = sender.send(outcome) {
                         log::error!("io_uring read fixed result send failed: {}", err);
                     }
                 }
                 PendingKind::ReadVec { buffer, sender } => {
+                    let buffer = BytesMut::from(&buffer[..]);
                     let outcome = parse_read_result(result_code, buffer);
-                    if let Err(err) = sender.send(outcome.map(BytesMut::from)) {
+                    if let Err(err) = sender.send(outcome) {
                         log::error!("io_uring read result send failed: {}", err);
                     }
                 }
                 PendingKind::ReadBatchFixed { idx, batch, index } => {
                     let bytes = buffer_pool.extract_bytes(idx, PAGE_SIZE);
                     buffer_pool.release(idx);
-                    let outcome = parse_read_result(result_code, bytes.to_vec());
+                    let outcome = parse_read_result(result_code, bytes);
                     let mut batch_ref = batch.borrow_mut();
                     if let Some(result) = batch_ref.record_result(index, outcome) {
                         if let Err(err) = batch_ref.sender.send(result) {
@@ -733,7 +734,8 @@ fn drain_completions(
                     batch,
                     index,
                 } => {
-                    let outcome = parse_read_result(result_code, buffer).map(BytesMut::from);
+                    let buffer = BytesMut::from(&buffer[..]);
+                    let outcome = parse_read_result(result_code, buffer);
                     let mut batch_ref = batch.borrow_mut();
                     if let Some(result) = batch_ref.record_result(index, outcome) {
                         if let Err(err) = batch_ref.sender.send(result) {
@@ -759,7 +761,7 @@ fn drain_completions(
     }
 }
 
-fn parse_read_result(code: i32, buffer: Vec<u8>) -> QuillSQLResult<BytesMut> {
+fn parse_read_result(code: i32, buffer: BytesMut) -> QuillSQLResult<BytesMut> {
     if code < 0 {
         let err = io::Error::from_raw_os_error(-code);
         Err(QuillSQLError::Storage(format!(
@@ -772,7 +774,7 @@ fn parse_read_result(code: i32, buffer: Vec<u8>) -> QuillSQLResult<BytesMut> {
             code
         )))
     } else {
-        Ok(BytesMut::from(&buffer[..]))
+        Ok(buffer)
     }
 }
 

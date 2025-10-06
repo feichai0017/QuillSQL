@@ -1,6 +1,6 @@
 //! Low-level buffer pool responsible for frame storage, page table, and disk I/O.
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use dashmap::DashMap;
 use parking_lot::{Mutex, MutexGuard, RwLock};
 use std::cell::UnsafeCell;
@@ -152,12 +152,12 @@ impl BufferPool {
         self.page_table.get(&page_id).map(|entry| *entry.value())
     }
 
-    pub fn read_page_from_disk(&self, page_id: PageId) -> QuillSQLResult<Vec<u8>> {
+    pub fn read_page_from_disk(&self, page_id: PageId) -> QuillSQLResult<BytesMut> {
         let rx = self.disk_scheduler.schedule_read(page_id)?;
         let data = rx
             .recv()
             .map_err(|e| QuillSQLError::Internal(format!("Channel disconnected: {}", e)))??;
-        Ok(data.to_vec())
+        Ok(data)
     }
 
     pub fn load_page_into_frame(&self, page_id: PageId, frame_id: FrameId) -> QuillSQLResult<()> {
