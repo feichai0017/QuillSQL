@@ -156,5 +156,9 @@ fn bench_all(c: &mut Criterion) {
     bench_index_scan(c);
 }
 
-criterion_group!(name = benches; config = Criterion::default().sample_size(30); targets = bench_all);
+criterion_group!(
+    name = benches;
+    config = Criterion::default().sample_size(10);
+    targets = bench_all
+);
 criterion_main!(benches);
