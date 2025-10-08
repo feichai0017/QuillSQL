@@ -162,9 +162,25 @@ impl ControlFileManager {
         let bytes = bincode::serialize(&*guard)?;
         drop(guard);
         let tmp_path = self.path.with_extension("tmp");
-        fs::write(&tmp_path, &bytes)?;
-        fs::rename(tmp_path, &self.path)?;
-        Ok(())
+        if let Some(parent) = self.path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        let mut attempts = 0;
+        loop {
+            fs::write(&tmp_path, &bytes)?;
+            match fs::rename(&tmp_path, &self.path) {
+                Ok(()) => return Ok(()),
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound && attempts < 1 => {
+                    if let Some(parent) = self.path.parent() {
+                        fs::create_dir_all(parent)?;
+                    }
+                    attempts += 1;
+                    continue;
+                }
+                Err(err) => return Err(err.into()),
+            }
+        }
     }
 }
 
