@@ -46,7 +46,11 @@ impl HeapResourceManager {
                 return Ok(());
             }
             let mut new_meta = header.tuple_infos[slot_idx].meta;
-            new_meta.is_deleted = deleted;
+            if deleted {
+                new_meta.is_deleted = true;
+            } else {
+                new_meta.clear_delete();
+            }
             let heap = TableHeap::recovery_view(bpm.clone());
             let _ = heap.recover_set_tuple_meta(rid, new_meta);
             let _ = bpm.flush_page(page_id);

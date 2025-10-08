@@ -118,6 +118,7 @@ mod tests {
     use crate::storage::disk_manager::DiskManager;
     use crate::storage::disk_scheduler::DiskScheduler;
     use crate::storage::page::{TablePageHeader, TupleInfo, TupleMeta};
+    use crate::transaction::INVALID_COMMAND_ID;
     use std::path::Path;
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -344,11 +345,7 @@ mod tests {
             tuple_infos: vec![TupleInfo {
                 offset: (crate::buffer::PAGE_SIZE - 16) as u16,
                 size: 16,
-                meta: TupleMeta {
-                    insert_txn_id: 100,
-                    delete_txn_id: 0,
-                    is_deleted: false,
-                },
+                meta: TupleMeta::new(100, 0),
             }],
             lsn: 0,
         };
@@ -387,7 +384,9 @@ mod tests {
                     op_txn_id: 1,
                     tuple_meta: crate::recovery::wal_record::TupleMetaRepr {
                         insert_txn_id: 1,
+                        insert_cid: 0,
                         delete_txn_id: 0,
+                        delete_cid: INVALID_COMMAND_ID,
                         is_deleted: false,
                     },
                     tuple_data: vec![0u8; 16],
@@ -444,11 +443,7 @@ mod tests {
 
         let page_id = 4u32;
         // Build header with 1 slot
-        let old_meta = TupleMeta {
-            insert_txn_id: 1,
-            delete_txn_id: 0,
-            is_deleted: false,
-        };
+        let old_meta = TupleMeta::new(1, 0);
         let header = TablePageHeader {
             next_page_id: INVALID_PAGE_ID,
             num_tuples: 1,
@@ -483,11 +478,7 @@ mod tests {
             })
         })
         .unwrap();
-        let new_meta = TupleMeta {
-            insert_txn_id: 1,
-            delete_txn_id: 0,
-            is_deleted: false,
-        };
+        let new_meta = TupleMeta::new(1, 0);
         let old_tuple_bytes = vec![0xAA; 16];
         let new_tuple_bytes = vec![0xFF; 24]; // different size to exercise repack
         wal.append_record_with(|_| {
@@ -574,11 +565,7 @@ mod tests {
         let wal = Arc::new(WalManager::new(config.clone(), None, None).unwrap());
 
         let page_id = 5u32;
-        let old_meta = TupleMeta {
-            insert_txn_id: 5,
-            delete_txn_id: 0,
-            is_deleted: false,
-        };
+        let old_meta = TupleMeta::new(5, 0);
         let mut header = TablePageHeader {
             next_page_id: INVALID_PAGE_ID,
             num_tuples: 1,
@@ -693,11 +680,7 @@ mod tests {
             tuple_infos: vec![TupleInfo {
                 offset: (crate::buffer::PAGE_SIZE - 8) as u16,
                 size: 8,
-                meta: TupleMeta {
-                    insert_txn_id: 9,
-                    delete_txn_id: 0,
-                    is_deleted: false,
-                },
+                meta: TupleMeta::new(9, 0),
             }],
             lsn: 0,
         };
@@ -728,7 +711,9 @@ mod tests {
                     op_txn_id: 10,
                     tuple_meta: crate::recovery::wal_record::TupleMetaRepr {
                         insert_txn_id: 10,
+                        insert_cid: 0,
                         delete_txn_id: 0,
+                        delete_cid: INVALID_COMMAND_ID,
                         is_deleted: false,
                     },
                     tuple_data: vec![0u8; 8],
@@ -944,11 +929,7 @@ mod tests {
             tuple_infos: vec![TupleInfo {
                 offset: (crate::buffer::PAGE_SIZE - 16) as u16,
                 size: 16,
-                meta: TupleMeta {
-                    insert_txn_id: 1,
-                    delete_txn_id: 0,
-                    is_deleted: false,
-                },
+                meta: TupleMeta::new(1, 0),
             }],
             lsn: 0,
         };
@@ -981,18 +962,12 @@ mod tests {
                     page_id,
                     slot_id: 0,
                     op_txn_id: 42,
-                    new_tuple_meta: crate::recovery::wal_record::TupleMetaRepr::from(TupleMeta {
-                        insert_txn_id: 1,
-                        delete_txn_id: 0,
-                        is_deleted: false,
-                    }),
+                    new_tuple_meta: crate::recovery::wal_record::TupleMetaRepr::from(
+                        TupleMeta::new(1, 0),
+                    ),
                     new_tuple_data: vec![0x11; 20],
                     old_tuple_meta: Some(crate::recovery::wal_record::TupleMetaRepr::from(
-                        TupleMeta {
-                            insert_txn_id: 1,
-                            delete_txn_id: 0,
-                            is_deleted: false,
-                        },
+                        TupleMeta::new(1, 0),
                     )),
                     old_tuple_data: Some(orig.clone()),
                 },
@@ -1007,18 +982,12 @@ mod tests {
                     page_id,
                     slot_id: 0,
                     op_txn_id: 42,
-                    new_tuple_meta: crate::recovery::wal_record::TupleMetaRepr::from(TupleMeta {
-                        insert_txn_id: 1,
-                        delete_txn_id: 0,
-                        is_deleted: false,
-                    }),
+                    new_tuple_meta: crate::recovery::wal_record::TupleMetaRepr::from(
+                        TupleMeta::new(1, 0),
+                    ),
                     new_tuple_data: vec![0x22; 8],
                     old_tuple_meta: Some(crate::recovery::wal_record::TupleMetaRepr::from(
-                        TupleMeta {
-                            insert_txn_id: 1,
-                            delete_txn_id: 0,
-                            is_deleted: false,
-                        },
+                        TupleMeta::new(1, 0),
                     )),
                     old_tuple_data: Some(vec![0x11; 20]),
                 },
@@ -1098,11 +1067,7 @@ mod tests {
                 tuple_infos: vec![TupleInfo {
                     offset: (crate::buffer::PAGE_SIZE - bytes.len()) as u16,
                     size: bytes.len() as u16,
-                    meta: TupleMeta {
-                        insert_txn_id: 5,
-                        delete_txn_id: 0,
-                        is_deleted: false,
-                    },
+                    meta: TupleMeta::new(5, 0),
                 }],
                 lsn: 0,
             };
@@ -1135,7 +1100,9 @@ mod tests {
                     op_txn_id: 99,
                     tuple_meta: crate::recovery::wal_record::TupleMetaRepr {
                         insert_txn_id: 99,
+                        insert_cid: 0,
                         delete_txn_id: 0,
+                        delete_cid: INVALID_COMMAND_ID,
                         is_deleted: false,
                     },
                     tuple_data: vec![0u8; 8],
@@ -1152,7 +1119,9 @@ mod tests {
                     op_txn_id: 99,
                     old_tuple_meta: crate::recovery::wal_record::TupleMetaRepr::from(TupleMeta {
                         insert_txn_id: 5,
+                        insert_cid: 0,
                         delete_txn_id: 0,
+                        delete_cid: INVALID_COMMAND_ID,
                         is_deleted: false,
                     }),
                     old_tuple_data: Some(vec![1u8; 8]),
@@ -1167,18 +1136,12 @@ mod tests {
                     page_id: pid_b,
                     slot_id: 0,
                     op_txn_id: 99,
-                    new_tuple_meta: crate::recovery::wal_record::TupleMetaRepr::from(TupleMeta {
-                        insert_txn_id: 5,
-                        delete_txn_id: 0,
-                        is_deleted: false,
-                    }),
+                    new_tuple_meta: crate::recovery::wal_record::TupleMetaRepr::from(
+                        TupleMeta::new(5, 0),
+                    ),
                     new_tuple_data: vec![9u8; 10],
                     old_tuple_meta: Some(crate::recovery::wal_record::TupleMetaRepr::from(
-                        TupleMeta {
-                            insert_txn_id: 5,
-                            delete_txn_id: 0,
-                            is_deleted: false,
-                        },
+                        TupleMeta::new(5, 0),
                     )),
                     old_tuple_data: Some(vec![2u8; 12]),
                 },
@@ -1242,11 +1205,7 @@ mod tests {
             tuple_infos: vec![TupleInfo {
                 offset: (crate::buffer::PAGE_SIZE - 8) as u16,
                 size: 8,
-                meta: TupleMeta {
-                    insert_txn_id: 5,
-                    delete_txn_id: 0,
-                    is_deleted: false,
-                },
+                meta: TupleMeta::new(5, 0),
             }],
             lsn: 0,
         };
@@ -1282,17 +1241,32 @@ mod tests {
                 op_txn_id: 2,
                 new_tuple_meta: TupleMetaRepr {
                     insert_txn_id: 2,
+                    insert_cid: 0,
                     delete_txn_id: 0,
+                    delete_cid: INVALID_COMMAND_ID,
                     is_deleted: false,
                 },
                 new_tuple_data: new_bytes.clone(),
                 old_tuple_meta: Some(TupleMetaRepr {
                     insert_txn_id: 5,
+                    insert_cid: 0,
                     delete_txn_id: 0,
+                    delete_cid: INVALID_COMMAND_ID,
                     is_deleted: false,
                 }),
                 old_tuple_data: Some(old_bytes.clone()),
             }))
+        })
+        .unwrap();
+
+        let last = wal.max_assigned_lsn();
+        wal.append_record_with(|_| {
+            WalRecordPayload::Checkpoint(crate::recovery::wal_record::CheckpointPayload {
+                last_lsn: last,
+                dirty_pages: vec![page_id],
+                active_transactions: vec![2],
+                dpt: vec![(page_id, last)],
+            })
         })
         .unwrap();
 

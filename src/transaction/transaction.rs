@@ -13,6 +13,9 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 pub type TransactionId = u64;
+pub type CommandId = u32;
+
+pub const INVALID_COMMAND_ID: CommandId = CommandId::MAX;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IsolationLevel {

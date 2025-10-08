@@ -289,6 +289,7 @@ mod tests {
         HeapDeletePayload, HeapInsertPayload, HeapRecordPayload, HeapUpdatePayload, RelationIdent,
         TupleMetaRepr,
     };
+    use crate::transaction::INVALID_COMMAND_ID;
 
     #[test]
     fn encode_decode_page_write() {
@@ -361,102 +362,110 @@ mod tests {
     }
 
     #[test]
-    fn encode_decode_heap_insert() {
-        let payload = WalRecordPayload::Heap(HeapRecordPayload::Insert(HeapInsertPayload {
-            relation: RelationIdent { root_page_id: 10 },
-            page_id: 12,
-            slot_id: 2,
-            op_txn_id: 1,
-            tuple_meta: TupleMetaRepr {
-                insert_txn_id: 1,
-                delete_txn_id: 0,
-                is_deleted: false,
-            },
-            tuple_data: vec![7, 8, 9],
-        }));
-        let bytes = payload.encode(123, 100);
-        let (frame, len) = decode_frame(&bytes).unwrap();
-        assert_eq!(len, bytes.len());
-        assert_eq!(frame.rmid, ResourceManagerId::Heap);
-        assert_eq!(frame.info, HeapRecordKind::Insert as u8);
-        let decoded = decode_payload(&frame).unwrap();
-        match decoded {
-            WalRecordPayload::Heap(HeapRecordPayload::Insert(body)) => {
-                assert_eq!(body.relation.root_page_id, 10);
-                assert_eq!(body.page_id, 12);
-                assert_eq!(body.slot_id, 2);
-                assert_eq!(body.tuple_data, vec![7, 8, 9]);
+        fn encode_decode_heap_insert() {
+            let payload = WalRecordPayload::Heap(HeapRecordPayload::Insert(HeapInsertPayload {
+                relation: RelationIdent { root_page_id: 10 },
+                page_id: 12,
+                slot_id: 2,
+                op_txn_id: 1,
+                tuple_meta: TupleMetaRepr {
+                    insert_txn_id: 1,
+                    insert_cid: 0,
+                    delete_txn_id: 0,
+                    delete_cid: INVALID_COMMAND_ID,
+                    is_deleted: false,
+                },
+                tuple_data: vec![7, 8, 9],
+            }));
+            let bytes = payload.encode(123, 100);
+            let (frame, len) = decode_frame(&bytes).unwrap();
+            assert_eq!(len, bytes.len());
+            assert_eq!(frame.rmid, ResourceManagerId::Heap);
+            assert_eq!(frame.info, HeapRecordKind::Insert as u8);
+            let decoded = decode_payload(&frame).unwrap();
+            match decoded {
+                WalRecordPayload::Heap(HeapRecordPayload::Insert(body)) => {
+                    assert_eq!(body.relation.root_page_id, 10);
+                    assert_eq!(body.page_id, 12);
+                    assert_eq!(body.slot_id, 2);
+                    assert_eq!(body.tuple_data, vec![7, 8, 9]);
+                }
+                other => panic!("unexpected payload variant: {:?}", other),
             }
-            other => panic!("unexpected payload variant: {:?}", other),
         }
-    }
 
-    #[test]
-    fn encode_decode_heap_update() {
-        let payload = WalRecordPayload::Heap(HeapRecordPayload::Update(HeapUpdatePayload {
-            relation: RelationIdent { root_page_id: 99 },
-            page_id: 44,
-            slot_id: 5,
-            op_txn_id: 11,
-            new_tuple_meta: TupleMetaRepr {
-                insert_txn_id: 11,
-                delete_txn_id: 0,
-                is_deleted: false,
-            },
-            new_tuple_data: vec![1, 2, 3, 4],
-            old_tuple_meta: Some(TupleMetaRepr {
-                insert_txn_id: 5,
-                delete_txn_id: 7,
-                is_deleted: true,
-            }),
-            old_tuple_data: Some(vec![9, 9, 9]),
-        }));
-        let bytes = payload.encode(200, 150);
-        let (frame, len) = decode_frame(&bytes).unwrap();
-        assert_eq!(len, bytes.len());
-        assert_eq!(frame.rmid, ResourceManagerId::Heap);
-        assert_eq!(frame.info, HeapRecordKind::Update as u8);
-        let decoded = decode_payload(&frame).unwrap();
-        match decoded {
-            WalRecordPayload::Heap(HeapRecordPayload::Update(body)) => {
-                assert_eq!(body.relation.root_page_id, 99);
-                assert_eq!(body.new_tuple_data, vec![1, 2, 3, 4]);
-                assert!(body.old_tuple_meta.unwrap().is_deleted);
-                assert_eq!(body.old_tuple_data.unwrap(), vec![9, 9, 9]);
+        #[test]
+            fn encode_decode_heap_update() {
+                let payload = WalRecordPayload::Heap(HeapRecordPayload::Update(HeapUpdatePayload {
+                    relation: RelationIdent { root_page_id: 99 },
+                    page_id: 44,
+                    slot_id: 5,
+                    op_txn_id: 11,
+                    new_tuple_meta: TupleMetaRepr {
+                        insert_txn_id: 11,
+                        insert_cid: 0,
+                        delete_txn_id: 0,
+                        delete_cid: INVALID_COMMAND_ID,
+                        is_deleted: false,
+                    },
+                    new_tuple_data: vec![1, 2, 3, 4],
+                    old_tuple_meta: Some(TupleMetaRepr {
+                        insert_txn_id: 5,
+                        insert_cid: 0,
+                        delete_txn_id: 7,
+                        delete_cid: 0,
+                        is_deleted: true,
+                    }),
+                    old_tuple_data: Some(vec![9, 9, 9]),
+                }));
+                let bytes = payload.encode(200, 150);
+                let (frame, len) = decode_frame(&bytes).unwrap();
+                assert_eq!(len, bytes.len());
+                assert_eq!(frame.rmid, ResourceManagerId::Heap);
+                assert_eq!(frame.info, HeapRecordKind::Update as u8);
+                let decoded = decode_payload(&frame).unwrap();
+                match decoded {
+                    WalRecordPayload::Heap(HeapRecordPayload::Update(body)) => {
+                        assert_eq!(body.relation.root_page_id, 99);
+                        assert_eq!(body.new_tuple_data, vec![1, 2, 3, 4]);
+                        assert!(body.old_tuple_meta.unwrap().is_deleted);
+                        assert_eq!(body.old_tuple_data.unwrap(), vec![9, 9, 9]);
+                    }
+                    other => panic!("unexpected payload variant: {:?}", other),
+                }
             }
-            other => panic!("unexpected payload variant: {:?}", other),
-        }
-    }
-
-    #[test]
-    fn encode_decode_heap_delete() {
-        let payload = WalRecordPayload::Heap(HeapRecordPayload::Delete(HeapDeletePayload {
-            relation: RelationIdent { root_page_id: 7 },
-            page_id: 3,
-            slot_id: 1,
-            op_txn_id: 4,
-            old_tuple_meta: TupleMetaRepr {
-                insert_txn_id: 2,
-                delete_txn_id: 4,
-                is_deleted: true,
-            },
-            old_tuple_data: None,
-        }));
-        let bytes = payload.encode(80, 60);
-        let (frame, len) = decode_frame(&bytes).unwrap();
-        assert_eq!(len, bytes.len());
-        assert_eq!(frame.rmid, ResourceManagerId::Heap);
-        assert_eq!(frame.info, HeapRecordKind::Delete as u8);
-        let decoded = decode_payload(&frame).unwrap();
-        match decoded {
-            WalRecordPayload::Heap(HeapRecordPayload::Delete(body)) => {
-                assert_eq!(body.relation.root_page_id, 7);
-                assert!(body.old_tuple_meta.is_deleted);
-                assert!(body.old_tuple_data.is_none());
+        
+            #[test]
+            fn encode_decode_heap_delete() {
+                let payload = WalRecordPayload::Heap(HeapRecordPayload::Delete(HeapDeletePayload {
+                    relation: RelationIdent { root_page_id: 7 },
+                    page_id: 3,
+                    slot_id: 1,
+                    op_txn_id: 4,
+                    old_tuple_meta: TupleMetaRepr {
+                        insert_txn_id: 2,
+                        insert_cid: 0,
+                        delete_txn_id: 4,
+                        delete_cid: 0,
+                        is_deleted: true,
+                    },
+                    old_tuple_data: None,
+                }));
+                let bytes = payload.encode(80, 60);
+                let (frame, len) = decode_frame(&bytes).unwrap();
+                assert_eq!(len, bytes.len());
+                assert_eq!(frame.rmid, ResourceManagerId::Heap);
+                assert_eq!(frame.info, HeapRecordKind::Delete as u8);
+                let decoded = decode_payload(&frame).unwrap();
+                match decoded {
+                    WalRecordPayload::Heap(HeapRecordPayload::Delete(body)) => {
+                        assert_eq!(body.relation.root_page_id, 7);
+                        assert!(body.old_tuple_meta.is_deleted);
+                        assert!(body.old_tuple_data.is_none());
+                    }
+                    other => panic!("unexpected payload variant: {:?}", other),
+                }
             }
-            other => panic!("unexpected payload variant: {:?}", other),
-        }
-    }
 
     #[test]
     fn encode_decode_checkpoint() {

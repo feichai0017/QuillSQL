@@ -432,8 +432,7 @@ impl TableHeap {
         if meta.is_deleted {
             return Ok(());
         }
-        meta.is_deleted = true;
-        meta.delete_txn_id = txn_id;
+        meta.mark_deleted(txn_id, 0);
         self.recover_set_tuple_meta(rid, meta)
     }
 
@@ -451,10 +450,9 @@ impl TableHeap {
         if meta.is_deleted {
             return Ok(());
         }
-        meta.is_deleted = true;
         // capture old meta before mutation for WAL logging
         let old_meta = meta;
-        meta.delete_txn_id = txn_id;
+        meta.mark_deleted(txn_id, 0);
         table_page.update_tuple_meta(meta, slot)?;
         let old_tuple_bytes = TupleCodec::encode(&tuple);
 
@@ -923,33 +921,21 @@ mod tests {
         let buffer_pool = Arc::new(BufferManager::new(1000, disk_scheduler));
         let table_heap = TableHeap::try_new(schema.clone(), buffer_pool).unwrap();
 
-        let meta1 = super::TupleMeta {
-            insert_txn_id: 1,
-            delete_txn_id: 1,
-            is_deleted: false,
-        };
+        let meta1 = super::TupleMeta::new(1, 0);
         let rid1 = table_heap
             .insert_tuple(
                 &meta1,
                 &Tuple::new(schema.clone(), vec![1i8.into(), 1i16.into()]),
             )
             .unwrap();
-        let meta2 = super::TupleMeta {
-            insert_txn_id: 2,
-            delete_txn_id: 2,
-            is_deleted: false,
-        };
+        let meta2 = super::TupleMeta::new(2, 0);
         let rid2 = table_heap
             .insert_tuple(
                 &meta2,
                 &Tuple::new(schema.clone(), vec![2i8.into(), 2i16.into()]),
             )
             .unwrap();
-        let meta3 = super::TupleMeta {
-            insert_txn_id: 3,
-            delete_txn_id: 3,
-            is_deleted: false,
-        };
+        let meta3 = super::TupleMeta::new(3, 0);
         let rid3 = table_heap
             .insert_tuple(
                 &meta3,
@@ -985,33 +971,21 @@ mod tests {
         let buffer_pool = Arc::new(BufferManager::new(1000, disk_scheduler));
         let table_heap = Arc::new(TableHeap::try_new(schema.clone(), buffer_pool).unwrap());
 
-        let meta1 = super::TupleMeta {
-            insert_txn_id: 1,
-            delete_txn_id: 1,
-            is_deleted: false,
-        };
+        let meta1 = super::TupleMeta::new(1, 0);
         let rid1 = table_heap
             .insert_tuple(
                 &meta1,
                 &Tuple::new(schema.clone(), vec![1i8.into(), 1i16.into()]),
             )
             .unwrap();
-        let meta2 = super::TupleMeta {
-            insert_txn_id: 2,
-            delete_txn_id: 2,
-            is_deleted: false,
-        };
+        let meta2 = super::TupleMeta::new(2, 0);
         let rid2 = table_heap
             .insert_tuple(
                 &meta2,
                 &Tuple::new(schema.clone(), vec![2i8.into(), 2i16.into()]),
             )
             .unwrap();
-        let meta3 = super::TupleMeta {
-            insert_txn_id: 3,
-            delete_txn_id: 3,
-            is_deleted: false,
-        };
+        let meta3 = super::TupleMeta::new(3, 0);
         let rid3 = table_heap
             .insert_tuple(
                 &meta3,
@@ -1060,11 +1034,7 @@ mod tests {
         for i in 0..rows {
             let _rid = table_heap
                 .insert_tuple(
-                    &super::TupleMeta {
-                        insert_txn_id: 1,
-                        delete_txn_id: 1,
-                        is_deleted: false,
-                    },
+                    &super::TupleMeta::new(1, 0),
                     &Tuple::new(schema.clone(), vec![(i as i8).into(), (i as i16).into()]),
                 )
                 .unwrap();
@@ -1103,31 +1073,19 @@ mod tests {
 
         let rid1 = table_heap
             .insert_tuple(
-                &super::TupleMeta {
-                    insert_txn_id: 1,
-                    delete_txn_id: 1,
-                    is_deleted: false,
-                },
+                &super::TupleMeta::new(1, 0),
                 &Tuple::new(schema.clone(), vec![1i8.into(), 1i16.into()]),
             )
             .unwrap();
         let rid2 = table_heap
             .insert_tuple(
-                &super::TupleMeta {
-                    insert_txn_id: 2,
-                    delete_txn_id: 2,
-                    is_deleted: false,
-                },
+                &super::TupleMeta::new(2, 0),
                 &Tuple::new(schema.clone(), vec![2i8.into(), 2i16.into()]),
             )
             .unwrap();
         let rid3 = table_heap
             .insert_tuple(
-                &super::TupleMeta {
-                    insert_txn_id: 3,
-                    delete_txn_id: 3,
-                    is_deleted: false,
-                },
+                &super::TupleMeta::new(3, 0),
                 &Tuple::new(schema.clone(), vec![3i8.into(), 3i16.into()]),
             )
             .unwrap();

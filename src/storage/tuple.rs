@@ -1,7 +1,7 @@
 use crate::catalog::{Schema, SchemaRef, EMPTY_SCHEMA_REF};
 use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::storage::page::{RecordId, TupleMeta};
-use crate::transaction::TransactionId;
+use crate::transaction::{TransactionId, INVALID_COMMAND_ID};
 use crate::utils::scalar::ScalarValue;
 use crate::utils::table_ref::TableReference;
 use std::cmp::Ordering;
@@ -68,10 +68,11 @@ impl Tuple {
     }
 
     pub fn visible_to(&self, meta: &TupleMeta, txn_id: TransactionId) -> bool {
-        if meta.is_deleted && meta.delete_txn_id <= txn_id {
-            return false;
-        }
-        meta.insert_txn_id <= txn_id
+            if meta.is_deleted && meta.delete_cid != INVALID_COMMAND_ID && meta.delete_txn_id <= txn_id
+            {
+                return false;
+            }
+            meta.insert_txn_id <= txn_id
     }
 
     pub fn value(&self, index: usize) -> QuillSQLResult<&ScalarValue> {

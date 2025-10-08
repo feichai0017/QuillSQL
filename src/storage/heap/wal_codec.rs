@@ -3,7 +3,7 @@ use std::convert::TryFrom;
 use crate::buffer::PageId;
 use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::storage::page::TupleMeta;
-use crate::transaction::TransactionId;
+use crate::transaction::{CommandId, TransactionId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RelationIdent {
@@ -13,7 +13,9 @@ pub struct RelationIdent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TupleMetaRepr {
     pub insert_txn_id: TransactionId,
+    pub insert_cid: CommandId,
     pub delete_txn_id: TransactionId,
+    pub delete_cid: CommandId,
     pub is_deleted: bool,
 }
 
@@ -21,7 +23,9 @@ impl From<TupleMetaRepr> for TupleMeta {
     fn from(value: TupleMetaRepr) -> Self {
         TupleMeta {
             insert_txn_id: value.insert_txn_id,
+            insert_cid: value.insert_cid,
             delete_txn_id: value.delete_txn_id,
+            delete_cid: value.delete_cid,
             is_deleted: value.is_deleted,
         }
     }
@@ -31,7 +35,9 @@ impl From<TupleMeta> for TupleMetaRepr {
     fn from(value: TupleMeta) -> Self {
         TupleMetaRepr {
             insert_txn_id: value.insert_txn_id,
+            insert_cid: value.insert_cid,
             delete_txn_id: value.delete_txn_id,
+            delete_cid: value.delete_cid,
             is_deleted: value.is_deleted,
         }
     }
@@ -135,26 +141,32 @@ fn decode_relation_ident(bytes: &[u8]) -> QuillSQLResult<(RelationIdent, usize)>
 
 fn encode_tuple_meta(meta: &TupleMetaRepr, buf: &mut Vec<u8>) {
     buf.extend_from_slice(&meta.insert_txn_id.to_le_bytes());
+    buf.extend_from_slice(&meta.insert_cid.to_le_bytes());
     buf.extend_from_slice(&meta.delete_txn_id.to_le_bytes());
+    buf.extend_from_slice(&meta.delete_cid.to_le_bytes());
     buf.push(meta.is_deleted as u8);
 }
 
 fn decode_tuple_meta(bytes: &[u8]) -> QuillSQLResult<(TupleMetaRepr, usize)> {
-    if bytes.len() < 8 + 8 + 1 {
+    if bytes.len() < 8 + 4 + 8 + 4 + 1 {
         return Err(QuillSQLError::Internal(
             "Heap payload too short for tuple meta".to_string(),
         ));
     }
     let insert_txn_id = u64::from_le_bytes(bytes[0..8].try_into().unwrap()) as TransactionId;
-    let delete_txn_id = u64::from_le_bytes(bytes[8..16].try_into().unwrap()) as TransactionId;
-    let is_deleted = bytes[16] != 0;
+    let insert_cid = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as CommandId;
+    let delete_txn_id = u64::from_le_bytes(bytes[12..20].try_into().unwrap()) as TransactionId;
+    let delete_cid = u32::from_le_bytes(bytes[20..24].try_into().unwrap()) as CommandId;
+    let is_deleted = bytes[24] != 0;
     Ok((
         TupleMetaRepr {
             insert_txn_id,
+            insert_cid,
             delete_txn_id,
+            delete_cid,
             is_deleted,
         },
-        17,
+        25,
     ))
 }
 

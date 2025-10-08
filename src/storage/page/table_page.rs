@@ -4,13 +4,15 @@ use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::recovery::Lsn;
 use crate::storage::codec::{TablePageHeaderCodec, TablePageHeaderTupleInfoCodec, TupleCodec};
 use crate::storage::tuple::Tuple;
-use crate::transaction::TransactionId;
+use crate::transaction::{CommandId, TransactionId, INVALID_COMMAND_ID};
 use std::fmt::{Display, Formatter};
 use std::sync::LazyLock;
 
 pub static EMPTY_TUPLE_META: TupleMeta = TupleMeta {
     insert_txn_id: 0,
+    insert_cid: 0,
     delete_txn_id: 0,
+    delete_cid: INVALID_COMMAND_ID,
     is_deleted: false,
 };
 
@@ -67,8 +69,28 @@ pub struct TupleInfo {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TupleMeta {
     pub insert_txn_id: TransactionId,
+    pub insert_cid: CommandId,
     pub delete_txn_id: TransactionId,
+    pub delete_cid: CommandId,
     pub is_deleted: bool,
+}
+
+impl TupleMeta {
+    pub fn new(insert_txn_id: TransactionId, insert_cid: CommandId) -> Self {
+        Self { insert_txn_id, insert_cid, delete_txn_id: 0, delete_cid: INVALID_COMMAND_ID, is_deleted: false}
+    }
+    
+    pub fn mark_deleted(&mut self, txn_id: TransactionId, delete_cid: CommandId) {
+        self.is_deleted = true;
+        self.delete_txn_id = txn_id;
+        self.delete_cid = delete_cid;
+    }
+    
+    pub fn clear_delete(&mut self) {
+        self.is_deleted = false;
+        self.delete_txn_id = 0;
+        self.delete_cid = INVALID_COMMAND_ID;
+    }
 }
 
 pub const INVALID_RID: RecordId = RecordId {
@@ -344,14 +366,16 @@ mod tests {
             .unwrap();
 
         let mut tuple_meta = table_page.tuple_meta(0).unwrap();
-        tuple_meta.is_deleted = true;
-        tuple_meta.delete_txn_id = 1;
+        tuple_meta.mark_deleted(1, 0);
         tuple_meta.insert_txn_id = 2;
+        tuple_meta.insert_cid = 1;
 
         table_page.update_tuple_meta(tuple_meta, 0).unwrap();
         let tuple_meta = table_page.tuple_meta(0).unwrap();
         assert!(tuple_meta.is_deleted);
         assert_eq!(tuple_meta.delete_txn_id, 1);
+        assert_eq!(tuple_meta.delete_cid, 0);
         assert_eq!(tuple_meta.insert_txn_id, 2);
+        assert_eq!(tuple_meta.insert_cid, 1);
     }
 }

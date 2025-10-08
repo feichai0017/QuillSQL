@@ -92,7 +92,9 @@ impl TablePageHeaderTupleInfoCodec {
         bytes.extend(CommonCodec::encode_u16(tuple_info.offset));
         bytes.extend(CommonCodec::encode_u16(tuple_info.size));
         bytes.extend(CommonCodec::encode_u64(tuple_info.meta.insert_txn_id));
+        bytes.extend(CommonCodec::encode_u32(tuple_info.meta.insert_cid));
         bytes.extend(CommonCodec::encode_u64(tuple_info.meta.delete_txn_id));
+        bytes.extend(CommonCodec::encode_u32(tuple_info.meta.delete_cid));
         bytes.extend(CommonCodec::encode_bool(tuple_info.meta.is_deleted));
         bytes
     }
@@ -105,7 +107,11 @@ impl TablePageHeaderTupleInfoCodec {
         left_bytes = &left_bytes[offset..];
         let (insert_txn_id, offset) = CommonCodec::decode_u64(left_bytes)?;
         left_bytes = &left_bytes[offset..];
+        let (insert_cid, offset) = CommonCodec::decode_u32(left_bytes)?;
+        left_bytes = &left_bytes[offset..];
         let (delete_txn_id, offset) = CommonCodec::decode_u64(left_bytes)?;
+        left_bytes = &left_bytes[offset..];
+        let (delete_cid, offset) = CommonCodec::decode_u32(left_bytes)?;
         left_bytes = &left_bytes[offset..];
         let (is_deleted, offset) = CommonCodec::decode_bool(left_bytes)?;
         left_bytes = &left_bytes[offset..];
@@ -115,7 +121,9 @@ impl TablePageHeaderTupleInfoCodec {
                 size,
                 meta: TupleMeta {
                     insert_txn_id,
+                    insert_cid,
                     delete_txn_id,
+                    delete_cid,
                     is_deleted,
                 },
             },
@@ -167,17 +175,10 @@ mod tests {
             Column::new("b", DataType::Int32, true),
         ]));
         let tuple1 = Tuple::new(schema.clone(), vec![1i8.into(), 1i32.into()]);
-        let tuple1_meta = TupleMeta {
-            insert_txn_id: 1,
-            delete_txn_id: 2,
-            is_deleted: false,
-        };
+        let tuple1_meta = TupleMeta::new(1, 0);
         let tuple2 = Tuple::new(schema.clone(), vec![2i8.into(), 2i32.into()]);
-        let tuple2_meta = TupleMeta {
-            insert_txn_id: 3,
-            delete_txn_id: 4,
-            is_deleted: true,
-        };
+        let mut tuple2_meta = TupleMeta::new(3, 0);
+        tuple2_meta.mark_deleted(4, 0);
 
         let mut table_page = TablePage::new(schema.clone(), INVALID_PAGE_ID);
         table_page.set_lsn(42);
