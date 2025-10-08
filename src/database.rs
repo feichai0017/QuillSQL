@@ -50,13 +50,13 @@ pub struct DatabaseOptions {
 }
 
 pub struct Database {
+    _temp_dir: Option<TempDir>,
     pub(crate) buffer_pool: Arc<BufferManager>,
     pub(crate) catalog: Catalog,
     background_workers: BackgroundWorkers,
     pub(crate) wal_manager: Arc<WalManager>,
     pub(crate) transaction_manager: Arc<TransactionManager>,
     default_isolation: IsolationLevel,
-    _temp_dir: Option<TempDir>,
 }
 impl Database {
     pub fn new_on_disk(db_path: &str) -> QuillSQLResult<Self> {
@@ -129,6 +129,7 @@ impl Database {
         ));
 
         let mut db = Self {
+            _temp_dir: None,
             buffer_pool,
             catalog,
             background_workers,
@@ -137,7 +138,6 @@ impl Database {
             default_isolation: options
                 .default_isolation_level
                 .unwrap_or(IsolationLevel::ReadUncommitted),
-            _temp_dir: None,
         };
         load_catalog_data(&mut db)?;
         Ok(db)
@@ -215,6 +215,7 @@ impl Database {
         ));
 
         let mut db = Self {
+            _temp_dir: Some(temp_dir),
             buffer_pool,
             catalog,
             background_workers,
@@ -223,7 +224,6 @@ impl Database {
             default_isolation: options
                 .default_isolation_level
                 .unwrap_or(IsolationLevel::ReadUncommitted),
-            _temp_dir: Some(temp_dir),
         };
         load_catalog_data(&mut db)?;
         Ok(db)
