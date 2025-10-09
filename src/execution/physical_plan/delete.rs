@@ -50,7 +50,7 @@ impl VolcanoExecutor for PhysicalDelete {
         };
 
         loop {
-            let Some((rid, tuple)) = iterator.next()? else {
+            let Some((rid, meta, tuple)) = iterator.next()? else {
                 let deleted = self.deleted_rows.swap(0, Ordering::SeqCst);
                 if deleted == 0 {
                     return Ok(None);
@@ -67,28 +67,37 @@ impl VolcanoExecutor for PhysicalDelete {
                 }
             }
 
-            let table_heap = context.catalog.table_heap(&self.table)?;
-            let meta = table_heap.tuple_meta(rid)?;
-            if !Tuple::is_visible(&meta, context.txn.id()) {
+            if !context.is_visible(&meta) {
                 continue;
             }
 
             context.lock_row_exclusive(&self.table, rid)?;
 
-            let old_tuple = table_heap.tuple(rid)?;
+            let table_heap = context.catalog.table_heap(&self.table)?;
+            let (current_meta, current_tuple) = table_heap.full_tuple(rid)?;
+            if !context.is_visible(&current_meta) {
+                context
+                    .txn_mgr
+                    .unlock_row(context.txn.id(), &self.table, rid);
+                continue;
+            }
             table_heap.delete_tuple(rid, context.txn.id(), context.command_id())?;
 
             let mut index_entries = Vec::new();
             for index in context.catalog.table_indexes(&self.table)? {
-                if let Ok(key) = old_tuple.project_with_schema(index.key_schema.clone()) {
+                if let Ok(key) = current_tuple.project_with_schema(index.key_schema.clone()) {
                     index.delete(&key)?;
                     index_entries.push((index.clone(), key));
                 }
             }
 
-            context
-                .txn
-                .push_delete_undo(table_heap.clone(), rid, meta, old_tuple, index_entries);
+            context.txn.push_delete_undo(
+                table_heap.clone(),
+                rid,
+                current_meta,
+                current_tuple,
+                index_entries,
+            );
             self.deleted_rows.fetch_add(1, Ordering::SeqCst);
         }
     }

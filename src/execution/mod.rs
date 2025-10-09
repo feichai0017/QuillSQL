@@ -5,7 +5,7 @@ use std::sync::Arc;
 use crate::catalog::SchemaRef;
 use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::execution::physical_plan::PhysicalPlan;
-use crate::transaction::{CommandId, TransactionManager};
+use crate::transaction::{CommandId, TransactionManager, TransactionSnapshot};
 use crate::{
     catalog::Catalog,
     storage::tuple::Tuple,
@@ -29,6 +29,7 @@ pub struct ExecutionContext<'a> {
     pub txn: &'a mut Transaction,
     pub txn_mgr: &'a TransactionManager,
     command_id: CommandId,
+    snapshot: TransactionSnapshot,
 }
 
 impl<'a> ExecutionContext<'a> {
@@ -38,16 +39,28 @@ impl<'a> ExecutionContext<'a> {
         txn_mgr: &'a TransactionManager,
     ) -> Self {
         let command_id = txn.begin_command();
+        let snapshot = txn_mgr.snapshot(txn.id());
         Self {
             catalog,
             txn,
             txn_mgr,
             command_id,
+            snapshot,
         }
     }
 
     pub fn command_id(&self) -> CommandId {
         self.command_id
+    }
+
+    pub fn snapshot(&self) -> &TransactionSnapshot {
+        &self.snapshot
+    }
+
+    pub fn is_visible(&self, meta: &crate::storage::page::TupleMeta) -> bool {
+        self.snapshot.is_visible(meta, self.command_id, |txn_id| {
+            self.txn_mgr.transaction_status(txn_id)
+        })
     }
 
     pub fn lock_table(&mut self, table: TableReference, mode: LockMode) -> QuillSQLResult<()> {

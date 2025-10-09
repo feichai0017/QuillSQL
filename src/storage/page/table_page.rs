@@ -276,17 +276,12 @@ impl TablePage {
     }
 
     pub fn get_next_rid(&self, rid: &RecordId) -> Option<RecordId> {
-        let mut tuple_id = rid.slot_num;
-
-        // Find next non-deleted tuple
-        while tuple_id + 1 < self.header.num_tuples as u32 {
-            tuple_id += 1;
-            if !self.header.tuple_infos[tuple_id as usize].meta.is_deleted {
-                return Some(RecordId::new(rid.page_id, tuple_id));
-            }
+        let next_slot = rid.slot_num + 1;
+        if next_slot < self.header.num_tuples as u32 {
+            Some(RecordId::new(rid.page_id, next_slot))
+        } else {
+            None
         }
-
-        None
     }
 }
 

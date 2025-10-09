@@ -8,7 +8,8 @@ use crate::recovery::wal_record::WalRecordPayload;
 use crate::recovery::{Lsn, WalManager};
 use crate::storage::page::RecordId;
 use crate::transaction::{
-    IsolationLevel, LockManager, LockMode, Transaction, TransactionId, TransactionState,
+    IsolationLevel, LockManager, LockMode, Transaction, TransactionId, TransactionSnapshot,
+    TransactionState, TransactionStatus,
 };
 use crate::utils::table_ref::TableReference;
 use dashmap::{DashMap, DashSet};
@@ -29,6 +30,7 @@ pub struct TransactionManager {
     active_txns: DashSet<TransactionId>,
     lock_manager: Arc<LockManager>,
     held_locks: DashMap<TransactionId, HeldLocks>,
+    txn_statuses: DashMap<TransactionId, TransactionStatus>,
 }
 
 impl TransactionManager {
@@ -40,6 +42,7 @@ impl TransactionManager {
             active_txns: DashSet::new(),
             lock_manager: Arc::new(LockManager::new()),
             held_locks: DashMap::new(),
+            txn_statuses: DashMap::new(),
         }
     }
 
@@ -55,6 +58,7 @@ impl TransactionManager {
             active_txns: DashSet::new(),
             lock_manager,
             held_locks: DashMap::new(),
+            txn_statuses: DashMap::new(),
         }
     }
 
@@ -79,6 +83,8 @@ impl TransactionManager {
         })?;
         txn.set_begin_lsn(append.end_lsn);
         self.active_txns.insert(txn_id);
+        self.txn_statuses
+            .insert(txn_id, TransactionStatus::InProgress);
         self.held_locks.insert(txn_id, HeldLocks::default());
         Ok(txn)
     }
@@ -171,6 +177,8 @@ impl TransactionManager {
         txn.set_state(TransactionState::Committed);
 
         self.active_txns.remove(&txn_id);
+        self.txn_statuses
+            .insert(txn_id, TransactionStatus::Committed);
         self.release_all_locks(txn_id);
         txn.clear_undo();
         self.finish_commit(txn, append.end_lsn)
@@ -220,6 +228,7 @@ impl TransactionManager {
         txn.set_state(TransactionState::Aborted);
 
         self.active_txns.remove(&txn_id);
+        self.txn_statuses.insert(txn_id, TransactionStatus::Aborted);
         self.release_all_locks(txn_id);
         txn.clear_undo();
         self.finish_commit(txn, append.end_lsn)
@@ -235,6 +244,28 @@ impl TransactionManager {
 
     pub fn active_transactions(&self) -> Vec<TransactionId> {
         self.active_txns.iter().map(|txn| *txn).collect()
+    }
+
+    pub fn snapshot(&self, txn_id: TransactionId) -> TransactionSnapshot {
+        let active: Vec<TransactionId> = self
+            .active_txns
+            .iter()
+            .map(|id| *id)
+            .filter(|id| *id != txn_id)
+            .collect();
+        let xmax = self.next_txn_id.load(Ordering::SeqCst);
+        let xmin = active.iter().copied().min().unwrap_or(xmax);
+        TransactionSnapshot::new(txn_id, xmin, xmax, active)
+    }
+
+    pub fn transaction_status(&self, txn_id: TransactionId) -> TransactionStatus {
+        if txn_id == 0 {
+            return TransactionStatus::Committed;
+        }
+        self.txn_statuses
+            .get(&txn_id)
+            .map(|entry| *entry.value())
+            .unwrap_or(TransactionStatus::Unknown)
     }
 
     fn finish_commit(&self, txn: &Transaction, lsn: Lsn) -> QuillSQLResult<()> {
@@ -308,6 +339,16 @@ impl TransactionManager {
         Ok(())
     }
 
+    pub fn unlock_row(&self, txn_id: TransactionId, table: &TableReference, rid: RecordId) {
+        if self.lock_manager.unlock_row_raw(txn_id, table.clone(), rid) {
+            if let Some(mut entry) = self.held_locks.get_mut(&txn_id) {
+                entry.row_keys.remove(&(table.clone(), rid));
+                entry.rows.retain(|(t, r, _)| !(t == table && *r == rid));
+                entry.shared_rows.remove(&(table.clone(), rid));
+            }
+        }
+    }
+
     fn release_all_locks(&self, txn_id: TransactionId) {
         if let Some((_, mut held)) = self.held_locks.remove(&txn_id) {
             for (table, rid, _) in held.rows.drain(..).rev() {
@@ -328,6 +369,7 @@ mod tests {
     use super::*;
     use crate::config::WalConfig;
     use crate::recovery::WalManager;
+    use crate::storage::page::TupleMeta;
     use tempfile::TempDir;
 
     fn build_wal(temp_dir: &TempDir) -> Arc<WalManager> {
@@ -377,5 +419,81 @@ mod tests {
         let lsn = txn.last_lsn().expect("abort lsn");
         // Async commit still triggers flush_until, so durable LSN should advance.
         assert!(wal.durable_lsn() >= lsn);
+    }
+
+    #[test]
+    fn snapshot_excludes_running_insert_until_commit() {
+        let temp = TempDir::new().expect("tempdir");
+        let wal = build_wal(&temp);
+        let manager = TransactionManager::new(wal, true);
+
+        let mut writer = manager
+            .begin(
+                IsolationLevel::ReadCommitted,
+                TransactionAccessMode::ReadWrite,
+            )
+            .expect("writer");
+        let meta = TupleMeta::new(writer.id(), 0);
+
+        let mut reader = manager
+            .begin(
+                IsolationLevel::ReadCommitted,
+                TransactionAccessMode::ReadWrite,
+            )
+            .expect("reader");
+        let snapshot = manager.snapshot(reader.id());
+        assert!(
+            !snapshot.is_visible(&meta, 0, |tid| manager.transaction_status(tid)),
+            "running writer should not be visible",
+        );
+
+        manager.commit(&mut writer).expect("commit writer");
+        let snapshot_after_commit = manager.snapshot(reader.id());
+        assert!(snapshot_after_commit.is_visible(&meta, 0, |tid| manager.transaction_status(tid)));
+
+        manager.abort(&mut reader).expect("abort reader");
+    }
+
+    #[test]
+    fn snapshot_treats_committed_delete_as_invisible() {
+        let temp = TempDir::new().expect("tempdir");
+        let wal = build_wal(&temp);
+        let manager = TransactionManager::new(wal, true);
+
+        let mut inserter = manager
+            .begin(
+                IsolationLevel::ReadCommitted,
+                TransactionAccessMode::ReadWrite,
+            )
+            .expect("insert txn");
+        let mut meta = TupleMeta::new(inserter.id(), 0);
+        manager.commit(&mut inserter).expect("commit insert");
+
+        let mut deleter = manager
+            .begin(
+                IsolationLevel::ReadCommitted,
+                TransactionAccessMode::ReadWrite,
+            )
+            .expect("delete txn");
+        meta.mark_deleted(deleter.id(), 0);
+
+        let mut reader = manager
+            .begin(
+                IsolationLevel::ReadCommitted,
+                TransactionAccessMode::ReadWrite,
+            )
+            .expect("reader txn");
+
+        let before_commit = manager.snapshot(reader.id());
+        assert!(before_commit.is_visible(&meta, 0, |tid| manager.transaction_status(tid)));
+
+        manager.commit(&mut deleter).expect("commit delete");
+        let after_commit = manager.snapshot(reader.id());
+        assert!(
+            !after_commit.is_visible(&meta, 0, |tid| manager.transaction_status(tid)),
+            "committed delete should hide tuple",
+        );
+
+        manager.abort(&mut reader).expect("abort reader");
     }
 }

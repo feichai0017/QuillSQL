@@ -278,17 +278,11 @@ impl TableHeap {
             .buffer_pool
             .fetch_table_page(first_page_id, self.schema.clone())?;
 
-        // Find first non-deleted tuple
-        for slot_num in 0..table_page.header.num_tuples {
-            if !table_page.header.tuple_infos[slot_num as usize]
-                .meta
-                .is_deleted
-            {
-                return Ok(Some(RecordId::new(first_page_id, slot_num as u32)));
-            }
+        if table_page.header.num_tuples == 0 {
+            Ok(None)
+        } else {
+            Ok(Some(RecordId::new(first_page_id, 0)))
         }
-
-        Ok(None)
     }
 
     pub fn get_next_rid(&self, rid: RecordId) -> QuillSQLResult<Option<RecordId>> {
@@ -307,19 +301,10 @@ impl TableHeap {
             .buffer_pool
             .fetch_table_page(table_page.header.next_page_id, self.schema.clone())?;
 
-        // Find first non-deleted tuple in next page
-        for slot_num in 0..next_table_page.header.num_tuples {
-            if !next_table_page.header.tuple_infos[slot_num as usize]
-                .meta
-                .is_deleted
-            {
-                return Ok(Some(RecordId::new(
-                    table_page.header.next_page_id,
-                    slot_num as u32,
-                )));
-            }
+        if next_table_page.header.num_tuples == 0 {
+            return Ok(None);
         }
-        Ok(None)
+        Ok(Some(RecordId::new(table_page.header.next_page_id, 0)))
     }
 
     /// Construct a lightweight TableHeap view for recovery operations.
@@ -494,7 +479,7 @@ enum ScanStrategy {
 
 #[derive(Debug)]
 struct StreamScanState {
-    ring: RingBuffer<(RecordId, Tuple)>,
+    ring: RingBuffer<(RecordId, TupleMeta, Tuple)>,
     first_page: bool,
     prefetch: StreamPrefetchState,
 }
@@ -655,7 +640,7 @@ impl TableIterator {
         }
     }
 
-    pub fn next(&mut self) -> QuillSQLResult<Option<(RecordId, Tuple)>> {
+    pub fn next(&mut self) -> QuillSQLResult<Option<(RecordId, TupleMeta, Tuple)>> {
         if self.ended {
             return Ok(None);
         }
@@ -682,22 +667,22 @@ impl TableIterator {
             }
 
             loop {
-                if let Some((rid, tuple)) = state.ring.pop() {
+                if let Some((rid, meta, tuple)) = state.ring.pop() {
                     // Respect end bound
                     match &self.end_bound {
-                        Bound::Unbounded => return Ok(Some((rid, tuple))),
+                        Bound::Unbounded => return Ok(Some((rid, meta, tuple))),
                         Bound::Included(end) => {
                             if rid == *end {
                                 self.ended = true;
                             }
-                            return Ok(Some((rid, tuple)));
+                            return Ok(Some((rid, meta, tuple)));
                         }
                         Bound::Excluded(end) => {
                             if rid == *end {
                                 self.ended = true;
                                 return Ok(None);
                             }
-                            return Ok(Some((rid, tuple)));
+                            return Ok(Some((rid, meta, tuple)));
                         }
                     }
                 } else {
@@ -721,15 +706,12 @@ impl TableIterator {
             match self.end_bound {
                 Bound::Included(rid) => {
                     if let Some(next_rid) = self.heap.get_next_rid(self.cursor)? {
-                        if next_rid == rid {
+                        self.cursor = next_rid;
+                        if self.cursor == rid {
                             self.ended = true;
                         }
-                        self.cursor = next_rid;
-                        Ok(self
-                            .heap
-                            .tuple(self.cursor)
-                            .ok()
-                            .map(|tuple| (self.cursor, tuple)))
+                        let (meta, tuple) = self.heap.full_tuple(self.cursor)?;
+                        Ok(Some((self.cursor, meta, tuple)))
                     } else {
                         Ok(None)
                     }
@@ -737,14 +719,12 @@ impl TableIterator {
                 Bound::Excluded(rid) => {
                     if let Some(next_rid) = self.heap.get_next_rid(self.cursor)? {
                         if next_rid == rid {
+                            self.ended = true;
                             Ok(None)
                         } else {
                             self.cursor = next_rid;
-                            Ok(self
-                                .heap
-                                .tuple(self.cursor)
-                                .ok()
-                                .map(|tuple| (self.cursor, tuple)))
+                            let (meta, tuple) = self.heap.full_tuple(self.cursor)?;
+                            Ok(Some((self.cursor, meta, tuple)))
                         }
                     } else {
                         Ok(None)
@@ -753,11 +733,8 @@ impl TableIterator {
                 Bound::Unbounded => {
                     if let Some(next_rid) = self.heap.get_next_rid(self.cursor)? {
                         self.cursor = next_rid;
-                        Ok(self
-                            .heap
-                            .tuple(self.cursor)
-                            .ok()
-                            .map(|tuple| (self.cursor, tuple)))
+                        let (meta, tuple) = self.heap.full_tuple(self.cursor)?;
+                        Ok(Some((self.cursor, meta, tuple)))
                     } else {
                         Ok(None)
                     }
@@ -768,20 +745,14 @@ impl TableIterator {
             match self.start_bound {
                 Bound::Included(rid) => {
                     self.cursor = rid;
-                    Ok(self
-                        .heap
-                        .tuple(self.cursor)
-                        .ok()
-                        .map(|tuple| (self.cursor, tuple)))
+                    let (meta, tuple) = self.heap.full_tuple(self.cursor)?;
+                    Ok(Some((self.cursor, meta, tuple)))
                 }
                 Bound::Excluded(rid) => {
                     if let Some(next_rid) = self.heap.get_next_rid(rid)? {
                         self.cursor = next_rid;
-                        Ok(self
-                            .heap
-                            .tuple(self.cursor)
-                            .ok()
-                            .map(|tuple| (self.cursor, tuple)))
+                        let (meta, tuple) = self.heap.full_tuple(self.cursor)?;
+                        Ok(Some((self.cursor, meta, tuple)))
                     } else {
                         self.ended = true;
                         Ok(None)
@@ -790,11 +761,8 @@ impl TableIterator {
                 Bound::Unbounded => {
                     if let Some(first_rid) = self.heap.get_first_rid()? {
                         self.cursor = first_rid;
-                        Ok(self
-                            .heap
-                            .tuple(self.cursor)
-                            .ok()
-                            .map(|tuple| (self.cursor, tuple)))
+                        let (meta, tuple) = self.heap.full_tuple(self.cursor)?;
+                        Ok(Some((self.cursor, meta, tuple)))
                     } else {
                         self.ended = true;
                         Ok(None)
@@ -838,10 +806,7 @@ fn fill_stream_ring(
         for slot in start_slot..page.header.num_tuples as usize {
             let rid = RecordId::new(pid, slot as u32);
             let (meta, tuple) = page.tuple(slot as u16)?;
-            if meta.is_deleted {
-                continue;
-            }
-            state.ring.push((rid, tuple));
+            state.ring.push((rid, meta, tuple));
             if state.ring.len() >= state.ring.capacity() {
                 break;
             }
@@ -999,16 +964,19 @@ mod tests {
 
         let mut iterator = TableIterator::new(table_heap.clone(), ..);
 
-        let (rid, tuple) = iterator.next().unwrap().unwrap();
+        let (rid, meta, tuple) = iterator.next().unwrap().unwrap();
         assert_eq!(rid, rid1);
+        assert_eq!(meta, meta1);
         assert_eq!(tuple.data, vec![1i8.into(), 1i16.into()]);
 
-        let (rid, tuple) = iterator.next().unwrap().unwrap();
+        let (rid, meta, tuple) = iterator.next().unwrap().unwrap();
         assert_eq!(rid, rid2);
+        assert_eq!(meta, meta2);
         assert_eq!(tuple.data, vec![2i8.into(), 2i16.into()]);
 
-        let (rid, tuple) = iterator.next().unwrap().unwrap();
+        let (rid, meta, tuple) = iterator.next().unwrap().unwrap();
         assert_eq!(rid, rid3);
+        assert_eq!(meta, meta3);
         assert_eq!(tuple.data, vec![3i8.into(), 3i16.into()]);
 
         assert!(iterator.next().unwrap().is_none());
@@ -1050,7 +1018,7 @@ mod tests {
         // Iterate full range; should go through streaming ring buffer
         let mut it = TableIterator::new(table_heap.clone(), ..);
         let mut cnt = 0usize;
-        while let Some((_rid, _t)) = it.next().unwrap() {
+        while let Some((_rid, _meta, _t)) = it.next().unwrap() {
             cnt += 1;
         }
         assert_eq!(cnt, rows);

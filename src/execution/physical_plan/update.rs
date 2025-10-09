@@ -73,31 +73,36 @@ impl VolcanoExecutor for PhysicalUpdate {
         let table_heap = context.catalog.table_heap(&self.table)?;
 
         loop {
-            if let Some((rid, mut tuple)) = table_iterator.next()? {
+            if let Some((rid, meta, tuple)) = table_iterator.next()? {
                 if let Some(selection) = &self.selection {
                     if !selection.evaluate(&tuple)?.as_boolean()?.unwrap_or(false) {
                         continue;
                     }
                 }
 
-                let meta = table_heap.tuple_meta(rid)?;
-                if !Tuple::is_visible(&meta, context.txn.id()) {
+                if !context.is_visible(&meta) {
                     continue;
                 }
 
                 context.lock_row_exclusive(&self.table, rid)?;
 
-                let prev_tuple = tuple.clone();
-                let prev_meta = meta;
+                let (prev_meta, mut current_tuple) = table_heap.full_tuple(rid)?;
+                if !context.is_visible(&prev_meta) {
+                    context
+                        .txn_mgr
+                        .unlock_row(context.txn.id(), &self.table, rid);
+                    continue;
+                }
+                let prev_tuple = current_tuple.clone();
 
                 // update tuple data
                 for (col_name, value_expr) in self.assignments.iter() {
-                    let index = tuple.schema.index_of(None, col_name)?;
-                    let col_datatype = tuple.schema.columns[index].data_type;
+                    let index = current_tuple.schema.index_of(None, col_name)?;
+                    let col_datatype = current_tuple.schema.columns[index].data_type;
                     let new_value = value_expr.evaluate(&EMPTY_TUPLE)?.cast_to(&col_datatype)?;
-                    tuple.data[index] = new_value;
+                    current_tuple.data[index] = new_value;
                 }
-                table_heap.update_tuple(rid, tuple.clone())?;
+                table_heap.update_tuple(rid, current_tuple.clone())?;
 
                 let mut new_keys = Vec::new();
                 let mut old_keys = Vec::new();
@@ -121,7 +126,9 @@ impl VolcanoExecutor for PhysicalUpdate {
                     let old_key = prev_tuple
                         .project_with_schema(index.key_schema.clone())
                         .ok();
-                    let new_key = tuple.project_with_schema(index.key_schema.clone()).ok();
+                    let new_key = current_tuple
+                        .project_with_schema(index.key_schema.clone())
+                        .ok();
 
                     // Skip maintenance when key values are unchanged
                     if let (Some(ref ok), Some(ref nk)) = (&old_key, &new_key) {

@@ -713,7 +713,7 @@ impl Catalog {
         F: FnMut(&Tuple) -> QuillSQLResult<bool>,
     {
         let mut iterator = TableIterator::new(heap.clone(), ..);
-        while let Some((rid, tuple)) = iterator.next()? {
+        while let Some((rid, _meta, tuple)) = iterator.next()? {
             if predicate(&tuple)? {
                 heap.delete_tuple(rid, SYSTEM_TXN_ID, SYSTEM_COMMAND_ID)?;
             }

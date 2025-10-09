@@ -51,22 +51,37 @@ impl VolcanoExecutor for PhysicalSeqScan {
                 "table iterator not created".to_string(),
             ));
         };
-        if let Some((rid, tuple)) = iterator.next()? {
-            return match context.txn.isolation_level() {
-                IsolationLevel::ReadUncommitted => Ok(Some(tuple)),
+        loop {
+            let Some((rid, meta, tuple)) = iterator.next()? else {
+                return Ok(None);
+            };
+
+            if !context.is_visible(&meta) {
+                continue;
+            }
+
+            match context.txn.isolation_level() {
+                IsolationLevel::ReadUncommitted => return Ok(Some(tuple)),
                 IsolationLevel::ReadCommitted => {
                     context.lock_row_shared(&self.table, rid, false)?;
+                    if !context.is_visible(&meta) {
+                        context.unlock_row_shared(&self.table, rid)?;
+                        continue;
+                    }
                     let result = tuple.clone();
                     context.unlock_row_shared(&self.table, rid)?;
-                    Ok(Some(result))
+                    return Ok(Some(result));
                 }
                 IsolationLevel::RepeatableRead | IsolationLevel::Serializable => {
                     context.lock_row_shared(&self.table, rid, true)?;
-                    Ok(Some(tuple))
+                    if !context.is_visible(&meta) {
+                        context.unlock_row_shared(&self.table, rid)?;
+                        continue;
+                    }
+                    return Ok(Some(tuple));
                 }
-            };
+            }
         }
-        Ok(None)
     }
 
     fn output_schema(&self) -> SchemaRef {
