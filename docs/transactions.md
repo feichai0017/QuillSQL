@@ -2,15 +2,15 @@
 
 ## Overview
 
-QuillSQL currently provides single-node ACID-style transactions backed by two-phase locking (2PL) and write-ahead logging. The subsystem is designed to be simple, explicit, and observable—no MVCC yet, but easy to reason about.
-
+QuillSQL provides single-node ACID-style transactions backed by two-phase locking (2PL), write-ahead logging, and statement-level MVCC snapshots. The design stays explicit and observable while allowing readers to avoid long-lived locks.
 ```
 SessionContext
    ↓ (start/commit/abort, set modes)
 TransactionManager ───────► WalManager (begin/commit/abort records)
    │                        │
    ├─ LockManager (table/row IS/IX/S/SIX/X locks)
-   └─ Undo stack (Insert/Update/Delete logical undo)
+   ├─ Undo stack (Insert/Update/Delete logical undo)
+   └─ MVCC snapshot registry + background vacuum
 ```
 
 ### Components
@@ -28,11 +28,16 @@ TransactionManager ───────► WalManager (begin/commit/abort recor
   - Creates transactions (`begin`), logs WAL records, and finalizes undo/redo sequences (`commit`/`abort`).
   - Provides helpers for executors to acquire table/row locks while respecting 2PL rules.
   - Maintains per-transaction lock tracking so locks are released safely at commit/abort.
+  - Produces MVCC snapshots (`TransactionSnapshot`) that drive tuple visibility decisions inside the executor.
 
 - **LockManager** (`src/transaction/lock_manager.rs`)
   - Centralized lock table supporting multi-granularity modes: `IS`, `IX`, `S`, `SIX`, `X`.
   - Uses FIFO queues per resource plus a wait-for graph; detects deadlocks and logs them.
   - Trace logs (`lock granted`, `wait edge`) improve visibility when diagnosing contention.
+  
+- **MVCC Vacuum** (`src/background/mod.rs`)
+  - Periodic background worker walks registered table heaps and reclaims tuples deleted by committed transactions or inserts rolled back by aborts once they are globally invisible.
+  - Cooperates with the transaction manager’s active set to avoid removing versions still needed by running readers.
 
 - **WalManager** (`src/recovery/wal.rs`)
   - Records transaction begin/commit/abort and logical undo payloads.
@@ -65,7 +70,7 @@ Lock manager unit tests exercise shared/exclusive compatibility and row-level bl
 
 ## Future Work
 
-- MVCC snapshot support for snapshot isolation / true serializable semantics without long-held locks.
 - Predicate/next-key locking to prevent phantom reads.
 - Query planner awareness of transaction modes for smarter lock acquisition.
 - User-visible metrics (lock waits, deadlock count, active transaction list).
+- Smarter MVCC vacuum heuristics (per-table pacing, feedback from storage pressure).
