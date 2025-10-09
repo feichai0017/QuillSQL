@@ -5,7 +5,7 @@ use std::sync::Arc;
 use crate::catalog::SchemaRef;
 use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::execution::physical_plan::PhysicalPlan;
-use crate::transaction::TransactionManager;
+use crate::transaction::{CommandId, TransactionManager};
 use crate::{
     catalog::Catalog,
     storage::tuple::Tuple,
@@ -28,6 +28,7 @@ pub struct ExecutionContext<'a> {
     pub catalog: &'a mut Catalog,
     pub txn: &'a mut Transaction,
     pub txn_mgr: &'a TransactionManager,
+    command_id: CommandId,
 }
 
 impl<'a> ExecutionContext<'a> {
@@ -36,11 +37,17 @@ impl<'a> ExecutionContext<'a> {
         txn: &'a mut Transaction,
         txn_mgr: &'a TransactionManager,
     ) -> Self {
+        let command_id = txn.begin_command();
         Self {
             catalog,
             txn,
             txn_mgr,
+            command_id,
         }
+    }
+
+    pub fn command_id(&self) -> CommandId {
+        self.command_id
     }
 
     pub fn lock_table(&mut self, table: TableReference, mode: LockMode) -> QuillSQLResult<()> {

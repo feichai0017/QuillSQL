@@ -93,7 +93,7 @@ impl UndoAction {
                 for (index, key) in indexes.into_iter() {
                     index.delete(&key)?;
                 }
-                table.recover_delete_tuple(rid, txn_id)?;
+                table.recover_delete_tuple(rid, txn_id, 0)?;
                 Ok(())
             }
             UndoAction::Update {
@@ -185,6 +185,8 @@ pub struct Transaction {
     begin_lsn: Option<Lsn>,
     last_lsn: Option<Lsn>,
     undo_actions: Vec<UndoAction>,
+    current_command_id: CommandId,
+    next_command_id: CommandId,
 }
 
 impl Transaction {
@@ -203,6 +205,8 @@ impl Transaction {
             begin_lsn: None,
             last_lsn: None,
             undo_actions: Vec::new(),
+            current_command_id: INVALID_COMMAND_ID,
+            next_command_id: 0,
         }
     }
 
@@ -236,6 +240,17 @@ impl Transaction {
 
     pub fn last_lsn(&self) -> Option<Lsn> {
         self.last_lsn
+    }
+
+    pub fn begin_command(&mut self) -> CommandId {
+        let cid = self.next_command_id;
+        self.current_command_id = cid;
+        self.next_command_id = self.next_command_id.wrapping_add(1);
+        cid
+    }
+
+    pub fn current_command_id(&self) -> CommandId {
+        self.current_command_id
     }
 
     pub(crate) fn set_begin_lsn(&mut self, lsn: Lsn) {

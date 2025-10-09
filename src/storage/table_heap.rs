@@ -4,6 +4,7 @@ use crate::config::TableScanConfig;
 use crate::storage::codec::TablePageCodec;
 use crate::storage::disk_scheduler::{DiskCommandResultReceiver, DiskScheduler};
 use crate::storage::page::{RecordId, TablePage, TupleMeta, INVALID_RID};
+use crate::transaction::{CommandId, TransactionId};
 use crate::{
     buffer::BufferManager,
     error::{QuillSQLError, QuillSQLResult},
@@ -426,20 +427,22 @@ impl TableHeap {
     pub fn recover_delete_tuple(
         &self,
         rid: RecordId,
-        txn_id: crate::transaction::TransactionId,
+        txn_id: TransactionId,
+        cid: CommandId,
     ) -> QuillSQLResult<()> {
         let mut meta = self.tuple_meta(rid)?;
         if meta.is_deleted {
             return Ok(());
         }
-        meta.mark_deleted(txn_id, 0);
+        meta.mark_deleted(txn_id, cid);
         self.recover_set_tuple_meta(rid, meta)
     }
 
     pub fn delete_tuple(
         &self,
         rid: RecordId,
-        txn_id: crate::transaction::TransactionId,
+        txn_id: TransactionId,
+        cid: CommandId,
     ) -> QuillSQLResult<()> {
         let mut page_guard = self.buffer_pool.fetch_page_write(rid.page_id)?;
         let mut table_page = TablePageCodec::decode(page_guard.data(), self.schema.clone())?.0;
@@ -452,7 +455,7 @@ impl TableHeap {
         }
         // capture old meta before mutation for WAL logging
         let old_meta = meta;
-        meta.mark_deleted(txn_id, 0);
+        meta.mark_deleted(txn_id, cid);
         table_page.update_tuple_meta(meta, slot)?;
         let old_tuple_bytes = TupleCodec::encode(&tuple);
 
@@ -897,13 +900,14 @@ mod tests {
 
         let mut meta = table_heap.tuple_meta(rid2).unwrap();
         meta.insert_txn_id = 1;
-        meta.delete_txn_id = 2;
+        meta.mark_deleted(2, 0);
         meta.is_deleted = true;
         table_heap.update_tuple_meta(meta, rid2).unwrap();
 
         let meta = table_heap.tuple_meta(rid2).unwrap();
         assert_eq!(meta.insert_txn_id, 1);
         assert_eq!(meta.delete_txn_id, 2);
+        assert_eq!(meta.delete_cid, 0);
         assert!(meta.is_deleted);
     }
 

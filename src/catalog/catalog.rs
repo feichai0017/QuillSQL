@@ -14,7 +14,7 @@ use crate::storage::page::{
 };
 use crate::storage::table_heap::{TableHeap, TableIterator};
 use crate::storage::tuple::Tuple;
-use crate::transaction::TransactionId;
+use crate::transaction::{CommandId, TransactionId};
 use crate::utils::scalar::ScalarValue;
 use crate::utils::table_ref::TableReference;
 use crate::{
@@ -66,6 +66,7 @@ impl CatalogTable {
 }
 
 const SYSTEM_TXN_ID: TransactionId = 0;
+const SYSTEM_COMMAND_ID: CommandId = 0;
 
 impl Catalog {
     pub fn new(buffer_pool: Arc<BufferManager>, disk_manager: Arc<DiskManager>) -> Self {
@@ -714,7 +715,7 @@ impl Catalog {
         let mut iterator = TableIterator::new(heap.clone(), ..);
         while let Some((rid, tuple)) = iterator.next()? {
             if predicate(&tuple)? {
-                heap.delete_tuple(rid, SYSTEM_TXN_ID)?;
+                heap.delete_tuple(rid, SYSTEM_TXN_ID, SYSTEM_COMMAND_ID)?;
             }
         }
         Ok(())

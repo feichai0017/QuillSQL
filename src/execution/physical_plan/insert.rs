@@ -103,7 +103,7 @@ impl VolcanoExecutor for PhysicalInsert {
             let tuple = Tuple::new(self.table_schema.clone(), full_data);
 
             let table_heap = context.catalog.table_heap(&self.table)?;
-            let meta = TupleMeta::new(context.txn.id(), 0);
+            let meta = TupleMeta::new(context.txn.id(), context.command_id());
             let rid = table_heap.insert_tuple(&meta, &tuple)?;
             let mut index_links = Vec::new();
 

@@ -77,15 +77,21 @@ pub struct TupleMeta {
 
 impl TupleMeta {
     pub fn new(insert_txn_id: TransactionId, insert_cid: CommandId) -> Self {
-        Self { insert_txn_id, insert_cid, delete_txn_id: 0, delete_cid: INVALID_COMMAND_ID, is_deleted: false}
+        Self {
+            insert_txn_id,
+            insert_cid,
+            delete_txn_id: 0,
+            delete_cid: INVALID_COMMAND_ID,
+            is_deleted: false,
+        }
     }
-    
+
     pub fn mark_deleted(&mut self, txn_id: TransactionId, delete_cid: CommandId) {
         self.is_deleted = true;
         self.delete_txn_id = txn_id;
         self.delete_cid = delete_cid;
     }
-    
+
     pub fn clear_delete(&mut self) {
         self.is_deleted = false;
         self.delete_txn_id = 0;
