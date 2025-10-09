@@ -456,6 +456,30 @@ impl TableHeap {
         self.append_heap_record(payload)?;
         self.write_back_page(rid.page_id, &mut page_guard, &mut table_page)
     }
+
+    /// Attempt to reclaim the tuple at `rid` if `predicate` returns true for the current metadata.
+    /// Returns true when the tuple was removed.
+    pub fn vacuum_slot_if<F>(&self, rid: RecordId, predicate: F) -> QuillSQLResult<bool>
+    where
+        F: FnOnce(&TupleMeta) -> bool,
+    {
+        let mut page_guard = self.buffer_pool.fetch_page_write(rid.page_id)?;
+        let mut table_page = TablePageCodec::decode(page_guard.data(), self.schema.clone())?.0;
+        table_page.set_lsn(page_guard.lsn());
+
+        let slot = rid.slot_num as u16;
+        if slot >= table_page.header.num_tuples {
+            return Ok(false);
+        }
+        let meta = table_page.header.tuple_infos[slot as usize].meta;
+        if !predicate(&meta) {
+            return Ok(false);
+        }
+
+        table_page.reclaim_tuple(slot)?;
+        self.write_back_page(rid.page_id, &mut page_guard, &mut table_page)?;
+        Ok(true)
+    }
 }
 
 #[derive(Debug)]
@@ -829,6 +853,7 @@ mod tests {
     use crate::storage::page::EMPTY_TUPLE_META;
     use crate::storage::table_heap::TableIterator;
     use crate::storage::{table_heap::TableHeap, tuple::Tuple};
+    use crate::utils::scalar::ScalarValue;
 
     #[test]
     pub fn test_table_heap_update_tuple_meta() {
@@ -1151,5 +1176,47 @@ mod tests {
 
         let (_m, t2) = table_heap.full_tuple(rid).unwrap();
         assert_eq!(t2.data, vec![99i8.into(), 300i16.into()]);
+    }
+
+    #[test]
+    fn vacuum_slot_if_reclaims_tuple() {
+        let temp_dir = TempDir::new().unwrap();
+        let temp_path = temp_dir.path().join("vacuum.db");
+        let schema = Arc::new(Schema::new(vec![Column::new("v", DataType::Int32, false)]));
+        let disk_manager = DiskManager::try_new(temp_path).unwrap();
+        let disk_scheduler = Arc::new(DiskScheduler::new(Arc::new(disk_manager)));
+        let buffer_pool = Arc::new(BufferManager::new(32, disk_scheduler));
+        let heap = TableHeap::try_new(schema.clone(), buffer_pool).unwrap();
+
+        let meta = super::TupleMeta::new(1, 0);
+        let tuple = Tuple::new(schema.clone(), vec![ScalarValue::Int32(Some(5))]);
+        let rid = heap.insert_tuple(&meta, &tuple).unwrap();
+
+        assert!(heap.full_tuple(rid).is_ok());
+        assert!(heap.vacuum_slot_if(rid, |_| true).unwrap());
+        assert!(heap.full_tuple(rid).is_err());
+        assert!(heap.get_first_rid().unwrap().is_none());
+    }
+
+    #[test]
+    fn vacuum_slot_if_respects_predicate() {
+        let temp_dir = TempDir::new().unwrap();
+        let temp_path = temp_dir.path().join("vacuum_predicate.db");
+        let schema = Arc::new(Schema::new(vec![Column::new("v", DataType::Int32, false)]));
+        let disk_manager = DiskManager::try_new(temp_path).unwrap();
+        let disk_scheduler = Arc::new(DiskScheduler::new(Arc::new(disk_manager)));
+        let buffer_pool = Arc::new(BufferManager::new(32, disk_scheduler));
+        let heap = TableHeap::try_new(schema.clone(), buffer_pool).unwrap();
+
+        let meta = super::TupleMeta::new(42, 0);
+        let tuple = Tuple::new(schema.clone(), vec![ScalarValue::Int32(Some(9))]);
+        let rid = heap.insert_tuple(&meta, &tuple).unwrap();
+
+        assert!(!heap
+            .vacuum_slot_if(rid, |current| current.insert_txn_id == 0)
+            .unwrap());
+        let (meta_after, tuple_after) = heap.full_tuple(rid).unwrap();
+        assert_eq!(meta_after.insert_txn_id, 42);
+        assert_eq!(tuple_after, tuple);
     }
 }

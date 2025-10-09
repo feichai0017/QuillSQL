@@ -52,3 +52,37 @@ static REGISTRY: OnceLock<IndexRegistry> = OnceLock::new();
 pub fn global_index_registry() -> &'static IndexRegistry {
     REGISTRY.get_or_init(IndexRegistry::new)
 }
+
+/// Global registry of table heaps that may require background maintenance.
+#[derive(Debug, Default)]
+pub struct TableRegistry {
+    inner: DashMap<TableReference, Arc<TableHeap>>,
+}
+
+impl TableRegistry {
+    pub fn new() -> Self {
+        Self {
+            inner: DashMap::new(),
+        }
+    }
+
+    pub fn register(&self, table: TableReference, heap: Arc<TableHeap>) {
+        self.inner.insert(table, heap);
+    }
+
+    pub fn unregister(&self, table: &TableReference) {
+        self.inner.remove(table);
+    }
+
+    pub fn iter_tables(&self) -> impl Iterator<Item = (TableReference, Arc<TableHeap>)> + '_ {
+        self.inner
+            .iter()
+            .map(|entry| (entry.key().clone(), entry.value().clone()))
+    }
+}
+
+static TABLE_REGISTRY: OnceLock<TableRegistry> = OnceLock::new();
+
+pub fn global_table_registry() -> &'static TableRegistry {
+    TABLE_REGISTRY.get_or_init(TableRegistry::new)
+}

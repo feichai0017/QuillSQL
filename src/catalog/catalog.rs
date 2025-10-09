@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use super::registry::global_index_registry;
+use super::registry::{global_index_registry, global_table_registry};
 use crate::catalog::{
     key_schema_to_varchar, SchemaRef, COLUMNS_SCHEMA, INDEXES_SCHEMA, INFORMATION_SCHEMA_COLUMNS,
     INFORMATION_SCHEMA_INDEXES, INFORMATION_SCHEMA_NAME, INFORMATION_SCHEMA_SCHEMAS,
@@ -153,6 +153,7 @@ impl Catalog {
         catalog_schema
             .tables
             .insert(table_name.clone(), catalog_table);
+        global_table_registry().register(table_ref.clone(), table_heap.clone());
 
         // update system table
         let Some(information_schema) = self.schemas.get_mut(INFORMATION_SCHEMA_NAME) else {
@@ -232,6 +233,8 @@ impl Catalog {
         let Some(catalog_table) = schema.tables.remove(&table_name) else {
             return Ok(false);
         };
+
+        global_table_registry().unregister(table_ref);
 
         for index_name in catalog_table.indexes.keys() {
             self.unregister_index_variants(
@@ -505,6 +508,7 @@ impl Catalog {
                 catalog_schema_name
             )));
         };
+        global_table_registry().register(table_ref.clone(), table.table.clone());
         catalog_schema.tables.insert(table_name, table);
         Ok(())
     }

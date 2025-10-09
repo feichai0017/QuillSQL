@@ -84,11 +84,13 @@ pub struct BackgroundConfig {
     pub checkpoint_interval: Option<Duration>,
     pub bg_writer_interval: Option<Duration>,
     pub vacuum: IndexVacuumConfig,
+    pub mvcc_vacuum: MvccVacuumConfig,
 }
 
 pub fn background_config(
     wal_config: &WalConfig,
     vacuum_cfg: IndexVacuumConfig,
+    mvcc_cfg: MvccVacuumConfig,
 ) -> BackgroundConfig {
     let wal_writer_interval = wal_config.writer_interval_ms.and_then(duration_from_ms);
     let checkpoint_interval = wal_config.checkpoint_interval_ms.and_then(duration_from_ms);
@@ -99,11 +101,25 @@ pub fn background_config(
     let bg_interval_ms = env_interval.unwrap_or(vacuum_cfg.interval_ms);
     let bg_writer_interval = duration_from_ms(bg_interval_ms);
 
+    let mvcc_interval_ms = std::env::var("QUILL_MVCC_VACUUM_INTERVAL_MS")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .unwrap_or(mvcc_cfg.interval_ms);
+    let mvcc_batch = std::env::var("QUILL_MVCC_VACUUM_BATCH")
+        .ok()
+        .and_then(|raw| raw.parse::<usize>().ok())
+        .unwrap_or(mvcc_cfg.batch_limit)
+        .max(1);
+
     BackgroundConfig {
         wal_writer_interval,
         checkpoint_interval,
         bg_writer_interval,
         vacuum: vacuum_cfg,
+        mvcc_vacuum: MvccVacuumConfig {
+            interval_ms: mvcc_interval_ms,
+            batch_limit: mvcc_batch,
+        },
     }
 }
 
@@ -189,6 +205,23 @@ impl Default for IndexVacuumConfig {
             interval_ms: 10_000,     // 10s
             trigger_threshold: 4096, // pending count to trigger
             batch_limit: 128,        // small batch to avoid stalls
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct MvccVacuumConfig {
+    /// Background MVCC vacuum interval in milliseconds
+    pub interval_ms: u64,
+    /// Max tuples to reclaim per iteration
+    pub batch_limit: usize,
+}
+
+impl Default for MvccVacuumConfig {
+    fn default() -> Self {
+        Self {
+            interval_ms: 15_000, // 15s
+            batch_limit: 512,
         }
     }
 }

@@ -245,6 +245,40 @@ impl TablePage {
         Ok(())
     }
 
+    /// Remove the tuple at `slot_num` and compact remaining tuples.
+    pub fn reclaim_tuple(&mut self, slot_num: u16) -> QuillSQLResult<()> {
+        if slot_num >= self.header.num_tuples {
+            return Err(QuillSQLError::Storage(format!(
+                "tuple_id {} out of range",
+                slot_num
+            )));
+        }
+
+        let snapshot_infos = self.header.tuple_infos.clone();
+        let next_page_id = self.header.next_page_id;
+        let lsn = self.header.lsn;
+
+        let mut rebuilt = TablePage::new(self.schema.clone(), next_page_id);
+        rebuilt.set_lsn(lsn);
+
+        for (idx, info) in snapshot_infos.into_iter().enumerate() {
+            if idx == slot_num as usize {
+                continue;
+            }
+            let (tuple, _) = TupleCodec::decode(
+                &self.data[info.offset as usize..(info.offset + info.size) as usize],
+                self.schema.clone(),
+            )?;
+            rebuilt.insert_tuple(&info.meta, &tuple)?;
+        }
+
+        // Preserve LSN and next pointer while replacing storage.
+        rebuilt.header.lsn = lsn;
+        self.header = rebuilt.header;
+        self.data = rebuilt.data;
+        Ok(())
+    }
+
     pub fn tuple(&self, slot_num: u16) -> QuillSQLResult<(TupleMeta, Tuple)> {
         if slot_num >= self.header.num_tuples {
             return Err(QuillSQLError::Storage(format!(
@@ -378,5 +412,35 @@ mod tests {
         assert_eq!(tuple_meta.delete_cid, 0);
         assert_eq!(tuple_meta.insert_txn_id, 2);
         assert_eq!(tuple_meta.insert_cid, 1);
+    }
+
+    #[test]
+    fn reclaim_tuple_removes_slot_and_compacts() {
+        let schema = Arc::new(Schema::new(vec![Column::new("id", DataType::Int32, false)]));
+        let mut table_page = super::TablePage::new(schema.clone(), 0);
+        let tuple1 = Tuple::new(schema.clone(), vec![1i32.into()]);
+        let tuple2 = Tuple::new(schema.clone(), vec![2i32.into()]);
+        let tuple3 = Tuple::new(schema.clone(), vec![3i32.into()]);
+
+        table_page
+            .insert_tuple(&super::TupleMeta::new(1, 0), &tuple1)
+            .unwrap();
+        table_page
+            .insert_tuple(&super::TupleMeta::new(2, 0), &tuple2)
+            .unwrap();
+        table_page
+            .insert_tuple(&super::TupleMeta::new(3, 0), &tuple3)
+            .unwrap();
+
+        table_page.reclaim_tuple(1).unwrap();
+        assert_eq!(table_page.header.num_tuples, 2);
+
+        let (meta0, t0) = table_page.tuple(0).unwrap();
+        assert_eq!(meta0.insert_txn_id, 1);
+        assert_eq!(t0, tuple1);
+
+        let (meta1, t1) = table_page.tuple(1).unwrap();
+        assert_eq!(meta1.insert_txn_id, 3);
+        assert_eq!(t1, tuple3);
     }
 }

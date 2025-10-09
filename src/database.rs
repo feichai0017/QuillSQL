@@ -1,22 +1,18 @@
-use crate::background::{BackgroundWorkers, WorkerHandle, WorkerKind, WorkerMetadata};
+use crate::background::{self, BackgroundWorkers};
 use log::{debug, warn};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::thread;
 use std::time::Duration;
 use tempfile::TempDir;
 
 use crate::buffer::{BufferManager, BUFFER_POOL_SIZE};
 use crate::catalog::load_catalog_data;
-use crate::catalog::registry::global_index_registry;
-use crate::config::{background_config, IndexVacuumConfig, WalConfig};
+use crate::config::{background_config, IndexVacuumConfig, MvccVacuumConfig, WalConfig};
 use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::optimizer::LogicalOptimizer;
 use crate::plan::logical_plan::{LogicalPlan, TransactionScope};
 use crate::plan::PhysicalPlanner;
-use crate::recovery::wal::codec::CheckpointPayload;
-use crate::recovery::{ControlFileManager, RecoveryManager, WalManager, WalWriterHandle};
+use crate::recovery::{ControlFileManager, RecoveryManager, WalManager};
 use crate::session::SessionContext;
 use crate::utils::util::{pretty_format_logical_plan, pretty_format_physical_plan};
 use crate::{
@@ -87,11 +83,15 @@ impl Database {
             synchronous_commit,
         ));
 
-        let worker_cfg = background_config(&wal_config, IndexVacuumConfig::default());
+        let worker_cfg = background_config(
+            &wal_config,
+            IndexVacuumConfig::default(),
+            MvccVacuumConfig::default(),
+        );
         let mut background_workers = BackgroundWorkers::new();
         if let Some(interval) = worker_cfg.wal_writer_interval {
             if let Some(handle) = wal_manager.start_background_flush(interval)? {
-                background_workers.register(wal_writer_worker(handle, interval));
+                background_workers.register(background::wal_writer_worker(handle, interval));
             }
         }
         buffer_pool.set_wal_manager(wal_manager.clone());
@@ -115,17 +115,28 @@ impl Database {
             );
         }
 
-        background_workers.register_opt(spawn_checkpoint_worker(
+        background_workers.register_opt(background::spawn_checkpoint_worker(
             wal_manager.clone(),
             buffer_pool.clone(),
             transaction_manager.clone(),
             worker_cfg.checkpoint_interval,
         ));
 
-        background_workers.register_opt(spawn_bg_writer(
+        background_workers.register_opt(background::spawn_bg_writer(
             buffer_pool.clone(),
             worker_cfg.bg_writer_interval,
             worker_cfg.vacuum,
+        ));
+
+        let mvcc_interval = if worker_cfg.mvcc_vacuum.interval_ms == 0 {
+            None
+        } else {
+            Some(Duration::from_millis(worker_cfg.mvcc_vacuum.interval_ms))
+        };
+        background_workers.register_opt(background::spawn_mvcc_vacuum_worker(
+            transaction_manager.clone(),
+            mvcc_interval,
+            worker_cfg.mvcc_vacuum.batch_limit,
         ));
 
         let mut db = Self {
@@ -173,11 +184,15 @@ impl Database {
             synchronous_commit,
         ));
 
-        let worker_cfg = background_config(&wal_config, IndexVacuumConfig::default());
+        let worker_cfg = background_config(
+            &wal_config,
+            IndexVacuumConfig::default(),
+            MvccVacuumConfig::default(),
+        );
         let mut background_workers = BackgroundWorkers::new();
         if let Some(interval) = worker_cfg.wal_writer_interval {
             if let Some(handle) = wal_manager.start_background_flush(interval)? {
-                background_workers.register(wal_writer_worker(handle, interval));
+                background_workers.register(background::wal_writer_worker(handle, interval));
             }
         }
         buffer_pool.set_wal_manager(wal_manager.clone());
@@ -201,17 +216,28 @@ impl Database {
             );
         }
 
-        background_workers.register_opt(spawn_checkpoint_worker(
+        background_workers.register_opt(background::spawn_checkpoint_worker(
             wal_manager.clone(),
             buffer_pool.clone(),
             transaction_manager.clone(),
             worker_cfg.checkpoint_interval,
         ));
 
-        background_workers.register_opt(spawn_bg_writer(
+        background_workers.register_opt(background::spawn_bg_writer(
             buffer_pool.clone(),
             worker_cfg.bg_writer_interval,
             worker_cfg.vacuum,
+        ));
+
+        let mvcc_interval = if worker_cfg.mvcc_vacuum.interval_ms == 0 {
+            None
+        } else {
+            Some(Duration::from_millis(worker_cfg.mvcc_vacuum.interval_ms))
+        };
+        background_workers.register_opt(background::spawn_mvcc_vacuum_worker(
+            transaction_manager.clone(),
+            mvcc_interval,
+            worker_cfg.mvcc_vacuum.batch_limit,
         ));
 
         let mut db = Self {
@@ -441,140 +467,4 @@ fn wal_config_for_temp(temp_root: &Path, overrides: &WalOptions) -> WalConfig {
         config.retain_segments = retain.max(1);
     }
     config
-}
-
-fn wal_writer_worker(handle: WalWriterHandle, interval: Duration) -> WorkerHandle {
-    WorkerHandle::new(
-        WorkerMetadata {
-            kind: WorkerKind::WalWriter,
-            interval: Some(interval),
-        },
-        move || {
-            if let Err(err) = handle.stop() {
-                warn!("Failed to stop WAL writer: {}", err);
-            }
-        },
-        None,
-    )
-}
-
-fn spawn_checkpoint_worker(
-    wal_manager: Arc<WalManager>,
-    buffer_pool: Arc<BufferManager>,
-    transaction_manager: Arc<TransactionManager>,
-    interval: Option<Duration>,
-) -> Option<WorkerHandle> {
-    let Some(interval) = interval else {
-        return None;
-    };
-    if interval.is_zero() {
-        return None;
-    }
-    let wal = wal_manager.clone();
-    let bp = buffer_pool.clone();
-    let txn_mgr = transaction_manager.clone();
-
-    spawn_periodic_worker(
-        "checkpoint-worker",
-        WorkerKind::Checkpoint,
-        interval,
-        move || {
-            let dirty_pages = bp.dirty_page_ids();
-            let dpt_snapshot = bp.dirty_page_table_snapshot();
-            let active_txns = txn_mgr.active_transactions();
-            let last_lsn = wal.max_assigned_lsn();
-
-            if last_lsn != 0 {
-                if let Err(e) = wal.flush_until(last_lsn) {
-                    warn!("Checkpoint flush failed: {}", e);
-                }
-                let payload = CheckpointPayload {
-                    last_lsn,
-                    dirty_pages,
-                    active_transactions: active_txns,
-                    dpt: dpt_snapshot,
-                };
-                if let Err(e) = wal.log_checkpoint(payload) {
-                    warn!("Checkpoint write failed: {}", e);
-                }
-            }
-        },
-    )
-}
-
-fn spawn_bg_writer(
-    buffer_pool: Arc<BufferManager>,
-    interval: Option<Duration>,
-    vacuum_cfg: IndexVacuumConfig,
-) -> Option<WorkerHandle> {
-    let Some(interval) = interval else {
-        return None;
-    };
-    if interval.is_zero() {
-        return None;
-    }
-    let bp = buffer_pool.clone();
-    spawn_periodic_worker(
-        "bg-writer",
-        WorkerKind::BufferPoolWriter,
-        interval,
-        move || {
-            let dirty_ids = bp.dirty_page_ids();
-            for page_id in dirty_ids.into_iter().take(16) {
-                let _ = bp.flush_page(page_id);
-            }
-
-            let registry = global_index_registry();
-            for (idx, heap) in registry.iter().take(16) {
-                let pending = idx.take_pending_garbage();
-                if pending >= vacuum_cfg.trigger_threshold {
-                    let _ = idx.lazy_cleanup_with(
-                        |rid| heap.tuple_meta(*rid).map(|m| m.is_deleted).unwrap_or(false),
-                        Some(vacuum_cfg.batch_limit),
-                    );
-                }
-            }
-        },
-    )
-}
-
-fn spawn_periodic_worker<F>(
-    name: &str,
-    kind: WorkerKind,
-    interval: Duration,
-    mut tick: F,
-) -> Option<WorkerHandle>
-where
-    F: FnMut() + Send + 'static,
-{
-    let stop_flag = Arc::new(AtomicBool::new(false));
-    let thread_flag = Arc::clone(&stop_flag);
-
-    match thread::Builder::new().name(name.into()).spawn(move || {
-        while !thread_flag.load(Ordering::Relaxed) {
-            tick();
-            if thread_flag.load(Ordering::Relaxed) {
-                break;
-            }
-            thread::sleep(interval);
-        }
-    }) {
-        Ok(join_handle) => {
-            let stop_handle = Arc::clone(&stop_flag);
-            Some(WorkerHandle::new(
-                WorkerMetadata {
-                    kind,
-                    interval: Some(interval),
-                },
-                move || {
-                    stop_handle.store(true, Ordering::Release);
-                },
-                Some(join_handle),
-            ))
-        }
-        Err(err) => {
-            warn!("Failed to spawn {}: {}", name, err);
-            None
-        }
-    }
 }

@@ -1,6 +1,9 @@
 use crate::buffer::{AtomicPageId, PageId, INVALID_PAGE_ID};
 use crate::catalog::catalog::{CatalogSchema, CatalogTable};
-use crate::catalog::{Catalog, Column, DataType, Schema, SchemaRef, DEFAULT_SCHEMA_NAME};
+use crate::catalog::registry::global_table_registry;
+use crate::catalog::{
+    Catalog, Column, DataType, Schema, SchemaRef, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME,
+};
 use crate::database::Database;
 use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::utils::scalar::ScalarValue;
@@ -111,9 +114,18 @@ fn load_information_schema(catalog: &mut Catalog) -> QuillSQLResult<()> {
         first_page_id: AtomicPageId::new(information_schema_schemas_first_page_id),
         last_page_id: AtomicPageId::new(information_schema_schemas_last_page_id),
     };
+    let schemas_heap = Arc::new(schemas_table);
     information_schema.tables.insert(
         INFORMATION_SCHEMA_SCHEMAS.to_string(),
-        CatalogTable::new(INFORMATION_SCHEMA_SCHEMAS, Arc::new(schemas_table)),
+        CatalogTable::new(INFORMATION_SCHEMA_SCHEMAS, schemas_heap.clone()),
+    );
+    global_table_registry().register(
+        TableReference::Full {
+            catalog: DEFAULT_CATALOG_NAME.to_string(),
+            schema: INFORMATION_SCHEMA_NAME.to_string(),
+            table: INFORMATION_SCHEMA_SCHEMAS.to_string(),
+        },
+        schemas_heap,
     );
 
     let tables_table = TableHeap {
@@ -122,9 +134,18 @@ fn load_information_schema(catalog: &mut Catalog) -> QuillSQLResult<()> {
         first_page_id: AtomicPageId::new(information_schema_tables_first_page_id),
         last_page_id: AtomicPageId::new(information_schema_tables_last_page_id),
     };
+    let tables_heap = Arc::new(tables_table);
     information_schema.tables.insert(
         INFORMATION_SCHEMA_TABLES.to_string(),
-        CatalogTable::new(INFORMATION_SCHEMA_TABLES, Arc::new(tables_table)),
+        CatalogTable::new(INFORMATION_SCHEMA_TABLES, tables_heap.clone()),
+    );
+    global_table_registry().register(
+        TableReference::Full {
+            catalog: DEFAULT_CATALOG_NAME.to_string(),
+            schema: INFORMATION_SCHEMA_NAME.to_string(),
+            table: INFORMATION_SCHEMA_TABLES.to_string(),
+        },
+        tables_heap,
     );
 
     let columns_table = TableHeap {
@@ -133,9 +154,18 @@ fn load_information_schema(catalog: &mut Catalog) -> QuillSQLResult<()> {
         first_page_id: AtomicPageId::new(information_schema_columns_first_page_id),
         last_page_id: AtomicPageId::new(information_schema_columns_last_page_id),
     };
+    let columns_heap = Arc::new(columns_table);
     information_schema.tables.insert(
         INFORMATION_SCHEMA_COLUMNS.to_string(),
-        CatalogTable::new(INFORMATION_SCHEMA_COLUMNS, Arc::new(columns_table)),
+        CatalogTable::new(INFORMATION_SCHEMA_COLUMNS, columns_heap.clone()),
+    );
+    global_table_registry().register(
+        TableReference::Full {
+            catalog: DEFAULT_CATALOG_NAME.to_string(),
+            schema: INFORMATION_SCHEMA_NAME.to_string(),
+            table: INFORMATION_SCHEMA_COLUMNS.to_string(),
+        },
+        columns_heap,
     );
 
     let indexes_table = TableHeap {
@@ -144,9 +174,18 @@ fn load_information_schema(catalog: &mut Catalog) -> QuillSQLResult<()> {
         first_page_id: AtomicPageId::new(information_schema_indexes_first_page_id),
         last_page_id: AtomicPageId::new(information_schema_indexes_last_page_id),
     };
+    let indexes_heap = Arc::new(indexes_table);
     information_schema.tables.insert(
         INFORMATION_SCHEMA_INDEXES.to_string(),
-        CatalogTable::new(INFORMATION_SCHEMA_INDEXES, Arc::new(indexes_table)),
+        CatalogTable::new(INFORMATION_SCHEMA_INDEXES, indexes_heap.clone()),
+    );
+    global_table_registry().register(
+        TableReference::Full {
+            catalog: DEFAULT_CATALOG_NAME.to_string(),
+            schema: INFORMATION_SCHEMA_NAME.to_string(),
+            table: INFORMATION_SCHEMA_INDEXES.to_string(),
+        },
+        indexes_heap,
     );
 
     catalog.load_schema(INFORMATION_SCHEMA_NAME, information_schema);

@@ -268,6 +268,14 @@ impl TransactionManager {
             .unwrap_or(TransactionStatus::Unknown)
     }
 
+    pub fn oldest_active_txn(&self) -> Option<TransactionId> {
+        self.active_txns.iter().map(|txn| *txn).min()
+    }
+
+    pub fn next_txn_id_hint(&self) -> TransactionId {
+        self.next_txn_id.load(Ordering::SeqCst)
+    }
+
     fn finish_commit(&self, txn: &Transaction, lsn: Lsn) -> QuillSQLResult<()> {
         if txn.synchronous_commit() {
             self.wal.wait_for_durable(lsn)?;
