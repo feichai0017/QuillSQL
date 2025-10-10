@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use log::{debug, warn};
 
-use crate::buffer::BufferManager;
+use crate::buffer::BufferEngine;
 use crate::catalog::registry::{global_index_registry, global_table_registry};
 use crate::catalog::INFORMATION_SCHEMA_NAME;
 use crate::config::IndexVacuumConfig;
@@ -149,9 +149,9 @@ pub fn wal_writer_worker(handle: WalWriterHandle, interval: Duration) -> WorkerH
     )
 }
 
-pub fn spawn_checkpoint_worker(
+pub fn spawn_checkpoint_worker<B: BufferEngine + 'static>(
     wal_manager: Arc<WalManager>,
-    buffer_pool: Arc<BufferManager>,
+    buffer_pool: Arc<B>,
     transaction_manager: Arc<TransactionManager>,
     interval: Option<Duration>,
 ) -> Option<WorkerHandle> {
@@ -194,8 +194,8 @@ pub fn spawn_checkpoint_worker(
     )
 }
 
-pub fn spawn_bg_writer(
-    buffer_pool: Arc<BufferManager>,
+pub fn spawn_bg_writer<B: BufferEngine + 'static>(
+    buffer_pool: Arc<B>,
     interval: Option<Duration>,
     vacuum_cfg: IndexVacuumConfig,
 ) -> Option<WorkerHandle> {
@@ -216,7 +216,7 @@ pub fn spawn_bg_writer(
                 let _ = bp.flush_page(page_id);
             }
 
-            let registry = global_index_registry();
+            let registry = global_index_registry::<B>();
             for (idx, heap) in registry.iter().take(16) {
                 let pending = idx.take_pending_garbage();
                 if pending >= vacuum_cfg.trigger_threshold {
@@ -230,7 +230,7 @@ pub fn spawn_bg_writer(
     )
 }
 
-pub fn spawn_mvcc_vacuum_worker(
+pub fn spawn_mvcc_vacuum_worker<B: BufferEngine + 'static>(
     transaction_manager: Arc<TransactionManager>,
     interval: Option<Duration>,
     batch_limit: usize,
@@ -243,7 +243,7 @@ pub fn spawn_mvcc_vacuum_worker(
     }
 
     let txn_mgr = transaction_manager.clone();
-    let tables = global_table_registry();
+    let tables = global_table_registry::<B>();
 
     spawn_periodic_worker("mvcc-vacuum", WorkerKind::MvccVacuum, interval, move || {
         let safe_xmin = txn_mgr
@@ -321,8 +321,8 @@ where
     }
 }
 
-fn vacuum_table_versions(
-    table: &Arc<TableHeap>,
+fn vacuum_table_versions<B: BufferEngine>(
+    table: &Arc<TableHeap<B>>,
     txn_mgr: &Arc<TransactionManager>,
     safe_xmin: TransactionId,
     remaining: &mut usize,
@@ -352,8 +352,8 @@ fn vacuum_table_versions(
     Ok(cleaned)
 }
 
-fn try_reclaim_deleted(
-    table: &Arc<TableHeap>,
+fn try_reclaim_deleted<B: BufferEngine>(
+    table: &Arc<TableHeap<B>>,
     txn_mgr: &Arc<TransactionManager>,
     safe_xmin: TransactionId,
     rid: RecordId,
@@ -383,8 +383,8 @@ fn try_reclaim_deleted(
     })
 }
 
-fn try_reclaim_aborted(
-    table: &Arc<TableHeap>,
+fn try_reclaim_aborted<B: BufferEngine>(
+    table: &Arc<TableHeap<B>>,
     txn_mgr: &Arc<TransactionManager>,
     safe_xmin: TransactionId,
     rid: RecordId,

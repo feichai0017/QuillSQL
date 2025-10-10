@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::buffer::BufferManager;
+use crate::buffer::{BufferEngine, StandardBufferManager};
 use crate::error::QuillSQLResult;
 use crate::recovery::analysis::{AnalysisPass, AnalysisResult};
 use crate::recovery::redo::RedoExecutor;
@@ -9,10 +9,10 @@ use crate::recovery::wal::codec::WalFrame;
 use crate::recovery::{Lsn, WalManager};
 use crate::storage::disk_scheduler::DiskScheduler;
 
-pub struct RecoveryManager {
+pub struct RecoveryManager<B: BufferEngine = StandardBufferManager> {
     wal: Arc<WalManager>,
     disk_scheduler: Arc<DiskScheduler>,
-    buffer_pool: Option<Arc<BufferManager>>,
+    buffer_pool: Option<Arc<B>>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -22,7 +22,7 @@ pub struct RecoverySummary {
     pub loser_transactions: Vec<u64>,
 }
 
-impl RecoveryManager {
+impl<B: BufferEngine + 'static> RecoveryManager<B> {
     pub fn new(wal: Arc<WalManager>, disk_scheduler: Arc<DiskScheduler>) -> Self {
         Self {
             wal,
@@ -31,8 +31,8 @@ impl RecoveryManager {
         }
     }
 
-    /// Optionally attach BufferManager to enable TableHeap recovery APIs
-    pub fn with_buffer_pool(mut self, bpm: Arc<BufferManager>) -> Self {
+    /// Optionally attach a buffer engine to enable TableHeap recovery APIs
+    pub fn with_buffer_pool(mut self, bpm: Arc<B>) -> Self {
         self.buffer_pool = Some(bpm);
         self
     }
@@ -45,12 +45,12 @@ impl RecoveryManager {
 
         let control_snapshot = self.wal.control_file().map(|ctrl| ctrl.snapshot());
         let mut analysis = AnalysisPass::new(control_snapshot);
-        let mut undo = UndoExecutor::new(
+        let mut undo = UndoExecutor::<B>::new(
             self.wal.clone(),
             self.disk_scheduler.clone(),
             self.buffer_pool.clone(),
         );
-        let redo = RedoExecutor::new(self.disk_scheduler.clone(), self.buffer_pool.clone());
+        let redo = RedoExecutor::<B>::new(self.disk_scheduler.clone(), self.buffer_pool.clone());
 
         let mut frames: Vec<WalFrame> = Vec::new();
         while let Some(frame) = reader.next_frame()? {
@@ -103,7 +103,7 @@ impl RecoveryManager {
 #[cfg(test)]
 mod tests {
     use super::RecoveryManager;
-    use crate::buffer::{BufferManager, INVALID_PAGE_ID};
+    use crate::buffer::{StandardBufferManager, INVALID_PAGE_ID};
     use crate::config::{IOSchedulerConfig, WalConfig};
     use crate::recovery::analysis::{AnalysisPass, AnalysisResult};
     use crate::recovery::redo::RedoExecutor;
@@ -147,13 +147,17 @@ mod tests {
     fn run_stage_pipeline(
         wal: Arc<WalManager>,
         scheduler: Arc<DiskScheduler>,
-        buffer_pool: Option<Arc<BufferManager>>,
+        buffer_pool: Option<Arc<StandardBufferManager>>,
     ) -> (AnalysisResult, UndoOutcome, usize) {
         let mut reader = wal.reader().expect("wal reader");
         let control_snapshot = wal.control_file().map(|ctrl| ctrl.snapshot());
         let mut analysis = AnalysisPass::new(control_snapshot);
-        let mut undo = UndoExecutor::new(wal.clone(), scheduler.clone(), buffer_pool.clone());
-        let redo = RedoExecutor::new(scheduler, buffer_pool);
+        let mut undo = UndoExecutor::<StandardBufferManager>::new(
+            wal.clone(),
+            scheduler.clone(),
+            buffer_pool.clone(),
+        );
+        let redo = RedoExecutor::<StandardBufferManager>::new(scheduler, buffer_pool);
         let mut frames = Vec::new();
         while let Some(frame) = reader.next_frame().expect("wal frame") {
             analysis.observe(&frame);
@@ -219,7 +223,7 @@ mod tests {
         assert_eq!(redo_count, 1);
         assert!(undo_outcome.loser_transactions.is_empty());
 
-        let recovery = RecoveryManager::new(wal, scheduler.clone());
+        let recovery = RecoveryManager::<StandardBufferManager>::new(wal, scheduler.clone());
         let summary = recovery.replay().unwrap();
         assert_eq!(summary.redo_count, redo_count);
         assert!(summary.loser_transactions.is_empty());
@@ -277,7 +281,7 @@ mod tests {
         assert_eq!(redo_count, 2);
         assert!(undo_outcome.loser_transactions.is_empty());
 
-        let recovery = RecoveryManager::new(wal, scheduler.clone());
+        let recovery = RecoveryManager::<StandardBufferManager>::new(wal, scheduler.clone());
         let summary = recovery.replay().unwrap();
         assert_eq!(summary.redo_count, redo_count);
 
@@ -317,7 +321,7 @@ mod tests {
         assert_eq!(redo_count, 0);
         assert_eq!(undo_outcome.loser_transactions, vec![7]);
 
-        let recovery = RecoveryManager::new(wal, scheduler.clone());
+        let recovery = RecoveryManager::<StandardBufferManager>::new(wal, scheduler.clone());
         let summary = recovery.replay().unwrap();
         assert_eq!(summary.redo_count, redo_count);
         assert_eq!(summary.loser_transactions, undo_outcome.loser_transactions);
@@ -414,7 +418,7 @@ mod tests {
 
         // Reopen wal and run recovery (inject BufferPool to use TableHeap recovery APIs)
         let (wal, scheduler) = build_wal(config.clone(), &db_path);
-        let bpm = Arc::new(BufferManager::new(64, scheduler.clone()));
+        let bpm = Arc::new(StandardBufferManager::new(64, scheduler.clone()));
         let (analysis, undo_outcome, redo_count) =
             run_stage_pipeline(wal.clone(), scheduler.clone(), Some(bpm.clone()));
         assert!(analysis.has_frames);
@@ -422,7 +426,8 @@ mod tests {
         assert_eq!(undo_outcome.loser_transactions, vec![1]);
         assert!(undo_outcome.max_clr_lsn > 0);
 
-        let recovery = RecoveryManager::new(wal, scheduler.clone()).with_buffer_pool(bpm);
+        let recovery = RecoveryManager::<StandardBufferManager>::new(wal, scheduler.clone())
+            .with_buffer_pool(bpm);
         let summary = recovery.replay().unwrap();
         assert_eq!(summary.loser_transactions, undo_outcome.loser_transactions);
 
@@ -532,7 +537,7 @@ mod tests {
 
         // Recover (inject BufferPool)
         let scheduler = build_scheduler(&db_path);
-        let bpm = Arc::new(BufferManager::new(64, scheduler.clone()));
+        let bpm = Arc::new(StandardBufferManager::new(64, scheduler.clone()));
         let wal = Arc::new(WalManager::new(config.clone(), None, None).unwrap());
         let (analysis, undo_outcome, redo_count) =
             run_stage_pipeline(wal.clone(), scheduler.clone(), Some(bpm.clone()));
@@ -541,7 +546,8 @@ mod tests {
         assert_eq!(undo_outcome.loser_transactions, vec![2]);
         assert!(undo_outcome.max_clr_lsn > 0);
 
-        let recovery = RecoveryManager::new(wal, scheduler.clone()).with_buffer_pool(bpm);
+        let recovery = RecoveryManager::<StandardBufferManager>::new(wal, scheduler.clone())
+            .with_buffer_pool(bpm);
         let summary = recovery.replay().unwrap();
         assert_eq!(summary.redo_count, redo_count);
         assert_eq!(summary.loser_transactions, undo_outcome.loser_transactions);
@@ -640,7 +646,7 @@ mod tests {
 
         // recover (inject BufferPool)
         let scheduler = build_scheduler(&db_path);
-        let bpm = Arc::new(BufferManager::new(64, scheduler.clone()));
+        let bpm = Arc::new(StandardBufferManager::new(64, scheduler.clone()));
         let wal = Arc::new(WalManager::new(config.clone(), None, None).unwrap());
         let (analysis, undo_outcome, redo_count) =
             run_stage_pipeline(wal.clone(), scheduler.clone(), Some(bpm.clone()));
@@ -649,7 +655,8 @@ mod tests {
         assert_eq!(undo_outcome.loser_transactions, vec![6]);
         assert!(undo_outcome.max_clr_lsn > 0);
 
-        let recovery = RecoveryManager::new(wal, scheduler.clone()).with_buffer_pool(bpm);
+        let recovery = RecoveryManager::<StandardBufferManager>::new(wal, scheduler.clone())
+            .with_buffer_pool(bpm);
         let summary = recovery.replay().unwrap();
         assert_eq!(summary.redo_count, redo_count);
         assert_eq!(summary.loser_transactions, undo_outcome.loser_transactions);
@@ -740,7 +747,7 @@ mod tests {
 
         // First recovery (inject BufferPool)
         let scheduler = build_scheduler(&db_path);
-        let bpm = Arc::new(BufferManager::new(64, scheduler.clone()));
+        let bpm = Arc::new(StandardBufferManager::new(64, scheduler.clone()));
         let wal = Arc::new(WalManager::new(config.clone(), None, None).unwrap());
         let (analysis1, outcome1, redo_count1) =
             run_stage_pipeline(wal.clone(), scheduler.clone(), Some(bpm.clone()));
@@ -749,7 +756,8 @@ mod tests {
         assert_eq!(outcome1.loser_transactions, vec![10]);
         assert!(outcome1.max_clr_lsn > 0);
 
-        let recovery = RecoveryManager::new(wal, scheduler.clone()).with_buffer_pool(bpm);
+        let recovery = RecoveryManager::<StandardBufferManager>::new(wal, scheduler.clone())
+            .with_buffer_pool(bpm);
         let summary1 = recovery.replay().unwrap();
         assert_eq!(summary1.redo_count, redo_count1);
         assert_eq!(summary1.loser_transactions, outcome1.loser_transactions);
@@ -760,7 +768,7 @@ mod tests {
 
         // Second recovery (should not change page state) - inject BufferPool again
         let scheduler2 = build_scheduler(&db_path);
-        let bpm2 = Arc::new(BufferManager::new(64, scheduler2.clone()));
+        let bpm2 = Arc::new(StandardBufferManager::new(64, scheduler2.clone()));
         let wal2 = Arc::new(WalManager::new(config, None, None).unwrap());
         let (analysis2, outcome2, redo_count2) =
             run_stage_pipeline(wal2.clone(), scheduler2.clone(), Some(bpm2.clone()));
@@ -768,7 +776,8 @@ mod tests {
         assert_eq!(redo_count2, 0);
         assert_eq!(outcome2.loser_transactions, vec![10]);
 
-        let recovery2 = RecoveryManager::new(wal2, scheduler2.clone()).with_buffer_pool(bpm2);
+        let recovery2 = RecoveryManager::<StandardBufferManager>::new(wal2, scheduler2.clone())
+            .with_buffer_pool(bpm2);
         let summary2 = recovery2.replay().unwrap();
         assert_eq!(summary2.redo_count, redo_count2);
         assert_eq!(summary2.loser_transactions, outcome2.loser_transactions);
@@ -851,7 +860,7 @@ mod tests {
         assert!(redo_count >= 1);
         assert!(undo_outcome.loser_transactions.is_empty());
 
-        let recovery = RecoveryManager::new(wal, scheduler.clone());
+        let recovery = RecoveryManager::<StandardBufferManager>::new(wal, scheduler.clone());
         let summary = recovery.replay().unwrap();
         assert_eq!(summary.redo_count, redo_count);
 
@@ -905,7 +914,7 @@ mod tests {
         // Recover and verify
         let scheduler = build_scheduler(&db_path);
         let wal = Arc::new(WalManager::new(config, None, None).unwrap());
-        let recovery = RecoveryManager::new(wal, scheduler.clone());
+        let recovery = RecoveryManager::<StandardBufferManager>::new(wal, scheduler.clone());
         let _ = recovery.replay().unwrap();
         let rx = scheduler.schedule_read(pid).unwrap();
         let data = rx.recv().unwrap().unwrap();
@@ -1012,10 +1021,11 @@ mod tests {
 
         // First recovery should undo both updates and write two CLRs
         let scheduler1 = build_scheduler(&db_path);
-        let bpm1 = Arc::new(BufferManager::new(64, scheduler1.clone()));
+        let bpm1 = Arc::new(StandardBufferManager::new(64, scheduler1.clone()));
         let wal1 = Arc::new(WalManager::new(config.clone(), None, None).unwrap());
         let recovery1 =
-            RecoveryManager::new(wal1.clone(), scheduler1.clone()).with_buffer_pool(bpm1);
+            RecoveryManager::<StandardBufferManager>::new(wal1.clone(), scheduler1.clone())
+                .with_buffer_pool(bpm1);
         let _ = recovery1.replay().unwrap();
         // Ensure CLRs appended during UNDO are durable before reading WAL files
         wal1.flush(None).unwrap();
@@ -1037,9 +1047,10 @@ mod tests {
 
         // Second recovery: no further changes
         let scheduler2 = build_scheduler(&db_path);
-        let bpm2 = Arc::new(BufferManager::new(64, scheduler2.clone()));
+        let bpm2 = Arc::new(StandardBufferManager::new(64, scheduler2.clone()));
         let wal2 = Arc::new(WalManager::new(config.clone(), None, None).unwrap());
-        let recovery2 = RecoveryManager::new(wal2, scheduler2.clone()).with_buffer_pool(bpm2);
+        let recovery2 = RecoveryManager::<StandardBufferManager>::new(wal2, scheduler2.clone())
+            .with_buffer_pool(bpm2);
         let _ = recovery2.replay().unwrap();
         let rx2 = scheduler2.schedule_read(page_id).unwrap();
         let data2 = rx2.recv().unwrap().unwrap();
@@ -1170,9 +1181,11 @@ mod tests {
 
         for _ in 0..2 {
             let scheduler_r = build_scheduler(&db_path);
-            let bpm_r = Arc::new(BufferManager::new(64, scheduler_r.clone()));
+            let bpm_r = Arc::new(StandardBufferManager::new(64, scheduler_r.clone()));
             let wal_r = Arc::new(WalManager::new(config.clone(), None, None).unwrap());
-            let recovery = RecoveryManager::new(wal_r, scheduler_r.clone()).with_buffer_pool(bpm_r);
+            let recovery =
+                RecoveryManager::<StandardBufferManager>::new(wal_r, scheduler_r.clone())
+                    .with_buffer_pool(bpm_r);
             let _ = recovery.replay().unwrap();
 
             let rx_a = scheduler_r.schedule_read(pid_a).unwrap();
@@ -1296,9 +1309,10 @@ mod tests {
         drop(wal);
 
         let scheduler = build_scheduler(&db_path);
-        let bpm = Arc::new(BufferManager::new(64, scheduler.clone()));
+        let bpm = Arc::new(StandardBufferManager::new(64, scheduler.clone()));
         let wal = Arc::new(WalManager::new(config.clone(), None, None).unwrap());
-        let recovery = RecoveryManager::new(wal, scheduler.clone()).with_buffer_pool(bpm);
+        let recovery = RecoveryManager::<StandardBufferManager>::new(wal, scheduler.clone())
+            .with_buffer_pool(bpm);
         let summary = recovery.replay().unwrap();
         assert_eq!(summary.loser_transactions, vec![2]);
 

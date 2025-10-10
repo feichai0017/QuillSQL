@@ -1,10 +1,10 @@
-use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::any::TypeId;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, OnceLock, RwLock};
 
-use once_cell::sync::Lazy;
-use std::sync::OnceLock;
+use dashmap::DashMap;
 
-use crate::buffer::BufferManager;
+use crate::buffer::{BufferEngine, StandardBufferManager};
 use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::recovery::wal::codec::{
     decode_page_delta, decode_page_write, ResourceManagerId, WalFrame,
@@ -13,48 +13,135 @@ use crate::recovery::Lsn;
 use crate::storage::disk_scheduler::DiskScheduler;
 
 #[derive(Clone)]
-pub struct RedoContext {
+pub struct RedoContext<B: BufferEngine = StandardBufferManager> {
     pub disk_scheduler: Arc<DiskScheduler>,
-    pub buffer_pool: Option<Arc<BufferManager>>,
+    pub buffer_pool: Option<Arc<B>>,
 }
 
 #[derive(Clone)]
-pub struct UndoContext {
+pub struct UndoContext<B: BufferEngine = StandardBufferManager> {
     pub disk_scheduler: Arc<DiskScheduler>,
-    pub buffer_pool: Option<Arc<BufferManager>>,
+    pub buffer_pool: Option<Arc<B>>,
 }
 
-pub trait ResourceManager: Send + Sync {
-    fn redo(&self, frame: &WalFrame, ctx: &RedoContext) -> QuillSQLResult<usize>;
-    fn undo(&self, frame: &WalFrame, ctx: &UndoContext) -> QuillSQLResult<()>;
+pub trait ResourceManager<B: BufferEngine>: Send + Sync {
+    fn redo(&self, frame: &WalFrame, ctx: &RedoContext<B>) -> QuillSQLResult<usize>;
+    fn undo(&self, frame: &WalFrame, ctx: &UndoContext<B>) -> QuillSQLResult<()>;
 
     fn transaction_id(&self, _frame: &WalFrame) -> Option<u64> {
         None
     }
 }
 
-static REGISTRY: Lazy<RwLock<HashMap<ResourceManagerId, Arc<dyn ResourceManager>>>> =
-    Lazy::new(|| RwLock::new(HashMap::new()));
-
-pub fn register_resource_manager(id: ResourceManagerId, manager: Arc<dyn ResourceManager>) {
-    let mut guard = REGISTRY
-        .write()
-        .expect("resource manager registry poisoned");
-    guard.insert(id, manager);
+struct ResourceRegistry<B: BufferEngine> {
+    managers: DashMap<ResourceManagerId, Arc<dyn ResourceManager<B>>>,
 }
 
-pub fn get_resource_manager(id: ResourceManagerId) -> Option<Arc<dyn ResourceManager>> {
-    let guard = REGISTRY.read().expect("resource manager registry poisoned");
-    guard.get(&id).cloned()
+impl<B: BufferEngine> Default for ResourceRegistry<B> {
+    fn default() -> Self {
+        Self {
+            managers: DashMap::new(),
+        }
+    }
+}
+
+impl<B: BufferEngine> ResourceRegistry<B> {
+    fn register(&self, id: ResourceManagerId, manager: Arc<dyn ResourceManager<B>>) {
+        if self.managers.contains_key(&id) {
+            return;
+        }
+        self.managers.insert(id, manager);
+    }
+
+    fn get(&self, id: ResourceManagerId) -> Option<Arc<dyn ResourceManager<B>>> {
+        self.managers.get(&id).map(|entry| entry.value().clone())
+    }
+}
+
+struct RegistryStore {
+    registries: HashMap<TypeId, Arc<dyn std::any::Any + Send + Sync>>,
+}
+
+impl RegistryStore {
+    fn new() -> Self {
+        Self {
+            registries: HashMap::new(),
+        }
+    }
+}
+
+fn registry_store() -> &'static RwLock<RegistryStore> {
+    static STORE: OnceLock<RwLock<RegistryStore>> = OnceLock::new();
+    STORE.get_or_init(|| RwLock::new(RegistryStore::new()))
+}
+
+fn resource_registry<B: BufferEngine + 'static>() -> Arc<ResourceRegistry<B>> {
+    let store = registry_store();
+    {
+        let guard = store.read().unwrap();
+        if let Some(entry) = guard.registries.get(&TypeId::of::<B>()) {
+            if let Ok(registry) = entry.clone().downcast::<ResourceRegistry<B>>() {
+                return registry;
+            }
+        }
+    }
+    let mut guard = store.write().unwrap();
+    guard
+        .registries
+        .entry(TypeId::of::<B>())
+        .or_insert_with(|| Arc::new(ResourceRegistry::<B>::default()));
+    guard
+        .registries
+        .get(&TypeId::of::<B>())
+        .and_then(|entry| entry.clone().downcast::<ResourceRegistry<B>>().ok())
+        .expect("resource registry initialization failed")
+}
+
+fn default_tracker() -> &'static RwLock<HashSet<TypeId>> {
+    static TRACKER: OnceLock<RwLock<HashSet<TypeId>>> = OnceLock::new();
+    TRACKER.get_or_init(|| RwLock::new(HashSet::new()))
+}
+
+pub fn register_resource_manager<B: BufferEngine + 'static>(
+    id: ResourceManagerId,
+    manager: Arc<dyn ResourceManager<B>>,
+) {
+    let registry = resource_registry::<B>();
+    registry.register(id, manager);
+}
+
+pub fn get_resource_manager<B: BufferEngine + 'static>(
+    id: ResourceManagerId,
+) -> Option<Arc<dyn ResourceManager<B>>> {
+    let registry = resource_registry::<B>();
+    registry.get(id)
+}
+
+pub fn ensure_default_resource_managers_registered<B: BufferEngine + 'static>() {
+    let tracker = default_tracker();
+    {
+        let guard = tracker.read().unwrap();
+        if guard.contains(&TypeId::of::<B>()) {
+            return;
+        }
+    }
+    let mut guard = tracker.write().unwrap();
+    if guard.insert(TypeId::of::<B>()) {
+        register_resource_manager::<B>(
+            ResourceManagerId::Page,
+            Arc::new(PageResourceManager::default()),
+        );
+        crate::storage::heap_recovery::ensure_heap_resource_manager_registered::<B>();
+    }
 }
 
 #[derive(Default)]
 struct PageResourceManager;
 
 impl PageResourceManager {
-    fn page_requires_redo(
+    fn page_requires_redo<B: BufferEngine>(
         &self,
-        ctx: &RedoContext,
+        ctx: &RedoContext<B>,
         page_id: u32,
         record_lsn: Lsn,
     ) -> QuillSQLResult<bool> {
@@ -70,7 +157,7 @@ impl PageResourceManager {
 
     fn redo_page_write(
         &self,
-        ctx: &RedoContext,
+        ctx: &RedoContext<impl BufferEngine>,
         payload: crate::recovery::wal::codec::PageWritePayload,
     ) -> QuillSQLResult<()> {
         debug_assert_eq!(payload.page_image.len(), crate::buffer::PAGE_SIZE);
@@ -84,7 +171,7 @@ impl PageResourceManager {
 
     fn redo_page_delta(
         &self,
-        ctx: &RedoContext,
+        ctx: &RedoContext<impl BufferEngine>,
         payload: crate::recovery::wal::codec::PageDeltaPayload,
     ) -> QuillSQLResult<()> {
         let rx = ctx.disk_scheduler.schedule_read(payload.page_id)?;
@@ -128,8 +215,8 @@ impl PageResourceManager {
     }
 }
 
-impl ResourceManager for PageResourceManager {
-    fn redo(&self, frame: &WalFrame, ctx: &RedoContext) -> QuillSQLResult<usize> {
+impl<B: BufferEngine> ResourceManager<B> for PageResourceManager {
+    fn redo(&self, frame: &WalFrame, ctx: &RedoContext<B>) -> QuillSQLResult<usize> {
         match frame.info {
             0 => {
                 let payload = decode_page_write(&frame.body)?;
@@ -154,19 +241,7 @@ impl ResourceManager for PageResourceManager {
         }
     }
 
-    fn undo(&self, _frame: &WalFrame, _ctx: &UndoContext) -> QuillSQLResult<()> {
+    fn undo(&self, _frame: &WalFrame, _ctx: &UndoContext<B>) -> QuillSQLResult<()> {
         Ok(())
     }
-}
-
-static DEFAULT_RESOURCE_MANAGERS: OnceLock<()> = OnceLock::new();
-
-pub fn ensure_default_resource_managers_registered() {
-    DEFAULT_RESOURCE_MANAGERS.get_or_init(|| {
-        register_resource_manager(
-            ResourceManagerId::Page,
-            Arc::new(PageResourceManager::default()),
-        );
-        crate::storage::heap_recovery::ensure_heap_resource_manager_registered();
-    });
 }

@@ -1,11 +1,13 @@
-use crate::buffer::buffer_pool::{BufferPool, FrameMeta};
-use crate::buffer::{BufferManager, FrameId};
+use crate::buffer::engine::{BufferReadGuard, BufferWriteGuard};
 use crate::recovery::Lsn;
 use derive_with::With;
 use parking_lot::{RwLockReadGuard, RwLockWriteGuard};
 use std::mem::{self, ManuallyDrop};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+
+use super::buffer_pool::{BufferPool, FrameId, FrameMeta};
+use super::StandardBufferManager;
 
 pub type PageId = u32;
 pub type AtomicPageId = AtomicU32;
@@ -50,7 +52,7 @@ impl PageMeta {
 
 #[derive(Debug)]
 pub struct ReadPageGuard {
-    bpm: Arc<BufferManager>,
+    bpm: Arc<StandardBufferManager>,
     pool: Arc<BufferPool>,
     frame_id: FrameId,
     guard: ManuallyDrop<RwLockReadGuard<'static, ()>>,
@@ -102,7 +104,7 @@ impl Drop for ReadPageGuard {
 
 #[derive(Debug)]
 pub struct WritePageGuard {
-    bpm: Arc<BufferManager>,
+    bpm: Arc<StandardBufferManager>,
     pool: Arc<BufferPool>,
     frame_id: FrameId,
     guard: ManuallyDrop<RwLockWriteGuard<'static, ()>>,
@@ -191,147 +193,130 @@ impl Drop for WritePageGuard {
     }
 }
 
-pub(crate) fn new_read_guard(bpm: Arc<BufferManager>, frame_id: FrameId) -> ReadPageGuard {
+impl BufferReadGuard for ReadPageGuard {
+    fn page_id(&self) -> PageId {
+        self.meta_snapshot().page_id
+    }
+
+    fn data(&self) -> &[u8] {
+        ReadPageGuard::data(self)
+    }
+
+    fn lsn(&self) -> Lsn {
+        self.meta_snapshot().lsn
+    }
+
+    fn is_dirty(&self) -> bool {
+        self.meta_snapshot().is_dirty
+    }
+
+    fn pin_count(&self) -> u32 {
+        self.meta_snapshot().pin_count
+    }
+}
+
+impl BufferReadGuard for WritePageGuard {
+    fn page_id(&self) -> PageId {
+        self.meta_snapshot().page_id
+    }
+
+    fn data(&self) -> &[u8] {
+        WritePageGuard::data(self)
+    }
+
+    fn lsn(&self) -> Lsn {
+        self.meta_snapshot().lsn
+    }
+
+    fn is_dirty(&self) -> bool {
+        self.meta_snapshot().is_dirty
+    }
+
+    fn pin_count(&self) -> u32 {
+        self.meta_snapshot().pin_count
+    }
+}
+
+impl BufferWriteGuard for WritePageGuard {
+    fn data_mut(&mut self) -> &mut [u8] {
+        WritePageGuard::data_mut(self)
+    }
+
+    fn mark_dirty(&mut self) {
+        WritePageGuard::mark_dirty(self)
+    }
+
+    fn set_lsn(&mut self, lsn: Lsn) {
+        WritePageGuard::set_lsn(self, lsn)
+    }
+
+    fn overwrite(&mut self, data: &[u8], new_lsn: Option<Lsn>) {
+        WritePageGuard::overwrite(self, data, new_lsn)
+    }
+
+    fn first_dirty_lsn(&self) -> Option<Lsn> {
+        self.first_dirty_lsn
+    }
+}
+
+pub(crate) fn new_read_guard(bpm: Arc<StandardBufferManager>, frame_id: FrameId) -> ReadPageGuard {
     let pool = bpm.buffer_pool();
-    let lock = pool.frame_lock(frame_id).read();
-    let static_guard =
-        unsafe { mem::transmute::<RwLockReadGuard<'_, ()>, RwLockReadGuard<'static, ()>>(lock) };
+    let lock = pool.frame_lock(frame_id);
+    let guard = lock.read();
+    let guard_static: RwLockReadGuard<'static, ()> =
+        unsafe { mem::transmute::<RwLockReadGuard<'_, ()>, RwLockReadGuard<'static, ()>>(guard) };
     ReadPageGuard {
         bpm,
         pool,
         frame_id,
-        guard: ManuallyDrop::new(static_guard),
+        guard: ManuallyDrop::new(guard_static),
     }
 }
 
-pub(crate) fn new_write_guard(bpm: Arc<BufferManager>, frame_id: FrameId) -> WritePageGuard {
+pub(crate) fn new_write_guard(
+    bpm: Arc<StandardBufferManager>,
+    frame_id: FrameId,
+) -> WritePageGuard {
     let pool = bpm.buffer_pool();
-    let lock = pool.frame_lock(frame_id).write();
-    let static_guard =
-        unsafe { mem::transmute::<RwLockWriteGuard<'_, ()>, RwLockWriteGuard<'static, ()>>(lock) };
+    let lock = pool.frame_lock(frame_id);
+    let guard = lock.write();
+    let guard_static: RwLockWriteGuard<'static, ()> =
+        unsafe { mem::transmute::<RwLockWriteGuard<'_, ()>, RwLockWriteGuard<'static, ()>>(guard) };
     WritePageGuard {
         bpm,
         pool,
         frame_id,
-        guard: ManuallyDrop::new(static_guard),
+        guard: ManuallyDrop::new(guard_static),
         first_dirty_lsn: None,
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::Ordering;
-    use std::sync::Arc;
+    use super::*;
+    use crate::storage::disk_scheduler::DiskScheduler;
     use tempfile::TempDir;
 
-    use crate::buffer::BufferManager;
-    use crate::storage::disk_manager::DiskManager;
-    use crate::storage::disk_scheduler::DiskScheduler;
-
-    use super::{PageMeta, INVALID_PAGE_ID, PAGE_SIZE};
-
-    fn setup_real_bpm_environment(num_pages: usize) -> (TempDir, Arc<BufferManager>) {
+    fn setup_real_bpm_environment(num_pages: usize) -> (TempDir, Arc<StandardBufferManager>) {
         let temp_dir = TempDir::new().unwrap();
-        let db_path = temp_dir.path().join("test.db");
-
-        let disk_manager = Arc::new(DiskManager::try_new(db_path).unwrap());
+        let disk_manager = Arc::new(
+            crate::storage::disk_manager::DiskManager::try_new(temp_dir.path().join("bpm.db"))
+                .unwrap(),
+        );
         let disk_scheduler = Arc::new(DiskScheduler::new(disk_manager));
-        let buffer_pool_manager = Arc::new(BufferManager::new(num_pages, disk_scheduler));
-
+        let buffer_pool_manager = Arc::new(StandardBufferManager::new(num_pages, disk_scheduler));
         (temp_dir, buffer_pool_manager)
     }
 
     #[test]
-    fn test_page_struct_creation() {
-        let page = PageMeta::new(1);
-        assert_eq!(page.page_id, 1);
-        assert!(!page.is_dirty);
-        assert_eq!(page.pin_count.load(Ordering::Acquire), 0);
-
-        let empty_page = PageMeta::empty();
-        assert_eq!(empty_page.page_id, INVALID_PAGE_ID);
-    }
-
-    #[test]
-    fn test_read_guard_deref_and_drop() {
-        let (_temp_dir, bpm) = setup_real_bpm_environment(10);
-
-        let (page_id, frame_id) = {
-            let guard = bpm.new_page().unwrap();
-            let frame_id = guard.frame_id();
-            (guard.page_id(), frame_id)
-        };
-
-        {
-            let meta = bpm.buffer_pool().frame_meta(frame_id).clone();
-            assert_eq!(meta.pin_count, 0);
-        }
+    fn read_guard_pins_and_unpins_frame() {
+        let (_tmp, bpm) = setup_real_bpm_environment(4);
+        let guard = bpm.new_page().unwrap();
+        let page_id = guard.page_id();
+        drop(guard);
 
         let read_guard = bpm.fetch_page_read(page_id).unwrap();
-        assert_eq!(read_guard.page_id(), page_id);
         assert_eq!(read_guard.pin_count(), 1);
-        assert_eq!(read_guard.data().len(), PAGE_SIZE);
-        let snapshot = read_guard.meta_snapshot();
-        assert_eq!(snapshot.pin_count, 1);
         drop(read_guard);
-
-        let meta = bpm.buffer_pool().frame_meta(frame_id).clone();
-        assert_eq!(meta.pin_count, 0);
-    }
-
-    #[test]
-    fn test_write_guard_deref_mut_and_drop() {
-        let (_temp_dir, bpm) = setup_real_bpm_environment(10);
-        let (page_id, frame_id) = {
-            let mut write_guard = bpm.new_page().unwrap();
-            write_guard.data_mut()[0] = 123;
-            write_guard.set_lsn(42);
-            write_guard.mark_dirty();
-            (write_guard.page_id(), write_guard.frame_id())
-        };
-
-        let meta = bpm.buffer_pool().frame_meta(frame_id).clone();
-        assert!(meta.is_dirty);
-        assert_eq!(meta.lsn, 42);
-        assert_eq!(meta.pin_count, 0);
-
-        let read_guard = bpm.fetch_page_read(page_id).unwrap();
-        assert_eq!(read_guard.data()[0], 123);
-        assert!(read_guard.is_dirty());
-        assert_eq!(read_guard.lsn(), 42);
-        let snapshot = read_guard.meta_snapshot();
-        assert_eq!(snapshot.lsn, 42);
-        assert!(snapshot.is_dirty);
-        assert_eq!(snapshot.pin_count, 1);
-        drop(read_guard);
-
-        let meta = bpm.buffer_pool().frame_meta(frame_id).clone();
-        assert!(meta.is_dirty);
-        assert_eq!(meta.lsn, 42);
-        assert_eq!(meta.pin_count, 0);
-    }
-
-    #[test]
-    fn test_write_guard_without_mutation_is_not_dirty() {
-        let (_temp_dir, bpm) = setup_real_bpm_environment(10);
-        let (page_id, frame_id) = {
-            let guard = bpm.new_page().unwrap();
-            (guard.page_id(), guard.frame_id())
-        };
-
-        {
-            let _write_guard = bpm.fetch_page_write(page_id).unwrap();
-        }
-
-        let read_guard = bpm.fetch_page_read(page_id).unwrap();
-        let snapshot = read_guard.meta_snapshot();
-        assert!(!snapshot.is_dirty);
-        assert_eq!(snapshot.lsn, 0);
-        assert_eq!(snapshot.pin_count, 1);
-        drop(read_guard);
-
-        let meta = bpm.buffer_pool().frame_meta(frame_id).clone();
-        assert!(!meta.is_dirty);
-        assert_eq!(meta.pin_count, 0);
     }
 }

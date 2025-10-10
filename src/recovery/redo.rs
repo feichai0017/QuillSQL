@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::buffer::BufferManager;
+use crate::buffer::{BufferEngine, StandardBufferManager};
 use crate::error::QuillSQLResult;
 use crate::recovery::resource_manager::{
     ensure_default_resource_managers_registered, get_resource_manager, RedoContext,
@@ -8,17 +8,14 @@ use crate::recovery::resource_manager::{
 use crate::recovery::wal::codec::WalFrame;
 use crate::storage::disk_scheduler::DiskScheduler;
 
-pub struct RedoExecutor {
+pub struct RedoExecutor<B: BufferEngine = StandardBufferManager> {
     disk_scheduler: Arc<DiskScheduler>,
-    buffer_pool: Option<Arc<BufferManager>>,
+    buffer_pool: Option<Arc<B>>,
 }
 
-impl RedoExecutor {
-    pub fn new(
-        disk_scheduler: Arc<DiskScheduler>,
-        buffer_pool: Option<Arc<BufferManager>>,
-    ) -> Self {
-        ensure_default_resource_managers_registered();
+impl<B: BufferEngine + 'static> RedoExecutor<B> {
+    pub fn new(disk_scheduler: Arc<DiskScheduler>, buffer_pool: Option<Arc<B>>) -> Self {
+        ensure_default_resource_managers_registered::<B>();
         Self {
             disk_scheduler,
             buffer_pool,
@@ -26,7 +23,7 @@ impl RedoExecutor {
     }
 
     pub fn apply(&self, frame: &WalFrame) -> QuillSQLResult<usize> {
-        if let Some(manager) = get_resource_manager(frame.rmid) {
+        if let Some(manager) = get_resource_manager::<B>(frame.rmid) {
             let ctx = RedoContext {
                 disk_scheduler: self.disk_scheduler.clone(),
                 buffer_pool: self.buffer_pool.clone(),

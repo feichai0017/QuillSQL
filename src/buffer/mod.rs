@@ -1,9 +1,11 @@
-mod buffer_manager;
-mod buffer_pool;
-mod page;
+pub mod engine;
+pub mod standard;
 
-pub use buffer_manager::BufferManager;
-pub use buffer_pool::{BufferPool, FrameId, BUFFER_POOL_SIZE};
-pub use page::{
-    AtomicPageId, PageId, PageMeta, ReadPageGuard, WritePageGuard, INVALID_PAGE_ID, PAGE_SIZE,
+pub use engine::{BufferEngine, BufferReadGuard, BufferWriteGuard, ReadGuardRef, WriteGuardRef};
+pub use standard::{
+    buffer_pool::{BufferPool, FrameId, BUFFER_POOL_SIZE},
+    page::{
+        AtomicPageId, PageId, PageMeta, ReadPageGuard, WritePageGuard, INVALID_PAGE_ID, PAGE_SIZE,
+    },
+    StandardBufferManager,
 };

@@ -18,7 +18,7 @@ use crate::transaction::{CommandId, TransactionId};
 use crate::utils::scalar::ScalarValue;
 use crate::utils::table_ref::TableReference;
 use crate::{
-    buffer::BufferManager,
+    buffer::{BufferEngine, StandardBufferManager},
     error::{QuillSQLError, QuillSQLResult},
     storage::index::btree_index::BPlusTreeIndex,
 };
@@ -27,19 +27,19 @@ pub static DEFAULT_CATALOG_NAME: &str = "quillsql";
 pub static DEFAULT_SCHEMA_NAME: &str = "public";
 
 #[derive(Debug)]
-pub struct Catalog {
-    pub schemas: HashMap<String, CatalogSchema>,
-    pub buffer_pool: Arc<BufferManager>,
+pub struct Catalog<B: BufferEngine = StandardBufferManager> {
+    pub schemas: HashMap<String, CatalogSchema<B>>,
+    pub buffer_pool: Arc<B>,
     pub disk_manager: Arc<DiskManager>,
 }
 
 #[derive(Debug)]
-pub struct CatalogSchema {
+pub struct CatalogSchema<B: BufferEngine = StandardBufferManager> {
     pub name: String,
-    pub tables: HashMap<String, CatalogTable>,
+    pub tables: HashMap<String, CatalogTable<B>>,
 }
 
-impl CatalogSchema {
+impl<B: BufferEngine> CatalogSchema<B> {
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -49,14 +49,14 @@ impl CatalogSchema {
 }
 
 #[derive(Debug)]
-pub struct CatalogTable {
+pub struct CatalogTable<B: BufferEngine = StandardBufferManager> {
     pub name: String,
-    pub table: Arc<TableHeap>,
-    pub indexes: HashMap<String, Arc<BPlusTreeIndex>>,
+    pub table: Arc<TableHeap<B>>,
+    pub indexes: HashMap<String, Arc<BPlusTreeIndex<B>>>,
 }
 
-impl CatalogTable {
-    pub fn new(name: impl Into<String>, table: Arc<TableHeap>) -> Self {
+impl<B: BufferEngine> CatalogTable<B> {
+    pub fn new(name: impl Into<String>, table: Arc<TableHeap<B>>) -> Self {
         Self {
             name: name.into(),
             table,
@@ -68,8 +68,8 @@ impl CatalogTable {
 const SYSTEM_TXN_ID: TransactionId = 0;
 const SYSTEM_COMMAND_ID: CommandId = 0;
 
-impl Catalog {
-    pub fn new(buffer_pool: Arc<BufferManager>, disk_manager: Arc<DiskManager>) -> Self {
+impl<B: BufferEngine + 'static> Catalog<B> {
+    pub fn new(buffer_pool: Arc<B>, disk_manager: Arc<DiskManager>) -> Self {
         Self {
             schemas: HashMap::new(),
             buffer_pool,
@@ -119,7 +119,7 @@ impl Catalog {
         &mut self,
         table_ref: TableReference,
         schema: SchemaRef,
-    ) -> QuillSQLResult<Arc<TableHeap>> {
+    ) -> QuillSQLResult<Arc<TableHeap<B>>> {
         let catalog_name = table_ref
             .catalog()
             .unwrap_or(DEFAULT_CATALOG_NAME)
@@ -153,7 +153,7 @@ impl Catalog {
         catalog_schema
             .tables
             .insert(table_name.clone(), catalog_table);
-        global_table_registry().register(table_ref.clone(), table_heap.clone());
+        global_table_registry::<B>().register(table_ref.clone(), table_heap.clone());
 
         // update system table
         let Some(information_schema) = self.schemas.get_mut(INFORMATION_SCHEMA_NAME) else {
@@ -234,7 +234,7 @@ impl Catalog {
             return Ok(false);
         };
 
-        global_table_registry().unregister(table_ref);
+        global_table_registry::<B>().unregister(table_ref);
 
         for index_name in catalog_table.indexes.keys() {
             self.unregister_index_variants(
@@ -250,7 +250,7 @@ impl Catalog {
         Ok(true)
     }
 
-    pub fn table_heap(&self, table_ref: &TableReference) -> QuillSQLResult<Arc<TableHeap>> {
+    pub fn table_heap(&self, table_ref: &TableReference) -> QuillSQLResult<Arc<TableHeap<B>>> {
         let catalog_schema_name = table_ref
             .schema()
             .unwrap_or(DEFAULT_SCHEMA_NAME)
@@ -272,7 +272,7 @@ impl Catalog {
         Ok(catalog_table.table.clone())
     }
 
-    pub fn try_table_heap(&self, table_ref: &TableReference) -> Option<Arc<TableHeap>> {
+    pub fn try_table_heap(&self, table_ref: &TableReference) -> Option<Arc<TableHeap<B>>> {
         let schema_name = table_ref
             .schema()
             .unwrap_or(DEFAULT_SCHEMA_NAME)
@@ -286,7 +286,7 @@ impl Catalog {
     pub fn table_indexes(
         &self,
         table_ref: &TableReference,
-    ) -> QuillSQLResult<Vec<Arc<BPlusTreeIndex>>> {
+    ) -> QuillSQLResult<Vec<Arc<BPlusTreeIndex<B>>>> {
         let catalog_schema_name = table_ref
             .schema()
             .unwrap_or(DEFAULT_SCHEMA_NAME)
@@ -313,7 +313,7 @@ impl Catalog {
         index_name: String,
         table_ref: &TableReference,
         key_schema: SchemaRef,
-    ) -> QuillSQLResult<Arc<BPlusTreeIndex>> {
+    ) -> QuillSQLResult<Arc<BPlusTreeIndex<B>>> {
         let catalog_name = table_ref
             .catalog()
             .unwrap_or(DEFAULT_CATALOG_NAME)
@@ -353,7 +353,7 @@ impl Catalog {
             .insert(index_name.clone(), b_plus_tree_index.clone());
         // register for background maintenance
         let table_heap = catalog_table.table.clone();
-        global_index_registry().register(
+        global_index_registry::<B>().register(
             table_ref.clone(),
             index_name.clone(),
             b_plus_tree_index.clone(),
@@ -469,7 +469,7 @@ impl Catalog {
         &self,
         table_ref: &TableReference,
         index_name: &str,
-    ) -> QuillSQLResult<Option<Arc<BPlusTreeIndex>>> {
+    ) -> QuillSQLResult<Option<Arc<BPlusTreeIndex<B>>>> {
         let catalog_schema_name = table_ref
             .schema()
             .unwrap_or(DEFAULT_SCHEMA_NAME)
@@ -491,14 +491,14 @@ impl Catalog {
         Ok(catalog_table.indexes.get(index_name).cloned())
     }
 
-    pub fn load_schema(&mut self, name: impl Into<String>, schema: CatalogSchema) {
+    pub fn load_schema(&mut self, name: impl Into<String>, schema: CatalogSchema<B>) {
         self.schemas.insert(name.into(), schema);
     }
 
     pub fn load_table(
         &mut self,
         table_ref: TableReference,
-        table: CatalogTable,
+        table: CatalogTable<B>,
     ) -> QuillSQLResult<()> {
         let catalog_schema_name = table_ref.schema().unwrap_or(DEFAULT_SCHEMA_NAME);
         let table_name = table_ref.table().to_string();
@@ -508,7 +508,7 @@ impl Catalog {
                 catalog_schema_name
             )));
         };
-        global_table_registry().register(table_ref.clone(), table.table.clone());
+        global_table_registry::<B>().register(table_ref.clone(), table.table.clone());
         catalog_schema.tables.insert(table_name, table);
         Ok(())
     }
@@ -517,7 +517,7 @@ impl Catalog {
         &mut self,
         table_ref: TableReference,
         index_name: impl Into<String>,
-        index: Arc<BPlusTreeIndex>,
+        index: Arc<BPlusTreeIndex<B>>,
     ) -> QuillSQLResult<()> {
         let catalog_schema_name = table_ref.schema().unwrap_or(DEFAULT_SCHEMA_NAME);
         let table_name = table_ref.table().to_string();
@@ -538,7 +538,12 @@ impl Catalog {
         // register as well
         if let Some(idx) = catalog_table.indexes.get(&idx_name) {
             let table_heap = catalog_table.table.clone();
-            global_index_registry().register(table_ref.clone(), idx_name, idx.clone(), table_heap);
+            global_index_registry::<B>().register(
+                table_ref.clone(),
+                idx_name,
+                idx.clone(),
+                table_heap,
+            );
         }
         Ok(())
     }
@@ -712,7 +717,7 @@ impl Catalog {
         Ok(())
     }
 
-    fn delete_matching_rows<F>(heap: Arc<TableHeap>, mut predicate: F) -> QuillSQLResult<()>
+    fn delete_matching_rows<F>(heap: Arc<TableHeap<B>>, mut predicate: F) -> QuillSQLResult<()>
     where
         F: FnMut(&Tuple) -> QuillSQLResult<bool>,
     {
@@ -733,7 +738,7 @@ impl Catalog {
         original_ref: &TableReference,
         index_name: &str,
     ) {
-        let registry = global_index_registry();
+        let registry = global_index_registry::<B>();
         registry.unregister(original_ref, index_name);
         registry.unregister(
             &TableReference::Bare {

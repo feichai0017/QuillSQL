@@ -1,7 +1,8 @@
+use std::fmt;
 use std::ops::{Bound, RangeBounds};
 use std::sync::Arc;
 
-use crate::buffer::{ReadPageGuard, INVALID_PAGE_ID};
+use crate::buffer::{BufferEngine, PageId, ReadGuardRef, StandardBufferManager, INVALID_PAGE_ID};
 use crate::config::BTreeConfig;
 use crate::error::QuillSQLResult;
 use crate::storage::codec::BPlusTreeLeafPageCodec;
@@ -12,12 +13,11 @@ use bytes::BytesMut;
 
 use super::btree_index::BPlusTreeIndex;
 
-#[derive(Debug)]
-pub struct TreeIndexIterator {
-    index: Arc<BPlusTreeIndex>,
+pub struct TreeIndexIterator<B: BufferEngine = StandardBufferManager> {
+    index: Arc<BPlusTreeIndex<B>>,
     start_bound: Bound<Tuple>,
     end_bound: Bound<Tuple>,
-    current_guard: Option<ReadPageGuard>,
+    current_guard: Option<ReadGuardRef>,
     cursor: usize,
     started: bool,
     // Byte offset to current cursor's KV within the leaf page
@@ -30,15 +30,28 @@ pub struct TreeIndexIterator {
     batch_window: usize,
 }
 
-impl TreeIndexIterator {
+impl<B: BufferEngine> fmt::Debug for TreeIndexIterator<B> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TreeIndexIterator")
+            .field("start_bound", &self.start_bound)
+            .field("end_bound", &self.end_bound)
+            .field("cursor", &self.cursor)
+            .field("started", &self.started)
+            .field("batch_enabled", &self.batch_enabled)
+            .field("batch_window", &self.batch_window)
+            .finish()
+    }
+}
+
+impl<B: BufferEngine> TreeIndexIterator<B> {
     /// Create a new iterator over a range (reads config from index)
-    pub fn new<R: RangeBounds<Tuple>>(index: Arc<BPlusTreeIndex>, range: R) -> Self {
+    pub fn new<R: RangeBounds<Tuple>>(index: Arc<BPlusTreeIndex<B>>, range: R) -> Self {
         Self::new_with_config(index.clone(), range, index.config)
     }
 
     /// Create a new iterator with explicit configuration
     pub fn new_with_config<R: RangeBounds<Tuple>>(
-        index: Arc<BPlusTreeIndex>,
+        index: Arc<BPlusTreeIndex<B>>,
         range: R,
         cfg: BTreeConfig,
     ) -> Self {
@@ -179,10 +192,9 @@ impl TreeIndexIterator {
                     }
                 }
                 // prefetch next-next leaf to warm cache (best-effort)
-                if let Ok((next_g, next_leaf)) = self
-                    .index
-                    .buffer_pool
-                    .fetch_tree_leaf_page(next_page_id, self.index.key_schema.clone())
+                let next_guard = self.index.buffer_pool.fetch_page_read(next_page_id)?;
+                if let Ok((next_leaf, _)) =
+                    BPlusTreeLeafPageCodec::decode(next_guard.data(), self.index.key_schema.clone())
                 {
                     if next_leaf.header.next_page_id != INVALID_PAGE_ID {
                         let _ = self
@@ -190,11 +202,8 @@ impl TreeIndexIterator {
                             .buffer_pool
                             .prefetch_page(next_leaf.header.next_page_id);
                     }
-                    self.current_guard = Some(next_g);
-                } else {
-                    self.current_guard =
-                        Some(self.index.buffer_pool.fetch_page_read(next_page_id)?);
                 }
+                self.current_guard = Some(next_guard);
                 self.cursor = 0;
                 // reset kv_offset to the start of next leaf
                 let (_nh, nh_off) = BPlusTreeLeafPageCodec::decode_header_only(
@@ -262,7 +271,7 @@ impl TreeIndexIterator {
     }
 
     /// Synchronously fill batch buffer by following the next_page_id chain.
-    fn fill_batch_from(&mut self, mut pid: crate::buffer::PageId) -> QuillSQLResult<()> {
+    fn fill_batch_from(&mut self, mut pid: PageId) -> QuillSQLResult<()> {
         while self.batch_buf.len() < self.batch_window && pid != INVALID_PAGE_ID {
             let guard = self.index.buffer_pool.fetch_page_read(pid)?;
             let (leaf, _) =

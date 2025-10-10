@@ -1,14 +1,14 @@
-use crate::buffer::{AtomicPageId, PageId, WritePageGuard, INVALID_PAGE_ID};
+use crate::buffer::{
+    engine::{BufferEngine, BufferWriteGuard},
+    AtomicPageId, PageId, StandardBufferManager, INVALID_PAGE_ID,
+};
 use crate::catalog::{SchemaRef, EMPTY_SCHEMA_REF};
 use crate::config::TableScanConfig;
+use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::storage::codec::TablePageCodec;
 use crate::storage::disk_scheduler::{DiskCommandResultReceiver, DiskScheduler};
 use crate::storage::page::{RecordId, TablePage, TupleMeta, INVALID_RID};
 use crate::transaction::{CommandId, TransactionId, INVALID_COMMAND_ID};
-use crate::{
-    buffer::BufferManager,
-    error::{QuillSQLError, QuillSQLResult},
-};
 use bytes::BytesMut;
 use std::collections::Bound;
 use std::collections::VecDeque;
@@ -27,18 +27,18 @@ use crate::storage::tuple::Tuple;
 use crate::utils::ring_buffer::RingBuffer;
 
 #[derive(Debug)]
-pub struct TableHeap {
+pub struct TableHeap<B: BufferEngine = StandardBufferManager> {
     pub schema: SchemaRef,
-    pub buffer_pool: Arc<BufferManager>,
+    pub buffer_pool: Arc<B>,
     pub first_page_id: AtomicPageId,
     pub last_page_id: AtomicPageId,
 }
 
-impl TableHeap {
+impl<B: BufferEngine> TableHeap<B> {
     /// Creates a new table heap. This involves allocating an initial page.
-    pub fn try_new(schema: SchemaRef, buffer_pool: Arc<BufferManager>) -> QuillSQLResult<Self> {
-        // new_page() returns a WritePageGuard.
-        let mut first_page_guard = buffer_pool.new_page()?;
+    pub fn try_new(schema: SchemaRef, buffer_pool: Arc<B>) -> QuillSQLResult<Self> {
+        // new_page() returns a write guard implementing BufferWriteGuard.
+        let mut first_page_guard = <B as BufferEngine>::new_page(&buffer_pool)?;
         let first_page_id = first_page_guard.page_id();
 
         // Initialize the first page as an empty TablePage.
@@ -62,11 +62,11 @@ impl TableHeap {
     fn write_back_page(
         &self,
         page_id: PageId,
-        guard: &mut WritePageGuard,
+        guard: &mut dyn BufferWriteGuard,
         table_page: &mut TablePage,
     ) -> QuillSQLResult<()> {
         let prev_lsn = guard.lsn();
-        if let Some(wal) = self.buffer_pool.wal_manager() {
+        if let Some(wal) = <B as BufferEngine>::wal_manager(&self.buffer_pool) {
             // FPW: if first touch since checkpoint, force full-page image
             if wal.fpw_first_touch(page_id) {
                 let new_image = TablePageCodec::encode(table_page);
@@ -131,7 +131,7 @@ impl TableHeap {
     }
 
     fn append_heap_record(&self, payload: HeapRecordPayload) -> QuillSQLResult<()> {
-        if let Some(wal) = self.buffer_pool.wal_manager() {
+        if let Some(wal) = <B as BufferEngine>::wal_manager(&self.buffer_pool) {
             let _wal_result =
                 wal.append_record_with(|_| WalRecordPayload::Heap(payload.clone()))?;
         }
@@ -155,7 +155,8 @@ impl TableHeap {
         let mut current_page_id = self.last_page_id.load(Ordering::SeqCst);
 
         loop {
-            let mut current_page_guard = self.buffer_pool.fetch_page_write(current_page_id)?;
+            let mut current_page_guard =
+                <B as BufferEngine>::fetch_page_write(&self.buffer_pool, current_page_id)?;
             let mut table_page =
                 TablePageCodec::decode(current_page_guard.data(), self.schema.clone())?.0;
             table_page.set_lsn(current_page_guard.lsn());
@@ -174,17 +175,25 @@ impl TableHeap {
                     tuple_data: tuple_bytes,
                 });
                 self.append_heap_record(payload.clone())?;
-                self.write_back_page(current_page_id, &mut current_page_guard, &mut table_page)?;
+                self.write_back_page(
+                    current_page_id,
+                    current_page_guard.as_mut(),
+                    &mut table_page,
+                )?;
                 return Ok(RecordId::new(current_page_id, slot_id as u32));
             }
 
-            let mut new_page_guard = self.buffer_pool.new_page()?;
+            let mut new_page_guard = <B as BufferEngine>::new_page(&self.buffer_pool)?;
             let new_page_id = new_page_guard.page_id();
             let mut new_table_page = TablePage::new(self.schema.clone(), INVALID_PAGE_ID);
-            self.write_back_page(new_page_id, &mut new_page_guard, &mut new_table_page)?;
+            self.write_back_page(new_page_id, new_page_guard.as_mut(), &mut new_table_page)?;
 
             table_page.header.next_page_id = new_page_id;
-            self.write_back_page(current_page_id, &mut current_page_guard, &mut table_page)?;
+            self.write_back_page(
+                current_page_id,
+                current_page_guard.as_mut(),
+                &mut table_page,
+            )?;
             drop(current_page_guard);
 
             self.last_page_id.store(new_page_id, Ordering::SeqCst);
@@ -263,7 +272,7 @@ impl TableHeap {
     /// deleted and leaves full reclamation to vacuum.
     #[allow(dead_code)]
     pub fn mvcc_remove_version(&self, rid: RecordId) -> QuillSQLResult<()> {
-        let mut page_guard = self.buffer_pool.fetch_page_write(rid.page_id)?;
+        let mut page_guard = <B as BufferEngine>::fetch_page_write(&self.buffer_pool, rid.page_id)?;
         let mut table_page = TablePageCodec::decode(page_guard.data(), self.schema.clone())?.0;
         table_page.set_lsn(page_guard.lsn());
 
@@ -278,17 +287,17 @@ impl TableHeap {
             if !meta.is_deleted {
                 meta.mark_deleted(0, INVALID_COMMAND_ID);
                 table_page.update_tuple_meta(meta, slot as u16)?;
-                self.write_back_page(rid.page_id, &mut page_guard, &mut table_page)?;
+                self.write_back_page(rid.page_id, page_guard.as_mut(), &mut table_page)?;
             }
             return Ok(());
         }
 
         table_page.reclaim_tuple(slot as u16)?;
-        self.write_back_page(rid.page_id, &mut page_guard, &mut table_page)
+        self.write_back_page(rid.page_id, page_guard.as_mut(), &mut table_page)
     }
 
     pub fn update_tuple(&self, rid: RecordId, tuple: Tuple) -> QuillSQLResult<()> {
-        let mut page_guard = self.buffer_pool.fetch_page_write(rid.page_id)?;
+        let mut page_guard = <B as BufferEngine>::fetch_page_write(&self.buffer_pool, rid.page_id)?;
         let mut table_page = TablePageCodec::decode(page_guard.data(), self.schema.clone())?.0;
         table_page.set_lsn(page_guard.lsn());
 
@@ -309,11 +318,11 @@ impl TableHeap {
             old_tuple_meta: Some(TupleMetaRepr::from(old_meta)),
             old_tuple_data: Some(old_tuple_bytes),
         }))?;
-        self.write_back_page(rid.page_id, &mut page_guard, &mut table_page)
+        self.write_back_page(rid.page_id, page_guard.as_mut(), &mut table_page)
     }
 
     pub fn update_tuple_meta(&self, meta: TupleMeta, rid: RecordId) -> QuillSQLResult<()> {
-        let mut page_guard = self.buffer_pool.fetch_page_write(rid.page_id)?;
+        let mut page_guard = <B as BufferEngine>::fetch_page_write(&self.buffer_pool, rid.page_id)?;
         let mut table_page = TablePageCodec::decode(page_guard.data(), self.schema.clone())?.0;
         table_page.set_lsn(page_guard.lsn());
 
@@ -346,32 +355,33 @@ impl TableHeap {
             })
         };
         self.append_heap_record(payload)?;
-        self.write_back_page(rid.page_id, &mut page_guard, &mut table_page)
+        self.write_back_page(rid.page_id, page_guard.as_mut(), &mut table_page)
     }
 
     pub fn full_tuple(&self, rid: RecordId) -> QuillSQLResult<(TupleMeta, Tuple)> {
-        let (_, table_page) = self
-            .buffer_pool
-            .fetch_table_page(rid.page_id, self.schema.clone())?;
-        let result = table_page.tuple(rid.slot_num as u16)?;
-        Ok(result)
+        let guard = <B as BufferEngine>::fetch_page_read(&self.buffer_pool, rid.page_id)?;
+        let (table_page, _) = TablePageCodec::decode(guard.data(), self.schema.clone())?;
+        table_page.tuple(rid.slot_num as u16)
     }
 
     pub fn tuple(&self, rid: RecordId) -> QuillSQLResult<Tuple> {
-        let (_meta, tuple) = self.full_tuple(rid)?;
+        let guard = <B as BufferEngine>::fetch_page_read(&self.buffer_pool, rid.page_id)?;
+        let (table_page, _) = TablePageCodec::decode(guard.data(), self.schema.clone())?;
+        let (_meta, tuple) = table_page.tuple(rid.slot_num as u16)?;
         Ok(tuple)
     }
 
     pub fn tuple_meta(&self, rid: RecordId) -> QuillSQLResult<TupleMeta> {
-        let (meta, _tuple) = self.full_tuple(rid)?;
+        let guard = <B as BufferEngine>::fetch_page_read(&self.buffer_pool, rid.page_id)?;
+        let (table_page, _) = TablePageCodec::decode(guard.data(), self.schema.clone())?;
+        let (meta, _tuple) = table_page.tuple(rid.slot_num as u16)?;
         Ok(meta)
     }
 
     pub fn get_first_rid(&self) -> QuillSQLResult<Option<RecordId>> {
         let first_page_id = self.first_page_id.load(Ordering::SeqCst);
-        let (_, table_page) = self
-            .buffer_pool
-            .fetch_table_page(first_page_id, self.schema.clone())?;
+        let guard = <B as BufferEngine>::fetch_page_read(&self.buffer_pool, first_page_id)?;
+        let (table_page, _) = TablePageCodec::decode(guard.data(), self.schema.clone())?;
 
         if table_page.header.num_tuples == 0 {
             Ok(None)
@@ -381,9 +391,8 @@ impl TableHeap {
     }
 
     pub fn get_next_rid(&self, rid: RecordId) -> QuillSQLResult<Option<RecordId>> {
-        let (_, table_page) = self
-            .buffer_pool
-            .fetch_table_page(rid.page_id, self.schema.clone())?;
+        let guard = <B as BufferEngine>::fetch_page_read(&self.buffer_pool, rid.page_id)?;
+        let (table_page, _) = TablePageCodec::decode(guard.data(), self.schema.clone())?;
         let next_rid = table_page.get_next_rid(&rid);
         if next_rid.is_some() {
             return Ok(next_rid);
@@ -392,9 +401,11 @@ impl TableHeap {
         if table_page.header.next_page_id == INVALID_PAGE_ID {
             return Ok(None);
         }
-        let (_, next_table_page) = self
-            .buffer_pool
-            .fetch_table_page(table_page.header.next_page_id, self.schema.clone())?;
+        let next_guard = <B as BufferEngine>::fetch_page_read(
+            &self.buffer_pool,
+            table_page.header.next_page_id,
+        )?;
+        let (next_table_page, _) = TablePageCodec::decode(next_guard.data(), self.schema.clone())?;
 
         if next_table_page.header.num_tuples == 0 {
             return Ok(None);
@@ -402,9 +413,45 @@ impl TableHeap {
         Ok(Some(RecordId::new(table_page.header.next_page_id, 0)))
     }
 
+    pub fn delete_tuple(
+        &self,
+        rid: RecordId,
+        txn_id: TransactionId,
+        cid: CommandId,
+    ) -> QuillSQLResult<()> {
+        let _ = self.mvcc_mark_deleted(rid, txn_id, cid)?;
+        Ok(())
+    }
+
+    /// Attempt to reclaim the tuple at `rid` if `predicate` returns true for the current metadata.
+    /// Returns true when the tuple was removed.
+    pub fn vacuum_slot_if<F>(&self, rid: RecordId, predicate: F) -> QuillSQLResult<bool>
+    where
+        F: FnOnce(&TupleMeta) -> bool,
+    {
+        let mut page_guard = <B as BufferEngine>::fetch_page_write(&self.buffer_pool, rid.page_id)?;
+        let mut table_page = TablePageCodec::decode(page_guard.data(), self.schema.clone())?.0;
+        table_page.set_lsn(page_guard.lsn());
+
+        let slot = rid.slot_num as u16;
+        if slot >= table_page.header.num_tuples {
+            return Ok(false);
+        }
+        let meta = table_page.header.tuple_infos[slot as usize].meta;
+        if !predicate(&meta) {
+            return Ok(false);
+        }
+
+        table_page.reclaim_tuple(slot)?;
+        self.write_back_page(rid.page_id, page_guard.as_mut(), &mut table_page)?;
+        Ok(true)
+    }
+}
+
+impl<B: BufferEngine> TableHeap<B> {
     /// Construct a lightweight TableHeap view for recovery operations.
     /// This instance uses an empty schema and does not rely on first/last page ids.
-    pub fn recovery_view(buffer_pool: Arc<BufferManager>) -> Self {
+    pub fn recovery_view(buffer_pool: Arc<B>) -> Self {
         Self {
             schema: EMPTY_SCHEMA_REF.clone(),
             buffer_pool,
@@ -517,45 +564,11 @@ impl TableHeap {
         meta.mark_deleted(txn_id, cid);
         self.recover_set_tuple_meta(rid, meta)
     }
-
-    pub fn delete_tuple(
-        &self,
-        rid: RecordId,
-        txn_id: TransactionId,
-        cid: CommandId,
-    ) -> QuillSQLResult<()> {
-        let _ = self.mvcc_mark_deleted(rid, txn_id, cid)?;
-        Ok(())
-    }
-
-    /// Attempt to reclaim the tuple at `rid` if `predicate` returns true for the current metadata.
-    /// Returns true when the tuple was removed.
-    pub fn vacuum_slot_if<F>(&self, rid: RecordId, predicate: F) -> QuillSQLResult<bool>
-    where
-        F: FnOnce(&TupleMeta) -> bool,
-    {
-        let mut page_guard = self.buffer_pool.fetch_page_write(rid.page_id)?;
-        let mut table_page = TablePageCodec::decode(page_guard.data(), self.schema.clone())?.0;
-        table_page.set_lsn(page_guard.lsn());
-
-        let slot = rid.slot_num as u16;
-        if slot >= table_page.header.num_tuples {
-            return Ok(false);
-        }
-        let meta = table_page.header.tuple_infos[slot as usize].meta;
-        if !predicate(&meta) {
-            return Ok(false);
-        }
-
-        table_page.reclaim_tuple(slot)?;
-        self.write_back_page(rid.page_id, &mut page_guard, &mut table_page)?;
-        Ok(true)
-    }
 }
 
 #[derive(Debug)]
-pub struct TableIterator {
-    heap: Arc<TableHeap>,
+pub struct TableIterator<B: BufferEngine = StandardBufferManager> {
+    heap: Arc<TableHeap<B>>,
     start_bound: Bound<RecordId>,
     end_bound: Bound<RecordId>,
     cursor: RecordId,
@@ -653,13 +666,13 @@ impl StreamPrefetchState {
     }
 }
 
-impl TableIterator {
-    pub fn new<R: RangeBounds<RecordId>>(heap: Arc<TableHeap>, range: R) -> Self {
+impl<B: BufferEngine> TableIterator<B> {
+    pub fn new<R: RangeBounds<RecordId>>(heap: Arc<TableHeap<B>>, range: R) -> Self {
         Self::new_with_hint(heap, range, None)
     }
 
     pub fn new_with_hint<R: RangeBounds<RecordId>>(
-        heap: Arc<TableHeap>,
+        heap: Arc<TableHeap<B>>,
         range: R,
         streaming_hint: Option<bool>,
     ) -> Self {
@@ -668,9 +681,20 @@ impl TableIterator {
 
         // Centralized config (remove env): use TableScanConfig defaults
         let cfg = TableScanConfig::default();
-        let pool_quarter = (heap.buffer_pool.buffer_pool().capacity().max(1) / 4) as u32;
-        let threshold: u32 = cfg.stream_threshold_pages.unwrap_or(pool_quarter.max(1));
-        let readahead: usize = cfg.readahead_pages;
+        let maybe_bpm = heap
+            .buffer_pool
+            .as_ref()
+            .as_any()
+            .downcast_ref::<StandardBufferManager>();
+        let (threshold, readahead, streaming_supported) = if let Some(bpm) = maybe_bpm {
+            let pool_capacity = bpm.buffer_pool().capacity().max(1);
+            let pool_quarter = (pool_capacity / 4).max(1) as u32;
+            let threshold = cfg.stream_threshold_pages.unwrap_or(pool_quarter).max(1);
+            let readahead = cfg.readahead_pages.max(1);
+            (threshold, readahead, true)
+        } else {
+            (u32::MAX, 1, false)
+        };
 
         let approx_pages = heap
             .last_page_id
@@ -682,15 +706,15 @@ impl TableIterator {
 
         // Requested streaming decision
         let requested_stream = match streaming_hint {
-            Some(true) => true,
+            Some(true) => streaming_supported,
             Some(false) => false,
-            None => cfg.stream_scan_enable || approx_pages >= threshold,
+            None => streaming_supported && (cfg.stream_scan_enable || approx_pages >= threshold),
         };
         // If explicitly hinted true, allow streaming even for ranged scans. Otherwise only for full scan.
         let use_streaming = if matches!(streaming_hint, Some(true)) {
-            true
+            streaming_supported
         } else {
-            is_full_scan && requested_stream
+            streaming_supported && is_full_scan && requested_stream
         };
 
         let strategy = if use_streaming {
@@ -868,13 +892,22 @@ impl TableIterator {
     }
 }
 
-fn fill_stream_ring(
-    heap: &Arc<TableHeap>,
+fn fill_stream_ring<B: BufferEngine>(
+    heap: &Arc<TableHeap<B>>,
     schema: SchemaRef,
     start_bound: &Bound<RecordId>,
     state: &mut StreamScanState,
 ) -> QuillSQLResult<()> {
-    let scheduler = heap.buffer_pool.buffer_pool().disk_scheduler();
+    let Some(bpm) = heap
+        .buffer_pool
+        .as_ref()
+        .as_any()
+        .downcast_ref::<StandardBufferManager>()
+    else {
+        state.prefetch.exhausted = true;
+        return Ok(());
+    };
+    let scheduler = bpm.buffer_pool().disk_scheduler();
     while state.ring.len() < state.ring.capacity() && !state.prefetch.exhausted {
         state.prefetch.ensure_ready(&scheduler)?;
         let Some((pid, bytes)) = state.prefetch.ready.pop_front() else {
@@ -916,7 +949,7 @@ mod tests {
     use std::sync::Arc;
     use tempfile::TempDir;
 
-    use crate::buffer::BufferManager;
+    use crate::buffer::StandardBufferManager;
     use crate::catalog::{Column, DataType, Schema};
     use crate::storage::codec::TupleCodec;
     use crate::storage::disk_manager::DiskManager;
@@ -937,7 +970,7 @@ mod tests {
         ]));
         let disk_manager = DiskManager::try_new(temp_path).unwrap();
         let disk_scheduler = Arc::new(DiskScheduler::new(Arc::new(disk_manager)));
-        let buffer_pool = Arc::new(BufferManager::new(1000, disk_scheduler));
+        let buffer_pool = Arc::new(StandardBufferManager::new(1000, disk_scheduler));
         let table_heap = TableHeap::try_new(schema.clone(), buffer_pool).unwrap();
 
         let _rid1 = table_heap
@@ -983,7 +1016,7 @@ mod tests {
         ]));
         let disk_manager = DiskManager::try_new(temp_path).unwrap();
         let disk_scheduler = Arc::new(DiskScheduler::new(Arc::new(disk_manager)));
-        let buffer_pool = Arc::new(BufferManager::new(1000, disk_scheduler));
+        let buffer_pool = Arc::new(StandardBufferManager::new(1000, disk_scheduler));
         let table_heap = TableHeap::try_new(schema.clone(), buffer_pool).unwrap();
 
         let meta1 = super::TupleMeta::new(1, 0);
@@ -1032,7 +1065,7 @@ mod tests {
         ]));
         let disk_manager = DiskManager::try_new(temp_path).unwrap();
         let disk_scheduler = Arc::new(DiskScheduler::new(Arc::new(disk_manager)));
-        let buffer_pool = Arc::new(BufferManager::new(256, disk_scheduler));
+        let buffer_pool = Arc::new(StandardBufferManager::new(256, disk_scheduler));
         let table_heap = TableHeap::try_new(schema.clone(), buffer_pool).unwrap();
 
         let base_tuple = Tuple::new(
@@ -1072,7 +1105,7 @@ mod tests {
 
         let disk_manager = DiskManager::try_new(temp_path).unwrap();
         let disk_scheduler = Arc::new(DiskScheduler::new(Arc::new(disk_manager)));
-        let buffer_pool = Arc::new(BufferManager::new(1000, disk_scheduler));
+        let buffer_pool = Arc::new(StandardBufferManager::new(1000, disk_scheduler));
         let table_heap = Arc::new(TableHeap::try_new(schema.clone(), buffer_pool).unwrap());
 
         let meta1 = super::TupleMeta::new(1, 0);
@@ -1133,7 +1166,7 @@ mod tests {
 
         let disk_manager = DiskManager::try_new(temp_path).unwrap();
         let disk_scheduler = Arc::new(DiskScheduler::new(Arc::new(disk_manager)));
-        let buffer_pool = Arc::new(BufferManager::new(128, disk_scheduler));
+        let buffer_pool = Arc::new(StandardBufferManager::new(128, disk_scheduler));
         let table_heap = Arc::new(TableHeap::try_new(schema.clone(), buffer_pool).unwrap());
 
         // Insert many rows to span multiple pages
@@ -1175,7 +1208,7 @@ mod tests {
 
         let disk_manager = DiskManager::try_new(temp_path).unwrap();
         let disk_scheduler = Arc::new(DiskScheduler::new(Arc::new(disk_manager)));
-        let buffer_pool = Arc::new(BufferManager::new(128, disk_scheduler));
+        let buffer_pool = Arc::new(StandardBufferManager::new(128, disk_scheduler));
         let table_heap = Arc::new(TableHeap::try_new(schema.clone(), buffer_pool).unwrap());
 
         let rid1 = table_heap
@@ -1224,7 +1257,7 @@ mod tests {
         ]));
         let disk_manager = DiskManager::try_new(temp_path).unwrap();
         let disk_scheduler = Arc::new(DiskScheduler::new(Arc::new(disk_manager)));
-        let buffer_pool = Arc::new(BufferManager::new(128, disk_scheduler));
+        let buffer_pool = Arc::new(StandardBufferManager::new(128, disk_scheduler));
         let table_heap = TableHeap::try_new(schema.clone(), buffer_pool.clone()).unwrap();
 
         // Insert a row
@@ -1267,7 +1300,7 @@ mod tests {
         ]));
         let disk_manager = DiskManager::try_new(temp_path).unwrap();
         let disk_scheduler = Arc::new(DiskScheduler::new(Arc::new(disk_manager)));
-        let buffer_pool = Arc::new(BufferManager::new(128, disk_scheduler));
+        let buffer_pool = Arc::new(StandardBufferManager::new(128, disk_scheduler));
         let table_heap = TableHeap::try_new(schema.clone(), buffer_pool.clone()).unwrap();
 
         let rid = table_heap
@@ -1295,7 +1328,7 @@ mod tests {
         let schema = Arc::new(Schema::new(vec![Column::new("v", DataType::Int32, false)]));
         let disk_manager = DiskManager::try_new(temp_path).unwrap();
         let disk_scheduler = Arc::new(DiskScheduler::new(Arc::new(disk_manager)));
-        let buffer_pool = Arc::new(BufferManager::new(32, disk_scheduler));
+        let buffer_pool = Arc::new(StandardBufferManager::new(32, disk_scheduler));
         let heap = TableHeap::try_new(schema.clone(), buffer_pool).unwrap();
 
         let meta = super::TupleMeta::new(1, 0);
@@ -1315,7 +1348,7 @@ mod tests {
         let schema = Arc::new(Schema::new(vec![Column::new("v", DataType::Int32, false)]));
         let disk_manager = DiskManager::try_new(temp_path).unwrap();
         let disk_scheduler = Arc::new(DiskScheduler::new(Arc::new(disk_manager)));
-        let buffer_pool = Arc::new(BufferManager::new(32, disk_scheduler));
+        let buffer_pool = Arc::new(StandardBufferManager::new(32, disk_scheduler));
         let heap = TableHeap::try_new(schema.clone(), buffer_pool).unwrap();
 
         let meta = super::TupleMeta::new(42, 0);

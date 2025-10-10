@@ -1,8 +1,10 @@
-use std::sync::Arc;
+use std::any::TypeId;
+use std::collections::HashSet;
+use std::sync::{Arc, OnceLock, RwLock};
 
 use bytes::{Bytes, BytesMut};
 
-use crate::buffer::PAGE_SIZE;
+use crate::buffer::{BufferEngine, PAGE_SIZE};
 use crate::error::QuillSQLResult;
 use crate::recovery::resource_manager::{
     register_resource_manager, RedoContext, ResourceManager, UndoContext,
@@ -12,7 +14,6 @@ use crate::storage::codec::TablePageHeaderCodec;
 use crate::storage::heap::wal_codec::{decode_heap_record, HeapRecordPayload, TupleMetaRepr};
 use crate::storage::page::{RecordId, TupleMeta};
 use crate::storage::table_heap::TableHeap;
-use std::sync::OnceLock;
 
 #[derive(Default)]
 struct HeapResourceManager;
@@ -30,9 +31,9 @@ impl HeapResourceManager {
         }
     }
 
-    fn apply_tuple_meta_flag(
+    fn apply_tuple_meta_flag<B: BufferEngine>(
         &self,
-        ctx: &UndoContext,
+        ctx: &UndoContext<B>,
         page_id: u32,
         slot_idx: usize,
         deleted: bool,
@@ -59,9 +60,9 @@ impl HeapResourceManager {
         Ok(())
     }
 
-    fn restore_tuple(
+    fn restore_tuple<B: BufferEngine>(
         &self,
-        ctx: &UndoContext,
+        ctx: &UndoContext<B>,
         page_id: u32,
         slot_idx: usize,
         old_meta: TupleMetaRepr,
@@ -127,12 +128,12 @@ impl HeapResourceManager {
     }
 }
 
-impl ResourceManager for HeapResourceManager {
-    fn redo(&self, _frame: &WalFrame, _ctx: &RedoContext) -> QuillSQLResult<usize> {
+impl<B: BufferEngine> ResourceManager<B> for HeapResourceManager {
+    fn redo(&self, _frame: &WalFrame, _ctx: &RedoContext<B>) -> QuillSQLResult<usize> {
         Ok(0)
     }
 
-    fn undo(&self, frame: &WalFrame, ctx: &UndoContext) -> QuillSQLResult<()> {
+    fn undo(&self, frame: &WalFrame, ctx: &UndoContext<B>) -> QuillSQLResult<()> {
         let payload = self.decode_payload(frame)?;
         match payload {
             HeapRecordPayload::Insert(body) => {
@@ -175,13 +176,24 @@ impl ResourceManager for HeapResourceManager {
     }
 }
 
-static REGISTER: OnceLock<()> = OnceLock::new();
+fn heap_registry_tracker() -> &'static RwLock<HashSet<TypeId>> {
+    static TRACKER: OnceLock<RwLock<HashSet<TypeId>>> = OnceLock::new();
+    TRACKER.get_or_init(|| RwLock::new(HashSet::new()))
+}
 
-pub fn ensure_heap_resource_manager_registered() {
-    REGISTER.get_or_init(|| {
-        register_resource_manager(
+pub fn ensure_heap_resource_manager_registered<B: BufferEngine + 'static>() {
+    let tracker = heap_registry_tracker();
+    {
+        let guard = tracker.read().unwrap();
+        if guard.contains(&TypeId::of::<B>()) {
+            return;
+        }
+    }
+    let mut guard = tracker.write().unwrap();
+    if guard.insert(TypeId::of::<B>()) {
+        register_resource_manager::<B>(
             ResourceManagerId::Heap,
             Arc::new(HeapResourceManager::default()),
         );
-    });
+    }
 }

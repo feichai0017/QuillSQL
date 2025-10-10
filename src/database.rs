@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
 
-use crate::buffer::{BufferManager, BUFFER_POOL_SIZE};
+use crate::buffer::{StandardBufferManager, BUFFER_POOL_SIZE};
 use crate::catalog::load_catalog_data;
 use crate::config::{background_config, IndexVacuumConfig, MvccVacuumConfig, WalConfig};
 use crate::error::{QuillSQLError, QuillSQLResult};
@@ -47,7 +47,7 @@ pub struct DatabaseOptions {
 
 pub struct Database {
     _temp_dir: Option<TempDir>,
-    pub(crate) buffer_pool: Arc<BufferManager>,
+    pub(crate) buffer_pool: Arc<StandardBufferManager>,
     pub(crate) catalog: Catalog,
     background_workers: BackgroundWorkers,
     pub(crate) wal_manager: Arc<WalManager>,
@@ -65,7 +65,10 @@ impl Database {
     ) -> QuillSQLResult<Self> {
         let disk_manager = Arc::new(DiskManager::try_new(db_path)?);
         let disk_scheduler = Arc::new(DiskScheduler::new(disk_manager.clone()));
-        let buffer_pool = Arc::new(BufferManager::new(BUFFER_POOL_SIZE, disk_scheduler.clone()));
+        let buffer_pool = Arc::new(StandardBufferManager::new(
+            BUFFER_POOL_SIZE,
+            disk_scheduler.clone(),
+        ));
 
         let wal_config = wal_config_for_path(db_path, &options.wal);
         let synchronous_commit = wal_config.synchronous_commit;
@@ -98,9 +101,12 @@ impl Database {
 
         let catalog = Catalog::new(buffer_pool.clone(), disk_manager.clone());
 
-        let recovery_summary = RecoveryManager::new(wal_manager.clone(), disk_scheduler.clone())
-            .with_buffer_pool(buffer_pool.clone())
-            .replay()?;
+        let recovery_summary = RecoveryManager::<StandardBufferManager>::new(
+            wal_manager.clone(),
+            disk_scheduler.clone(),
+        )
+        .with_buffer_pool(buffer_pool.clone())
+        .replay()?;
         if recovery_summary.redo_count > 0 {
             debug!(
                 "Recovery replayed {} record(s) starting at LSN {}",
@@ -115,14 +121,16 @@ impl Database {
             );
         }
 
-        background_workers.register_opt(background::spawn_checkpoint_worker(
-            wal_manager.clone(),
-            buffer_pool.clone(),
-            transaction_manager.clone(),
-            worker_cfg.checkpoint_interval,
-        ));
+        background_workers.register_opt(
+            background::spawn_checkpoint_worker::<StandardBufferManager>(
+                wal_manager.clone(),
+                buffer_pool.clone(),
+                transaction_manager.clone(),
+                worker_cfg.checkpoint_interval,
+            ),
+        );
 
-        background_workers.register_opt(background::spawn_bg_writer(
+        background_workers.register_opt(background::spawn_bg_writer::<StandardBufferManager>(
             buffer_pool.clone(),
             worker_cfg.bg_writer_interval,
             worker_cfg.vacuum,
@@ -133,7 +141,9 @@ impl Database {
         } else {
             Some(Duration::from_millis(worker_cfg.mvcc_vacuum.interval_ms))
         };
-        background_workers.register_opt(background::spawn_mvcc_vacuum_worker(
+        background_workers.register_opt(background::spawn_mvcc_vacuum_worker::<
+            StandardBufferManager,
+        >(
             transaction_manager.clone(),
             mvcc_interval,
             worker_cfg.mvcc_vacuum.batch_limit,
@@ -166,7 +176,10 @@ impl Database {
                 QuillSQLError::Internal("Invalid temp path".to_string()),
             )?)?);
         let disk_scheduler = Arc::new(DiskScheduler::new(disk_manager.clone()));
-        let buffer_pool = Arc::new(BufferManager::new(BUFFER_POOL_SIZE, disk_scheduler.clone()));
+        let buffer_pool = Arc::new(StandardBufferManager::new(
+            BUFFER_POOL_SIZE,
+            disk_scheduler.clone(),
+        ));
 
         let wal_config = wal_config_for_temp(temp_dir.path(), &options.wal);
         let synchronous_commit = wal_config.synchronous_commit;
@@ -199,9 +212,12 @@ impl Database {
 
         let catalog = Catalog::new(buffer_pool.clone(), disk_manager.clone());
 
-        let recovery_summary = RecoveryManager::new(wal_manager.clone(), disk_scheduler.clone())
-            .with_buffer_pool(buffer_pool.clone())
-            .replay()?;
+        let recovery_summary = RecoveryManager::<StandardBufferManager>::new(
+            wal_manager.clone(),
+            disk_scheduler.clone(),
+        )
+        .with_buffer_pool(buffer_pool.clone())
+        .replay()?;
         if recovery_summary.redo_count > 0 {
             debug!(
                 "Recovery replayed {} record(s) starting at LSN {}",
@@ -216,14 +232,16 @@ impl Database {
             );
         }
 
-        background_workers.register_opt(background::spawn_checkpoint_worker(
-            wal_manager.clone(),
-            buffer_pool.clone(),
-            transaction_manager.clone(),
-            worker_cfg.checkpoint_interval,
-        ));
+        background_workers.register_opt(
+            background::spawn_checkpoint_worker::<StandardBufferManager>(
+                wal_manager.clone(),
+                buffer_pool.clone(),
+                transaction_manager.clone(),
+                worker_cfg.checkpoint_interval,
+            ),
+        );
 
-        background_workers.register_opt(background::spawn_bg_writer(
+        background_workers.register_opt(background::spawn_bg_writer::<StandardBufferManager>(
             buffer_pool.clone(),
             worker_cfg.bg_writer_interval,
             worker_cfg.vacuum,
@@ -234,7 +252,9 @@ impl Database {
         } else {
             Some(Duration::from_millis(worker_cfg.mvcc_vacuum.interval_ms))
         };
-        background_workers.register_opt(background::spawn_mvcc_vacuum_worker(
+        background_workers.register_opt(background::spawn_mvcc_vacuum_worker::<
+            StandardBufferManager,
+        >(
             transaction_manager.clone(),
             mvcc_interval,
             worker_cfg.mvcc_vacuum.batch_limit,

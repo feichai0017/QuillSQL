@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::buffer::BufferManager;
+use crate::buffer::{BufferEngine, StandardBufferManager};
 use crate::error::QuillSQLResult;
 use crate::recovery::resource_manager::{
     ensure_default_resource_managers_registered, get_resource_manager, UndoContext,
@@ -27,7 +27,7 @@ struct UndoIndex {
 }
 
 impl UndoIndex {
-    fn observe(&mut self, frame: &WalFrame) -> QuillSQLResult<()> {
+    fn observe<B: BufferEngine + 'static>(&mut self, frame: &WalFrame) -> QuillSQLResult<()> {
         match frame.rmid {
             ResourceManagerId::Clr => {
                 let clr = decode_clr(&frame.body)?;
@@ -60,7 +60,7 @@ impl UndoIndex {
                 }
             }
             _ => {
-                if let Some(manager) = get_resource_manager(frame.rmid) {
+                if let Some(manager) = get_resource_manager::<B>(frame.rmid) {
                     if let Some(txn_id) = manager.transaction_id(frame) {
                         let prev = self.head_for(txn_id);
                         self.entries.insert(
@@ -100,20 +100,20 @@ pub struct UndoOutcome {
     pub max_clr_lsn: Lsn,
 }
 
-pub struct UndoExecutor {
+pub struct UndoExecutor<B: BufferEngine = StandardBufferManager> {
     wal: Arc<WalManager>,
     disk_scheduler: Arc<DiskScheduler>,
-    buffer_pool: Option<Arc<BufferManager>>,
+    buffer_pool: Option<Arc<B>>,
     index: UndoIndex,
 }
 
-impl UndoExecutor {
+impl<B: BufferEngine + 'static> UndoExecutor<B> {
     pub fn new(
         wal: Arc<WalManager>,
         disk_scheduler: Arc<DiskScheduler>,
-        buffer_pool: Option<Arc<BufferManager>>,
+        buffer_pool: Option<Arc<B>>,
     ) -> Self {
-        ensure_default_resource_managers_registered();
+        ensure_default_resource_managers_registered::<B>();
         Self {
             wal,
             disk_scheduler,
@@ -123,7 +123,7 @@ impl UndoExecutor {
     }
 
     pub fn observe(&mut self, frame: &WalFrame) -> QuillSQLResult<()> {
-        self.index.observe(frame)
+        self.index.observe::<B>(frame)
     }
 
     pub fn finalize(self) -> QuillSQLResult<UndoOutcome> {
@@ -137,7 +137,7 @@ impl UndoExecutor {
                     break;
                 };
                 if let Some(rec) = &entry.payload {
-                    if let Some(manager) = get_resource_manager(rec.rmid) {
+                    if let Some(manager) = get_resource_manager::<B>(rec.rmid) {
                         let ctx = UndoContext {
                             disk_scheduler: self.disk_scheduler.clone(),
                             buffer_pool: self.buffer_pool.clone(),

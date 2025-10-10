@@ -7,7 +7,7 @@ use std::cell::UnsafeCell;
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use crate::buffer::page::{PageId, INVALID_PAGE_ID, PAGE_SIZE};
+use super::page::{PageId, INVALID_PAGE_ID, PAGE_SIZE};
 use crate::config::BufferPoolConfig;
 use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::recovery::Lsn;
@@ -199,6 +199,18 @@ impl BufferPool {
 
     pub fn disk_scheduler(&self) -> Arc<DiskScheduler> {
         self.disk_scheduler.clone()
+    }
+
+    pub fn schedule_deallocate(&self, page_id: PageId) -> QuillSQLResult<()> {
+        self.disk_scheduler
+            .schedule_deallocate(page_id)?
+            .recv()
+            .map_err(|e| QuillSQLError::Internal(format!("Channel disconnected: {}", e)))??;
+        Ok(())
+    }
+
+    pub fn evict_victim_frame(&self) -> Option<FrameId> {
+        self.free_list.lock().pop_front()
     }
 
     pub fn reset_frame(&self, frame_id: FrameId) {

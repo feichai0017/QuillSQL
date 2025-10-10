@@ -1,4 +1,4 @@
-use crate::buffer::{AtomicPageId, PageId, INVALID_PAGE_ID};
+use crate::buffer::{AtomicPageId, PageId, StandardBufferManager, INVALID_PAGE_ID};
 use crate::catalog::catalog::{CatalogSchema, CatalogTable};
 use crate::catalog::registry::global_table_registry;
 use crate::catalog::{
@@ -119,7 +119,7 @@ fn load_information_schema(catalog: &mut Catalog) -> QuillSQLResult<()> {
         INFORMATION_SCHEMA_SCHEMAS.to_string(),
         CatalogTable::new(INFORMATION_SCHEMA_SCHEMAS, schemas_heap.clone()),
     );
-    global_table_registry().register(
+    global_table_registry::<StandardBufferManager>().register(
         TableReference::Full {
             catalog: DEFAULT_CATALOG_NAME.to_string(),
             schema: INFORMATION_SCHEMA_NAME.to_string(),
@@ -139,7 +139,7 @@ fn load_information_schema(catalog: &mut Catalog) -> QuillSQLResult<()> {
         INFORMATION_SCHEMA_TABLES.to_string(),
         CatalogTable::new(INFORMATION_SCHEMA_TABLES, tables_heap.clone()),
     );
-    global_table_registry().register(
+    global_table_registry::<StandardBufferManager>().register(
         TableReference::Full {
             catalog: DEFAULT_CATALOG_NAME.to_string(),
             schema: INFORMATION_SCHEMA_NAME.to_string(),
@@ -159,7 +159,7 @@ fn load_information_schema(catalog: &mut Catalog) -> QuillSQLResult<()> {
         INFORMATION_SCHEMA_COLUMNS.to_string(),
         CatalogTable::new(INFORMATION_SCHEMA_COLUMNS, columns_heap.clone()),
     );
-    global_table_registry().register(
+    global_table_registry::<StandardBufferManager>().register(
         TableReference::Full {
             catalog: DEFAULT_CATALOG_NAME.to_string(),
             schema: INFORMATION_SCHEMA_NAME.to_string(),
@@ -179,7 +179,7 @@ fn load_information_schema(catalog: &mut Catalog) -> QuillSQLResult<()> {
         INFORMATION_SCHEMA_INDEXES.to_string(),
         CatalogTable::new(INFORMATION_SCHEMA_INDEXES, indexes_heap.clone()),
     );
-    global_table_registry().register(
+    global_table_registry::<StandardBufferManager>().register(
         TableReference::Full {
             catalog: DEFAULT_CATALOG_NAME.to_string(),
             schema: INFORMATION_SCHEMA_NAME.to_string(),

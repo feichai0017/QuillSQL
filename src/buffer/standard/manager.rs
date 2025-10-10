@@ -1,4 +1,4 @@
-//! BufferManager coordinates replacement, dirty tracking, and WAL with a shared BufferPool.
+//! StandardBufferManager coordinates replacement, dirty tracking, and WAL with a shared BufferPool.
 
 use std::sync::Arc;
 
@@ -6,8 +6,9 @@ use bytes::Bytes;
 use dashmap::{DashMap, DashSet};
 use parking_lot::{Mutex, RwLock};
 
-use crate::buffer::buffer_pool::{BufferPool, FrameId, FrameMeta};
-use crate::buffer::page::{self, PageId, ReadPageGuard, WritePageGuard, INVALID_PAGE_ID};
+use super::buffer_pool::{BufferPool, FrameId, FrameMeta};
+use super::page::{self, PageId, ReadPageGuard, WritePageGuard, INVALID_PAGE_ID};
+use crate::buffer::engine::{BufferEngine, ReadGuardRef, WriteGuardRef};
 use crate::catalog::SchemaRef;
 use crate::config::BufferPoolConfig;
 use crate::error::{QuillSQLError, QuillSQLResult};
@@ -25,7 +26,7 @@ use crate::utils::cache::tiny_lfu::TinyLFU;
 use crate::utils::cache::Replacer;
 
 #[derive(Debug)]
-pub struct BufferManager {
+pub struct StandardBufferManager {
     pool: Arc<BufferPool>,
     replacer: Arc<RwLock<LRUKReplacer>>,
     inflight_loads: DashMap<PageId, Arc<Mutex<()>>>,
@@ -35,7 +36,7 @@ pub struct BufferManager {
     wal_manager: Arc<RwLock<Option<Arc<WalManager>>>>,
 }
 
-impl BufferManager {
+impl StandardBufferManager {
     pub fn new(num_pages: usize, disk_scheduler: Arc<DiskScheduler>) -> Self {
         Self::new_with_config(
             BufferPoolConfig {
@@ -500,6 +501,58 @@ impl BufferManager {
     }
 }
 
+impl BufferEngine for StandardBufferManager {
+    fn new_page(self: &Arc<Self>) -> QuillSQLResult<WriteGuardRef> {
+        StandardBufferManager::new_page(self).map(|guard| Box::new(guard) as WriteGuardRef)
+    }
+
+    fn fetch_page_read(self: &Arc<Self>, page_id: PageId) -> QuillSQLResult<ReadGuardRef> {
+        StandardBufferManager::fetch_page_read(self, page_id)
+            .map(|guard| Box::new(guard) as ReadGuardRef)
+    }
+
+    fn fetch_page_write(self: &Arc<Self>, page_id: PageId) -> QuillSQLResult<WriteGuardRef> {
+        StandardBufferManager::fetch_page_write(self, page_id)
+            .map(|guard| Box::new(guard) as WriteGuardRef)
+    }
+
+    fn prefetch_page(self: &Arc<Self>, page_id: PageId) -> QuillSQLResult<()> {
+        StandardBufferManager::prefetch_page(self, page_id)
+    }
+
+    fn flush_page(&self, page_id: PageId) -> QuillSQLResult<bool> {
+        StandardBufferManager::flush_page(self, page_id)
+    }
+
+    fn flush_all_pages(&self) -> QuillSQLResult<()> {
+        StandardBufferManager::flush_all_pages(self)
+    }
+
+    fn delete_page(self: &Arc<Self>, page_id: PageId) -> QuillSQLResult<bool> {
+        StandardBufferManager::delete_page(self, page_id)
+    }
+
+    fn dirty_page_ids(&self) -> Vec<PageId> {
+        StandardBufferManager::dirty_page_ids(self)
+    }
+
+    fn dirty_page_table_snapshot(&self) -> Vec<(PageId, Lsn)> {
+        StandardBufferManager::dirty_page_table_snapshot(self)
+    }
+
+    fn set_wal_manager(&self, wal_manager: Arc<WalManager>) {
+        StandardBufferManager::set_wal_manager(self, wal_manager)
+    }
+
+    fn wal_manager(&self) -> Option<Arc<WalManager>> {
+        StandardBufferManager::wal_manager(self)
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -509,12 +562,12 @@ mod tests {
     use std::thread;
     use tempfile::TempDir;
 
-    fn setup_manager(num_pages: usize) -> (TempDir, Arc<BufferManager>) {
+    fn setup_manager(num_pages: usize) -> (TempDir, Arc<StandardBufferManager>) {
         let temp_dir = TempDir::new().unwrap();
         let db_file = temp_dir.path().join("test.db");
         let disk_manager = Arc::new(DiskManager::try_new(db_file).unwrap());
         let disk_scheduler = Arc::new(DiskScheduler::new(disk_manager));
-        let manager = Arc::new(BufferManager::new(num_pages, disk_scheduler));
+        let manager = Arc::new(StandardBufferManager::new(num_pages, disk_scheduler));
         (temp_dir, manager)
     }
 
