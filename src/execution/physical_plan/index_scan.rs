@@ -43,7 +43,7 @@ impl VolcanoExecutor for PhysicalIndexScan {
     fn init(&self, context: &mut ExecutionContext) -> QuillSQLResult<()> {
         // Lock table IS for RC/RR; RU keeps current behavior
         if matches!(
-            context.txn.isolation_level(),
+            context.txn().isolation_level(),
             IsolationLevel::ReadCommitted
                 | IsolationLevel::RepeatableRead
                 | IsolationLevel::Serializable
@@ -93,7 +93,7 @@ impl VolcanoExecutor for PhysicalIndexScan {
                     continue;
                 }
                 // Acquire S lock for RC/RR before returning tuple
-                return match context.txn.isolation_level() {
+                return match context.txn().isolation_level() {
                     IsolationLevel::ReadUncommitted => Ok(Some(table_heap.tuple(rid)?)),
                     IsolationLevel::ReadCommitted => {
                         context.lock_row_shared(&self.table_ref, rid, false)?;

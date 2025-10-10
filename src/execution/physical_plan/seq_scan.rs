@@ -60,7 +60,7 @@ impl VolcanoExecutor for PhysicalSeqScan {
                 continue;
             }
 
-            match context.txn.isolation_level() {
+            match context.txn().isolation_level() {
                 IsolationLevel::ReadUncommitted => return Ok(Some(tuple)),
                 IsolationLevel::ReadCommitted => {
                     context.lock_row_shared(&self.table, rid, false)?;
@@ -72,7 +72,17 @@ impl VolcanoExecutor for PhysicalSeqScan {
                     context.unlock_row_shared(&self.table, rid)?;
                     return Ok(Some(result));
                 }
-                IsolationLevel::RepeatableRead | IsolationLevel::Serializable => {
+                IsolationLevel::RepeatableRead => {
+                    context.lock_row_shared(&self.table, rid, true)?;
+                    if !context.is_visible(&meta) {
+                        context.unlock_row_shared(&self.table, rid)?;
+                        continue;
+                    }
+                    let result = tuple;
+                    context.unlock_row_shared(&self.table, rid)?;
+                    return Ok(Some(result));
+                }
+                IsolationLevel::Serializable => {
                     context.lock_row_shared(&self.table, rid, true)?;
                     if !context.is_visible(&meta) {
                         context.unlock_row_shared(&self.table, rid)?;

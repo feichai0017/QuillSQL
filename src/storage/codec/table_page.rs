@@ -96,6 +96,18 @@ impl TablePageHeaderTupleInfoCodec {
         bytes.extend(CommonCodec::encode_u64(tuple_info.meta.delete_txn_id));
         bytes.extend(CommonCodec::encode_u32(tuple_info.meta.delete_cid));
         bytes.extend(CommonCodec::encode_bool(tuple_info.meta.is_deleted));
+        bytes.extend(CommonCodec::encode_bool(
+            tuple_info.meta.next_version.is_some(),
+        ));
+        if let Some(next) = tuple_info.meta.next_version {
+            bytes.extend(RidCodec::encode(&next));
+        }
+        bytes.extend(CommonCodec::encode_bool(
+            tuple_info.meta.prev_version.is_some(),
+        ));
+        if let Some(prev) = tuple_info.meta.prev_version {
+            bytes.extend(RidCodec::encode(&prev));
+        }
         bytes
     }
 
@@ -115,6 +127,24 @@ impl TablePageHeaderTupleInfoCodec {
         left_bytes = &left_bytes[offset..];
         let (is_deleted, offset) = CommonCodec::decode_bool(left_bytes)?;
         left_bytes = &left_bytes[offset..];
+        let (has_next, offset) = CommonCodec::decode_bool(left_bytes)?;
+        left_bytes = &left_bytes[offset..];
+        let (next_version, consumed_next) = if has_next {
+            let (rid, offset) = RidCodec::decode(left_bytes)?;
+            (Some(rid), offset)
+        } else {
+            (None, 0)
+        };
+        left_bytes = &left_bytes[consumed_next..];
+        let (has_prev, offset) = CommonCodec::decode_bool(left_bytes)?;
+        left_bytes = &left_bytes[offset..];
+        let (prev_version, consumed_prev) = if has_prev {
+            let (rid, offset) = RidCodec::decode(left_bytes)?;
+            (Some(rid), offset)
+        } else {
+            (None, 0)
+        };
+        left_bytes = &left_bytes[consumed_prev..];
         Ok((
             TupleInfo {
                 offset: tuple_offset,
@@ -125,6 +155,8 @@ impl TablePageHeaderTupleInfoCodec {
                     delete_txn_id,
                     delete_cid,
                     is_deleted,
+                    next_version,
+                    prev_version,
                 },
             },
             bytes.len() - left_bytes.len(),

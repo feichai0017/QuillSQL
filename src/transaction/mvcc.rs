@@ -200,6 +200,8 @@ mod tests {
             delete_txn_id: 0,
             delete_cid: INVALID_COMMAND_ID,
             is_deleted: false,
+            next_version: None,
+            prev_version: None,
         };
         assert!(!snapshot.is_visible(&meta, 0, |_| TransactionStatus::InProgress));
     }
@@ -213,6 +215,8 @@ mod tests {
             delete_txn_id: 0,
             delete_cid: INVALID_COMMAND_ID,
             is_deleted: false,
+            next_version: None,
+            prev_version: None,
         };
         assert!(snapshot.is_visible(&meta, 0, |_| TransactionStatus::Committed));
     }
@@ -226,6 +230,8 @@ mod tests {
             delete_txn_id: 5,
             delete_cid: 0,
             is_deleted: true,
+            next_version: None,
+            prev_version: None,
         };
         assert!(!snapshot.is_visible(&meta, 0, |txn| {
             if txn == 5 {
@@ -245,6 +251,8 @@ mod tests {
             delete_txn_id: 5,
             delete_cid: 0,
             is_deleted: true,
+            next_version: None,
+            prev_version: None,
         };
         assert!(snapshot.is_visible(&meta, 0, |txn| {
             if txn == 5 {

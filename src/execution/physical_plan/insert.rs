@@ -4,7 +4,6 @@ use std::sync::{atomic::AtomicU32, Arc};
 
 use crate::catalog::{SchemaRef, INSERT_OUTPUT_SCHEMA_REF};
 use crate::error::QuillSQLError;
-use crate::storage::page::TupleMeta;
 use crate::storage::tuple::Tuple;
 use crate::transaction::LockMode;
 use crate::utils::scalar::ScalarValue;
@@ -48,12 +47,7 @@ impl VolcanoExecutor for PhysicalInsert {
         self.insert_rows.store(0, Ordering::SeqCst);
         context.ensure_writable(&self.table, "INSERT")?;
         if context
-            .txn_mgr
-            .acquire_table_lock(
-                context.txn,
-                self.table.clone(),
-                LockMode::IntentionExclusive,
-            )
+            .lock_table(self.table.clone(), LockMode::IntentionExclusive)
             .is_err()
         {
             return Err(QuillSQLError::Execution(format!(
@@ -103,8 +97,12 @@ impl VolcanoExecutor for PhysicalInsert {
             let tuple = Tuple::new(self.table_schema.clone(), full_data);
 
             let table_heap = context.catalog.table_heap(&self.table)?;
-            let meta = TupleMeta::new(context.txn.id(), context.command_id());
-            let rid = table_heap.insert_tuple(&meta, &tuple)?;
+            let (rid, _) = table_heap.mvcc_insert_version(
+                &tuple,
+                context.txn_id(),
+                context.command_id(),
+                None,
+            )?;
             let mut index_links = Vec::new();
 
             let indexes = context.catalog.table_indexes(&self.table)?;
@@ -121,7 +119,7 @@ impl VolcanoExecutor for PhysicalInsert {
             }
 
             context
-                .txn
+                .txn_mut()
                 .push_insert_undo(table_heap.clone(), rid, index_links);
 
             self.insert_rows.fetch_add(1, Ordering::SeqCst);

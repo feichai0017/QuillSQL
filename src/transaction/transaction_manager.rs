@@ -181,6 +181,7 @@ impl TransactionManager {
             .insert(txn_id, TransactionStatus::Committed);
         self.release_all_locks(txn_id);
         txn.clear_undo();
+        txn.clear_snapshot();
         self.finish_commit(txn, append.end_lsn)
     }
 
@@ -231,6 +232,7 @@ impl TransactionManager {
         self.txn_statuses.insert(txn_id, TransactionStatus::Aborted);
         self.release_all_locks(txn_id);
         txn.clear_undo();
+        txn.clear_snapshot();
         self.finish_commit(txn, append.end_lsn)
     }
 
@@ -336,13 +338,7 @@ impl TransactionManager {
         table: &TableReference,
         rid: RecordId,
     ) -> QuillSQLResult<()> {
-        let unlocked = self.lock_manager.unlock_row_raw(txn_id, table.clone(), rid);
-        if !unlocked {
-            return Err(QuillSQLError::Execution(format!(
-                "failed to release shared row lock for txn {} on {}",
-                txn_id, table
-            )));
-        }
+        let _ = self.lock_manager.unlock_row_raw(txn_id, table.clone(), rid);
         self.remove_shared_row_lock(txn_id, table, rid);
         Ok(())
     }

@@ -76,27 +76,16 @@ impl VolcanoExecutor for PhysicalDelete {
             let table_heap = context.catalog.table_heap(&self.table)?;
             let (current_meta, current_tuple) = table_heap.full_tuple(rid)?;
             if !context.is_visible(&current_meta) {
-                context
-                    .txn_mgr
-                    .unlock_row(context.txn.id(), &self.table, rid);
+                context.unlock_row(&self.table, rid);
                 continue;
             }
-            table_heap.delete_tuple(rid, context.txn.id(), context.command_id())?;
+            table_heap.delete_tuple(rid, context.txn_id(), context.command_id())?;
 
-            let mut index_entries = Vec::new();
-            for index in context.catalog.table_indexes(&self.table)? {
-                if let Ok(key) = current_tuple.project_with_schema(index.key_schema.clone()) {
-                    index.delete(&key)?;
-                    index_entries.push((index.clone(), key));
-                }
-            }
-
-            context.txn.push_delete_undo(
+            context.txn_mut().push_delete_undo(
                 table_heap.clone(),
                 rid,
                 current_meta,
                 current_tuple,
-                index_entries,
             );
             self.deleted_rows.fetch_add(1, Ordering::SeqCst);
         }

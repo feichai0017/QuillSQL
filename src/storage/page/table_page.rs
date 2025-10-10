@@ -14,6 +14,8 @@ pub static EMPTY_TUPLE_META: TupleMeta = TupleMeta {
     delete_txn_id: 0,
     delete_cid: INVALID_COMMAND_ID,
     is_deleted: false,
+    next_version: None,
+    prev_version: None,
 };
 
 pub static EMPTY_TUPLE_INFO: LazyLock<TupleInfo> = LazyLock::new(|| TupleInfo {
@@ -73,6 +75,8 @@ pub struct TupleMeta {
     pub delete_txn_id: TransactionId,
     pub delete_cid: CommandId,
     pub is_deleted: bool,
+    pub next_version: Option<RecordId>,
+    pub prev_version: Option<RecordId>,
 }
 
 impl TupleMeta {
@@ -83,6 +87,8 @@ impl TupleMeta {
             delete_txn_id: 0,
             delete_cid: INVALID_COMMAND_ID,
             is_deleted: false,
+            next_version: None,
+            prev_version: None,
         }
     }
 
@@ -96,6 +102,19 @@ impl TupleMeta {
         self.is_deleted = false;
         self.delete_txn_id = 0;
         self.delete_cid = INVALID_COMMAND_ID;
+    }
+
+    pub fn set_next_version(&mut self, next: Option<RecordId>) {
+        self.next_version = next;
+    }
+
+    pub fn set_prev_version(&mut self, prev: Option<RecordId>) {
+        self.prev_version = prev;
+    }
+
+    pub fn clear_chain(&mut self) {
+        self.next_version = None;
+        self.prev_version = None;
     }
 }
 

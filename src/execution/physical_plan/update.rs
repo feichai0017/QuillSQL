@@ -8,7 +8,6 @@ use crate::transaction::LockMode;
 use crate::utils::scalar::ScalarValue;
 use crate::utils::table_ref::TableReference;
 use std::collections::HashMap;
-use std::collections::HashSet;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
 
@@ -48,12 +47,7 @@ impl VolcanoExecutor for PhysicalUpdate {
         let table_heap = context.catalog.table_heap(&self.table)?;
         *self.table_iterator.lock().unwrap() = Some(TableIterator::new(table_heap.clone(), ..));
         context
-            .txn_mgr
-            .acquire_table_lock(
-                context.txn,
-                self.table.clone(),
-                LockMode::IntentionExclusive,
-            )
+            .lock_table(self.table.clone(), LockMode::IntentionExclusive)
             .map_err(|_| {
                 QuillSQLError::Execution(format!(
                     "failed to acquire IX lock on table {}",
@@ -74,6 +68,13 @@ impl VolcanoExecutor for PhysicalUpdate {
 
         loop {
             if let Some((rid, meta, tuple)) = table_iterator.next()? {
+                // Skip versions that were created by this command so we do not
+                // immediately reprocess the freshly inserted MVCC tuple and loop forever.
+                if meta.insert_txn_id == context.txn_id() && meta.insert_cid == context.command_id()
+                {
+                    continue;
+                }
+
                 if let Some(selection) = &self.selection {
                     if !selection.evaluate(&tuple)?.as_boolean()?.unwrap_or(false) {
                         continue;
@@ -88,9 +89,7 @@ impl VolcanoExecutor for PhysicalUpdate {
 
                 let (prev_meta, mut current_tuple) = table_heap.full_tuple(rid)?;
                 if !context.is_visible(&prev_meta) {
-                    context
-                        .txn_mgr
-                        .unlock_row(context.txn.id(), &self.table, rid);
+                    context.unlock_row(&self.table, rid);
                     continue;
                 }
                 let prev_tuple = current_tuple.clone();
@@ -102,58 +101,31 @@ impl VolcanoExecutor for PhysicalUpdate {
                     let new_value = value_expr.evaluate(&EMPTY_TUPLE)?.cast_to(&col_datatype)?;
                     current_tuple.data[index] = new_value;
                 }
-                table_heap.update_tuple(rid, current_tuple.clone())?;
+                let (new_rid, _) = table_heap.mvcc_update(
+                    rid,
+                    current_tuple.clone(),
+                    context.txn_id(),
+                    context.command_id(),
+                )?;
 
                 let mut new_keys = Vec::new();
-                let mut old_keys = Vec::new();
-                let changed_cols: HashSet<String> = self
-                    .assignments
-                    .keys()
-                    .map(|s| s.to_ascii_lowercase())
-                    .collect();
                 let indexes = context.catalog.table_indexes(&self.table)?;
                 for index in indexes {
-                    // Skip indexes whose key columns are not affected by this update
-                    let affected = index
-                        .key_schema
-                        .columns
-                        .iter()
-                        .any(|c| changed_cols.contains(&c.name.to_ascii_lowercase()));
-                    if !affected {
-                        continue;
-                    }
-
-                    let old_key = prev_tuple
-                        .project_with_schema(index.key_schema.clone())
-                        .ok();
-                    let new_key = current_tuple
-                        .project_with_schema(index.key_schema.clone())
-                        .ok();
-
-                    // Skip maintenance when key values are unchanged
-                    if let (Some(ref ok), Some(ref nk)) = (&old_key, &new_key) {
-                        if ok.data == nk.data {
-                            continue;
-                        }
-                    }
-
-                    if let Some(old_key_tuple) = old_key {
-                        index.delete(&old_key_tuple)?;
-                        old_keys.push((index.clone(), old_key_tuple));
-                    }
-                    if let Some(new_key_tuple) = new_key {
-                        index.insert(&new_key_tuple, rid)?;
+                    if let Ok(new_key_tuple) =
+                        current_tuple.project_with_schema(index.key_schema.clone())
+                    {
+                        index.insert(&new_key_tuple, new_rid)?;
                         new_keys.push((index.clone(), new_key_tuple));
                     }
                 }
 
-                context.txn.push_update_undo(
+                context.txn_mut().push_update_undo(
                     table_heap.clone(),
                     rid,
+                    new_rid,
                     prev_meta,
                     prev_tuple,
                     new_keys,
-                    old_keys,
                 );
 
                 self.update_rows.fetch_add(1, Ordering::SeqCst);

@@ -2,7 +2,7 @@ use crate::error::QuillSQLResult;
 use crate::recovery::Lsn;
 use crate::storage::codec::TupleCodec;
 use crate::storage::heap::wal_codec::{
-    HeapDeletePayload, HeapInsertPayload, HeapRecordPayload, HeapUpdatePayload, TupleMetaRepr,
+    HeapDeletePayload, HeapRecordPayload, HeapUpdatePayload, TupleMetaRepr,
 };
 use crate::storage::index::btree_index::BPlusTreeIndex;
 use crate::storage::page::{RecordId, TupleMeta};
@@ -11,6 +11,8 @@ use crate::storage::tuple::Tuple;
 use sqlparser::ast::TransactionAccessMode;
 use std::str::FromStr;
 use std::sync::Arc;
+
+use super::TransactionSnapshot;
 
 pub type TransactionId = u64;
 pub type CommandId = u32;
@@ -70,15 +72,12 @@ pub enum UndoAction {
         rid: RecordId,
         prev_meta: TupleMeta,
         prev_tuple: Tuple,
-        new_keys: Vec<(Arc<BPlusTreeIndex>, Tuple)>,
-        old_keys: Vec<(Arc<BPlusTreeIndex>, Tuple)>,
     },
     Delete {
         table: Arc<TableHeap>,
         rid: RecordId,
         prev_meta: TupleMeta,
         prev_tuple: Tuple,
-        indexes: Vec<(Arc<BPlusTreeIndex>, Tuple)>,
     },
 }
 
@@ -101,16 +100,8 @@ impl UndoAction {
                 rid,
                 prev_meta,
                 prev_tuple,
-                new_keys,
-                old_keys,
             } => {
                 table.recover_restore_tuple(rid, prev_meta, &prev_tuple)?;
-                for (index, key) in new_keys.into_iter() {
-                    index.delete(&key)?;
-                }
-                for (index, key) in old_keys.into_iter() {
-                    index.insert(&key, rid)?;
-                }
                 Ok(())
             }
             UndoAction::Delete {
@@ -118,12 +109,8 @@ impl UndoAction {
                 rid,
                 prev_meta,
                 prev_tuple,
-                indexes,
             } => {
                 table.recover_restore_tuple(rid, prev_meta, &prev_tuple)?;
-                for (index, key) in indexes.into_iter() {
-                    index.insert(&key, rid)?;
-                }
                 Ok(())
             }
         }
@@ -164,13 +151,15 @@ impl UndoAction {
                 prev_meta,
                 prev_tuple,
                 ..
-            } => Ok(HeapRecordPayload::Insert(HeapInsertPayload {
+            } => Ok(HeapRecordPayload::Update(HeapUpdatePayload {
                 relation: table.relation_ident(),
                 page_id: rid.page_id,
                 slot_id: rid.slot_num as u16,
                 op_txn_id: prev_meta.insert_txn_id,
-                tuple_meta: TupleMetaRepr::from(*prev_meta),
-                tuple_data: TupleCodec::encode(prev_tuple),
+                new_tuple_meta: TupleMetaRepr::from(*prev_meta),
+                new_tuple_data: TupleCodec::encode(prev_tuple),
+                old_tuple_meta: None,
+                old_tuple_data: None,
             })),
         }
     }
@@ -187,6 +176,7 @@ pub struct Transaction {
     undo_actions: Vec<UndoAction>,
     current_command_id: CommandId,
     next_command_id: CommandId,
+    snapshot: Option<TransactionSnapshot>,
 }
 
 impl Transaction {
@@ -207,6 +197,7 @@ impl Transaction {
             undo_actions: Vec::new(),
             current_command_id: INVALID_COMMAND_ID,
             next_command_id: 0,
+            snapshot: None,
         }
     }
 
@@ -224,6 +215,12 @@ impl Transaction {
 
     pub fn set_isolation_level(&mut self, isolation_level: IsolationLevel) {
         self.isolation_level = isolation_level;
+        if matches!(
+            isolation_level,
+            IsolationLevel::ReadCommitted | IsolationLevel::ReadUncommitted
+        ) {
+            self.clear_snapshot();
+        }
     }
 
     pub fn state(&self) -> TransactionState {
@@ -296,19 +293,22 @@ impl Transaction {
     pub fn push_update_undo(
         &mut self,
         table: Arc<TableHeap>,
-        rid: RecordId,
+        old_rid: RecordId,
+        new_rid: RecordId,
         prev_meta: TupleMeta,
         prev_tuple: Tuple,
         new_keys: Vec<(Arc<BPlusTreeIndex>, Tuple)>,
-        old_keys: Vec<(Arc<BPlusTreeIndex>, Tuple)>,
     ) {
         self.undo_actions.push(UndoAction::Update {
-            table,
-            rid,
+            table: table.clone(),
+            rid: old_rid,
             prev_meta,
             prev_tuple,
-            new_keys,
-            old_keys,
+        });
+        self.undo_actions.push(UndoAction::Insert {
+            table,
+            rid: new_rid,
+            indexes: new_keys,
         });
     }
 
@@ -318,14 +318,12 @@ impl Transaction {
         rid: RecordId,
         prev_meta: TupleMeta,
         prev_tuple: Tuple,
-        indexes: Vec<(Arc<BPlusTreeIndex>, Tuple)>,
     ) {
         self.undo_actions.push(UndoAction::Delete {
             table,
             rid,
             prev_meta,
             prev_tuple,
-            indexes,
         });
     }
 
@@ -335,5 +333,17 @@ impl Transaction {
 
     pub fn clear_undo(&mut self) {
         self.undo_actions.clear();
+    }
+
+    pub fn snapshot(&self) -> Option<&TransactionSnapshot> {
+        self.snapshot.as_ref()
+    }
+
+    pub fn set_snapshot(&mut self, snapshot: TransactionSnapshot) {
+        self.snapshot = Some(snapshot);
+    }
+
+    pub fn clear_snapshot(&mut self) {
+        self.snapshot = None;
     }
 }

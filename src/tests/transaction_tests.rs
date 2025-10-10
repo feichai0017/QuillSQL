@@ -202,3 +202,44 @@ fn repeatable_read_blocks_update_until_commit() {
         "writer should acquire lock after reader commit"
     );
 }
+
+#[test]
+fn repeatable_read_sees_consistent_snapshot_after_update() {
+    let mut db = Database::new_temp().expect("database");
+    db.run("create table mvcc_t(id int primary key, val int)")
+        .expect("create table");
+    db.run("insert into mvcc_t values (1, 10)")
+        .expect("seed row");
+
+    let mut rr_session = SessionContext::new(IsolationLevel::RepeatableRead);
+    rr_session.set_autocommit(false);
+    db.run_with_session(&mut rr_session, "start transaction")
+        .expect("start rr txn");
+
+    let rows = db
+        .run_with_session(&mut rr_session, "select val from mvcc_t where id = 1")
+        .expect("rr initial read");
+    assert_eq!(value_as_i32(&rows[0].data[0]), 10);
+
+    let mut rc_session = SessionContext::new(IsolationLevel::ReadCommitted);
+    rc_session.set_autocommit(false);
+    db.run_with_session(&mut rc_session, "start transaction")
+        .expect("start rc txn");
+    db.run_with_session(&mut rc_session, "update mvcc_t set val = 20 where id = 1")
+        .expect("perform update");
+    db.run_with_session(&mut rc_session, "commit")
+        .expect("commit updater");
+
+    let rows = db
+        .run_with_session(&mut rr_session, "select val from mvcc_t where id = 1")
+        .expect("rr snapshot read");
+    assert_eq!(value_as_i32(&rows[0].data[0]), 10);
+
+    db.run_with_session(&mut rr_session, "commit")
+        .expect("commit rr");
+
+    let rows = db
+        .run("select val from mvcc_t where id = 1")
+        .expect("post commit read");
+    assert_eq!(value_as_i32(&rows[0].data[0]), 20);
+}

@@ -374,6 +374,8 @@ mod tests {
                 delete_txn_id: 0,
                 delete_cid: INVALID_COMMAND_ID,
                 is_deleted: false,
+                next_version: None,
+                prev_version: None,
             },
             tuple_data: vec![7, 8, 9],
         }));
@@ -407,6 +409,8 @@ mod tests {
                 delete_txn_id: 0,
                 delete_cid: INVALID_COMMAND_ID,
                 is_deleted: false,
+                next_version: None,
+                prev_version: None,
             },
             new_tuple_data: vec![1, 2, 3, 4],
             old_tuple_meta: Some(TupleMetaRepr {
@@ -415,6 +419,8 @@ mod tests {
                 delete_txn_id: 7,
                 delete_cid: 0,
                 is_deleted: true,
+                next_version: None,
+                prev_version: None,
             }),
             old_tuple_data: Some(vec![9, 9, 9]),
         }));
@@ -448,6 +454,8 @@ mod tests {
                 delete_txn_id: 4,
                 delete_cid: 0,
                 is_deleted: true,
+                next_version: None,
+                prev_version: None,
             },
             old_tuple_data: None,
         }));
