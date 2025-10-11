@@ -4,8 +4,10 @@ use std::time::Duration;
 use bytes::Bytes;
 use dashmap::mapref::entry::Entry;
 use dashmap::{DashMap, DashSet};
+use log::warn;
 use parking_lot::{Mutex, RwLock};
 
+use super::buffer_pool::{FrameId, LeanBufferPool};
 use super::metadata::{
     AccessKind, LeanBufferStats, LeanBufferStatsSnapshot, LeanPageDescriptor, LeanPageSnapshot,
     LeanPageState, StateTransition,
@@ -13,16 +15,15 @@ use super::metadata::{
 use super::page::{new_read_guard, new_write_guard, LeanReadGuard, LeanWriteGuard};
 use super::page_table::LeanPageTable;
 use super::replacer::{LeanReplacer, LeanReplacerSnapshot};
-use super::segment::SegmentAllocator;
+use super::segment::{SegmentAllocationState, SegmentAllocator};
 use crate::background::{self, WorkerHandle};
 use crate::buffer::engine::{BufferEngine, ReadGuardRef, WriteGuardRef};
-use crate::buffer::standard::buffer_pool::{BufferPool, FrameId};
 use crate::buffer::standard::page::INVALID_PAGE_ID;
 use crate::buffer::PageId;
 use crate::catalog::SchemaRef;
 use crate::config::BufferPoolConfig;
 use crate::error::{QuillSQLError, QuillSQLResult};
-use crate::recovery::{Lsn, WalManager};
+use crate::recovery::{ControlFileManager, Lsn, WalManager};
 use crate::storage::codec::{
     BPlusTreeHeaderPageCodec, BPlusTreeInternalPageCodec, BPlusTreeLeafPageCodec,
     BPlusTreePageCodec, TablePageCodec,
@@ -57,7 +58,7 @@ impl Default for LeanBufferOptions {
 
 #[derive(Debug)]
 pub struct LeanBufferManager {
-    pool: Arc<BufferPool>,
+    pool: Arc<LeanBufferPool>,
     options: Arc<LeanBufferOptions>,
     page_table: Arc<LeanPageTable>,
     inflight_loads: DashMap<PageId, Arc<Mutex<()>>>,
@@ -66,19 +67,21 @@ pub struct LeanBufferManager {
     replacer: Arc<LeanReplacer>,
     segment_allocator: Arc<SegmentAllocator>,
     wal_manager: Arc<RwLock<Option<Arc<WalManager>>>>,
+    control_file: Arc<RwLock<Option<Arc<crate::recovery::ControlFileManager>>>>,
     dirty_pages: DashSet<PageId>,
     dirty_page_table: DashMap<PageId, Lsn>,
 }
 
 impl LeanBufferManager {
     pub fn new(num_pages: usize, disk_scheduler: Arc<DiskScheduler>) -> Self {
-        Self::with_buffer_config(
+        Self::with_buffer_config_and_state(
             BufferPoolConfig {
                 buffer_pool_size: num_pages,
                 ..Default::default()
             },
             disk_scheduler,
             LeanBufferOptions::default(),
+            None,
         )
     }
 
@@ -87,11 +90,24 @@ impl LeanBufferManager {
         disk_scheduler: Arc<DiskScheduler>,
         options: LeanBufferOptions,
     ) -> Self {
-        let pool = Arc::new(BufferPool::new_with_config(buffer_config, disk_scheduler));
+        Self::with_buffer_config_and_state(buffer_config, disk_scheduler, options, None)
+    }
+
+    pub fn with_buffer_config_and_state(
+        buffer_config: BufferPoolConfig,
+        disk_scheduler: Arc<DiskScheduler>,
+        options: LeanBufferOptions,
+        segment_state: Option<SegmentAllocationState>,
+    ) -> Self {
+        let pool = Arc::new(LeanBufferPool::new_with_config(
+            buffer_config,
+            disk_scheduler,
+        ));
         let page_table = Arc::new(LeanPageTable::new(options.page_table_partitions));
-        let segment_allocator = Arc::new(SegmentAllocator::new(
+        let segment_allocator = Arc::new(SegmentAllocator::with_state(
             pool.disk_scheduler(),
             options.segment_size,
+            segment_state.unwrap_or_default(),
         ));
         Self {
             pool,
@@ -103,6 +119,7 @@ impl LeanBufferManager {
             replacer: Arc::new(LeanReplacer::new()),
             segment_allocator,
             wal_manager: Arc::new(RwLock::new(None)),
+            control_file: Arc::new(RwLock::new(None)),
             dirty_pages: DashSet::new(),
             dirty_page_table: DashMap::new(),
         }
@@ -120,13 +137,17 @@ impl LeanBufferManager {
         self.replacer.snapshot()
     }
 
+    pub fn segment_state(&self) -> SegmentAllocationState {
+        self.segment_allocator.snapshot()
+    }
+
     pub fn page_snapshot(&self, page_id: PageId) -> Option<LeanPageSnapshot> {
         self.descriptors
             .get(&page_id)
             .map(|descriptor| descriptor.snapshot())
     }
 
-    pub fn buffer_pool(&self) -> Arc<BufferPool> {
+    pub fn buffer_pool(&self) -> Arc<LeanBufferPool> {
         self.pool.clone()
     }
 
@@ -136,6 +157,14 @@ impl LeanBufferManager {
 
     pub fn wal_manager(&self) -> Option<Arc<WalManager>> {
         self.wal_manager.read().clone()
+    }
+
+    pub fn set_control_file(&self, control_file: Arc<ControlFileManager>) {
+        *self.control_file.write() = Some(control_file);
+    }
+
+    pub fn control_file(&self) -> Option<Arc<ControlFileManager>> {
+        self.control_file.read().clone()
     }
 
     pub fn collect_dirty_page_ids(&self) -> Vec<PageId> {
@@ -272,14 +301,11 @@ impl LeanBufferManager {
         let frame_id = self.allocate_frame()?;
         self.pool.load_page_into_frame(page_id, frame_id)?;
         self.page_table.insert(page_id, frame_id);
-        self.pool.insert_mapping(page_id, frame_id);
-        {
-            let mut meta = self.pool.frame_meta(frame_id);
-            meta.page_id = page_id;
-            meta.pin_count = 0;
-            meta.is_dirty = false;
-            meta.lsn = 0;
-        }
+        let meta = self.pool.frame_meta(frame_id);
+        meta.set_page_id(page_id);
+        meta.set_pin_count(1);
+        meta.clear_dirty();
+        meta.set_lsn(0);
         drop(lock);
         if created_here {
             self.inflight_loads.remove(&page_id);
@@ -306,7 +332,7 @@ impl LeanBufferManager {
                 continue;
             };
 
-            let meta_snapshot = self.pool.frame_meta(frame_id).clone();
+            let meta_snapshot = self.pool.frame_meta_snapshot(frame_id);
             if meta_snapshot.pin_count > 0 {
                 self.mark_non_evictable(page_id);
                 continue;
@@ -314,7 +340,6 @@ impl LeanBufferManager {
 
             if meta_snapshot.page_id != page_id {
                 self.page_table.remove_if(page_id, frame_id);
-                self.pool.remove_mapping(page_id);
                 continue;
             }
 
@@ -327,7 +352,6 @@ impl LeanBufferManager {
             }
 
             self.page_table.remove(page_id);
-            self.pool.remove_mapping(page_id);
             self.pool.clear_frame_meta(frame_id);
             self.pool.reset_frame(frame_id);
             self.mark_non_evictable(page_id);
@@ -361,20 +385,17 @@ impl LeanBufferManager {
         is_dirty: bool,
         rec_lsn_hint: Option<Lsn>,
     ) -> QuillSQLResult<()> {
-        let mut meta = self.pool.frame_meta(frame_id);
-        if meta.pin_count > 0 {
-            meta.pin_count -= 1;
-        }
+        let meta = self.pool.frame_meta(frame_id);
+        let remaining = meta.unpin();
         if is_dirty {
-            meta.is_dirty = true;
+            meta.mark_dirty();
             if let Some(lsn) = rec_lsn_hint {
-                meta.lsn = lsn;
+                meta.set_lsn(lsn);
             }
-            self.note_dirty_page(page_id, rec_lsn_hint.unwrap_or(meta.lsn));
+            let lsn = rec_lsn_hint.unwrap_or_else(|| meta.lsn());
+            self.note_dirty_page(page_id, lsn);
         }
-        let pin_count = meta.pin_count;
-        drop(meta);
-        if pin_count == 0 {
+        if remaining == 0 {
             self.mark_evictable(page_id);
         } else {
             self.mark_non_evictable(page_id);
@@ -382,21 +403,28 @@ impl LeanBufferManager {
         Ok(())
     }
 
+    fn persist_segment_state(&self) {
+        if let Some(control) = self.control_file.read().clone() {
+            let state = self.segment_allocator.snapshot();
+            if let Err(err) = control.update_lean_segment_state(state.last_allocated_page) {
+                warn!("Failed to persist lean segment state: {}", err);
+            }
+        }
+    }
+
     fn new_page_guard(self: &Arc<Self>) -> QuillSQLResult<LeanWriteGuard> {
         let frame_id = self.allocate_frame()?;
         let page_id = self.segment_allocator.allocate_page()?;
         self.page_table.insert(page_id, frame_id);
-        self.pool.insert_mapping(page_id, frame_id);
-        {
-            let mut meta = self.pool.frame_meta(frame_id);
-            meta.page_id = page_id;
-            meta.pin_count = 1;
-            meta.is_dirty = false;
-            meta.lsn = 0;
-        }
         self.pool.reset_frame(frame_id);
+        let meta = self.pool.frame_meta(frame_id);
+        meta.set_page_id(page_id);
+        meta.set_pin_count(1);
+        meta.clear_dirty();
+        meta.set_lsn(0);
         let descriptor = self.record_access(page_id, AccessKind::New);
         self.mark_non_evictable(page_id);
+        self.persist_segment_state();
         Ok(new_write_guard(self.clone(), descriptor, frame_id))
     }
 
@@ -407,10 +435,7 @@ impl LeanBufferManager {
             ));
         }
         let frame_id = self.ensure_frame(page_id)?;
-        {
-            let mut meta = self.pool.frame_meta(frame_id);
-            meta.pin_count += 1;
-        }
+        self.pool.frame_meta(frame_id).pin();
         self.mark_non_evictable(page_id);
         let descriptor = self.record_access(page_id, AccessKind::Read);
         Ok(new_read_guard(self.clone(), descriptor, frame_id))
@@ -423,10 +448,7 @@ impl LeanBufferManager {
             ));
         }
         let frame_id = self.ensure_frame(page_id)?;
-        {
-            let mut meta = self.pool.frame_meta(frame_id);
-            meta.pin_count += 1;
-        }
+        self.pool.frame_meta(frame_id).pin();
         self.mark_non_evictable(page_id);
         let descriptor = self.record_access(page_id, AccessKind::Write);
         Ok(new_write_guard(self.clone(), descriptor, frame_id))
@@ -435,11 +457,9 @@ impl LeanBufferManager {
     fn prefetch_page_internal(self: &Arc<Self>, page_id: PageId) -> QuillSQLResult<()> {
         let descriptor = self.record_access(page_id, AccessKind::Prefetch);
         let frame_id = self.ensure_frame(page_id)?;
-        {
-            let meta = self.pool.frame_meta(frame_id);
-            if meta.pin_count == 0 {
-                self.mark_evictable(page_id);
-            }
+        let snapshot = self.pool.frame_meta_snapshot(frame_id);
+        if snapshot.pin_count == 0 {
+            self.mark_evictable(page_id);
         }
         drop(descriptor);
         Ok(())
@@ -450,14 +470,12 @@ impl LeanBufferManager {
             return Ok(false);
         };
         let meta = self.pool.frame_meta(frame_id);
-        if !meta.is_dirty {
-            drop(meta);
+        if !meta.is_dirty() {
             self.dirty_pages.remove(&page_id);
             self.dirty_page_table.remove(&page_id);
             return Ok(false);
         }
-        let lsn = meta.lsn;
-        drop(meta);
+        let lsn = meta.lsn();
         self.ensure_wal_durable(lsn)?;
         let bytes = {
             let _lock = self.pool.frame_lock(frame_id).read();
@@ -465,8 +483,7 @@ impl LeanBufferManager {
             Bytes::copy_from_slice(slice)
         };
         self.pool.write_page_to_disk(page_id, bytes)?;
-        let mut meta = self.pool.frame_meta(frame_id);
-        meta.is_dirty = false;
+        meta.clear_dirty();
         self.dirty_pages.remove(&page_id);
         self.dirty_page_table.remove(&page_id);
         Ok(true)
@@ -498,23 +515,18 @@ impl LeanBufferManager {
             };
             drop(guard);
             let meta = self.pool.frame_meta(frame_id);
-            if meta.page_id != page_id {
-                drop(meta);
-                self.pool.remove_mapping_if(page_id, frame_id);
+            let snapshot = meta.snapshot();
+            if snapshot.page_id != page_id {
+                self.page_table.remove_if(page_id, frame_id);
                 return self.delete_page_inner(page_id);
             }
-            if meta.pin_count > 0 {
-                drop(meta);
+            if snapshot.pin_count > 0 {
                 return Ok(false);
             }
             if !self.page_table.remove_if(page_id, frame_id) {
-                drop(meta);
                 return self.delete_page_inner(page_id);
             }
-            drop(meta);
-            self.pool.remove_mapping(page_id);
             self.pool.reset_frame(frame_id);
-            self.pool.clear_frame_meta(frame_id);
             self.pool.push_free_frame(frame_id);
             self.dirty_pages.remove(&page_id);
             self.dirty_page_table.remove(&page_id);

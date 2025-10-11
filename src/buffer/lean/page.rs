@@ -4,26 +4,26 @@ use std::sync::Arc;
 use parking_lot::{RwLockReadGuard, RwLockWriteGuard};
 
 use crate::buffer::engine::{BufferReadGuard, BufferWriteGuard};
-use crate::buffer::standard::buffer_pool::{BufferPool, FrameId, FrameMeta};
 use crate::buffer::standard::page::PAGE_SIZE;
 use crate::buffer::PageId;
 use crate::recovery::Lsn;
 
-use super::manager::LeanBufferManager;
+use super::buffer_manager::LeanBufferManager;
+use super::buffer_pool::{FrameId, LeanBufferPool, LeanFrameMeta};
 use super::metadata::{AccessKind, LeanPageDescriptor};
 
 #[derive(Debug)]
 pub struct LeanReadGuard {
     manager: Arc<LeanBufferManager>,
-    pool: Arc<BufferPool>,
+    pool: Arc<LeanBufferPool>,
     frame_id: FrameId,
     guard: ManuallyDrop<RwLockReadGuard<'static, ()>>,
     descriptor: Arc<LeanPageDescriptor>,
 }
 
 impl LeanReadGuard {
-    pub(crate) fn meta_snapshot(&self) -> FrameMeta {
-        self.pool.frame_meta(self.frame_id).clone()
+    pub(crate) fn meta_snapshot(&self) -> LeanFrameMeta {
+        self.pool.frame_meta_snapshot(self.frame_id)
     }
 
     pub(crate) fn data(&self) -> &[u8] {
@@ -76,7 +76,7 @@ impl BufferReadGuard for LeanReadGuard {
 #[derive(Debug)]
 pub struct LeanWriteGuard {
     manager: Arc<LeanBufferManager>,
-    pool: Arc<BufferPool>,
+    pool: Arc<LeanBufferPool>,
     frame_id: FrameId,
     guard: ManuallyDrop<RwLockWriteGuard<'static, ()>>,
     descriptor: Arc<LeanPageDescriptor>,
@@ -84,8 +84,8 @@ pub struct LeanWriteGuard {
 }
 
 impl LeanWriteGuard {
-    pub(crate) fn meta_snapshot(&self) -> FrameMeta {
-        self.pool.frame_meta(self.frame_id).clone()
+    pub(crate) fn meta_snapshot(&self) -> LeanFrameMeta {
+        self.pool.frame_meta_snapshot(self.frame_id)
     }
 
     pub(crate) fn data(&self) -> &[u8] {
@@ -158,16 +158,16 @@ impl BufferWriteGuard for LeanWriteGuard {
     }
 
     fn mark_dirty(&mut self) {
-        let mut meta = self.pool.frame_meta(self.frame_id);
-        meta.is_dirty = true;
+        let meta = self.pool.frame_meta(self.frame_id);
+        meta.mark_dirty();
         if self.first_dirty_lsn.is_none() {
-            self.first_dirty_lsn = Some(meta.lsn);
+            self.first_dirty_lsn = Some(meta.lsn());
         }
     }
 
     fn set_lsn(&mut self, lsn: Lsn) {
-        let mut meta = self.pool.frame_meta(self.frame_id);
-        meta.lsn = lsn;
+        let meta = self.pool.frame_meta(self.frame_id);
+        meta.set_lsn(lsn);
         if self.first_dirty_lsn.is_none() {
             self.first_dirty_lsn = Some(lsn);
         }

@@ -5,11 +5,12 @@ use parking_lot::Mutex;
 use rand::random;
 use serde::{Deserialize, Serialize};
 
+use crate::buffer::PageId;
 use crate::error::QuillSQLResult;
 use crate::recovery::Lsn;
 
 const CONTROL_FILE_NAME: &str = "control.dat";
-const CONTROL_FILE_VERSION: u32 = 2;
+const CONTROL_FILE_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 // control.dat (bincode of ControlFileData)
@@ -32,6 +33,7 @@ struct ControlFileData {
     last_checkpoint_lsn: Lsn,
     last_record_start: Lsn,
     checkpoint_redo_start: Lsn,
+    lean_last_allocated_page: PageId,
 }
 
 impl ControlFileData {
@@ -45,6 +47,7 @@ impl ControlFileData {
             last_checkpoint_lsn: 0,
             last_record_start: 0,
             checkpoint_redo_start: 0,
+            lean_last_allocated_page: 0,
         }
     }
 }
@@ -56,6 +59,7 @@ pub struct ControlFileSnapshot {
     pub last_checkpoint_lsn: Lsn,
     pub last_record_start: Lsn,
     pub checkpoint_redo_start: Lsn,
+    pub lean_last_allocated_page: PageId,
 }
 
 #[derive(Debug)]
@@ -71,6 +75,7 @@ pub struct WalInitState {
     pub last_checkpoint_lsn: Lsn,
     pub last_record_start: Lsn,
     pub checkpoint_redo_start: Lsn,
+    pub lean_last_allocated_page: PageId,
 }
 
 impl WalInitState {
@@ -90,11 +95,16 @@ impl ControlFileManager {
         let (data, newly_created) = if path.exists() {
             let bytes = fs::read(&path)?;
             let mut data: ControlFileData = bincode::deserialize(&bytes)?;
-            if data.version != CONTROL_FILE_VERSION {
+            if data.version > CONTROL_FILE_VERSION {
                 return Err(crate::error::QuillSQLError::Internal(format!(
                     "Unsupported control file version: {}",
                     data.version
                 )));
+            }
+            if data.version < CONTROL_FILE_VERSION {
+                data.version = CONTROL_FILE_VERSION;
+                data.lean_last_allocated_page = 0;
+                needs_persist = true;
             }
             if data.wal_segment_size != wal_segment_size {
                 data.wal_segment_size = wal_segment_size;
@@ -113,6 +123,7 @@ impl ControlFileManager {
             last_checkpoint_lsn: data.last_checkpoint_lsn,
             last_record_start: data.last_record_start,
             checkpoint_redo_start: data.checkpoint_redo_start,
+            lean_last_allocated_page: data.lean_last_allocated_page,
         };
 
         let manager = Self {
@@ -146,6 +157,17 @@ impl ControlFileManager {
         self.persist()
     }
 
+    pub fn update_lean_segment_state(
+        &self,
+        lean_last_allocated_page: PageId,
+    ) -> QuillSQLResult<()> {
+        {
+            let mut guard = self.inner.lock();
+            guard.lean_last_allocated_page = lean_last_allocated_page;
+        }
+        self.persist()
+    }
+
     pub fn snapshot(&self) -> ControlFileSnapshot {
         let guard = self.inner.lock();
         ControlFileSnapshot {
@@ -154,6 +176,7 @@ impl ControlFileManager {
             last_checkpoint_lsn: guard.last_checkpoint_lsn,
             last_record_start: guard.last_record_start,
             checkpoint_redo_start: guard.checkpoint_redo_start,
+            lean_last_allocated_page: guard.lean_last_allocated_page,
         }
     }
 
