@@ -1,4 +1,4 @@
-use crate::buffer::buffer_pool::{BufferPool, FrameMeta};
+use crate::buffer::buffer_pool::{BufferPool, FrameMetaSnapshot};
 use crate::buffer::{BufferManager, FrameId};
 use crate::recovery::Lsn;
 use derive_with::With;
@@ -77,8 +77,8 @@ impl ReadPageGuard {
         self.meta_snapshot().lsn
     }
 
-    pub fn meta_snapshot(&self) -> FrameMeta {
-        self.pool.frame_meta(self.frame_id).clone()
+    pub fn meta_snapshot(&self) -> FrameMetaSnapshot {
+        self.pool.frame_meta(self.frame_id).snapshot()
     }
 
     pub fn frame_id(&self) -> FrameId {
@@ -135,18 +135,18 @@ impl WritePageGuard {
     }
 
     pub fn set_lsn(&mut self, lsn: Lsn) {
-        let mut meta = self.pool.frame_meta(self.frame_id);
-        meta.lsn = lsn;
+        let meta = self.pool.frame_meta(self.frame_id);
+        meta.set_lsn(lsn);
         if self.first_dirty_lsn.is_none() {
             self.first_dirty_lsn = Some(lsn);
         }
     }
 
     pub fn mark_dirty(&mut self) {
-        let mut meta = self.pool.frame_meta(self.frame_id);
-        meta.is_dirty = true;
+        let meta = self.pool.frame_meta(self.frame_id);
+        meta.mark_dirty();
         if self.first_dirty_lsn.is_none() {
-            self.first_dirty_lsn = Some(meta.lsn);
+            self.first_dirty_lsn = Some(meta.lsn());
         }
     }
 
@@ -160,8 +160,8 @@ impl WritePageGuard {
         self.mark_dirty();
     }
 
-    pub fn meta_snapshot(&self) -> FrameMeta {
-        self.pool.frame_meta(self.frame_id).clone()
+    pub fn meta_snapshot(&self) -> FrameMetaSnapshot {
+        self.pool.frame_meta(self.frame_id).snapshot()
     }
 
     pub fn frame_id(&self) -> FrameId {
@@ -263,7 +263,7 @@ mod tests {
         };
 
         {
-            let meta = bpm.buffer_pool().frame_meta(frame_id).clone();
+            let meta = bpm.buffer_pool().frame_meta(frame_id).snapshot();
             assert_eq!(meta.pin_count, 0);
         }
 
@@ -275,7 +275,7 @@ mod tests {
         assert_eq!(snapshot.pin_count, 1);
         drop(read_guard);
 
-        let meta = bpm.buffer_pool().frame_meta(frame_id).clone();
+        let meta = bpm.buffer_pool().frame_meta(frame_id).snapshot();
         assert_eq!(meta.pin_count, 0);
     }
 
@@ -290,7 +290,7 @@ mod tests {
             (write_guard.page_id(), write_guard.frame_id())
         };
 
-        let meta = bpm.buffer_pool().frame_meta(frame_id).clone();
+        let meta = bpm.buffer_pool().frame_meta(frame_id).snapshot();
         assert!(meta.is_dirty);
         assert_eq!(meta.lsn, 42);
         assert_eq!(meta.pin_count, 0);
@@ -305,7 +305,7 @@ mod tests {
         assert_eq!(snapshot.pin_count, 1);
         drop(read_guard);
 
-        let meta = bpm.buffer_pool().frame_meta(frame_id).clone();
+        let meta = bpm.buffer_pool().frame_meta(frame_id).snapshot();
         assert!(meta.is_dirty);
         assert_eq!(meta.lsn, 42);
         assert_eq!(meta.pin_count, 0);
@@ -330,7 +330,7 @@ mod tests {
         assert_eq!(snapshot.pin_count, 1);
         drop(read_guard);
 
-        let meta = bpm.buffer_pool().frame_meta(frame_id).clone();
+        let meta = bpm.buffer_pool().frame_meta(frame_id).snapshot();
         assert!(!meta.is_dirty);
         assert_eq!(meta.pin_count, 0);
     }

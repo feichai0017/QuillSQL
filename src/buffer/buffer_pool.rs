@@ -2,9 +2,10 @@
 
 use bytes::{Bytes, BytesMut};
 use dashmap::DashMap;
-use parking_lot::{Mutex, MutexGuard, RwLock};
+use parking_lot::{Mutex, RwLock};
 use std::cell::UnsafeCell;
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::buffer::page::{PageId, INVALID_PAGE_ID, PAGE_SIZE};
@@ -18,7 +19,7 @@ pub type FrameId = usize;
 pub const BUFFER_POOL_SIZE: usize = 5000;
 
 #[derive(Debug, Default, Clone)]
-pub struct FrameMeta {
+pub struct FrameMetaSnapshot {
     pub page_id: PageId,
     pub pin_count: u32,
     pub is_dirty: bool,
@@ -26,10 +27,113 @@ pub struct FrameMeta {
 }
 
 #[derive(Debug)]
+pub struct FrameMeta {
+    page_id: AtomicU32,
+    pin_count: AtomicU32,
+    is_dirty: AtomicBool,
+    lsn: AtomicU64,
+}
+
+impl Default for FrameMeta {
+    fn default() -> Self {
+        Self {
+            page_id: AtomicU32::new(INVALID_PAGE_ID),
+            pin_count: AtomicU32::new(0),
+            is_dirty: AtomicBool::new(false),
+            lsn: AtomicU64::new(0),
+        }
+    }
+}
+
+impl FrameMeta {
+    pub fn snapshot(&self) -> FrameMetaSnapshot {
+        FrameMetaSnapshot {
+            page_id: self.page_id(),
+            pin_count: self.pin_count(),
+            is_dirty: self.is_dirty(),
+            lsn: self.lsn(),
+        }
+    }
+
+    pub fn page_id(&self) -> PageId {
+        self.page_id.load(Ordering::Acquire)
+    }
+
+    pub fn set_page_id(&self, page_id: PageId) {
+        self.page_id.store(page_id, Ordering::Release);
+    }
+
+    pub fn pin_count(&self) -> u32 {
+        self.pin_count.load(Ordering::Acquire)
+    }
+
+    pub fn set_pin_count(&self, count: u32) {
+        self.pin_count.store(count, Ordering::Release);
+    }
+
+    pub fn increment_pin(&self) -> u32 {
+        self.pin_count.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
+    pub fn try_decrement_pin(&self) -> Option<u32> {
+        let mut current = self.pin_count.load(Ordering::Acquire);
+        loop {
+            if current == 0 {
+                return None;
+            }
+            match self.pin_count.compare_exchange(
+                current,
+                current - 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Some(current - 1),
+                Err(observed) => current = observed,
+            }
+        }
+    }
+
+    pub fn reset_pin(&self) {
+        self.set_pin_count(0);
+    }
+
+    pub fn is_dirty(&self) -> bool {
+        self.is_dirty.load(Ordering::Acquire)
+    }
+
+    pub fn mark_dirty(&self) {
+        self.is_dirty.store(true, Ordering::Release);
+    }
+
+    pub fn clear_dirty(&self) {
+        self.is_dirty.store(false, Ordering::Release);
+    }
+
+    pub fn lsn(&self) -> Lsn {
+        self.lsn.load(Ordering::Acquire)
+    }
+
+    pub fn set_lsn(&self, lsn: Lsn) {
+        self.lsn.store(lsn, Ordering::Release);
+    }
+
+    pub fn initialize(&self, page_id: PageId) {
+        self.set_page_id(page_id);
+        self.reset_pin();
+        self.clear_dirty();
+        self.set_lsn(0);
+    }
+
+    pub fn clear(&self) {
+        self.initialize(INVALID_PAGE_ID);
+    }
+}
+
+#[derive(Debug)]
 pub struct BufferPool {
     arena: Box<[UnsafeCell<u8>]>,
     locks: Vec<RwLock<()>>,
-    meta: Vec<Mutex<FrameMeta>>,
+    meta: Vec<FrameMeta>,
     page_table: DashMap<PageId, FrameId>,
     free_list: Mutex<VecDeque<FrameId>>,
     disk_scheduler: Arc<DiskScheduler>,
@@ -55,7 +159,7 @@ impl BufferPool {
         let mut locks = Vec::with_capacity(num_pages);
         for frame_id in 0..num_pages {
             free_list.push_back(frame_id);
-            meta.push(Mutex::new(FrameMeta::default()));
+            meta.push(FrameMeta::default());
             locks.push(RwLock::new(()));
         }
         let mut arena_vec: Vec<UnsafeCell<u8>> = Vec::with_capacity(num_pages * PAGE_SIZE);
@@ -113,13 +217,12 @@ impl BufferPool {
         self.arena.as_ptr().add(frame_id * PAGE_SIZE) as *mut u8
     }
 
-    pub fn frame_meta(&self, frame_id: FrameId) -> MutexGuard<'_, FrameMeta> {
-        self.meta[frame_id].lock()
+    pub fn frame_meta(&self, frame_id: FrameId) -> &FrameMeta {
+        &self.meta[frame_id]
     }
 
     pub fn clear_frame_meta(&self, frame_id: FrameId) {
-        let mut meta = self.meta[frame_id].lock();
-        *meta = FrameMeta::default();
+        self.meta[frame_id].clear();
     }
 
     pub fn pop_free_frame(&self) -> Option<FrameId> {
@@ -168,11 +271,8 @@ impl BufferPool {
         if len < PAGE_SIZE {
             slice[len..].fill(0);
         }
-        let mut meta = self.meta[frame_id].lock();
-        meta.page_id = page_id;
-        meta.is_dirty = false;
-        meta.pin_count = 0;
-        meta.lsn = 0;
+        let meta = self.frame_meta(frame_id);
+        meta.initialize(page_id);
         Ok(())
     }
 
@@ -242,7 +342,7 @@ mod tests {
         pool.load_page_into_frame(page_id, frame_id).unwrap();
 
         {
-            let meta = pool.frame_meta(frame_id);
+            let meta = pool.frame_meta(frame_id).snapshot();
             assert_eq!(meta.page_id, page_id);
             assert_eq!(meta.pin_count, 0);
             assert!(!meta.is_dirty);
@@ -291,11 +391,11 @@ mod tests {
         let frame_id = pool.pop_free_frame().expect("free frame");
 
         {
-            let mut meta = pool.frame_meta(frame_id);
-            meta.page_id = page_id;
-            meta.pin_count = 5;
-            meta.is_dirty = true;
-            meta.lsn = 99;
+            let meta = pool.frame_meta(frame_id);
+            meta.set_page_id(page_id);
+            meta.set_pin_count(5);
+            meta.mark_dirty();
+            meta.set_lsn(99);
         }
         unsafe {
             pool.frame_slice_mut(frame_id).fill(0x55);
@@ -304,12 +404,11 @@ mod tests {
         pool.reset_frame(frame_id);
         pool.clear_frame_meta(frame_id);
 
-        let meta = pool.frame_meta(frame_id);
+        let meta = pool.frame_meta(frame_id).snapshot();
         assert_eq!(meta.page_id, INVALID_PAGE_ID);
         assert_eq!(meta.pin_count, 0);
         assert!(!meta.is_dirty);
         assert_eq!(meta.lsn, 0);
-        drop(meta);
 
         assert!(unsafe { pool.frame_slice(frame_id) }
             .iter()

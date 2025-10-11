@@ -6,7 +6,7 @@ use bytes::Bytes;
 use dashmap::{DashMap, DashSet};
 use parking_lot::{Mutex, RwLock};
 
-use crate::buffer::buffer_pool::{BufferPool, FrameId, FrameMeta};
+use crate::buffer::buffer_pool::{BufferPool, FrameId};
 use crate::buffer::page::{self, PageId, ReadPageGuard, WritePageGuard, INVALID_PAGE_ID};
 use crate::catalog::SchemaRef;
 use crate::config::BufferPoolConfig;
@@ -113,11 +113,9 @@ impl BufferManager {
         self.pool.insert_mapping(page_id, frame_id);
 
         {
-            let mut meta = self.pool.frame_meta(frame_id);
-            meta.page_id = page_id;
-            meta.pin_count = 1;
-            meta.is_dirty = false;
-            meta.lsn = 0;
+            let meta = self.pool.frame_meta(frame_id);
+            meta.initialize(page_id);
+            meta.increment_pin();
         }
 
         self.pool.reset_frame(frame_id);
@@ -135,8 +133,8 @@ impl BufferManager {
 
         let frame_id = self.ensure_frame(page_id)?;
         {
-            let mut meta = self.pool.frame_meta(frame_id);
-            meta.pin_count += 1;
+            let meta = self.pool.frame_meta(frame_id);
+            meta.increment_pin();
         }
         self.replacer_record_access(frame_id)?;
         self.mark_non_evictable(frame_id)?;
@@ -152,8 +150,8 @@ impl BufferManager {
 
         let frame_id = self.ensure_frame(page_id)?;
         {
-            let mut meta = self.pool.frame_meta(frame_id);
-            meta.pin_count += 1;
+            let meta = self.pool.frame_meta(frame_id);
+            meta.increment_pin();
         }
         self.replacer_record_access(frame_id)?;
         self.mark_non_evictable(frame_id)?;
@@ -167,18 +165,21 @@ impl BufferManager {
         rec_lsn_hint: Option<Lsn>,
     ) -> QuillSQLResult<()> {
         if let Some(frame_id) = self.pool.lookup_frame(page_id) {
-            let mut meta = self.pool.frame_meta(frame_id);
-            if meta.pin_count > 0 {
-                meta.pin_count -= 1;
-            }
+            let meta = self.pool.frame_meta(frame_id);
+            let new_pin_count = if meta.pin_count() > 0 {
+                meta.try_decrement_pin().unwrap_or(0)
+            } else {
+                0
+            };
             if is_dirty {
-                meta.is_dirty = true;
+                meta.mark_dirty();
                 if let Some(lsn) = rec_lsn_hint {
-                    meta.lsn = lsn;
+                    meta.set_lsn(lsn);
                 }
-                self.note_dirty_page(page_id, rec_lsn_hint.unwrap_or(meta.lsn));
+                let rec_lsn = rec_lsn_hint.unwrap_or_else(|| meta.lsn());
+                self.note_dirty_page(page_id, rec_lsn);
             }
-            if meta.pin_count == 0 {
+            if new_pin_count == 0 {
                 self.mark_evictable(frame_id)?;
             }
         }
@@ -246,13 +247,12 @@ impl BufferManager {
             return Ok(false);
         };
         let meta = self.pool.frame_meta(frame_id);
-        if !meta.is_dirty {
+        if !meta.is_dirty() {
             self.dirty_pages.remove(&page_id);
             self.dirty_page_table.remove(&page_id);
             return Ok(false);
         }
-        let lsn = meta.lsn;
-        drop(meta);
+        let lsn = meta.lsn();
         self.ensure_wal_durable(lsn)?;
         let bytes = {
             let _lock = self.pool.frame_lock(frame_id).read();
@@ -260,8 +260,7 @@ impl BufferManager {
             Bytes::copy_from_slice(slice)
         };
         self.pool.write_page_to_disk(page_id, bytes)?;
-        let mut meta = self.pool.frame_meta(frame_id);
-        meta.is_dirty = false;
+        meta.clear_dirty();
         self.dirty_pages.remove(&page_id);
         self.dirty_page_table.remove(&page_id);
         Ok(true)
@@ -304,27 +303,20 @@ impl BufferManager {
             };
             drop(guard);
             let meta = self.pool.frame_meta(frame_id);
-            if meta.page_id != page_id {
-                drop(meta);
+            if meta.page_id() != page_id {
                 self.pool.remove_mapping_if(page_id, frame_id);
                 return self.delete_page_inner(page_id);
             }
-            if meta.pin_count > 0 {
-                drop(meta);
+            if meta.pin_count() > 0 {
                 return Ok(false);
             }
             if !self.pool.remove_mapping_if(page_id, frame_id) {
-                drop(meta);
                 return self.delete_page_inner(page_id);
             }
-            drop(meta);
             self.pool.reset_frame(frame_id);
             self.dirty_pages.remove(&page_id);
             self.dirty_page_table.remove(&page_id);
-            {
-                let mut meta = self.pool.frame_meta(frame_id);
-                *meta = FrameMeta::default();
-            }
+            self.pool.clear_frame_meta(frame_id);
             {
                 let mut rep = self.replacer.write();
                 let _ = rep.set_evictable(frame_id, true);
@@ -391,13 +383,7 @@ impl BufferManager {
         let frame_id = self.allocate_frame()?;
         self.pool.load_page_into_frame(page_id, frame_id)?;
         self.pool.insert_mapping(page_id, frame_id);
-        {
-            let mut meta = self.pool.frame_meta(frame_id);
-            meta.page_id = page_id;
-            meta.pin_count = 0;
-            meta.is_dirty = false;
-            meta.lsn = 0;
-        }
+
         if let Some(lfu) = &self.tiny_lfu {
             lfu.write().admit_record(page_id as u64);
         }
@@ -435,10 +421,11 @@ impl BufferManager {
                 }
             };
 
-            let (page_id, pin_count, is_dirty, lsn) = {
-                let meta = self.pool.frame_meta(victim);
-                (meta.page_id, meta.pin_count, meta.is_dirty, meta.lsn)
-            };
+            let snapshot = self.pool.frame_meta(victim).snapshot();
+            let page_id = snapshot.page_id;
+            let pin_count = snapshot.pin_count;
+            let is_dirty = snapshot.is_dirty;
+            let lsn = snapshot.lsn;
 
             if pin_count > 0 {
                 let mut rep = self.replacer.write();
@@ -532,7 +519,7 @@ mod tests {
 
         drop(guard);
 
-        let meta = manager.buffer_pool().frame_meta(frame_id).clone();
+        let meta = manager.buffer_pool().frame_meta(frame_id).snapshot();
         assert_eq!(meta.page_id, page_id);
         assert_eq!(meta.pin_count, 0);
         assert!(!meta.is_dirty);
@@ -552,7 +539,7 @@ mod tests {
             assert_eq!(read_guard.frame_id(), frame_id);
         }
 
-        let meta = manager.buffer_pool().frame_meta(frame_id).clone();
+        let meta = manager.buffer_pool().frame_meta(frame_id).snapshot();
         assert_eq!(meta.pin_count, 0);
     }
 
@@ -575,7 +562,7 @@ mod tests {
         let meta = manager
             .buffer_pool()
             .frame_meta(manager.buffer_pool().lookup_frame(page_id).unwrap())
-            .clone();
+            .snapshot();
         assert!(meta.is_dirty);
         assert_eq!(meta.lsn, 99);
         assert_eq!(meta.pin_count, 0);
@@ -596,7 +583,7 @@ mod tests {
         let meta = manager
             .buffer_pool()
             .frame_meta(manager.buffer_pool().lookup_frame(page_id).unwrap())
-            .clone();
+            .snapshot();
         assert!(!meta.is_dirty);
     }
 
@@ -646,7 +633,7 @@ mod tests {
         }
 
         let pool = manager.buffer_pool();
-        let meta = pool.frame_meta(frame_id);
+        let meta = pool.frame_meta(frame_id).snapshot();
         assert_eq!(meta.pin_count, 0);
         assert_eq!(meta.page_id, page_id);
     }
@@ -683,7 +670,7 @@ mod tests {
 
         {
             let pool = manager.buffer_pool();
-            let meta = pool.frame_meta(frame_id);
+            let meta = pool.frame_meta(frame_id).snapshot();
             assert!(meta.is_dirty);
             assert_eq!(meta.pin_count, 0);
             assert_eq!(meta.page_id, page_id);
@@ -692,7 +679,7 @@ mod tests {
         assert!(manager.flush_page(page_id).unwrap());
         {
             let pool = manager.buffer_pool();
-            let meta = pool.frame_meta(frame_id);
+            let meta = pool.frame_meta(frame_id).snapshot();
             assert!(!meta.is_dirty);
             assert_eq!(meta.pin_count, 0);
         }
