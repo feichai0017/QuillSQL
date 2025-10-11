@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use log::{debug, warn};
 
+use crate::buffer::lean::LeanBufferManager;
 use crate::buffer::BufferEngine;
 use crate::catalog::registry::{global_index_registry, global_table_registry};
 use crate::catalog::INFORMATION_SCHEMA_NAME;
@@ -22,6 +23,7 @@ pub enum WorkerKind {
     WalWriter,
     Checkpoint,
     BufferPoolWriter,
+    LeanCooling,
     MvccVacuum,
 }
 
@@ -226,6 +228,35 @@ pub fn spawn_bg_writer<B: BufferEngine + 'static>(
                     );
                 }
             }
+        },
+    )
+}
+
+pub fn spawn_lean_cooler_worker(
+    buffer_pool: Arc<LeanBufferManager>,
+    interval: Option<Duration>,
+    batch_limit: usize,
+) -> Option<WorkerHandle> {
+    let Some(interval) = interval else {
+        return None;
+    };
+    if interval.is_zero() {
+        return None;
+    }
+
+    let manager = buffer_pool.clone();
+    let budget = if batch_limit == 0 {
+        manager.options().cooling_batch_size
+    } else {
+        batch_limit
+    };
+
+    spawn_periodic_worker(
+        "lean-cooler",
+        WorkerKind::LeanCooling,
+        interval,
+        move || {
+            manager.cooling_pass(budget);
         },
     )
 }
