@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 
-use crate::buffer::standard::buffer_pool::FrameId;
+use super::buffer_pool::FrameId;
 use crate::buffer::PageId;
 
 #[derive(Debug)]

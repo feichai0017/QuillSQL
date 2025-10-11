@@ -1,3 +1,4 @@
+use std::ptr::NonNull;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -16,6 +17,7 @@ use super::page::{new_read_guard, new_write_guard, LeanReadGuard, LeanWriteGuard
 use super::page_table::LeanPageTable;
 use super::replacer::{LeanReplacer, LeanReplacerSnapshot};
 use super::segment::{SegmentAllocationState, SegmentAllocator};
+use super::swip::LeanSwip;
 use crate::background::{self, WorkerHandle};
 use crate::buffer::engine::{BufferEngine, ReadGuardRef, WriteGuardRef};
 use crate::buffer::standard::page::INVALID_PAGE_ID;
@@ -70,6 +72,30 @@ pub struct LeanBufferManager {
     control_file: Arc<RwLock<Option<Arc<crate::recovery::ControlFileManager>>>>,
     dirty_pages: DashSet<PageId>,
     dirty_page_table: DashMap<PageId, Lsn>,
+}
+
+struct InflightLoadGuard<'a> {
+    map: &'a DashMap<PageId, Arc<Mutex<()>>>,
+    page_id: PageId,
+    created: bool,
+}
+
+impl<'a> InflightLoadGuard<'a> {
+    fn new(map: &'a DashMap<PageId, Arc<Mutex<()>>>, page_id: PageId, created: bool) -> Self {
+        Self {
+            map,
+            page_id,
+            created,
+        }
+    }
+}
+
+impl Drop for InflightLoadGuard<'_> {
+    fn drop(&mut self) {
+        if self.created {
+            self.map.remove(&self.page_id);
+        }
+    }
 }
 
 impl LeanBufferManager {
@@ -250,6 +276,17 @@ impl LeanBufferManager {
     pub(crate) fn on_descriptor_transition(&self, page_id: PageId, transition: StateTransition) {
         self.stats.apply_transition(transition);
         self.replacer.apply_transition(page_id, transition);
+        match transition.new {
+            LeanPageState::Hot => {
+                if let Some(frame_id) = self.page_table.lookup(page_id) {
+                    self.attach_swizzle(page_id, frame_id);
+                }
+            }
+            LeanPageState::Cooling => {}
+            LeanPageState::Cool => {
+                self.detach_swizzle(page_id);
+            }
+        }
     }
 
     fn record_access(&self, page_id: PageId, access: AccessKind) -> Arc<LeanPageDescriptor> {
@@ -278,6 +315,7 @@ impl LeanBufferManager {
 
     fn ensure_frame(&self, page_id: PageId) -> QuillSQLResult<FrameId> {
         if let Some(frame_id) = self.page_table.lookup(page_id) {
+            self.attach_swizzle(page_id, frame_id);
             return Ok(frame_id);
         }
 
@@ -288,28 +326,25 @@ impl LeanBufferManager {
             self.inflight_loads.insert(page_id, arc.clone());
             (arc, true)
         };
+        let _inflight = InflightLoadGuard::new(&self.inflight_loads, page_id, created_here);
         let lock = guard.lock();
 
         if let Some(frame_id) = self.page_table.lookup(page_id) {
             drop(lock);
-            if created_here {
-                self.inflight_loads.remove(&page_id);
-            }
+            self.attach_swizzle(page_id, frame_id);
             return Ok(frame_id);
         }
 
         let frame_id = self.allocate_frame()?;
-        self.pool.load_page_into_frame(page_id, frame_id)?;
-        self.page_table.insert(page_id, frame_id);
-        let meta = self.pool.frame_meta(frame_id);
-        meta.set_page_id(page_id);
-        meta.set_pin_count(1);
-        meta.clear_dirty();
-        meta.set_lsn(0);
-        drop(lock);
-        if created_here {
-            self.inflight_loads.remove(&page_id);
+        if let Err(err) = self.pool.load_page_into_frame(page_id, frame_id) {
+            self.pool.reset_frame(frame_id);
+            self.pool.push_free_frame(frame_id);
+            drop(lock);
+            return Err(err);
         }
+        self.page_table.insert(page_id, frame_id);
+        self.attach_swizzle(page_id, frame_id);
+        drop(lock);
         Ok(frame_id)
     }
 
@@ -351,8 +386,8 @@ impl LeanBufferManager {
                 self.dirty_page_table.remove(&page_id);
             }
 
+            self.detach_swizzle(page_id);
             self.page_table.remove(page_id);
-            self.pool.clear_frame_meta(frame_id);
             self.pool.reset_frame(frame_id);
             self.mark_non_evictable(page_id);
             return Ok(frame_id);
@@ -422,6 +457,7 @@ impl LeanBufferManager {
         meta.set_pin_count(1);
         meta.clear_dirty();
         meta.set_lsn(0);
+        self.attach_swizzle(page_id, frame_id);
         let descriptor = self.record_access(page_id, AccessKind::New);
         self.mark_non_evictable(page_id);
         self.persist_segment_state();
@@ -526,6 +562,7 @@ impl LeanBufferManager {
             if !self.page_table.remove_if(page_id, frame_id) {
                 return self.delete_page_inner(page_id);
             }
+            self.detach_swizzle(page_id);
             self.pool.reset_frame(frame_id);
             self.pool.push_free_frame(frame_id);
             self.dirty_pages.remove(&page_id);
@@ -543,6 +580,7 @@ impl LeanBufferManager {
                 self.stats.on_page_removed(descriptor.state());
                 self.replacer.on_page_removed(page_id, descriptor.state());
             }
+            self.detach_swizzle(page_id);
             self.page_table.remove(page_id);
             self.segment_allocator.deallocate_page(page_id)?;
             Ok(true)
@@ -604,6 +642,81 @@ impl LeanBufferManager {
         batch_limit: usize,
     ) -> Option<WorkerHandle> {
         background::spawn_lean_cooler_worker(self.clone(), interval, batch_limit)
+    }
+
+    fn attach_swizzle(&self, page_id: PageId, frame_id: FrameId) {
+        let ptr = self.pool.frame_ptr_nonnull(frame_id);
+        self.page_table.set_swizzled(page_id, Some(ptr));
+    }
+
+    fn detach_swizzle(&self, page_id: PageId) {
+        self.page_table.set_swizzled(page_id, None);
+    }
+
+    pub fn swizzled_pointer(&self, page_id: PageId) -> Option<NonNull<u8>> {
+        self.page_table
+            .entry(page_id)
+            .and_then(|entry| entry.swizzled_ptr())
+    }
+
+    pub fn page_id_from_pointer(&self, ptr: NonNull<u8>) -> Option<PageId> {
+        self.pool.ptr_to_page_id(ptr)
+    }
+
+    pub fn resolve_swip_read<T>(
+        self: &Arc<Self>,
+        swip: &LeanSwip<T>,
+    ) -> QuillSQLResult<(LeanReadGuard, NonNull<T>)> {
+        if let Some(ptr) = swip.ptr() {
+            if let Some(frame_id) = self.pool.ptr_to_frame_id(ptr.cast()) {
+                let meta = self.pool.frame_meta(frame_id);
+                let page_id = meta.page_id();
+                if page_id != INVALID_PAGE_ID {
+                    meta.pin();
+                    self.mark_non_evictable(page_id);
+                    let descriptor = self.record_access(page_id, AccessKind::Read);
+                    self.attach_swizzle(page_id, frame_id);
+                    let guard = new_read_guard(self.clone(), descriptor, frame_id);
+                    swip.swizzle(ptr);
+                    return Ok((guard, ptr));
+                }
+            }
+        }
+        let page_id = swip.page_id().ok_or_else(|| {
+            QuillSQLError::Storage("Swip does not contain a page identifier".to_string())
+        })?;
+        let guard = self.fetch_page_read_guard(page_id)?;
+        let ptr = guard.frame_ptr().cast();
+        swip.swizzle(ptr);
+        Ok((guard, ptr))
+    }
+
+    pub fn resolve_swip_write<T>(
+        self: &Arc<Self>,
+        swip: &LeanSwip<T>,
+    ) -> QuillSQLResult<(LeanWriteGuard, NonNull<T>)> {
+        if let Some(ptr) = swip.ptr() {
+            if let Some(frame_id) = self.pool.ptr_to_frame_id(ptr.cast()) {
+                let meta = self.pool.frame_meta(frame_id);
+                let page_id = meta.page_id();
+                if page_id != INVALID_PAGE_ID {
+                    meta.pin();
+                    self.mark_non_evictable(page_id);
+                    let descriptor = self.record_access(page_id, AccessKind::Write);
+                    self.attach_swizzle(page_id, frame_id);
+                    let guard = new_write_guard(self.clone(), descriptor, frame_id);
+                    swip.swizzle(ptr);
+                    return Ok((guard, ptr));
+                }
+            }
+        }
+        let page_id = swip.page_id().ok_or_else(|| {
+            QuillSQLError::Storage("Swip does not contain a page identifier".to_string())
+        })?;
+        let guard = self.fetch_page_write_guard(page_id)?;
+        let ptr = guard.frame_ptr().cast();
+        swip.swizzle(ptr);
+        Ok((guard, ptr))
     }
 }
 
@@ -669,7 +782,8 @@ impl BufferEngine for LeanBufferManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::buffer::engine::BufferEngine;
+    use crate::buffer::engine::{BufferEngine, BufferReadGuard, BufferWriteGuard};
+    use crate::buffer::lean::LeanSwip;
     use crate::storage::disk_manager::DiskManager;
     use tempfile::TempDir;
 
@@ -714,5 +828,42 @@ mod tests {
         assert_eq!(total, 6);
         let allowed_hot = (manager.options().hot_partition_fraction * total as f64).ceil() as usize;
         assert!(stats.hot_pages <= allowed_hot);
+    }
+
+    #[test]
+    fn swip_resolves_and_unswizzles() {
+        let temp = TempDir::new().unwrap();
+        let disk_manager = Arc::new(DiskManager::try_new(temp.path().join("swip.db")).unwrap());
+        let scheduler = Arc::new(DiskScheduler::new(disk_manager));
+        let manager = Arc::new(LeanBufferManager::new(8, scheduler));
+
+        let mut guard = LeanBufferManager::new_page_guard(&manager).unwrap();
+        let page_id = guard.page_id();
+        guard.mark_dirty();
+        drop(guard);
+
+        let swip = LeanSwip::<u8>::new(page_id);
+
+        let (read_guard, ptr) = manager.resolve_swip_read(&swip).unwrap();
+        assert!(swip.is_swizzled());
+        assert_eq!(manager.page_id_from_pointer(ptr).unwrap(), page_id);
+        drop(read_guard);
+
+        let (mut write_guard, ptr_again) = manager.resolve_swip_write(&swip).unwrap();
+        assert_eq!(ptr_again, ptr);
+        write_guard.mark_dirty();
+        drop(write_guard);
+
+        if let Some(entry) = manager.descriptors.get(&page_id) {
+            let descriptor = entry.value().clone();
+            drop(entry);
+            if let Some(transition) = descriptor.force_state(LeanPageState::Cool) {
+                manager.on_descriptor_transition(page_id, transition);
+            }
+        }
+
+        assert!(manager.swizzled_pointer(page_id).is_none());
+        swip.unswizzle(page_id);
+        assert!(!swip.is_swizzled());
     }
 }

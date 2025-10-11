@@ -1,5 +1,6 @@
 use std::cell::UnsafeCell;
 use std::collections::VecDeque;
+use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -188,8 +189,34 @@ impl LeanBufferPool {
         std::slice::from_raw_parts_mut(ptr, PAGE_SIZE)
     }
 
-    unsafe fn frame_ptr(&self, frame_id: FrameId) -> *mut u8 {
+    pub(crate) unsafe fn frame_ptr(&self, frame_id: FrameId) -> *mut u8 {
         self.arena.as_ptr().add(frame_id * PAGE_SIZE) as *mut u8
+    }
+
+    pub(crate) fn frame_ptr_nonnull(&self, frame_id: FrameId) -> NonNull<u8> {
+        // Safety: `frame_ptr` always yields an address inside the arena which is non-null.
+        unsafe { NonNull::new_unchecked(self.frame_ptr(frame_id)) }
+    }
+
+    pub(crate) fn ptr_to_frame_id(&self, ptr: NonNull<u8>) -> Option<FrameId> {
+        let base = self.arena.as_ptr() as usize;
+        let len = self.arena.len();
+        let raw = ptr.as_ptr() as usize;
+        if raw < base || raw >= base + len {
+            return None;
+        }
+        let offset = raw - base;
+        let frame = offset / PAGE_SIZE;
+        if frame < self.capacity() {
+            Some(frame)
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn ptr_to_page_id(&self, ptr: NonNull<u8>) -> Option<PageId> {
+        self.ptr_to_frame_id(ptr)
+            .map(|frame_id| self.meta[frame_id].page_id())
     }
 
     pub fn clear_frame_meta(&self, frame_id: FrameId) {

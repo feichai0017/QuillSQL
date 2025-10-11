@@ -1,4 +1,5 @@
 use std::mem::{self, ManuallyDrop};
+use std::ptr::NonNull;
 use std::sync::Arc;
 
 use parking_lot::{RwLockReadGuard, RwLockWriteGuard};
@@ -28,6 +29,10 @@ impl LeanReadGuard {
 
     pub(crate) fn data(&self) -> &[u8] {
         unsafe { self.pool.frame_slice(self.frame_id) }
+    }
+
+    pub(crate) fn frame_ptr(&self) -> NonNull<u8> {
+        self.pool.frame_ptr_nonnull(self.frame_id)
     }
 }
 
@@ -94,6 +99,10 @@ impl LeanWriteGuard {
 
     pub(crate) fn data_mut(&mut self) -> &mut [u8] {
         unsafe { self.pool.frame_slice_mut(self.frame_id) }
+    }
+
+    pub(crate) fn frame_ptr(&self) -> NonNull<u8> {
+        self.pool.frame_ptr_nonnull(self.frame_id)
     }
 }
 
