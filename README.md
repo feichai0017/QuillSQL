@@ -5,7 +5,7 @@
 
 <div align="center">
   <img src="/public/rust-db.png" alt="QuillSQL Architecture" width="720"/>
-  <p><em>A tiny yet serious SQL database in Rust — simple, modular, pragmatic.</em></p>
+  <p><em>An educational Rust RDBMS for cmu15445-style teaching (BusTub-inspired)</em></p>
 </div>
 
 ## ✨ Highlights
