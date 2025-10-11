@@ -3,7 +3,7 @@ use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::execution::{ExecutionContext, VolcanoExecutor};
 use crate::expression::{Expr, ExprTrait};
 use crate::storage::table_heap::TableIterator;
-use crate::storage::tuple::{Tuple, EMPTY_TUPLE};
+use crate::storage::tuple::Tuple;
 use crate::transaction::LockMode;
 use crate::utils::scalar::ScalarValue;
 use crate::utils::table_ref::TableReference;
@@ -93,13 +93,18 @@ impl VolcanoExecutor for PhysicalUpdate {
                     continue;
                 }
                 let prev_tuple = current_tuple.clone();
+                let mut eval_tuple = current_tuple.clone();
 
                 // update tuple data
                 for (col_name, value_expr) in self.assignments.iter() {
                     let index = current_tuple.schema.index_of(None, col_name)?;
                     let col_datatype = current_tuple.schema.columns[index].data_type;
-                    let new_value = value_expr.evaluate(&EMPTY_TUPLE)?.cast_to(&col_datatype)?;
-                    current_tuple.data[index] = new_value;
+                    // use the updated value for subsequent expressions in this update
+                    // e.g., SET a = 1, b = a + 1
+                    // should set b to 2
+                    let new_value = value_expr.evaluate(&eval_tuple)?.cast_to(&col_datatype)?;
+                    current_tuple.data[index] = new_value.clone();
+                    eval_tuple.data[index] = new_value;
                 }
                 let (new_rid, _) = table_heap.mvcc_update(
                     rid,

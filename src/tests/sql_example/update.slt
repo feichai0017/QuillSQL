@@ -1,0 +1,26 @@
+statement ok
+create table t_update (
+    id int,
+    v int
+)
+
+statement ok
+insert into t_update values (1, 5), (2, 10)
+
+statement ok
+update t_update set v = v + 1
+
+query
+select id, v from t_update order by id
+----
+1 6
+2 11
+
+statement ok
+update t_update set v = v + 2 where id = 1
+
+query
+select id, v from t_update order by id
+----
+1 8
+2 11
