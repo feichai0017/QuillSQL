@@ -75,11 +75,9 @@ where
 }
 
 fn prepare_dataset(db_path: &Path) -> Database {
-    let mut db = Database::new_on_disk_with_options(
-        db_path.to_str().unwrap(),
-        quill_bench_options(),
-    )
-    .expect("on-disk db");
+    let mut db =
+        Database::new_on_disk_with_options(db_path.to_str().unwrap(), quill_bench_options())
+            .expect("on-disk db");
     db.run(&format!(
         "CREATE TABLE {}(id BIGINT NOT NULL, val BIGINT)",
         QUILL_TABLE
@@ -258,11 +256,9 @@ fn bench_insert(c: &mut Criterion, db_dir: &Path) {
         let drop_sql = format!("DROP TABLE IF EXISTS {}", QUILL_TABLE);
         let clear_sql = format!("DELETE FROM {}", QUILL_TABLE);
         let db = RefCell::new({
-            let mut db = Database::new_on_disk_with_options(
-                db_path.to_str().unwrap(),
-                insert_opts.clone(),
-            )
-            .expect("on-disk db");
+            let mut db =
+                Database::new_on_disk_with_options(db_path.to_str().unwrap(), insert_opts.clone())
+                    .expect("on-disk db");
             db.run(&drop_sql).expect("drop table if exists");
             db.run(&create_sql).expect("create table");
             db
