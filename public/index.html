@@ -368,6 +368,7 @@
       </div>
       <span class="title">QUILLSQL TERMINAL</span>
       <div class="bezel-links">
+        <a href="https://feichai0017.github.io/QuillSQL/" target="_blank" class="bezel-link">DOCS</a>
         <button class="bezel-link" id="openGithub">GITHUB</button>
         <button class="bezel-link" id="openProfile">PROFILE</button>
       </div>
@@ -382,7 +383,7 @@
           <span class="prompt-label">quill@tty:~$</span>
           <textarea id="cmd" rows="1" placeholder="type help for usage · Shift+Enter to add newline"></textarea>
         </form>
-        <div class="hint">Commands: help · docs · doc &lt;name&gt; · github · profile · clear · examples · example
+        <div class="hint">Commands: help · github · profile · clear · examples · example
           &lt;name&gt; · history · Any other input executes SQL.</div>
       </div>
     </div>
@@ -412,333 +413,23 @@
 
     logoEl.textContent = asciiLogo;
 
-    const examples = {
-      create_table: `-- src/tests/sql_example/create_table.slt
-CREATE TABLE t(v1 INT, v2 INT, v3 INT);
-CREATE TABLE IF NOT EXISTS t(v1 INT, v2 INT, v3 INT);`,
-      insert: `-- src/tests/sql_example/insert.slt
-CREATE TABLE t1 (
-    a TINYINT,
-    b SMALLINT,
-    c INTEGER,
-    d BIGINT,
-    e TINYINT UNSIGNED,
-    f SMALLINT UNSIGNED,
-    g INTEGER UNSIGNED,
-    h BIGINT UNSIGNED,
-    i FLOAT,
-    j VARCHAR
-);
-INSERT INTO t1 VALUES
-    (1, 2, 3, 4, 5, 6, 7, 8, 1.1, 'a'),
-    (NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
-SELECT * FROM t1;
-CREATE TABLE t2 (
-    a TINYINT,
-    b INTEGER DEFAULT 1
-);
-INSERT INTO t2(a) VALUES (1);
-SELECT * FROM t2;`,
-      delete: `-- src/tests/sql_example/delete.slt
-CREATE TABLE d1 (
-    id INT PRIMARY KEY,
-    value INT
-);
-INSERT INTO d1 VALUES (1, 10), (2, 20), (3, 30);
-DELETE FROM d1 WHERE id = 2;
-SELECT * FROM d1 ORDER BY id;`,
-      show_explain: `-- src/tests/sql_example/show_explain.slt
-CREATE TABLE t(id INT, v INT);
-INSERT INTO t(id, v) VALUES (1, 10), (2, 20), (3, 30);
-SELECT schema FROM information_schema.schemas WHERE schema = 'public';
-SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 't';
-EXPLAIN SELECT id FROM t WHERE v > 10 ORDER BY id LIMIT 2 OFFSET 1;
-EXPLAIN SELECT id, COUNT(*) FROM t GROUP BY id ORDER BY id;`,
-      create_index: `-- src/tests/sql_example/create_index.slt
-CREATE TABLE t1 (a INT, b INT);
-CREATE INDEX idx1 ON t1(a);`,
-      transaction: `-- src/tests/sql_example/transaction.slt
-CREATE TABLE accounts(id INTEGER PRIMARY KEY, balance INTEGER);
-INSERT INTO accounts VALUES (1, 100), (2, 200);
-UPDATE accounts SET balance = 150 WHERE id = 1;
-SELECT * FROM accounts ORDER BY id;
-BEGIN;
-UPDATE accounts SET balance = 175 WHERE id = 2;
-ROLLBACK;
-SELECT * FROM accounts ORDER BY id;
-SET TRANSACTION ISOLATION LEVEL SERIALIZABLE;
-BEGIN;
-UPDATE accounts SET balance = 160 WHERE id = 1;
-COMMIT;
-SELECT * FROM accounts ORDER BY id;
-SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
-BEGIN;
-UPDATE accounts SET balance = 195 WHERE id = 2;
-COMMIT;
-SELECT * FROM accounts ORDER BY id;`
-    };
+    let examples = {};
 
-    const docFiles = {
-      architecture: 'architecture.md',
-      buffer_pool: 'buffer_pool.md',
-      btree_index: 'btree_index.md',
-      disk_io: 'disk_io.md',
-      wal: 'wal.md',
-      transactions: 'transactions.md'
-    };
-
-    const GITHUB_URL = 'https://github.com/feichai0017/quillsql';
-    const PROFILE_URL = 'https://github.com/feichai0017';
-
-    const history = [];
-    let historyIndex = -1;
-
-    const getApiBase = () => DEFAULT_API_BASE;
-    const batchEndpointFor = (base) => (base.endsWith('/sql') ? base.replace(/\/sql$/, '/sql_batch') : `${base}_batch`);
-
-    function setStatus(text, state = 'ready') {
-      statusEl.textContent = text;
-      statusEl.dataset.state = state;
-    }
-
-    function appendLine(text, className = '') {
-      const div = document.createElement('div');
-      div.className = ['line', className].join(' ').trim();
-      div.textContent = text;
-      logEl.appendChild(div);
-      scrollLog();
-    }
-
-    function appendPrompt(command) {
-      const div = document.createElement('div');
-      div.className = 'line prompt';
-      const promptSpan = document.createElement('span');
-      promptSpan.className = 'prompt-text';
-      promptSpan.textContent = 'quill@tty:~$';
-      const contentSpan = document.createElement('span');
-      contentSpan.textContent = ` ${command}`;
-      div.appendChild(promptSpan);
-      div.appendChild(contentSpan);
-      logEl.appendChild(div);
-      scrollLog();
-    }
-
-    function appendBlock(text, className = '', autoScroll = true) {
-      const pre = document.createElement('pre');
-      pre.className = ['block', className].join(' ').trim();
-      pre.textContent = text;
-      pre.tabIndex = 0;
-      logEl.appendChild(pre);
-      if (autoScroll) {
-        scrollLog();
-      }
-    }
-
-    function scrollLog() {
-      requestAnimationFrame(() => {
-        logEl.scrollTop = logEl.scrollHeight;
-      });
-    }
-
-    function sanitizeCell(value) {
-      if (value === null || value === undefined) return 'NULL';
-      if (typeof value === 'object') {
-        try {
-          return JSON.stringify(value);
-        } catch (_) {
-          return String(value);
-        }
-      }
-      return String(value);
-    }
-
-    function asciiTable(rows) {
-      const colCount = Math.max(...rows.map(r => r.length), 0);
-      if (colCount === 0) return '';
-      const headers = Array.from({ length: colCount }, (_, i) => `col${i + 1}`);
-      const values = rows.map(r => r.map(sanitizeCell));
-      const widths = headers.map((h, i) => Math.max(h.length, ...values.map(r => (r[i] || '').length)));
-
-      const sep = `+${widths.map(w => '-'.repeat(w + 2)).join('+')}+`;
-      const headerLine = `|${headers.map((h, i) => ` ${h.padEnd(widths[i])} `).join('|')}|`;
-      const body = values.map(row => `|${Array.from({ length: colCount }, (_, i) => ` ${(row[i] || '').padEnd(widths[i])} `).join('|')}|`).join('\n');
-      return [sep, headerLine, sep, body, sep].filter(Boolean).join('\n');
-    }
-
-    function renderResult(rows) {
-      if (!rows || rows.length === 0) {
-        appendLine('✓ Query executed successfully (0 rows)', 'success');
-        return;
-      }
-      const table = asciiTable(rows);
-      if (table) {
-        appendBlock(table);
-        appendLine(`${rows.length} row(s)`, 'muted');
-      } else {
-        const text = rows.map(r => r.join('\t')).join('\n');
-        appendBlock(text);
-      }
-    }
-
-    function friendlyError(text) {
-      const t = String(text || '');
-      if (/Not\s*support|not\s*supported|NotSupport/i.test(t)) {
-        return `Unsupported statement or data type.\n${t}`;
-      }
-      return t;
-    }
-
-    async function runSQL(sqlText) {
-      setStatus('RUNNING', 'busy');
-      cmdEl.disabled = true;
+    (async function loadExamples() {
       try {
-        const apiBase = getApiBase();
-        const rawStatements = sqlText
-          .split(';')
-          .map(s => s.trim())
-          .filter(Boolean)
-          .slice(0, 100);
-
-        if (rawStatements.length === 0) {
-          appendLine('No SQL statements to execute.', 'muted');
-          return;
+        const response = await fetch('/api/examples');
+        if (!response.ok) {
+          throw new Error(`HTTP error! status: ${response.status}`);
         }
-
-        let usedBatch = false;
-
-        try {
-          const resp = await fetch(batchEndpointFor(apiBase), {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ sql: sqlText })
-          });
-          if (resp.ok) {
-            const data = await resp.json();
-            const results = Array.isArray(data.results) ? data.results : [];
-            results.slice(0, rawStatements.length).forEach((rows, idx) => {
-              appendLine(`[${String(idx + 1).padStart(2, '0')}] ${rawStatements[idx]}`);
-              renderResult(rows || []);
-            });
-            usedBatch = true;
-          }
-        } catch (e) {
-          // swallow and fall back
-        }
-
-        if (!usedBatch) {
-          for (let i = 0; i < rawStatements.length; i += 1) {
-            const stmt = rawStatements[i];
-            appendLine(`[${String(i + 1).padStart(2, '0')}] ${stmt}`);
-            const resp = await fetch(apiBase, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ sql: stmt })
-            });
-            if (!resp.ok) {
-              const err = await resp.text();
-              appendLine(`❌ ${friendlyError(err)}`, 'error');
-              break;
-            } else {
-              const data = await resp.json();
-              renderResult(data.rows || []);
-            }
-          }
-        }
+        examples = await response.json();
+        appendLine('✓ SQL examples loaded from server.', 'success');
       } catch (e) {
-        appendLine(`❌ Connection Error: ${e}`, 'error');
-      } finally {
-        setStatus('READY', 'ready');
-        cmdEl.disabled = false;
-        cmdEl.focus();
+        appendLine(`❌ Failed to load SQL examples: ${e}`, 'error');
+        console.error('Failed to load examples:', e);
       }
-    }
+    })();
 
-    function printHelp() {
-      appendLine('Available commands:', 'muted');
-      appendBlock([
-        ' help                 Show this message',
-        ' docs                 List available documentation files',
-        ' doc <name>          Fetch and render a documentation file',
-        ' github              Show repository information',
-        ' profile             Show maintainer profile',
-        ' clear                Clear the terminal session',
-        ' examples             List bundled SQL snippets',
-        ' example <name>       Load an example into the prompt',
-        ' history              Show previous commands',
-        ' Any other input      Executes as SQL (multi-line supported)'
-      ].join('\n'));
-      appendLine('Session tips: Shift+Enter inserts newline · Commands are trimmed before execution.', 'muted');
-    }
 
-    function showExamples() {
-      appendLine('Example bundles:', 'muted');
-      const list = Object.keys(examples).map(k => `  - ${k}`).join('\n');
-      appendBlock(list);
-      appendLine('Use `example <name>` to load into the prompt.', 'muted');
-    }
-
-    function showDocs() {
-      appendLine('Available docs:', 'muted');
-      const list = Object.entries(docFiles).map(([key, file]) => `  - ${key} (${file})`).join('\n');
-      appendBlock(list);
-      appendLine('Use `doc <name>` to render markdown inside the terminal.', 'muted');
-    }
-
-    function markdownToTTY(md) {
-      const lines = md.replace(/\r\n?/g, '\n').split('\n');
-      const output = [];
-      let inCodeBlock = false;
-      for (const rawLine of lines) {
-        let line = rawLine;
-        if (line.trim().startsWith('```')) {
-          inCodeBlock = !inCodeBlock;
-          output.push(inCodeBlock ? '```' : '```');
-          continue;
-        }
-        if (!inCodeBlock) {
-          const headingMatch = line.match(/^(#{1,6})\s+(.*)$/);
-          if (headingMatch) {
-            const level = headingMatch[1].length;
-            const text = headingMatch[2].trim();
-            if (level <= 2) {
-              const bar = '='.repeat(text.length);
-              output.push(text.toUpperCase());
-              output.push(bar);
-            } else {
-              output.push(`${'#'.repeat(level)} ${text}`);
-            }
-            continue;
-          }
-          line = line.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1 <$2>');
-          line = line.replace(/\*\*([^*]+)\*\*/g, '$1');
-          line = line.replace(/\*([^*]+)\*/g, '$1');
-          line = line.replace(/`([^`]+)`/g, '$1');
-        }
-        output.push(line);
-      }
-      return output.join('\n').trim();
-    }
-
-    async function loadDoc(key) {
-      const file = docFiles[key];
-      if (!file) {
-        appendLine(`Unknown doc: ${key}`, 'error');
-        return;
-      }
-      setStatus('DOCS', 'busy');
-      try {
-        const res = await fetch(`/docs/${file}`);
-        if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-        const md = await res.text();
-        const rendered = markdownToTTY(md);
-        appendLine(`[docs] ${file}`, 'muted');
-        appendBlock(rendered);
-      } catch (e) {
-        appendLine(`Failed to load doc: ${e}`, 'error');
-      } finally {
-        setStatus('READY', 'ready');
-      }
-    }
 
     function showGithub() {
       appendLine('GitHub repository', 'muted');
@@ -769,21 +460,6 @@ SELECT * FROM accounts ORDER BY id;`
 
       if (trimmed === 'help') {
         printHelp();
-        return;
-      }
-
-      if (trimmed === 'docs') {
-        showDocs();
-        return;
-      }
-
-      if (trimmed.startsWith('doc ')) {
-        const key = trimmed.split(/\s+/)[1];
-        if (!key) {
-          appendLine('Usage: doc <name>', 'error');
-        } else {
-          loadDoc(key);
-        }
         return;
       }
 

@@ -1,5 +1,12 @@
-use axum::{extract::State, http::StatusCode, routing::post, Json, Router};
+use axum::{
+    extract::State,
+    http::StatusCode,
+    routing::{get, post},
+    Json, Router,
+};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::fs;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -46,6 +53,48 @@ fn strip_sql_comments(input: &str) -> String {
     out
 }
 
+async fn api_examples() -> Result<Json<HashMap<String, String>>, (StatusCode, String)> {
+    const EXAMPLE_DIR: &str = "src/tests/sql_example/";
+    let mut examples = HashMap::new();
+
+    match fs::read_dir(EXAMPLE_DIR) {
+        Ok(entries) => {
+            for entry in entries {
+                if let Ok(entry) = entry {
+                    let path = entry.path();
+                    if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("slt") {
+                        if let Some(name) = path.file_stem().and_then(|s| s.to_str()) {
+                            match fs::read_to_string(&path) {
+                                Ok(content) => {
+                                    examples.insert(name.to_string(), content);
+                                }
+                                Err(e) => {
+                                    return Err((
+                                        StatusCode::INTERNAL_SERVER_ERROR,
+                                        format!(
+                                            "Failed to read example file {}: {}",
+                                            path.display(),
+                                            e
+                                        ),
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to read examples directory {}: {}", EXAMPLE_DIR, e),
+            ));
+        }
+    }
+
+    Ok(Json(examples))
+}
+
 #[tokio::main]
 async fn main() {
     env_logger::init();
@@ -80,6 +129,7 @@ async fn main() {
     let app = Router::new()
         .route("/api/sql", post(api_sql))
         .route("/api/sql_batch", post(api_sql_batch))
+        .route("/api/examples", get(api_examples))
         .nest_service("/docs", docs_service)
         .fallback_service(static_service)
         .with_state(state);
