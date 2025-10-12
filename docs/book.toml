@@ -10,5 +10,5 @@ command = "mdbook-mermaid"
 
 [output.html]
 site-url = "/QuillSQL/"
-additional-css = ["mermaid.css"]
-additional-js = ["mermaid.min.js"]
+
+additional-js = ["mermaid.min.js", "mermaid-init.js"]
