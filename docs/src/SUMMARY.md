@@ -1,29 +1,36 @@
 # Summary
 
-[Introduction](./introduction.md)
-
----
-
-# High-Level Architecture
-
+- [Introduction](./introduction.md)
 - [Overall Architecture](./architecture.md)
-- [Buffer Pool](./buffer_pool.md)
-- [Disk I/O](./disk_io.md)
-- [Write-Ahead Log (WAL)](./wal.md)
-- [Transactions & Concurrency](./transactions.md)
-- [B+Tree Index](./btree_index.md)
 
 ---
 
-# Module Internals
+- [**Contributor's Guide**](./contributing.md)
 
-- [Storage Engine](./modules/storage.md)
-- [Buffer Manager](./modules/buffer.md)
-- [Transaction Manager](./modules/transaction.md)
-- [Recovery Manager](./modules/recovery.md)
-- [Catalog](./modules/catalog.md)
-- [SQL Parser](./modules/sql.md)
-- [Expression Handling](./modules/expression.md)
-- [Query Plan](./modules/plan.md)
-- [Query Optimizer](./modules/optimizer.md)
-- [Execution Engine](./modules/execution.md)
+---
+
+- **Core Modules**
+    - [Buffer Manager](./modules/buffer.md)
+        - [Page & Page Guards](./buffer/page.md)
+        - [The Buffer Pool](./buffer/buffer_pool.md)
+    - [Storage Engine](./modules/storage.md)
+        - [Disk I/O](./storage/disk_io.md)
+        - [Page & Tuple Layout](./storage/page_layouts.md)
+        - [Table Heap & MVCC](./storage/table_heap.md)
+    - [Indexes](./modules/index.md)
+        - [B+Tree](./index/btree_index.md)
+- **Recovery Manager (WAL)**
+    - [Core Concepts](./modules/recovery.md)
+    - [The ARIES Protocol](./recovery/aries.md)
+- **Transaction Manager**
+    - [Core Concepts](./modules/transaction.md)
+    - [MVCC and 2PL](./transaction/mvcc_and_2pl.md)
+    - **Query Plan**
+    - [Core Concepts](./modules/plan.md)
+    - [The Lifecycle of a Query](./plan/lifecycle.md)
+- **Query Optimizer**
+    - [Core Concepts](./modules/optimizer.md)
+    - [Rule-Based Optimization](./optimizer/rules.md)
+- **Execution Engine**
+    - [Core Concepts](./modules/execution.md)
+    - [The Volcano Model](./execution/volcano.md)

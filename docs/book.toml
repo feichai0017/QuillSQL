@@ -4,3 +4,10 @@ language = "en"
 multilingual = false
 src = "src"
 title = "QuillSQL Internals"
+
+[preprocessor.mermaid]
+command = "mdbook-mermaid"
+
+[output.html]
+additional-css = ["mermaid.css"]
+additional-js = ["mermaid.min.js"]

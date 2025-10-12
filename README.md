@@ -18,7 +18,7 @@
 - **Streaming / Prefetch**: Large sequential scans bypass the cache via a small direct I/O ring buffer; targeted prefetch warms hot paths without pins
 - **WAL & Recovery (ARIES-inspired)**: FPW + PageDelta, DPT, chained CLR, per-transaction undo chains, idempotent replays
 - **Information schema**: `information_schema.schemas`, `tables`, `columns`, `indexes`
-- **Docs**: [Architecture](docs/architecture.md) · [Buffer Pool](docs/buffer_pool.md) · [B+ Tree Index](docs/btree_index.md) · [Disk I/O](docs/disk_io.md) · [WAL & Recovery](docs/wal.md) · [Transactions](docs/transactions.md)
+- **Docs**: 📖 **[Read the Book Online](https://feichai0017.github.io/QuillSQL/)** 
 
 ---
 

@@ -14,8 +14,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install mdbook
-        run: cargo install mdbook --no-default-features
+      - name: Install mdbook and mdbook-mermaid
+        run: |
+          cargo install mdbook --no-default-features
+          cargo install mdbook-mermaid
 
       - name: Build mdbook
         run: mdbook build docs

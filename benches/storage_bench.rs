@@ -1,6 +1,7 @@
 use std::cell::{Cell, RefCell};
 use std::fmt::Write as _; // for INSERT statement construction
 use std::fs;
+use std::path::Path;
 
 use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion, Throughput};
 use postgres::{Client, NoTls};
@@ -18,7 +19,7 @@ const POINT_SAMPLES: usize = 5_000;
 const RANGE_WINDOW: i64 = 200;
 const INDEX_RANGE_WIDTH: usize = 4;
 
-const DB_DIR: &str = "quill_bench_data";
+const DB_DIR_NAME: &str = "quill_bench_data";
 
 const QUILL_TABLE: &str = "bench";
 const SQLITE_TABLE: &str = "bench";
@@ -73,9 +74,12 @@ where
     Ok(())
 }
 
-fn prepare_dataset(db_path: &str) -> Database {
-    let mut db =
-        Database::new_on_disk_with_options(db_path, quill_bench_options()).expect("on-disk db");
+fn prepare_dataset(db_path: &Path) -> Database {
+    let mut db = Database::new_on_disk_with_options(
+        db_path.to_str().unwrap(),
+        quill_bench_options(),
+    )
+    .expect("on-disk db");
     db.run(&format!(
         "CREATE TABLE {}(id BIGINT NOT NULL, val BIGINT)",
         QUILL_TABLE
@@ -240,8 +244,8 @@ fn build_index_range_queries(table: &str) -> Vec<String> {
     ranges
 }
 
-fn bench_insert(c: &mut Criterion) {
-    let db_path = format!("{}/insert.db", DB_DIR);
+fn bench_insert(c: &mut Criterion, db_dir: &Path) {
+    let db_path = db_dir.join("insert.db");
 
     let mut group = c.benchmark_group("insert_10k");
     group.throughput(Throughput::Elements((INSERT_BATCH * 50) as u64));
@@ -251,10 +255,15 @@ fn bench_insert(c: &mut Criterion) {
             "CREATE TABLE {}(id BIGINT NOT NULL, val BIGINT)",
             QUILL_TABLE
         );
+        let drop_sql = format!("DROP TABLE IF EXISTS {}", QUILL_TABLE);
         let clear_sql = format!("DELETE FROM {}", QUILL_TABLE);
         let db = RefCell::new({
-            let mut db = Database::new_on_disk_with_options(&db_path, insert_opts.clone())
-                .expect("on-disk db");
+            let mut db = Database::new_on_disk_with_options(
+                db_path.to_str().unwrap(),
+                insert_opts.clone(),
+            )
+            .expect("on-disk db");
+            db.run(&drop_sql).expect("drop table if exists");
             db.run(&create_sql).expect("create table");
             db
         });
@@ -303,8 +312,8 @@ fn bench_insert(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_seq_scan(c: &mut Criterion) {
-    let db_path = format!("{}/scan.db", DB_DIR);
+fn bench_seq_scan(c: &mut Criterion, db_dir: &Path) {
+    let db_path = db_dir.join("scan.db");
 
     let mut group = c.benchmark_group("scan_seq");
     group.throughput(Throughput::Elements(ROWS as u64));
@@ -408,8 +417,8 @@ fn bench_seq_scan(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_index_scan(c: &mut Criterion) {
-    let db_path = format!("{}/index.db", DB_DIR);
+fn bench_index_scan(c: &mut Criterion, db_dir: &Path) {
+    let db_path = db_dir.join("index.db");
     let mut db = prepare_dataset(&db_path);
     let mut group = c.benchmark_group("index_scan");
     group.throughput(Throughput::Elements(POINT_SAMPLES as u64));
@@ -524,16 +533,18 @@ fn bench_index_scan(c: &mut Criterion) {
 }
 
 fn bench_main(c: &mut Criterion) {
-    // Global setup
-    fs::remove_dir_all(DB_DIR).ok();
-    fs::create_dir_all(DB_DIR).expect("create bench dir");
+    let bench_dir = std::env::current_dir().unwrap().join(DB_DIR_NAME);
 
-    bench_insert(c);
-    bench_seq_scan(c);
-    bench_index_scan(c);
+    // Global setup
+    fs::remove_dir_all(&bench_dir).ok();
+    fs::create_dir_all(&bench_dir).expect("create bench dir");
+
+    bench_insert(c, &bench_dir);
+    bench_seq_scan(c, &bench_dir);
+    bench_index_scan(c, &bench_dir);
 
     // Global teardown
-    fs::remove_dir_all(DB_DIR).ok();
+    fs::remove_dir_all(&bench_dir).ok();
 }
 
 criterion_group!(

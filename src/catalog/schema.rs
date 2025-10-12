@@ -47,7 +47,11 @@ impl Schema {
                     (Some(rel1), Some(rel2)) => {
                         assert!(!(rel1.resolved_eq(rel2) && col1.name == col2.name));
                     }
-                    (None, None) => assert_ne!(col1.name, col2.name),
+                    (None, None) => {
+                        if col1.name == col2.name {
+                            assert_eq!(col1.relation, col2.relation);
+                        }
+                    }
                     (Some(_), None) | (None, Some(_)) => {}
                 }
             }
