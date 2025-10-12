@@ -1,0 +1,351 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>B+Tree Index - QuillSQL Internals</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="favicon.svg">
+        <link rel="shortcut icon" href="favicon.png">
+        <link rel="stylesheet" href="css/variables.css">
+        <link rel="stylesheet" href="css/general.css">
+        <link rel="stylesheet" href="css/chrome.css">
+        <link rel="stylesheet" href="css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="highlight-css" href="highlight.css">
+        <link rel="stylesheet" id="tomorrow-night-css" href="tomorrow-night.css">
+        <link rel="stylesheet" id="ayu-highlight-css" href="ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "";
+            const default_light_theme = "light";
+            const default_dark_theme = "navy";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="toc.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="toc.html"></iframe>
+            </noscript>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                    </div>
+
+                    <h1 class="menu-title">QuillSQL Internals</h1>
+
+                    <div class="right-buttons">
+                        <a href="print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="b-tree-index--architecture-and-concurrency"><a class="header" href="#b-tree-index--architecture-and-concurrency">B+ Tree Index — Architecture and Concurrency</a></h1>
+<h2 id="1-architecture-overview"><a class="header" href="#1-architecture-overview">1. Architecture Overview</a></h2>
+<h3 id="11-node-and-page-structure"><a class="header" href="#11-node-and-page-structure">1.1 Node and Page Structure</a></h3>
+<ul>
+<li><strong>Node Types</strong>: <code>Internal</code> and <code>Leaf</code>.
+<ul>
+<li><strong>Internal Nodes</strong>: Store separator keys and pointers to child pages. The first pointer is a "sentinel" that points to the subtree for all keys less than the first key in the node.</li>
+<li><strong>Leaf Nodes</strong>: Store <code>(key, RecordId)</code> pairs in sorted order. Leaves are linked together in a singly linked list (<code>next_page_id</code>) to allow for efficient range scans.</li>
+</ul>
+</li>
+<li><strong>Header Page</strong>: A fixed page (<code>header_page_id</code>) that acts as the entry point to the tree. It stores the <code>root_page_id</code>, allowing for atomic updates to the tree root when it splits or shrinks.</li>
+<li><strong>Page Layout</strong>:
+<ul>
+<li><strong>Internal Page</strong>: <code>{Header, High Key, Array&lt;(Key, ChildPageId)&gt;}</code>. The <code>High Key</code> is part of the B-link optimization.</li>
+<li><strong>Leaf Page</strong>: <code>{Header, Array&lt;(Key, RID)&gt;}</code>.</li>
+</ul>
+</li>
+</ul>
+<h3 id="12-b-link-structure"><a class="header" href="#12-b-link-structure">1.2 B-link Structure</a></h3>
+<p>The tree uses B-link pointers (<code>next_page_id</code>) on all levels (both internal and leaf nodes). This creates a "side-link" to the right sibling. This is crucial for concurrency, as it allows readers to recover from transient inconsistent states caused by concurrent page splits by "chasing" the link to the right sibling.</p>
+<pre><code>              +------------------+
+              |   Root (Int)     |
+              +------------------+
+             /         |         \
+   +--------+      +--------+      +--------+
+   | Int P1 |-----&gt;| Int P2 |-----&gt;| Int P3 |  (Internal B-link pointers)
+   +--------+      +--------+      +--------+
+   /   |   \      /   |   \      /   |   \
++----+ +----+  +----+ +----+  +----+ +----+
+| L1 |-| L2 |-&gt;| L3 |-| L4 |-&gt;| L5 |-| L6 | (Leaf chain / B-links)
++----+ +----+  +----+ +----+  +----+ +----+
+</code></pre>
+<h2 id="2-concurrency-control"><a class="header" href="#2-concurrency-control">2. Concurrency Control</a></h2>
+<p>The B+Tree employs a sophisticated, lock-free read path and a high-concurrency write path using latch crabbing.</p>
+<h3 id="21-read-path-optimistic-lock-coupling-olc-with-b-links"><a class="header" href="#21-read-path-optimistic-lock-coupling-olc-with-b-links">2.1 Read Path: Optimistic Lock Coupling (OLC) with B-links</a></h3>
+<ul>
+<li>Readers traverse the tree from the root without taking any locks.</li>
+<li>On each page, a <code>version</code> number is read before and after processing the page's contents. If the version changes, it indicates a concurrent modification, and the read operation restarts from the root.</li>
+<li>If a reader is traversing an internal node and the search key is greater than or equal to the node's <code>high_key</code>, it knows a split has occurred. Instead of restarting, it can use the <code>next_page_id</code> B-link to "chase" to the right sibling and continue the search, minimizing restarts.</li>
+</ul>
+<h3 id="22-write-path-latch-crabbing"><a class="header" href="#22-write-path-latch-crabbing">2.2 Write Path: Latch Crabbing</a></h3>
+<p>Writers (insert/delete) use a technique called <strong>latch crabbing</strong> (or lock coupling) to ensure safe concurrent modifications.</p>
+<ul>
+<li><strong>Process</strong>: A writer acquires a write latch on a parent node before fetching and latching a child node. Once the child is latched, the writer checks if the child is "safe" for the operation (i.e., not full for an insert, not at minimum size for a delete).
+<ul>
+<li>If the child is <strong>safe</strong>, the latch on the parent (and all other ancestors) is released.</li>
+<li>If the child is <strong>unsafe</strong>, the parent latch is held, as the child might need to split or merge, which would require modifying the parent.</li>
+</ul>
+</li>
+<li><strong><code>Context</code> Struct</strong>: This process is managed by a <code>Context</code> struct that holds the stack of write guards (<code>write_set</code>) for the current traversal path. Releasing ancestor latches is as simple as clearing this stack.</li>
+</ul>
+<pre><code>Latch Crabbing on Insert:
+1. Latch(Root)
+2. Descend to Child C1. Latch(C1).
+3. Check if C1 is safe (not full).
+   IF SAFE:
+     ReleaseLatch(Root). Path is now just {C1}.
+   IF UNSAFE (full):
+     Keep Latch(Root). Path is {Root, C1}.
+4. Descend from C1 to C2. Latch(C2).
+5. Check if C2 is safe... and so on.
+</code></pre>
+<h3 id="23-deadlock-avoidance"><a class="header" href="#23-deadlock-avoidance">2.3 Deadlock Avoidance</a></h3>
+<p>When modifying siblings (during merge or redistribution), deadlocks are possible if two threads try to acquire latches on the same two pages in opposite orders. This is prevented by enforcing a strict <strong>PageId-ordered locking</strong> protocol. When two sibling pages must be latched, the page with the lower <code>PageId</code> is always latched first.</p>
+<h2 id="3-key-algorithms--features"><a class="header" href="#3-key-algorithms--features">3. Key Algorithms &amp; Features</a></h2>
+<ul>
+<li><strong>Parent-Guided Redirection</strong>: During an insert or delete, after a writer has descended to a leaf, it re-validates its position using the parent (if a latch is still held). If a concurrent split has moved the target key range to a different sibling, the writer can jump directly to the correct page instead of traversing the leaf chain, preventing race conditions.</li>
+<li><strong>Iterator</strong>: The iterator performs a forward scan by following the leaf chain (<code>next_page_id</code>). It uses a lightweight form of OLC, checking the leaf page version to detect concurrent modifications and restart if necessary to ensure it doesn't miss keys.
+<ul>
+<li>Sequential Scan Optimization (RingBuffer): For large range scans, the iterator switches to a "synchronous batch fetch + local ring buffer" mode. It fills a small <code>RingBuffer&lt;BytesMut&gt;</code> with consecutive leaf pages (by following <code>next_page_id</code>) and then decodes KVs locally without holding page guards for long. This reduces buffer pool pollution and syscall/lock overhead.</li>
+<li>Two Iteration Modes:
+<ul>
+<li>Guard Mode: Keep a <code>ReadPageGuard</code> and decode per step; prefetch next leaf best-effort.</li>
+<li>Bytes Mode: After switching, decode from <code>BytesMut</code> buffers in the local ring; when a leaf is exhausted, pop next bytes from the ring or refill by following the chain.</li>
+</ul>
+</li>
+</ul>
+</li>
+<li><strong>Prefix Compression</strong>: Keys in internal nodes are prefix-compressed to save space. Each key is stored as <code>(lcp, suffix_len, suffix)</code>. This reduces the size of internal pages, increasing the tree's fanout and reducing its height, which improves cache performance and reduces I/O.</li>
+<li><strong>Split/Merge Safety</strong>:
+<ul>
+<li><strong>Split</strong>: When a node splits, the new right sibling is written first. Then, the B-link pointer and separator key are published atomically by updating the left sibling and parent. This ensures readers can always navigate the structure correctly.</li>
+<li><strong>Merge/Redistribute</strong>: When a node is underfull, the implementation first tries to borrow an entry from a sibling (redistribute). If both siblings are at minimum size, it merges with a sibling. All these operations carefully maintain the B-link chain and parent pointers.</li>
+</ul>
+</li>
+</ul>
+<h2 id="4-benchmarks--performance"><a class="header" href="#4-benchmarks--performance">4. Benchmarks &amp; Performance</a></h2>
+<h3 id="41-example-range-scan-benchmark"><a class="header" href="#41-example-range-scan-benchmark">4.1 Example: Range Scan Benchmark</a></h3>
+<p>This benchmark measures the efficiency of the leaf-chain traversal, which is critical for <code>SELECT</code> queries with <code>WHERE</code> clauses on indexed columns. It benefits from iterator prefetching and prefix compression.</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// Pseudo-code for a range scan benchmark
+use std::time::Instant;
+
+fn benchmark_range_scan(index: Arc&lt;BPlusTreeIndex&gt;, num_keys: i64, num_passes: usize) {
+    // 1. Populate the index with sequential keys
+    for key in 1..=num_keys {
+        let tuple = create_tuple_from_key(key, index.key_schema.clone());
+        index.insert(&amp;tuple, create_rid_from_key(key)).unwrap();
+    }
+
+    // 2. Run the benchmark
+    let start = Instant::now();
+    let mut count = 0;
+    for _ in 0..num_passes {
+        // Create an iterator over the full key range
+        let mut iter = TreeIndexIterator::new(index.clone(), ..);
+        while let Some(_) = iter.next().unwrap() {
+            count += 1;
+        }
+    }
+    let elapsed = start.elapsed();
+    let total_items_scanned = num_keys as usize * num_passes;
+    let items_per_sec = total_items_scanned as f64 / elapsed.as_secs_f64();
+
+    println!(
+        "Range Scan: Scanned {} items in {:?}. Throughput: {:.2} items/sec",
+        total_items_scanned, elapsed, items_per_sec
+    );
+}
+<span class="boring">}</span></code></pre></pre>
+<h3 id="42-performance-notes"><a class="header" href="#42-performance-notes">4.2 Performance Notes</a></h3>
+<ul>
+<li><strong>Hot Reads</strong>: Performance on hot-spot reads depends on keeping upper levels and hot leaves resident in the buffer pool. Warm up the cache for read-heavy benchmarks. Protect hot pages from pollution by enabling TinyLFU admission.</li>
+<li><strong>Large Range Scans</strong>: Prefer table SeqScan with ring buffer (bypass) when scanning most of the table. For index scans over very large ranges, consider future Bitmap Heap Scan rather than bypassing the pool for leaves.</li>
+</ul>
+<h3 id="43-configuration"><a class="header" href="#43-configuration">4.3 Configuration</a></h3>
+<ul>
+<li><code>config::BTreeConfig</code> controls iterator behavior:
+<ul>
+<li><code>seq_batch_enable</code> (bool): enable batch mode with local ring buffer.</li>
+<li><code>seq_window</code> (usize): number of leaf pages to prefill into the ring per refill.</li>
+<li><code>prefetch_enable</code>/<code>prefetch_window</code>: guard-mode prefetch hints to buffer pool.
+Defaults are conservative; increase <code>seq_window</code> for long scans to reduce I/O hop.</li>
+</ul>
+</li>
+</ul>
+<h2 id="5-future-work"><a class="header" href="#5-future-work">5. Future Work</a></h2>
+<ul>
+<li>Stronger OLC with bounded retries and telemetry.</li>
+<li>CSB+-like internal layout and columnar key prefixing.</li>
+<li>NUMA-aware partitioning and router.</li>
+<li>WAL/MVCC for crash recovery and snapshot isolation.</li>
+</ul>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="transactions.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="modules/storage.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="transactions.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="modules/storage.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+
+        <script src="clipboard.min.js"></script>
+        <script src="highlight.js"></script>
+        <script src="book.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+
+    </div>
+    </body>
+</html>

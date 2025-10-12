@@ -1,0 +1,258 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Disk I/O - QuillSQL Internals</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="favicon.svg">
+        <link rel="shortcut icon" href="favicon.png">
+        <link rel="stylesheet" href="css/variables.css">
+        <link rel="stylesheet" href="css/general.css">
+        <link rel="stylesheet" href="css/chrome.css">
+        <link rel="stylesheet" href="css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="highlight-css" href="highlight.css">
+        <link rel="stylesheet" id="tomorrow-night-css" href="tomorrow-night.css">
+        <link rel="stylesheet" id="ayu-highlight-css" href="ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "";
+            const default_light_theme = "light";
+            const default_dark_theme = "navy";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="toc.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="toc.html"></iframe>
+            </noscript>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                    </div>
+
+                    <h1 class="menu-title">QuillSQL Internals</h1>
+
+                    <div class="right-buttons">
+                        <a href="print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="disk-io--scheduler-io_uring-data-pages--wal-runtime"><a class="header" href="#disk-io--scheduler-io_uring-data-pages--wal-runtime">Disk I/O — Scheduler, io_uring Data Pages &amp; WAL Runtime</a></h1>
+<h2 id="1-architecture"><a class="header" href="#1-architecture">1. Architecture</a></h2>
+<ul>
+<li><strong>Request Path</strong>: foreground components enqueue <code>DiskRequest</code> objects via <code>DiskScheduler::{schedule_read, schedule_write, …}</code>. A dispatcher thread drains the global channel and distributes work round-robin to N io_uring workers. Each worker owns its own ring and file-descriptor cache, so once a request is forwarded, execution proceeds entirely off the foreground thread.</li>
+<li><strong>Stable APIs</strong>: <code>schedule_read(page_id)</code>, <code>schedule_write(page_id, Bytes)</code>, <code>schedule_read_pages(Vec&lt;PageId&gt;)</code>, <code>schedule_allocate()</code>, <code>schedule_deallocate(page_id)</code> — every call returns a channel the caller can block on or poll.</li>
+<li><strong>Batch Reads</strong>: <code>ReadPages</code> fans out per-page SQEs while a shared <code>BatchState</code> tracks completions. Even if the kernel completes I/O out of order, the caller receives a <code>Vec&lt;BytesMut&gt;</code> that preserves the original page order.</li>
+</ul>
+<h2 id="2-wal-runtime-buffered-io"><a class="header" href="#2-wal-runtime-buffered-io">2. WAL Runtime (buffered I/O)</a></h2>
+<ul>
+<li>Dedicated WAL runtime threads handle sequential WAL appends/reads using buffered I/O. They now keep a per-thread cache of open segment files, eliminating repeated <code>open()</code>/<code>close()</code> on every log record.</li>
+<li>Worker count defaults to <code>max(1, available_parallelism / 2)</code> but is tunable through <code>IOSchedulerConfig</code>.</li>
+<li>Optional <code>sync</code> on a request triggers <code>sync_data</code> / <code>fdatasync</code> so <code>WalManager</code> can honour synchronous commit or checkpoint barriers. Data pages stay on the io_uring dataplane; WAL always uses buffered writes.</li>
+</ul>
+<h2 id="3-io_uring-backend-linux"><a class="header" href="#3-io_uring-backend-linux">3. io_uring Backend (Linux)</a></h2>
+<ul>
+<li>Each worker owns an <code>IoUring</code> with configurable <code>queue_depth</code>, optional SQPOLL idle timeout, and a pool of registered fixed buffers sized to <code>PAGE_SIZE</code>. Workers submit SQEs asynchronously and drain CQEs in small batches to keep the ring warm.</li>
+<li>Read batching relies on shared <code>BatchState</code> instances (<code>Rc&lt;RefCell&lt;_&gt;&gt;</code>) so multi-page callers see ordered results without blocking the kernel on serialization.</li>
+<li>Writes keep their payload alive until completion; if a fixed buffer slot is available we reuse it, otherwise we fall back to heap buffers. A companion <code>WriteState</code> tracks an optional <code>fdatasync</code> so the caller still observes exactly one <code>Result&lt;()&gt;</code> once all CQEs land.</li>
+<li>Errors (short read/write, errno) are normalised into <code>QuillSQLError</code> values that flow back on the original channel.</li>
+</ul>
+<h2 id="4-configuration"><a class="header" href="#4-configuration">4. Configuration</a></h2>
+<ul>
+<li><code>config::IOSchedulerConfig</code> controls:
+<ul>
+<li><code>workers</code>: number of io_uring workers (default = available parallelism).</li>
+<li><code>wal_workers</code>: WAL runtime threads (default workers / 2).</li>
+<li><code>iouring_queue_depth</code>, <code>iouring_fixed_buffers</code>, <code>iouring_sqpoll_idle_ms</code>.</li>
+<li><code>fsync_on_write</code>: whether data-page writes also issue <code>fdatasync</code> (WAL sync is managed separately by <code>WalManager</code>).</li>
+</ul>
+</li>
+</ul>
+<h2 id="5-concurrency--safety"><a class="header" href="#5-concurrency--safety">5. Concurrency &amp; Safety</a></h2>
+<ul>
+<li>Worker-local file descriptors plus positional I/O remove shared mutable state on the hot path. The new per-worker handle cache further reduces syscall overhead.</li>
+<li>Shutdown sequence: enqueue <code>Shutdown</code>, dispatcher forwards it to every worker, each worker drains outstanding SQEs/CQEs, and finally dispatcher + workers are joined.</li>
+<li>BufferPool, TableHeap, and the streaming scan ring buffer still integrate via channels; inflight guards prevent duplicate page fetches.</li>
+</ul>
+<h2 id="6-performance-notes"><a class="header" href="#6-performance-notes">6. Performance Notes</a></h2>
+<ul>
+<li>Random page access benefits from fewer syscalls and deeper outstanding queue depth than the blocking fallback.</li>
+<li>Only the io_uring backend currently ships (Linux x86_64). A portable fallback remains future work.</li>
+<li>For large sequential scans, combine <code>ReadPages</code> with the ring-buffer iterator to minimise buffer-pool churn.</li>
+</ul>
+<h2 id="7-future-work"><a class="header" href="#7-future-work">7. Future Work</a></h2>
+<ul>
+<li>Queue-depth aware scheduling and CQE bulk harvesting.</li>
+<li>Optional group commit (aggregate writes, single fsync) behind configuration.</li>
+<li>Metrics hooks (queue depth, submit/complete throughput, latency percentiles, error codes).</li>
+<li>Cross-platform fallback backend and richer prioritisation/throttling policies.</li>
+<li>Control-plane knobs for throttling individual background workers.</li>
+</ul>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="buffer_pool.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="wal.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="buffer_pool.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="wal.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+
+        <script src="clipboard.min.js"></script>
+        <script src="highlight.js"></script>
+        <script src="book.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+
+    </div>
+    </body>
+</html>
