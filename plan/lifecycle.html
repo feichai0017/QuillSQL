@@ -1,0 +1,287 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>The Lifecycle of a Query - QuillSQL Internals</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon.svg">
+        <link rel="shortcut icon" href="../favicon.png">
+        <link rel="stylesheet" href="../css/variables.css">
+        <link rel="stylesheet" href="../css/general.css">
+        <link rel="stylesheet" href="../css/chrome.css">
+        <link rel="stylesheet" href="../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="highlight-css" href="../highlight.css">
+        <link rel="stylesheet" id="tomorrow-night-css" href="../tomorrow-night.css">
+        <link rel="stylesheet" id="ayu-highlight-css" href="../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "../";
+            const default_light_theme = "light";
+            const default_dark_theme = "navy";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="../toc.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="../toc.html"></iframe>
+            </noscript>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                    </div>
+
+                    <h1 class="menu-title">QuillSQL Internals</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="the-lifecycle-of-a-query"><a class="header" href="#the-lifecycle-of-a-query">The Lifecycle of a Query</a></h1>
+<p>When you submit a SQL query to a database, it doesn't just magically produce a result. The database undertakes a sophisticated, multi-stage process to translate the declarative SQL statement (which describes <em>what</em> data you want) into an imperative, efficient execution plan (which describes <em>how</em> to get that data). This entire process is the responsibility of the <strong>Query Planner</strong>.</p>
+<p>In QuillSQL, this process follows a classic, compiler-like pipeline, which is a cornerstone of modern database architecture as taught in courses like CMU 15-445.</p>
+<p>The journey from a SQL string to an executable plan involves several transformations:</p>
+<p><strong>SQL String</strong> -&gt; <strong>AST (Abstract Syntax Tree)</strong> -&gt; <strong>Logical Plan</strong> -&gt; <strong>Optimized Logical Plan</strong> -&gt; <strong>Physical Plan</strong></p>
+<p>Let's break down each stage.</p>
+<h3 id="stage-1-parsing-sql---ast"><a class="header" href="#stage-1-parsing-sql---ast">Stage 1: Parsing (SQL -&gt; AST)</a></h3>
+<p>The first step is purely syntactic. The raw SQL query string is fed into a parser. QuillSQL uses the excellent <code>sqlparser</code> crate for this. The parser checks if the SQL conforms to valid grammar and, if so, converts it into an <strong>Abstract Syntax Tree (AST)</strong>.</p>
+<p>An AST is a direct tree representation of the SQL query's structure. For example, <code>SELECT id FROM users WHERE age &gt; 30</code> would be parsed into a tree structure with nodes representing the <code>SELECT</code> clause, the table <code>users</code>, the <code>WHERE</code> clause, and the predicate <code>age &gt; 30</code>.</p>
+<h3 id="stage-2-logical-planning-ast---logical-plan"><a class="header" href="#stage-2-logical-planning-ast---logical-plan">Stage 2: Logical Planning (AST -&gt; Logical Plan)</a></h3>
+<p>Next, the <code>LogicalPlanner</code> (<code>plan/logical_planner.rs</code>) walks the AST and converts it into a <strong>Logical Plan</strong>.</p>
+<p>A Logical Plan is a tree of relational algebra operators. It describes the query in terms of high-level data operations, completely independent of how the data is stored or which algorithms will be used. It defines <em>what</em> to do, not <em>how</em> to do it.</p>
+<p>Key logical operators in QuillSQL (<code>plan/logical_plan/mod.rs</code>) include:</p>
+<ul>
+<li><strong><code>TableScan(users)</code></strong>: Represents reading the entire <code>users</code> table.</li>
+<li><strong><code>Filter(predicate: age &gt; 30)</code></strong>: Represents filtering rows based on a condition.</li>
+<li><strong><code>Projection(columns: [id])</code></strong>: Represents selecting specific columns.</li>
+<li><strong><code>Join</code></strong>: Represents joining two data sources.</li>
+<li><strong><code>Aggregate</code></strong>: Represents a <code>GROUP BY</code> operation.</li>
+<li><strong><code>Sort</code></strong>: Represents an <code>ORDER BY</code> operation.</li>
+</ul>
+<p>For our example query, the initial logical plan might look like this:</p>
+<pre><code>Projection(columns=[id])
+  └── Filter(predicate=age &gt; 30)
+        └── TableScan(users)
+</code></pre>
+<h3 id="stage-3-logical-optimization"><a class="header" href="#stage-3-logical-optimization">Stage 3: Logical Optimization</a></h3>
+<p>Before executing the plan, we have a crucial opportunity to make it more efficient. The <code>LogicalOptimizer</code> (<code>optimizer/logical_optimizer.rs</code>) takes the logical plan and applies a series of <strong>transformation rules</strong> to produce a new, equivalent logical plan that is expected to be faster.</p>
+<p>QuillSQL uses a simple but effective rule-based optimizer. A classic example of such a rule is <strong>Predicate Pushdown</strong>. Consider this query:</p>
+<p><code>SELECT name FROM (SELECT * FROM users JOIN cities ON users.city_id = cities.id) WHERE users.age &gt; 30;</code></p>
+<p>A naive logical plan would first perform a full <code>JOIN</code> between <code>users</code> and <code>cities</code> and <em>then</em> filter the massive result. Predicate pushdown is a rule that would rewrite the plan to apply the <code>age &gt; 30</code> filter <em>before</em> the join:</p>
+<p><strong>Before Optimization:</strong></p>
+<pre><code>Filter(users.age &gt; 30)
+  └── Join(users.city_id = cities.id)
+        ├── TableScan(users)
+        └── TableScan(cities)
+</code></pre>
+<p><strong>After Optimization (Predicate Pushdown):</strong></p>
+<pre><code>Join(users.city_id = cities.id)
+  ├── Filter(users.age &gt; 30)
+  │     └── TableScan(users)
+  └── TableScan(cities)
+</code></pre>
+<p>By filtering early, we dramatically reduce the number of rows that need to be processed by the expensive <code>Join</code> operator. QuillSQL implements similar rules, such as <code>PushDownLimit</code>, which pushes <code>LIMIT</code> clauses down the tree to reduce the amount of data processed.</p>
+<h3 id="stage-4-physical-planning-logical-plan---physical-plan"><a class="header" href="#stage-4-physical-planning-logical-plan---physical-plan">Stage 4: Physical Planning (Logical Plan -&gt; Physical Plan)</a></h3>
+<p>Finally, the <code>PhysicalPlanner</code> (<code>plan/physical_planner.rs</code>) converts the optimized logical plan into a <strong>Physical Plan</strong>.</p>
+<p>A Physical Plan describes exactly <em>how</em> the query will be executed. It maps each logical operator to a concrete algorithm or implementation.</p>
+<ul>
+<li>A <code>LogicalPlan::TableScan</code> becomes a <code>PhysicalSeqScan</code> (a sequential scan of the table heap).</li>
+<li>A <code>LogicalPlan::Filter</code> becomes a <code>PhysicalFilter</code>, which implements the filtering logic.</li>
+<li>A <code>LogicalPlan::Join</code> becomes a <code>PhysicalNestedLoopJoin</code>. This is where the database commits to a specific join algorithm. A more advanced database might have multiple options (e.g., <code>PhysicalHashJoin</code>, <code>PhysicalSortMergeJoin</code>) and would use a cost model to choose the best one. QuillSQL currently implements Nested Loop Join.</li>
+</ul>
+<p>Each node in the physical plan tree is an executor that the <a href="../modules/execution.html">Execution Engine</a> can run. This final plan is what gets executed to produce the query result.</p>
+<h2 id="conclusion"><a class="header" href="#conclusion">Conclusion</a></h2>
+<p>This layered approach—from syntax to a logical representation, then to an optimized logical representation, and finally to a concrete physical execution plan—is fundamental to database design. It provides a clear separation of concerns and, most importantly, creates a dedicated <strong>optimization stage</strong>, which is the key to achieving high performance on a wide variety of SQL queries.</p>
+<hr />
+<h2 id="for-study--discussion"><a class="header" href="#for-study--discussion">For Study &amp; Discussion</a></h2>
+<ol>
+<li>
+<p><strong>Logical vs. Physical</strong>: Why is the separation between logical and physical plans so important? What would be the disadvantages of a simpler system that converted the AST directly into a physical plan?</p>
+</li>
+<li>
+<p><strong>Join Algorithms</strong>: QuillSQL currently only implements <code>NestedLoopJoin</code>. What are two other common join algorithms? Describe how they work and in what scenarios they would be more performant than a nested loop join.</p>
+</li>
+<li>
+<p><strong>Programming Exercise (Advanced)</strong>: Implement a <code>PhysicalHashJoin</code> operator. This is a significant undertaking that involves:
+a.  Creating a <code>PhysicalHashJoin</code> struct that implements the <code>VolcanoExecutor</code> trait.
+b.  In the <code>init()</code> phase, it should consume the entire "build" side (typically the smaller, right-hand table) and build an in-memory hash table from its rows.
+c.  In the <code>next()</code> phase, it should read from the "probe" side (the left-hand table) one row at a time, probe the hash table for matches, and emit the joined tuples.
+d.  Modify the <code>PhysicalPlanner</code> to choose <code>PhysicalHashJoin</code> instead of <code>PhysicalNestedLoopJoin</code> for equi-joins.</p>
+</li>
+<li>
+<p><strong>Programming Exercise</strong>: Add support for the <code>UNION ALL</code> operator. This would involve:
+a.  Adding a <code>Union</code> variant to the <code>LogicalPlan</code> enum.
+b.  Updating the <code>LogicalPlanner</code> to recognize the <code>UNION</code> syntax in the AST and create a <code>LogicalPlan::Union</code> node.
+c.  Creating a <code>PhysicalUnion</code> executor that pulls tuples from its first child until it's exhausted, and then pulls tuples from its second child.</p>
+</li>
+</ol>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../modules/plan.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="../modules/optimizer.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../modules/plan.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="../modules/optimizer.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+
+        <script src="../clipboard.min.js"></script>
+        <script src="../highlight.js"></script>
+        <script src="../book.js"></script>
+
+        <!-- Custom JS scripts -->
+        <script src="../mermaid.min.js"></script>
+        <script src="../mermaid-init.js"></script>
+
+
+
+    </div>
+    </body>
+</html>

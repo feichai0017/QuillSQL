@@ -3,7 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>Transaction Manager - QuillSQL Internals</title>
+        <title>Table Heap &amp; MVCC - QuillSQL Internals</title>
 
 
         <!-- Custom HTML head -->
@@ -155,36 +155,55 @@
 
                 <div id="content" class="content">
                     <main>
-                        <h1 id="transaction-manager"><a class="header" href="#transaction-manager">Transaction Manager</a></h1>
-<p>The Transaction Manager is responsible for one of the most critical aspects of a database: guaranteeing the <strong>ACID</strong> properties, specifically <strong>Isolation</strong> and <strong>Atomicity</strong>.</p>
-<p>It allows multiple clients to access the database concurrently without interfering with each other, and it ensures that transactions are treated as single, indivisible operations (all or nothing).</p>
-<h2 id="core-concepts"><a class="header" href="#core-concepts">Core Concepts</a></h2>
-<ul>
-<li>
-<p><strong>Concurrency Control</strong>: To handle simultaneous operations, QuillSQL uses a hybrid approach that combines two powerful techniques:</p>
+                        <h1 id="table-heap-and-mvcc"><a class="header" href="#table-heap-and-mvcc">Table Heap and MVCC</a></h1>
+<p>The <code>TableHeap</code> (<code>storage/table_heap.rs</code>) is the component responsible for managing the collection of pages that belong to a single table. While the <code>TablePage</code> defines the <em>layout</em> within a single page, the <code>TableHeap</code> provides the high-level API for inserting, updating, and deleting tuples, making it central to the implementation of MVCC.</p>
+<h2 id="tuple-serialization"><a class="header" href="#tuple-serialization"><code>Tuple</code> Serialization</a></h2>
+<p>A logical <code>Tuple</code> struct in memory must be converted into a byte array to be stored on a page. This process is handled by <code>storage/codec/tuple.rs</code>.</p>
+<p>The serialized format of a tuple consists of two parts:</p>
 <ol>
-<li><strong>Multi-Version Concurrency Control (MVCC)</strong>: Instead of overwriting data, writers create new <em>versions</em> of rows. Readers are given a consistent <em>snapshot</em> of the database, which allows them to proceed without being blocked by writers.</li>
-<li><strong>Two-Phase Locking (2PL)</strong>: To prevent two writers from modifying the same row at the same time, a strict two-phase locking protocol is used. Transactions must acquire locks on data before modifying it and hold those locks until the transaction ends.</li>
+<li><strong>Null Bitmap</strong>: A compact bitmap at the beginning of the tuple data. Each bit corresponds to a column in the schema; if the bit is <code>1</code>, the column's value is <code>NULL</code>. This avoids storing any data for null fields.</li>
+<li><strong>Attribute Data</strong>: The actual data for all non-null columns, serialized one after another.</li>
 </ol>
+<h2 id="tuplemeta-the-heart-of-mvcc"><a class="header" href="#tuplemeta-the-heart-of-mvcc"><code>TupleMeta</code>: The Heart of MVCC</a></h2>
+<p>The most important part of a tuple's on-disk metadata is the <code>TupleMeta</code> struct, which is stored directly within the <code>TupleInfo</code> slot in the page header. This is the heart of QuillSQL's <strong>Multi-Version Concurrency Control (MVCC)</strong> implementation.</p>
+<ul>
+<li><strong><code>insert_txn_id</code></strong>: The ID of the transaction that created this version of the tuple.</li>
+<li><strong><code>delete_txn_id</code></strong>: The ID of the transaction that "deleted" this version. (A value of <code>0</code> or <code>INVALID</code> means it's not deleted).</li>
+<li><strong><code>is_deleted</code></strong>: A boolean flag indicating the tuple version is considered deleted.</li>
+<li><strong><code>prev_version: Option&lt;RecordId&gt;</code></strong>: A link (RID) to the <em>previous</em> version of this logical row.</li>
+<li><strong><code>next_version: Option&lt;RecordId&gt;</code></strong>: A link (RID) to the <em>next</em> version of this logical row.</li>
+</ul>
+<p>These fields allow QuillSQL to maintain a <strong>version chain</strong> for each logical row. When a row is updated, the <code>TableHeap</code>'s <code>mvcc_update</code> method is called, which, instead of overwriting the data, performs the following steps:</p>
+<ol>
+<li>Creates a new tuple version with the new data by calling <code>insert_tuple</code>.</li>
+<li>Sets the <code>prev_version</code> pointer of this new version to the RID of the old version.</li>
+<li>Updates the <code>next_version</code> pointer of the old version to point to the new version.</li>
+<li>Sets the <code>delete_txn_id</code> on the old version to mark it as "dead".</li>
+</ol>
+<p>A transaction can then traverse this chain and use the transaction IDs in the <code>TupleMeta</code> to determine which version of a row is visible to it based on its own transaction ID and isolation level, thus achieving transaction isolation without long-held read locks.</p>
+<hr />
+<h2 id="for-study--discussion"><a class="header" href="#for-study--discussion">For Study &amp; Discussion</a></h2>
+<ol>
+<li>
+<p><strong>Version Chain Traversal</strong>: Imagine a transaction with ID <code>T10</code> needs to read a row. It finds a version of the row that was inserted by <code>T5</code> (committed) but deleted by <code>T12</code> (in-progress). Should <code>T10</code> see this version? What if the deleter was <code>T8</code> (committed)? What if the deleter was <code>T10</code> itself? Walk through the visibility check logic.</p>
 </li>
 <li>
-<p><strong>Atomicity</strong>: The transaction manager records all actions performed by a transaction. If the transaction needs to be aborted, it can use this record to perform the necessary undo operations, rolling the database back to its state before the transaction began.</p>
+<p><strong>Garbage Collection</strong>: The MVCC model creates many "dead" tuple versions that are no longer visible to any active or future transaction. What is the long-term problem with leaving these dead versions in the database? This problem is typically solved by a process called <strong>vacuuming</strong> or garbage collection. When is it safe to physically remove a dead tuple version?</p>
 </li>
-</ul>
-<p>This section contains:</p>
-<ul>
-<li><strong><a href="./../transaction/mvcc_and_2pl.html">MVCC and 2PL</a></strong>: A deep dive into QuillSQL's hybrid concurrency control model.</li>
-</ul>
+<li>
+<p><strong>Programming Exercise (Advanced)</strong>: Implement a basic <code>VACUUM</code> function for a <code>TableHeap</code>. This function should scan the table and identify dead tuple versions that are no longer visible to <em>any</em> currently active transaction. Once identified, it should physically remove them from their pages. This is a challenging exercise that touches transaction management, storage, and concurrency.</p>
+</li>
+</ol>
 
                     </main>
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
-                            <a rel="prev" href="../recovery/aries.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                            <a rel="prev" href="../storage/page_layouts.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                                 <i class="fa fa-angle-left"></i>
                             </a>
 
-                            <a rel="next prefetch" href="../transaction/mvcc_and_2pl.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                            <a rel="next prefetch" href="../modules/index.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                                 <i class="fa fa-angle-right"></i>
                             </a>
 
@@ -194,11 +213,11 @@
             </div>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
-                    <a rel="prev" href="../recovery/aries.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                    <a rel="prev" href="../storage/page_layouts.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                         <i class="fa fa-angle-left"></i>
                     </a>
 
-                    <a rel="next prefetch" href="../transaction/mvcc_and_2pl.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                    <a rel="next prefetch" href="../modules/index.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                         <i class="fa fa-angle-right"></i>
                     </a>
             </nav>

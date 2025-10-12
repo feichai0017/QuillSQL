@@ -3,7 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>Transaction Manager - QuillSQL Internals</title>
+        <title>The Buffer Pool - QuillSQL Internals</title>
 
 
         <!-- Custom HTML head -->
@@ -155,36 +155,96 @@
 
                 <div id="content" class="content">
                     <main>
-                        <h1 id="transaction-manager"><a class="header" href="#transaction-manager">Transaction Manager</a></h1>
-<p>The Transaction Manager is responsible for one of the most critical aspects of a database: guaranteeing the <strong>ACID</strong> properties, specifically <strong>Isolation</strong> and <strong>Atomicity</strong>.</p>
-<p>It allows multiple clients to access the database concurrently without interfering with each other, and it ensures that transactions are treated as single, indivisible operations (all or nothing).</p>
-<h2 id="core-concepts"><a class="header" href="#core-concepts">Core Concepts</a></h2>
+                        <h1 id="the-buffer-pool-architecture-and-lifecycle"><a class="header" href="#the-buffer-pool-architecture-and-lifecycle">The Buffer Pool: Architecture and Lifecycle</a></h1>
+<h2 id="1-core-components--architecture"><a class="header" href="#1-core-components--architecture">1. Core Components &amp; Architecture</a></h2>
+<p>QuillSQL's buffer management is split into two main structs, reflecting a separation of concerns:</p>
 <ul>
-<li>
-<p><strong>Concurrency Control</strong>: To handle simultaneous operations, QuillSQL uses a hybrid approach that combines two powerful techniques:</p>
+<li><strong><code>BufferPool</code> (<code>buffer/buffer_pool.rs</code>)</strong>: A low-level, "dumb" container. It owns the actual memory arena for pages and provides basic mapping from a <code>PageId</code> to a memory location (<code>FrameId</code>).</li>
+<li><strong><code>BufferManager</code> (<code>buffer/buffer_manager.rs</code>)</strong>: The high-level, "smart" coordinator. It contains the <code>BufferPool</code> and implements all the logic for fetching pages, choosing which pages to evict, and interacting with other database components like the transaction and recovery managers.</li>
+</ul>
+<p>This architecture is centered around three key data structures:</p>
 <ol>
-<li><strong>Multi-Version Concurrency Control (MVCC)</strong>: Instead of overwriting data, writers create new <em>versions</em> of rows. Readers are given a consistent <em>snapshot</em> of the database, which allows them to proceed without being blocked by writers.</li>
-<li><strong>Two-Phase Locking (2PL)</strong>: To prevent two writers from modifying the same row at the same time, a strict two-phase locking protocol is used. Transactions must acquire locks on data before modifying it and hold those locks until the transaction ends.</li>
-</ol>
+<li>
+<p><strong>Frames (The Arena)</strong>: The <code>BufferPool</code> pre-allocates a large, contiguous block of memory on the heap. This block is divided into a fixed number of smaller chunks called <strong>frames</strong>. Each frame is exactly <code>PAGE_SIZE</code> (4KB) and can hold the contents of one disk page.</p>
 </li>
 <li>
-<p><strong>Atomicity</strong>: The transaction manager records all actions performed by a transaction. If the transaction needs to be aborted, it can use this record to perform the necessary undo operations, rolling the database back to its state before the transaction began.</p>
+<p><strong>Page Table (<code>page_table</code>)</strong>: A hash map (specifically, a concurrent <code>DashMap</code>) that maps a logical <code>PageId</code> to the <code>FrameId</code> where it currently resides in memory. This provides fast O(1) lookups to check if a page is already in the buffer pool.</p>
 </li>
-</ul>
-<p>This section contains:</p>
+<li>
+<p><strong>Replacer (<code>LRUKReplacer</code>)</strong>: When a requested page is not in memory and the buffer pool is full, one of the existing pages must be <strong>evicted</strong> to make room. The <code>Replacer</code> is the component that implements the page replacement policy and decides which page is the best candidate for eviction. QuillSQL uses an <strong>LRU-K</strong> replacement policy, a sophisticated variant of the classic Least Recently Used (LRU) algorithm.</p>
+</li>
+</ol>
+<h2 id="2-the-lifecycle-of-a-page-request"><a class="header" href="#2-the-lifecycle-of-a-page-request">2. The Lifecycle of a Page Request</a></h2>
+<p>When another part of the database (e.g., the execution engine) needs to access a page, it calls <code>buffer_manager.fetch_page_read(page_id)</code> or <code>fetch_page_write(page_id)</code>. This initiates a critical sequence of events.</p>
+<p>The flow is as follows:</p>
+<ol>
+<li>
+<p><strong>Request</strong>: An executor requests Page <code>P</code>.</p>
+</li>
+<li>
+<p><strong>Lookup</strong>: The <code>BufferManager</code> consults the <code>PageTable</code>.</p>
+</li>
+<li>
+<p><strong>Case 1: Cache Hit</strong></p>
 <ul>
-<li><strong><a href="./../transaction/mvcc_and_2pl.html">MVCC and 2PL</a></strong>: A deep dive into QuillSQL's hybrid concurrency control model.</li>
+<li>The <code>PageTable</code> contains an entry for <code>P</code>, mapping it to <code>FrameId</code> <code>F</code>.</li>
+<li>The <code>BufferManager</code> increments the pin count for frame <code>F</code>.</li>
+<li>It informs the <code>LRUKReplacer</code> that the page has been accessed (updating its priority).</li>
+<li>It returns a <code>PageGuard</code> wrapping a reference to the memory in frame <code>F</code>.</li>
 </ul>
+</li>
+<li>
+<p><strong>Case 2: Cache Miss</strong></p>
+<ul>
+<li>The <code>PageTable</code> has no entry for <code>P</code>.</li>
+<li>The <code>BufferManager</code> must bring the page from disk. It asks the <code>Replacer</code> to choose a <strong>victim frame</strong> <code>F_v</code> to evict.</li>
+<li><strong>If the victim frame <code>F_v</code> is dirty</strong>: The <code>BufferManager</code> first writes the contents of <code>F_v</code> back to disk via the <code>DiskScheduler</code>. This is essential for data durability.</li>
+<li>The <code>PageTable</code> entry for the old page residing in <code>F_v</code> is removed.</li>
+<li>The <code>BufferManager</code> issues a read request to the <code>DiskScheduler</code> to load page <code>P</code>'s data from disk into frame <code>F_v</code>.</li>
+<li>The <code>PageTable</code> is updated with the new mapping: <code>P -&gt; F_v</code>.</li>
+<li>The process then continues like a cache hit: frame <code>F_v</code> is pinned and a <code>PageGuard</code> is returned.</li>
+</ul>
+</li>
+</ol>
+<h2 id="3-concurrency"><a class="header" href="#3-concurrency">3. Concurrency</a></h2>
+<p>The buffer pool is a shared resource accessed by many concurrent threads. QuillSQL uses a combination of locking strategies:</p>
+<ul>
+<li><strong>Page Table</strong>: A <code>DashMap</code> is used for the page table, which is highly optimized for concurrent reads and writes.</li>
+<li><strong>Frame-Level Locks</strong>: Each frame in the pool has its own <code>RwLock</code>. A <code>ReadPageGuard</code> acquires a read lock on the frame, allowing multiple threads to read the same page concurrently. A <code>WritePageGuard</code> acquires an exclusive write lock, ensuring that only one thread can modify a page at a time.</li>
+<li><strong>Replacer/Free List</strong>: These shared structures are protected by a <code>Mutex</code>.</li>
+</ul>
+<h2 id="4-integration-with-wal-and-recovery"><a class="header" href="#4-integration-with-wal-and-recovery">4. Integration with WAL and Recovery</a></h2>
+<p>The Buffer Manager is a key player in the ARIES recovery protocol.</p>
+<ul>
+<li><strong>Dirty Pages</strong>: When a <code>WritePageGuard</code> is dropped, if it has modified the page, it marks the page as <strong>dirty</strong>. The <code>BufferManager</code> maintains a <code>dirty_page_table</code> that tracks all dirty pages and the Log Sequence Number (LSN) of the first WAL record that caused the page to become dirty.</li>
+<li><strong>Forced WAL (Write-Ahead Logging)</strong>: Before a dirty page can be written back to disk (either during eviction or a checkpoint), the <code>BufferManager</code> must ensure that all WAL records up to that page's current LSN have been flushed to durable storage. This is the fundamental <strong>WAL rule</strong> and is enforced by the <code>flush_page</code> method, which calls <code>wal_manager.flush(lsn)</code> before writing the page to disk.</li>
+</ul>
+<hr />
+<h2 id="for-study--discussion"><a class="header" href="#for-study--discussion">For Study &amp; Discussion</a></h2>
+<ol>
+<li>
+<p><strong>Replacement Policies</strong>: QuillSQL uses LRU-K. What are the potential advantages of LRU-K over a simple LRU policy? What kind of workload would benefit most? Conversely, what are the trade-offs of using Clock/Second-Chance instead?</p>
+</li>
+<li>
+<p><strong>The "Double Caching" Problem</strong>: We mentioned that using Direct I/O helps avoid double caching. If Direct I/O is disabled, how does the database's buffer pool interact with the operating system's file system cache? Why can this lead to suboptimal performance?</p>
+</li>
+<li>
+<p><strong>Programming Exercise</strong>: Implement a <code>ClockReplacer</code> that adheres to the <code>Replacer</code> trait. Modify the <code>BufferManager</code> to use your new replacer instead of <code>LRUKReplacer</code>. Run the benchmark suite and compare the performance. Does it change?</p>
+</li>
+<li>
+<p><strong>Programming Exercise</strong>: Add metrics to the <code>BufferManager</code> to track the buffer pool hit rate (i.e., <code>num_hits / (num_hits + num_misses)</code>). You could expose this via a new <code>SHOW BUFFER_STATS;</code> SQL command.</p>
+</li>
+</ol>
 
                     </main>
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
-                            <a rel="prev" href="../recovery/aries.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                            <a rel="prev" href="../buffer/page.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                                 <i class="fa fa-angle-left"></i>
                             </a>
 
-                            <a rel="next prefetch" href="../transaction/mvcc_and_2pl.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                            <a rel="next prefetch" href="../modules/storage.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                                 <i class="fa fa-angle-right"></i>
                             </a>
 
@@ -194,11 +254,11 @@
             </div>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
-                    <a rel="prev" href="../recovery/aries.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                    <a rel="prev" href="../buffer/page.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                         <i class="fa fa-angle-left"></i>
                     </a>
 
-                    <a rel="next prefetch" href="../transaction/mvcc_and_2pl.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                    <a rel="next prefetch" href="../modules/storage.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                         <i class="fa fa-angle-right"></i>
                     </a>
             </nav>

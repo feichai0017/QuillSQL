@@ -155,9 +155,47 @@
 
                 <div id="content" class="content">
                     <main>
-                        <h1 id="introduction"><a class="header" href="#introduction">Introduction</a></h1>
+                        <div align="center">
+  <img src="assets/rust-db.png" alt="QuillSQL Logo" width="500"/>
+</div>
+<h1 id="quillsql-internals"><a class="header" href="#quillsql-internals">QuillSQL Internals</a></h1>
 <p>Welcome to the technical documentation for QuillSQL.</p>
-<p>This book provides a deep dive into the internal architecture and implementation details of the database. It is intended for developers, contributors, and anyone interested in understanding how a relational database is built from the ground up.</p>
+<p>This book provides a deep dive into the internal architecture and implementation details of the database. It is intended for developers, contributors, and anyone interested in understanding how a relational database is built from the ground up, referencing concepts from classic database courses like CMU 15-445.</p>
+<hr />
+<h2 id="table-of-contents"><a class="header" href="#table-of-contents">Table of Contents</a></h2>
+<ul>
+<li>
+<p><a href="./architecture.html"><strong>Overall Architecture</strong></a>: A high-level overview of the entire system.</p>
+</li>
+<li>
+<p><strong>Core Modules</strong></p>
+<ul>
+<li><a href="./modules/buffer.html"><strong>Buffer Manager</strong></a>: The in-memory page cache.
+<ul>
+<li><a href="./buffer/page.html">Page &amp; Page Guards</a></li>
+<li><a href="./buffer/buffer_pool.html">The Buffer Pool</a></li>
+</ul>
+</li>
+<li><a href="./modules/storage.html"><strong>Storage Engine</strong></a>: How data is physically stored.
+<ul>
+<li><a href="./storage/disk_io.html">Disk I/O</a></li>
+<li><a href="./storage/page_layouts.html">Page &amp; Tuple Layout</a></li>
+<li><a href="./storage/table_heap.html">Table Heap &amp; MVCC</a></li>
+</ul>
+</li>
+<li><a href="./modules/index.html"><strong>Indexes</strong></a>: The B+Tree implementation.
+<ul>
+<li><a href="./index/btree_index.html">B+Tree Details</a></li>
+</ul>
+</li>
+<li><a href="./modules/recovery.html"><strong>Recovery Manager (WAL)</strong></a>: Crash recovery and the ARIES protocol.</li>
+<li><a href="./modules/transaction.html"><strong>Transaction Manager</strong></a>: Concurrency control with MVCC and 2PL.</li>
+<li><a href="./modules/plan.html"><strong>Query Plan</strong></a>: The journey from SQL to an executable plan.</li>
+<li><a href="./modules/optimizer.html"><strong>Query Optimizer</strong></a>: Rule-based plan transformations.</li>
+<li><a href="./modules/execution.html"><strong>Execution Engine</strong></a>: The Volcano (iterator) execution model.</li>
+</ul>
+</li>
+</ul>
 
                     </main>
 
@@ -196,6 +234,8 @@
         <script src="book.js"></script>
 
         <!-- Custom JS scripts -->
+        <script src="mermaid.min.js"></script>
+        <script src="mermaid-init.js"></script>
 
 
 

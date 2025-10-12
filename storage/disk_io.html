@@ -3,7 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>Transaction Manager - QuillSQL Internals</title>
+        <title>Disk I/O - QuillSQL Internals</title>
 
 
         <!-- Custom HTML head -->
@@ -155,36 +155,67 @@
 
                 <div id="content" class="content">
                     <main>
-                        <h1 id="transaction-manager"><a class="header" href="#transaction-manager">Transaction Manager</a></h1>
-<p>The Transaction Manager is responsible for one of the most critical aspects of a database: guaranteeing the <strong>ACID</strong> properties, specifically <strong>Isolation</strong> and <strong>Atomicity</strong>.</p>
-<p>It allows multiple clients to access the database concurrently without interfering with each other, and it ensures that transactions are treated as single, indivisible operations (all or nothing).</p>
-<h2 id="core-concepts"><a class="header" href="#core-concepts">Core Concepts</a></h2>
+                        <h1 id="disk-io--scheduler-io_uring-data-pages--wal-runtime"><a class="header" href="#disk-io--scheduler-io_uring-data-pages--wal-runtime">Disk I/O — Scheduler, io_uring Data Pages &amp; WAL Runtime</a></h1>
+<h2 id="1-architecture"><a class="header" href="#1-architecture">1. Architecture</a></h2>
 <ul>
-<li>
-<p><strong>Concurrency Control</strong>: To handle simultaneous operations, QuillSQL uses a hybrid approach that combines two powerful techniques:</p>
-<ol>
-<li><strong>Multi-Version Concurrency Control (MVCC)</strong>: Instead of overwriting data, writers create new <em>versions</em> of rows. Readers are given a consistent <em>snapshot</em> of the database, which allows them to proceed without being blocked by writers.</li>
-<li><strong>Two-Phase Locking (2PL)</strong>: To prevent two writers from modifying the same row at the same time, a strict two-phase locking protocol is used. Transactions must acquire locks on data before modifying it and hold those locks until the transaction ends.</li>
-</ol>
-</li>
-<li>
-<p><strong>Atomicity</strong>: The transaction manager records all actions performed by a transaction. If the transaction needs to be aborted, it can use this record to perform the necessary undo operations, rolling the database back to its state before the transaction began.</p>
+<li><strong>Request Path</strong>: foreground components enqueue <code>DiskRequest</code> objects via <code>DiskScheduler::{schedule_read, schedule_write, …}</code>. A dispatcher thread drains the global channel and distributes work round-robin to N io_uring workers. Each worker owns its own ring and file-descriptor cache, so once a request is forwarded, execution proceeds entirely off the foreground thread.</li>
+<li><strong>Stable APIs</strong>: <code>schedule_read(page_id)</code>, <code>schedule_write(page_id, Bytes)</code>, <code>schedule_read_pages(Vec&lt;PageId&gt;)</code>, <code>schedule_allocate()</code>, <code>schedule_deallocate(page_id)</code> — every call returns a channel the caller can block on or poll.</li>
+<li><strong>Batch Reads</strong>: <code>ReadPages</code> fans out per-page SQEs while a shared <code>BatchState</code> tracks completions. Even if the kernel completes I/O out of order, the caller receives a <code>Vec&lt;BytesMut&gt;</code> that preserves the original page order.</li>
+</ul>
+<h2 id="2-wal-runtime-buffered-io"><a class="header" href="#2-wal-runtime-buffered-io">2. WAL Runtime (buffered I/O)</a></h2>
+<ul>
+<li>Dedicated WAL runtime threads handle sequential WAL appends/reads using buffered I/O. They now keep a per-thread cache of open segment files, eliminating repeated <code>open()</code>/<code>close()</code> on every log record.</li>
+<li>Worker count defaults to <code>max(1, available_parallelism / 2)</code> but is tunable through <code>IOSchedulerConfig</code>.</li>
+<li>Optional <code>sync</code> on a request triggers <code>sync_data</code> / <code>fdatasync</code> so <code>WalManager</code> can honour synchronous commit or checkpoint barriers. Data pages stay on the io_uring dataplane; WAL always uses buffered writes.</li>
+</ul>
+<h2 id="3-io_uring-backend-linux"><a class="header" href="#3-io_uring-backend-linux">3. io_uring Backend (Linux)</a></h2>
+<ul>
+<li>Each worker owns an <code>IoUring</code> with configurable <code>queue_depth</code>, optional SQPOLL idle timeout, and a pool of registered fixed buffers sized to <code>PAGE_SIZE</code>. Workers submit SQEs asynchronously and drain CQEs in small batches to keep the ring warm.</li>
+<li>Read batching relies on shared <code>BatchState</code> instances (<code>Rc&lt;RefCell&lt;_&gt;&gt;</code>) so multi-page callers see ordered results without blocking the kernel on serialization.</li>
+<li>Writes keep their payload alive until completion; if a fixed buffer slot is available we reuse it, otherwise we fall back to heap buffers. A companion <code>WriteState</code> tracks an optional <code>fdatasync</code> so the caller still observes exactly one <code>Result&lt;()&gt;</code> once all CQEs land.</li>
+<li>Errors (short read/write, errno) are normalised into <code>QuillSQLError</code> values that flow back on the original channel.</li>
+</ul>
+<h2 id="4-configuration"><a class="header" href="#4-configuration">4. Configuration</a></h2>
+<ul>
+<li><code>config::IOSchedulerConfig</code> controls:
+<ul>
+<li><code>workers</code>: number of io_uring workers (default = available parallelism).</li>
+<li><code>wal_workers</code>: WAL runtime threads (default workers / 2).</li>
+<li><code>iouring_queue_depth</code>, <code>iouring_fixed_buffers</code>, <code>iouring_sqpoll_idle_ms</code>.</li>
+<li><code>fsync_on_write</code>: whether data-page writes also issue <code>fdatasync</code> (WAL sync is managed separately by <code>WalManager</code>).</li>
+</ul>
 </li>
 </ul>
-<p>This section contains:</p>
+<h2 id="5-concurrency--safety"><a class="header" href="#5-concurrency--safety">5. Concurrency &amp; Safety</a></h2>
 <ul>
-<li><strong><a href="./../transaction/mvcc_and_2pl.html">MVCC and 2PL</a></strong>: A deep dive into QuillSQL's hybrid concurrency control model.</li>
+<li>Worker-local file descriptors plus positional I/O remove shared mutable state on the hot path. The new per-worker handle cache further reduces syscall overhead.</li>
+<li>Shutdown sequence: enqueue <code>Shutdown</code>, dispatcher forwards it to every worker, each worker drains outstanding SQEs/CQEs, and finally dispatcher + workers are joined.</li>
+<li>BufferPool, TableHeap, and the streaming scan ring buffer still integrate via channels; inflight guards prevent duplicate page fetches.</li>
+</ul>
+<h2 id="6-performance-notes"><a class="header" href="#6-performance-notes">6. Performance Notes</a></h2>
+<ul>
+<li>Random page access benefits from fewer syscalls and deeper outstanding queue depth than the blocking fallback.</li>
+<li>Only the io_uring backend currently ships (Linux x86_64). A portable fallback remains future work.</li>
+<li>For large sequential scans, combine <code>ReadPages</code> with the ring-buffer iterator to minimise buffer-pool churn.</li>
+</ul>
+<h2 id="7-future-work"><a class="header" href="#7-future-work">7. Future Work</a></h2>
+<ul>
+<li>Queue-depth aware scheduling and CQE bulk harvesting.</li>
+<li>Optional group commit (aggregate writes, single fsync) behind configuration.</li>
+<li>Metrics hooks (queue depth, submit/complete throughput, latency percentiles, error codes).</li>
+<li>Cross-platform fallback backend and richer prioritisation/throttling policies.</li>
+<li>Control-plane knobs for throttling individual background workers.</li>
 </ul>
 
                     </main>
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
-                            <a rel="prev" href="../recovery/aries.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                            <a rel="prev" href="../modules/storage.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                                 <i class="fa fa-angle-left"></i>
                             </a>
 
-                            <a rel="next prefetch" href="../transaction/mvcc_and_2pl.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                            <a rel="next prefetch" href="../storage/page_layouts.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                                 <i class="fa fa-angle-right"></i>
                             </a>
 
@@ -194,11 +225,11 @@
             </div>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
-                    <a rel="prev" href="../recovery/aries.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                    <a rel="prev" href="../modules/storage.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                         <i class="fa fa-angle-left"></i>
                     </a>
 
-                    <a rel="next prefetch" href="../transaction/mvcc_and_2pl.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                    <a rel="next prefetch" href="../storage/page_layouts.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                         <i class="fa fa-angle-right"></i>
                     </a>
             </nav>

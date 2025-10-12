@@ -159,30 +159,30 @@
 <p>This document explains how a SQL request flows through QuillSQL, how transactional MVCC and background services plug in, and how the main modules collaborate. All diagrams use Mermaid so you can paste them into any compatible renderer for a richer view.</p>
 <hr />
 <h2 id="1-end-to-end-request-pipeline"><a class="header" href="#1-end-to-end-request-pipeline">1. End-to-End Request Pipeline</a></h2>
-<pre><code class="language-mermaid">flowchart TD
-    Client["CLI / HTTP client"] --&gt; API["bin/client / bin/server"]
-    API --&gt; Parser["sql::parser"]
-    Parser --&gt; LPlanner["plan::LogicalPlanner"]
-    LPlanner --&gt; Optimizer["optimizer::LogicalOptimizer"]
-    Optimizer --&gt; PhysPlanner["plan::PhysicalPlanner"]
-    PhysPlanner --&gt; Exec["execution::ExecutionEngine (Volcano)"]
+<pre class="mermaid">flowchart TD
+    Client[&quot;CLI / HTTP client&quot;] --&gt; API[&quot;bin/client / bin/server&quot;]
+    API --&gt; Parser[&quot;sql::parser&quot;]
+    Parser --&gt; LPlanner[&quot;plan::LogicalPlanner&quot;]
+    LPlanner --&gt; Optimizer[&quot;optimizer::LogicalOptimizer&quot;]
+    Optimizer --&gt; PhysPlanner[&quot;plan::PhysicalPlanner&quot;]
+    PhysPlanner --&gt; Exec[&quot;execution::ExecutionEngine (Volcano)&quot;]
 
-    subgraph Txn["Transaction Layer"]
-        Session["session::SessionContext"]
-        TM["transaction::TransactionManager"]
-        LM["transaction::LockManager"]
+    subgraph Txn[&quot;Transaction Layer&quot;]
+        Session[&quot;session::SessionContext&quot;]
+        TM[&quot;transaction::TransactionManager&quot;]
+        LM[&quot;transaction::LockManager&quot;]
         Session --&gt; TM --&gt; LM
     end
 
     Exec --&gt;|Tuple meta &amp; locks| Txn
     Exec --&gt; Storage
 
-    subgraph Storage["Storage &amp; I/O"]
-        TableHeap["storage::table_heap::TableHeap"]
-        Index["storage::index::B+Tree"]
-        Buffer["buffer::BufferManager"]
-        Scheduler["storage::disk_scheduler (io_uring)"]
-        WAL["recovery::WalManager"]
+    subgraph Storage[&quot;Storage &amp; I/O&quot;]
+        TableHeap[&quot;storage::table_heap::TableHeap&quot;]
+        Index[&quot;storage::index::B+Tree&quot;]
+        Buffer[&quot;buffer::BufferManager&quot;]
+        Scheduler[&quot;storage::disk_scheduler (io_uring)&quot;]
+        WAL[&quot;recovery::WalManager&quot;]
         TableHeap &lt;--&gt; Buffer
         Index &lt;--&gt; Buffer
         Buffer &lt;--&gt; Scheduler
@@ -191,10 +191,10 @@
 
     Txn --&gt;|WAL payloads| WAL
 
-    Background["background::workers\n(checkpoint, bg writer, MVCC vacuum)"] --&gt; Buffer
+    Background[&quot;background::workers\n(checkpoint, bg writer, MVCC vacuum)&quot;] --&gt; Buffer
     Background --&gt; WAL
     Background --&gt; TM
-</code></pre>
+</pre>
 <p><strong>High-level flow</strong></p>
 <ol>
 <li>SQL text is parsed into an AST, planned into a <code>LogicalPlan</code>, optimized by a handful of safe rewrite rules, then lowered into a physical operator tree.</li>
@@ -205,7 +205,7 @@
 </ol>
 <hr />
 <h2 id="2-transaction--mvcc-mechanics"><a class="header" href="#2-transaction--mvcc-mechanics">2. Transaction &amp; MVCC Mechanics</a></h2>
-<pre><code class="language-mermaid">sequenceDiagram
+<pre class="mermaid">sequenceDiagram
     participant Session
     participant TM as TransactionManager
     participant Runtime as TxnRuntime
@@ -230,7 +230,7 @@
     TM-&gt;&gt;WAL: Transaction(Commit)
     TM-&gt;&gt;TM: wait_for_durable / flush_until
     TM--&gt;&gt;Session: release locks, clear snapshot
-</code></pre>
+</pre>
 <ul>
 <li>
 <p><strong>Snapshots</strong></p>
@@ -321,7 +321,7 @@ COMMIT
                                 <i class="fa fa-angle-left"></i>
                             </a>
 
-                            <a rel="next prefetch" href="buffer_pool.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                            <a rel="next prefetch" href="contributing.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                                 <i class="fa fa-angle-right"></i>
                             </a>
 
@@ -335,7 +335,7 @@ COMMIT
                         <i class="fa fa-angle-left"></i>
                     </a>
 
-                    <a rel="next prefetch" href="buffer_pool.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                    <a rel="next prefetch" href="contributing.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                         <i class="fa fa-angle-right"></i>
                     </a>
             </nav>
@@ -356,6 +356,8 @@ COMMIT
         <script src="book.js"></script>
 
         <!-- Custom JS scripts -->
+        <script src="mermaid.min.js"></script>
+        <script src="mermaid-init.js"></script>
 
 
 

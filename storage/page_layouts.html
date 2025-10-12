@@ -3,7 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>SQL Parser - QuillSQL Internals</title>
+        <title>Page &amp; Tuple Layout - QuillSQL Internals</title>
 
 
         <!-- Custom HTML head -->
@@ -155,16 +155,86 @@
 
                 <div id="content" class="content">
                     <main>
-                        
+                        <h1 id="page-and-tuple-layout"><a class="header" href="#page-and-tuple-layout">Page and Tuple Layout</a></h1>
+<h2 id="1-the-page-the-atomic-unit-of-io"><a class="header" href="#1-the-page-the-atomic-unit-of-io">1. The Page: The Atomic Unit of I/O</a></h2>
+<p>A database file is not treated as one continuous stream of data. Instead, it is broken down into fixed-size blocks called <strong>pages</strong>. A page is the atomic unit of transfer between the disk and the in-memory <a href="../modules/buffer.html">Buffer Pool</a>. Whenever the database needs to read a piece of data (like a single row), it must load the <em>entire page</em> containing that data into memory.</p>
+<p>In QuillSQL, the page size is a constant defined at <code>quill-sql/src/buffer/mod.rs</code>:</p>
+<ul>
+<li><strong><code>PAGE_SIZE</code></strong>: 4096 bytes (4 KB)</li>
+</ul>
+<p>This fixed-size approach simplifies buffer management and allows for efficient, aligned I/O operations, especially when using Direct I/O to bypass the OS cache.</p>
+<h2 id="2-tablepage-the-slotted-page-layout"><a class="header" href="#2-tablepage-the-slotted-page-layout">2. <code>TablePage</code>: The Slotted Page Layout</a></h2>
+<p>While a page is a generic 4KB block of bytes, pages that store actual table data are structured in a specific way. QuillSQL uses a classic <strong>Slotted Page</strong> layout, which is a core concept in database implementation (as taught in CMU 15-445).</p>
+<p>A <code>TablePage</code> is organized into three main parts:</p>
+<pre><code>&lt;------------------------------ 4KB ------------------------------&gt;
++----------------+-----------------+-----------------+--------------+
+|  Page Header   |   Slot Array    |      Free       |   Tuple      |
+| (grows -&gt;)     |   (grows -&gt;)    |      Space      |     Data     |
+|                |                 |                 | (&lt;- grows)   |
++----------------+-----------------+-----------------+--------------+
+</code></pre>
+<ol>
+<li><strong>Page Header (<code>TablePageHeader</code>)</strong>: Located at the beginning of the page. It contains metadata about the page itself.</li>
+<li><strong>Slot Array (<code>tuple_infos</code>)</strong>: An array of <code>TupleInfo</code> structs that grows from after the header. Each entry in this array acts as a "pointer" or "directory entry" for a tuple on the page.</li>
+<li><strong>Tuple Data</strong>: The actual raw data of the tuples is stored starting from the <strong>end</strong> of the page, growing backwards towards the middle.</li>
+</ol>
+<p>This design has a key advantage: <strong>it decouples a tuple's logical identifier from its physical location on the page.</strong></p>
+<h3 id="the-recordid-rid"><a class="header" href="#the-recordid-rid">The <code>RecordId</code> (RID)</a></h3>
+<p>A specific tuple is uniquely identified by a <code>RecordId</code> (RID). The RID is a stable pointer composed of two parts:</p>
+<ul>
+<li><strong><code>page_id</code></strong>: The ID of the page where the tuple resides.</li>
+<li><strong><code>slot_num</code></strong>: The <strong>index</strong> into the Slot Array on that page.</li>
+</ul>
+<p>So, <code>RID = (page_id, slot_num)</code>.</p>
+<p>When the database needs to delete a tuple or if a variable-length tuple is updated and grows in size, the tuple's data might need to be moved within the page (for compaction). In a slotted page design, we only need to update the <code>offset</code> in the corresponding slot array entry. The tuple's RID (<code>page_id</code>, <code>slot_num</code>) <strong>remains unchanged</strong>. This prevents a cascade of updates to all secondary indexes that might be pointing to that tuple.</p>
+<h3 id="tablepageheader-and-slot-tupleinfo"><a class="header" href="#tablepageheader-and-slot-tupleinfo"><code>TablePageHeader</code> and Slot (<code>TupleInfo</code>)</a></h3>
+<p>Let's look at the physical layout, as defined in <code>storage/codec/table_page.rs</code>:</p>
+<ul>
+<li>
+<p><strong><code>TablePageHeader</code></strong>:</p>
+<ul>
+<li><code>lsn</code>: The Log Sequence Number of the last change made to this page, crucial for WAL recovery.</li>
+<li><code>next_page_id</code>: The ID of the next page in this table, forming a linked list of pages.</li>
+<li><code>num_tuples</code>: The number of active tuples on the page.</li>
+<li><code>num_deleted_tuples</code>: The number of "dead" or deleted tuples.</li>
+<li><code>tuple_infos</code>: The slot array itself.</li>
+</ul>
+</li>
+<li>
+<p><strong><code>TupleInfo</code></strong> (A single slot in the array):</p>
+<ul>
+<li><code>offset</code>: The byte offset from the beginning of the page where the tuple's data begins.</li>
+<li><code>size</code>: The size of the tuple's data in bytes.</li>
+<li><code>meta</code>: A nested <code>TupleMeta</code> struct containing critical information for concurrency control.</li>
+</ul>
+</li>
+</ul>
+<hr />
+<h2 id="for-study--discussion"><a class="header" href="#for-study--discussion">For Study &amp; Discussion</a></h2>
+<ol>
+<li>
+<p><strong>Layout Trade-offs</strong>: What is the main benefit of having the tuple data grow from the end of the page backwards, while the header and slot array grow from the beginning forwards? What happens when they meet?</p>
+</li>
+<li>
+<p><strong>Record ID Stability</strong>: Why is it so important that a tuple's <code>RecordId</code> does not change even if the tuple's physical data is moved within the page? What would break if the RID was just a direct byte offset?</p>
+</li>
+<li>
+<p><strong>Large Objects</strong>: The current design assumes a tuple fits entirely on one page. How would you modify this page layout to support tuples that are larger than 4KB (e.g., a long blog post stored in a <code>VARCHAR</code> column)? Research how systems like PostgreSQL handle this with their "TOAST" (The Oversized-Attribute Storage Technique) mechanism.</p>
+</li>
+<li>
+<p><strong>Programming Exercise</strong>: Implement a <code>defragment()</code> method for the <code>TablePage</code>. After several insertions and deletions, the free space on a page can become fragmented into small, unusable chunks. This method should reorganize the page by moving the existing tuples to be contiguous, creating a single, large block of free space. Remember to update the <code>offset</code> in each <code>TupleInfo</code> slot after moving its corresponding tuple data!</p>
+</li>
+</ol>
+
                     </main>
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
-                            <a rel="prev" href="../modules/catalog.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                            <a rel="prev" href="../storage/disk_io.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                                 <i class="fa fa-angle-left"></i>
                             </a>
 
-                            <a rel="next prefetch" href="../modules/expression.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                            <a rel="next prefetch" href="../storage/table_heap.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                                 <i class="fa fa-angle-right"></i>
                             </a>
 
@@ -174,11 +244,11 @@
             </div>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
-                    <a rel="prev" href="../modules/catalog.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                    <a rel="prev" href="../storage/disk_io.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                         <i class="fa fa-angle-left"></i>
                     </a>
 
-                    <a rel="next prefetch" href="../modules/expression.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                    <a rel="next prefetch" href="../storage/table_heap.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                         <i class="fa fa-angle-right"></i>
                     </a>
             </nav>
@@ -199,6 +269,8 @@
         <script src="../book.js"></script>
 
         <!-- Custom JS scripts -->
+        <script src="../mermaid.min.js"></script>
+        <script src="../mermaid-init.js"></script>
 
 
 
