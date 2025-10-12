@@ -460,8 +460,8 @@ cargo install mdbook-mermaid
 <p>Its primary goal is to minimize disk I/O by keeping frequently accessed pages in memory.</p>
 <p>This section is divided into the following parts:</p>
 <ul>
-<li><strong><a href="modules/./page.html">Page &amp; Page Guards</a></strong>: Explains the core concepts of pinning and the RAII guards used to safely access pages.</li>
-<li><strong><a href="modules/./buffer_pool.html">The Buffer Pool</a></strong>: A deep dive into the architecture and lifecycle of a page request, including the page table, replacer, and concurrency.</li>
+<li><strong><a href="modules/../buffer/page.html">Page &amp; Page Guards</a></strong>: Explains the core concepts of pinning and the RAII guards used to safely access pages.</li>
+<li><strong><a href="modules/../buffer/buffer_pool.html">The Buffer Pool</a></strong>: A deep dive into the architecture and lifecycle of a page request, including the page table, replacer, and concurrency.</li>
 </ul>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="page--page-guards"><a class="header" href="#page--page-guards">Page &amp; Page Guards</a></h1>
 <p>Before the Buffer Manager can hand out a reference to a page in memory, it must ensure that the page won't be evicted while it's being used by another thread. This is accomplished by <strong>pinning</strong>.</p>
@@ -580,9 +580,9 @@ cargo install mdbook-mermaid
 <p>The storage engine is where the logical world of SQL tables and rows meets the physical world of disk blocks and bytes. Understanding how data is laid out on disk is fundamental to understanding database performance, concurrency control, and recovery.</p>
 <p>This section is divided into the following parts:</p>
 <ul>
-<li><strong><a href="modules/./disk_io.html">Disk I/O</a></strong>: A look at the asynchronous I/O layer using <code>io_uring</code>.</li>
-<li><strong><a href="modules/./page_layouts.html">Page &amp; Tuple Layout</a></strong>: A deep dive into how pages and tuples are physically structured on disk, including the slotted page layout.</li>
-<li><strong><a href="modules/./table_heap.html">Table Heap</a></strong>: Explains how tuple versions are managed for MVCC.</li>
+<li><strong><a href="modules/../storage/disk_io.html">Disk I/O</a></strong>: A look at the asynchronous I/O layer using <code>io_uring</code>.</li>
+<li><strong><a href="modules/../storage/page_layouts.html">Page &amp; Tuple Layout</a></strong>: A deep dive into how pages and tuples are physically structured on disk, including the slotted page layout.</li>
+<li><strong><a href="modules/../storage/table_heap.html">Table Heap</a></strong>: Explains how tuple versions are managed for MVCC.</li>
 </ul>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="disk-io--scheduler-io_uring-data-pages--wal-runtime"><a class="header" href="#disk-io--scheduler-io_uring-data-pages--wal-runtime">Disk I/O — Scheduler, io_uring Data Pages &amp; WAL Runtime</a></h1>
 <h2 id="1-architecture"><a class="header" href="#1-architecture">1. Architecture</a></h2>
@@ -761,7 +761,7 @@ cargo install mdbook-mermaid
 </ul>
 <p>This section contains:</p>
 <ul>
-<li><strong><a href="modules/./index/btree_index.html">B+Tree</a></strong>: A look at the classic B+Tree data structure.</li>
+<li><strong><a href="modules/../index/btree_index.html">B+Tree</a></strong>: A look at the classic B+Tree data structure.</li>
 </ul>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="b-tree-index--architecture-and-concurrency"><a class="header" href="#b-tree-index--architecture-and-concurrency">B+ Tree Index — Architecture and Concurrency</a></h1>
 <h2 id="1-architecture-overview"><a class="header" href="#1-architecture-overview">1. Architecture Overview</a></h2>
