@@ -14,4 +14,4 @@ QuillSQL currently provides a `BPlusTreeIndex`.
 
 This section contains:
 
-- **[B+Tree](./index/btree_index.md)**: A look at the classic B+Tree data structure.
+- **[B+Tree](../index/btree_index.md)**: A look at the classic B+Tree data structure.

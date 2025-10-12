@@ -4,6 +4,6 @@ The storage engine is where the logical world of SQL tables and rows meets the p
 
 This section is divided into the following parts:
 
-- **[Disk I/O](./disk_io.md)**: A look at the asynchronous I/O layer using `io_uring`.
-- **[Page & Tuple Layout](./page_layouts.md)**: A deep dive into how pages and tuples are physically structured on disk, including the slotted page layout.
-- **[Table Heap](./table_heap.md)**: Explains how tuple versions are managed for MVCC.
+- **[Disk I/O](../storage/disk_io.md)**: A look at the asynchronous I/O layer using `io_uring`.
+- **[Page & Tuple Layout](../storage/page_layouts.md)**: A deep dive into how pages and tuples are physically structured on disk, including the slotted page layout.
+- **[Table Heap](../storage/table_heap.md)**: Explains how tuple versions are managed for MVCC.
