@@ -5,7 +5,7 @@
 
 ---
 
-- [**Contributor's Guide**](./contributing.md)
+- [Contributor's Guide](./contributing.md)
 
 ---
 
