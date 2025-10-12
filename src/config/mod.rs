@@ -140,7 +140,7 @@ impl Default for WalConfig {
             writer_interval_ms: Some(50),
             buffer_capacity: 256,
             flush_coalesce_bytes: 2 * 1024 * 1024,
-            synchronous_commit: true,
+            synchronous_commit: false,
             checkpoint_interval_ms: Some(5000),
             retain_segments: 8,
         }

@@ -1,7 +1,10 @@
-use std::sync::Mutex;
+use std::collections::VecDeque;
+
+use parking_lot::Mutex;
 
 use crate::catalog::SchemaRef;
 use crate::error::QuillSQLError;
+use crate::storage::page::{RecordId, TupleMeta};
 use crate::storage::table_heap::TableIterator;
 use crate::transaction::IsolationLevel;
 use crate::transaction::LockMode;
@@ -12,6 +15,8 @@ use crate::{
     storage::tuple::Tuple,
 };
 
+const PREFETCH_BATCH: usize = 64;
+
 #[derive(Debug)]
 pub struct PhysicalSeqScan {
     pub table: TableReference,
@@ -19,6 +24,7 @@ pub struct PhysicalSeqScan {
     pub streaming_hint: Option<bool>,
 
     iterator: Mutex<Option<TableIterator>>,
+    prefetch: Mutex<VecDeque<(RecordId, TupleMeta, Tuple)>>,
 }
 
 impl PhysicalSeqScan {
@@ -28,6 +34,74 @@ impl PhysicalSeqScan {
             table_schema,
             streaming_hint: None,
             iterator: Mutex::new(None),
+            prefetch: Mutex::new(VecDeque::new()),
+        }
+    }
+
+    fn refill_buffer(&self) -> QuillSQLResult<bool> {
+        let mut fetched = VecDeque::with_capacity(PREFETCH_BATCH);
+        {
+            let mut guard = self.iterator.lock();
+            let iterator = guard.as_mut().ok_or_else(|| {
+                QuillSQLError::Execution("table iterator not created".to_string())
+            })?;
+            for _ in 0..PREFETCH_BATCH {
+                match iterator.next()? {
+                    Some(entry) => fetched.push_back(entry),
+                    None => break,
+                }
+            }
+        }
+        if fetched.is_empty() {
+            return Ok(false);
+        }
+        let mut buffer = self.prefetch.lock();
+        buffer.extend(fetched);
+        Ok(true)
+    }
+
+    fn consume_row(
+        &self,
+        context: &mut ExecutionContext,
+        rid: RecordId,
+        meta: TupleMeta,
+        tuple: Tuple,
+    ) -> QuillSQLResult<Option<Tuple>> {
+        if !context.is_visible(&meta) {
+            return Ok(None);
+        }
+        match context.txn().isolation_level() {
+            IsolationLevel::ReadUncommitted => Ok(Some(tuple)),
+            IsolationLevel::ReadCommitted => {
+                context.lock_row_shared(&self.table, rid, false)?;
+                if !context.is_visible(&meta) {
+                    context.unlock_row_shared(&self.table, rid)?;
+                    return Ok(None);
+                }
+                let result = tuple;
+                context.unlock_row_shared(&self.table, rid)?;
+                Ok(Some(result))
+            }
+            IsolationLevel::RepeatableRead => {
+                context.lock_row_shared(&self.table, rid, true)?;
+                if !context.is_visible(&meta) {
+                    context.unlock_row_shared(&self.table, rid)?;
+                    return Ok(None);
+                }
+                let result = tuple;
+                context.unlock_row_shared(&self.table, rid)?;
+                Ok(Some(result))
+            }
+            IsolationLevel::Serializable => {
+                context.lock_row_shared(&self.table, rid, true)?;
+                if !context.is_visible(&meta) {
+                    context.unlock_row_shared(&self.table, rid)?;
+                    return Ok(None);
+                }
+                let result = tuple;
+                context.unlock_row_shared(&self.table, rid)?;
+                Ok(Some(result))
+            }
         }
     }
 }
@@ -41,55 +115,28 @@ impl VolcanoExecutor for PhysicalSeqScan {
         } else {
             TableIterator::new(table_heap, ..)
         };
-        *self.iterator.lock().unwrap() = Some(iter);
+        {
+            let mut guard = self.iterator.lock();
+            *guard = Some(iter);
+        }
+        self.prefetch.lock().clear();
         Ok(())
     }
 
     fn next(&self, context: &mut ExecutionContext) -> QuillSQLResult<Option<Tuple>> {
-        let Some(iterator) = &mut *self.iterator.lock().unwrap() else {
-            return Err(QuillSQLError::Execution(
-                "table iterator not created".to_string(),
-            ));
-        };
         loop {
-            let Some((rid, meta, tuple)) = iterator.next()? else {
-                return Ok(None);
-            };
-
-            if !context.is_visible(&meta) {
+            if let Some((rid, meta, tuple)) = {
+                let mut buffer = self.prefetch.lock();
+                buffer.pop_front()
+            } {
+                if let Some(result) = self.consume_row(context, rid, meta, tuple)? {
+                    return Ok(Some(result));
+                }
                 continue;
             }
 
-            match context.txn().isolation_level() {
-                IsolationLevel::ReadUncommitted => return Ok(Some(tuple)),
-                IsolationLevel::ReadCommitted => {
-                    context.lock_row_shared(&self.table, rid, false)?;
-                    if !context.is_visible(&meta) {
-                        context.unlock_row_shared(&self.table, rid)?;
-                        continue;
-                    }
-                    let result = tuple.clone();
-                    context.unlock_row_shared(&self.table, rid)?;
-                    return Ok(Some(result));
-                }
-                IsolationLevel::RepeatableRead => {
-                    context.lock_row_shared(&self.table, rid, true)?;
-                    if !context.is_visible(&meta) {
-                        context.unlock_row_shared(&self.table, rid)?;
-                        continue;
-                    }
-                    let result = tuple;
-                    context.unlock_row_shared(&self.table, rid)?;
-                    return Ok(Some(result));
-                }
-                IsolationLevel::Serializable => {
-                    context.lock_row_shared(&self.table, rid, true)?;
-                    if !context.is_visible(&meta) {
-                        context.unlock_row_shared(&self.table, rid)?;
-                        continue;
-                    }
-                    return Ok(Some(tuple));
-                }
+            if !self.refill_buffer()? {
+                return Ok(None);
             }
         }
     }

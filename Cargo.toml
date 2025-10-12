@@ -64,6 +64,8 @@ io-uring = { version = "0.6" }
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
 rand_chacha = "0.9"
+rusqlite = { version = "0.31", features = ["bundled"] }
+postgres = "0.19"
 
 [[bench]]
 name = "storage_bench"

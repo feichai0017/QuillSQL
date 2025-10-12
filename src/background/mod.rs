@@ -155,9 +155,7 @@ pub fn spawn_checkpoint_worker(
     transaction_manager: Arc<TransactionManager>,
     interval: Option<Duration>,
 ) -> Option<WorkerHandle> {
-    let Some(interval) = interval else {
-        return None;
-    };
+    let interval = interval?;
     if interval.is_zero() {
         return None;
     }
@@ -199,9 +197,7 @@ pub fn spawn_bg_writer(
     interval: Option<Duration>,
     vacuum_cfg: IndexVacuumConfig,
 ) -> Option<WorkerHandle> {
-    let Some(interval) = interval else {
-        return None;
-    };
+    let interval = interval?;
     if interval.is_zero() {
         return None;
     }
@@ -235,9 +231,7 @@ pub fn spawn_mvcc_vacuum_worker(
     interval: Option<Duration>,
     batch_limit: usize,
 ) -> Option<WorkerHandle> {
-    let Some(interval) = interval else {
-        return None;
-    };
+    let interval = interval?;
     if interval.is_zero() || batch_limit == 0 {
         return None;
     }

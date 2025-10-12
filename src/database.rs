@@ -394,18 +394,20 @@ impl Drop for Database {
 }
 
 fn wal_config_for_path(db_path: &str, overrides: &WalOptions) -> WalConfig {
-    let mut config = WalConfig::default();
-    config.directory = overrides
-        .directory
-        .clone()
-        .unwrap_or_else(|| wal_directory_from_path(db_path));
+    let mut config = WalConfig {
+        directory: overrides
+            .directory
+            .clone()
+            .unwrap_or_else(|| wal_directory_from_path(db_path)),
+        ..WalConfig::default()
+    };
     if let Some(size) = overrides.segment_size {
         config.segment_size = size;
     }
     if let Some(sync) = overrides.sync_on_flush {
         config.sync_on_flush = sync;
     }
-    if let Some(interval) = overrides.writer_interval_ms.clone() {
+    if let Some(interval) = overrides.writer_interval_ms {
         config.writer_interval_ms = interval;
     }
     if let Some(capacity) = overrides.buffer_capacity {
@@ -417,7 +419,7 @@ fn wal_config_for_path(db_path: &str, overrides: &WalOptions) -> WalConfig {
     if let Some(sync_commit) = overrides.synchronous_commit {
         config.synchronous_commit = sync_commit;
     }
-    if let Some(interval) = overrides.checkpoint_interval_ms.clone() {
+    if let Some(interval) = overrides.checkpoint_interval_ms {
         config.checkpoint_interval_ms = interval;
     }
     if let Some(retain) = overrides.retain_segments {
@@ -437,18 +439,20 @@ fn wal_directory_from_path(db_path: &str) -> PathBuf {
 }
 
 fn wal_config_for_temp(temp_root: &Path, overrides: &WalOptions) -> WalConfig {
-    let mut config = WalConfig::default();
-    config.directory = overrides
-        .directory
-        .clone()
-        .unwrap_or_else(|| temp_root.join("wal"));
+    let mut config = WalConfig {
+        directory: overrides
+            .directory
+            .clone()
+            .unwrap_or_else(|| temp_root.join("wal")),
+        ..WalConfig::default()
+    };
     if let Some(size) = overrides.segment_size {
         config.segment_size = size;
     }
     if let Some(sync) = overrides.sync_on_flush {
         config.sync_on_flush = sync;
     }
-    if let Some(interval) = overrides.writer_interval_ms.clone() {
+    if let Some(interval) = overrides.writer_interval_ms {
         config.writer_interval_ms = interval;
     }
     if let Some(capacity) = overrides.buffer_capacity {
@@ -460,7 +464,7 @@ fn wal_config_for_temp(temp_root: &Path, overrides: &WalOptions) -> WalConfig {
     if let Some(sync_commit) = overrides.synchronous_commit {
         config.synchronous_commit = sync_commit;
     }
-    if let Some(interval) = overrides.checkpoint_interval_ms.clone() {
+    if let Some(interval) = overrides.checkpoint_interval_ms {
         config.checkpoint_interval_ms = interval;
     }
     if let Some(retain) = overrides.retain_segments {

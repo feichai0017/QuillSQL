@@ -1,33 +1,64 @@
-use std::fmt::Write as _;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::cell::{Cell, RefCell};
+use std::fmt::Write as _; // for INSERT statement construction
+use std::fs;
 
 use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion, Throughput};
-use quill_sql::database::Database;
+use postgres::{Client, NoTls};
+use quill_sql::database::{Database, DatabaseOptions, WalOptions};
 use quill_sql::error::QuillSQLResult;
+use quill_sql::session::SessionContext;
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
+use rusqlite::Connection;
 
 const ROWS: i64 = 50_000;
 const INSERT_BATCH: i64 = 200;
 const POINT_SAMPLES: usize = 5_000;
+const RANGE_WINDOW: i64 = 200;
+const INDEX_RANGE_WIDTH: usize = 4;
 
-fn prepare_dataset() -> Database {
-    let mut db = Database::new_temp().expect("temp db");
-    db.run("CREATE TABLE bench(id BIGINT NOT NULL, val BIGINT)")
-        .expect("create table");
-    db.run("CREATE INDEX idx_bench_id ON bench(id)")
-        .expect("create index");
-    bulk_insert(&mut db, 0, ROWS, INSERT_BATCH).expect("bulk insert");
-    db.flush().expect("flush");
-    db
+const DB_DIR: &str = "quill_bench_data";
+
+const QUILL_TABLE: &str = "bench";
+const SQLITE_TABLE: &str = "bench";
+const PG_INSERT_TABLE: &str = "bench_insert";
+const PG_SCAN_TABLE: &str = "bench_scan";
+const PG_INDEX_TABLE: &str = "bench_index";
+
+fn postgres_url() -> Option<String> {
+    std::env::var("QUILL_BENCH_POSTGRES_URL")
+        .or_else(|_| std::env::var("DATABASE_URL"))
+        .ok()
 }
 
-fn bulk_insert(db: &mut Database, start: i64, total: i64, batch: i64) -> QuillSQLResult<()> {
+fn quill_bench_options() -> DatabaseOptions {
+    DatabaseOptions {
+        wal: WalOptions {
+            writer_interval_ms: Some(None),
+            synchronous_commit: Some(false),
+            sync_on_flush: Some(true),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+fn insert_batches<E, F>(
+    table: &str,
+    start: i64,
+    total: i64,
+    batch: i64,
+    mut exec: F,
+) -> Result<(), E>
+where
+    F: FnMut(&str) -> Result<(), E>,
+{
     let mut current = start;
     let end = start + total;
     while current < end {
-        let mut stmt = String::from("INSERT INTO bench(id, val) VALUES ");
+        let mut stmt = String::new();
+        write!(&mut stmt, "INSERT INTO {}(id, val) VALUES ", table).unwrap();
         let mut local = 0;
         while local < batch && current < end {
             if local > 0 {
@@ -37,128 +68,477 @@ fn bulk_insert(db: &mut Database, start: i64, total: i64, batch: i64) -> QuillSQ
             current += 1;
             local += 1;
         }
-        db.run(&stmt)?;
+        exec(&stmt)?;
     }
     Ok(())
 }
 
-fn bench_insert(c: &mut Criterion) {
-    let mut group = c.benchmark_group("insert");
-    group.throughput(Throughput::Elements((INSERT_BATCH * 50) as u64));
-    group.bench_function("insert_10k", |b| {
-        b.iter_batched(
-            || {
-                let mut db = Database::new_temp().expect("temp db");
-                db.run("CREATE TABLE bench(id BIGINT NOT NULL, val BIGINT)")
-                    .expect("create table");
-                db
-            },
-            |mut db| {
-                bulk_insert(&mut db, 0, 10_000, INSERT_BATCH).unwrap();
-                black_box(db.flush().unwrap());
-            },
-            BatchSize::LargeInput,
-        );
-    });
-    group.finish();
+fn prepare_dataset(db_path: &str) -> Database {
+    let mut db =
+        Database::new_on_disk_with_options(db_path, quill_bench_options()).expect("on-disk db");
+    db.run(&format!(
+        "CREATE TABLE {}(id BIGINT NOT NULL, val BIGINT)",
+        QUILL_TABLE
+    ))
+    .expect("create table");
+    db.run(&format!(
+        "CREATE INDEX idx_{}_id ON {}(id)",
+        QUILL_TABLE, QUILL_TABLE
+    ))
+    .expect("create index");
+    bulk_insert(&mut db, 0, ROWS, INSERT_BATCH).expect("bulk insert");
+    db.flush().expect("flush");
+    db
 }
 
-fn bench_seq_scan(c: &mut Criterion) {
-    let mut db = prepare_dataset();
-    let mut group = c.benchmark_group("scan");
-    group.throughput(Throughput::Elements(ROWS as u64));
-
-    group.bench_function("seq_full", |b| {
-        b.iter(|| {
-            let res = db.run("SELECT COUNT(*) FROM bench").expect("seq scan");
-            black_box(res);
-        });
+fn bulk_insert(db: &mut Database, start: i64, total: i64, batch: i64) -> QuillSQLResult<()> {
+    let mut session = SessionContext::new(db.default_isolation());
+    db.run_with_session(&mut session, "BEGIN")?;
+    let result = insert_batches(QUILL_TABLE, start, total, batch, |sql| {
+        db.run_with_session(&mut session, sql)?;
+        Ok(())
     });
+    match result {
+        Ok(()) => db.run_with_session(&mut session, "COMMIT")?,
+        Err(err) => {
+            let _ = db.run_with_session(&mut session, "ROLLBACK");
+            return Err(err);
+        }
+    };
+    Ok(())
+}
 
-    let mut range_sql = Vec::with_capacity(POINT_SAMPLES);
-    let mut rng = ChaCha8Rng::seed_from_u64(42);
+fn sqlite_empty_table() -> Connection {
+    let conn = Connection::open_in_memory().expect("sqlite temp db");
+    conn.execute(
+        &format!(
+            "CREATE TABLE {}(id INTEGER NOT NULL, val INTEGER)",
+            SQLITE_TABLE
+        ),
+        [],
+    )
+    .expect("sqlite create table");
+    conn
+}
+
+fn bulk_insert_sqlite(
+    conn: &Connection,
+    table: &str,
+    start: i64,
+    total: i64,
+    batch: i64,
+) -> rusqlite::Result<()> {
+    insert_batches(table, start, total, batch, |sql| {
+        conn.execute(sql, [])?;
+        Ok(())
+    })
+}
+
+fn prepare_sqlite_dataset(with_index: bool) -> Connection {
+    let conn = sqlite_empty_table();
+    if with_index {
+        conn.execute(
+            &format!(
+                "CREATE INDEX idx_{}_id ON {}(id)",
+                SQLITE_TABLE, SQLITE_TABLE
+            ),
+            [],
+        )
+        .expect("sqlite create index");
+    }
+    bulk_insert_sqlite(&conn, SQLITE_TABLE, 0, ROWS, INSERT_BATCH).expect("sqlite bulk insert");
+    conn
+}
+
+fn reset_postgres_table(
+    client: &mut Client,
+    table: &str,
+    create_index: bool,
+) -> Result<(), postgres::Error> {
+    client.batch_execute(&format!("DROP TABLE IF EXISTS {}", table))?;
+    client.batch_execute(&format!(
+        "CREATE TABLE {}(id BIGINT NOT NULL, val BIGINT)",
+        table
+    ))?;
+    if create_index {
+        client.batch_execute(&format!("CREATE INDEX idx_{}_id ON {}(id)", table, table))?;
+    }
+    Ok(())
+}
+
+fn bulk_insert_postgres(
+    client: &mut Client,
+    table: &str,
+    start: i64,
+    total: i64,
+    batch: i64,
+) -> Result<(), postgres::Error> {
+    insert_batches(table, start, total, batch, |sql| {
+        client.execute(sql, &[])?;
+        Ok(())
+    })
+}
+
+fn prepare_postgres_dataset(
+    url: &str,
+    table: &str,
+    create_index: bool,
+) -> Result<Client, postgres::Error> {
+    let mut client = Client::connect(url, NoTls)?;
+    reset_postgres_table(&mut client, table, create_index)?;
+    bulk_insert_postgres(&mut client, table, 0, ROWS, INSERT_BATCH)?;
+    client.batch_execute(&format!("ANALYZE {}", table)).ok();
+    Ok(client)
+}
+
+fn build_seq_range_queries(table: &str) -> Vec<String> {
+    let mut queries = Vec::with_capacity(POINT_SAMPLES);
     let mut ids: Vec<i64> = (0..ROWS).collect();
+    let mut rng = ChaCha8Rng::seed_from_u64(42);
     ids.shuffle(&mut rng);
-    for chunk in ids.chunks((ROWS as usize / POINT_SAMPLES.max(1)).max(1)) {
+    let chunk_size = (ROWS as usize / POINT_SAMPLES.max(1)).max(1);
+    for chunk in ids.chunks(chunk_size) {
         if let Some(&id) = chunk.first() {
-            range_sql.push(format!(
-                "SELECT COUNT(*) FROM bench WHERE id >= {} AND id <= {}",
+            queries.push(format!(
+                "SELECT COUNT(*) FROM {} WHERE id >= {} AND id <= {}",
+                table,
                 id,
-                id + 200
+                id + RANGE_WINDOW
             ));
         }
-        if range_sql.len() == POINT_SAMPLES {
+        if queries.len() == POINT_SAMPLES {
             break;
         }
     }
-    let mut idx = 0usize;
-    group.bench_function("seq_range", |b| {
-        b.iter(|| {
-            let sql = &range_sql[idx % range_sql.len()];
-            idx = (idx + 1) % range_sql.len();
-            let res = db.run(sql).expect("seq range");
-            black_box(res);
-        });
-    });
-
-    group.finish();
+    queries
 }
 
-fn bench_index_scan(c: &mut Criterion) {
-    let mut db = prepare_dataset();
+fn build_index_point_queries(table: &str) -> Vec<String> {
     let mut ids: Vec<i64> = (0..ROWS).collect();
     ids.shuffle(&mut ChaCha8Rng::seed_from_u64(123));
-    let queries: Vec<String> = ids
-        .iter()
+    ids.iter()
         .take(POINT_SAMPLES)
-        .map(|id| format!("SELECT val FROM bench WHERE id = {}", id))
-        .collect();
-    let q_index = AtomicUsize::new(0);
+        .map(|id| format!("SELECT val FROM {} WHERE id = {}", table, id))
+        .collect()
+}
 
-    let mut group = c.benchmark_group("index");
-    group.throughput(Throughput::Elements(POINT_SAMPLES as u64));
-    group.bench_function("index_point", |b| {
-        b.iter(|| {
-            let idx = q_index.fetch_add(1, Ordering::Relaxed) % queries.len();
-            let res = db.run(&queries[idx]).expect("index point");
-            black_box(res);
-        });
-    });
-
+fn build_index_range_queries(table: &str) -> Vec<String> {
     let mut ranges = Vec::with_capacity(POINT_SAMPLES);
-    for window in ids.chunks(4) {
+    let mut ids: Vec<i64> = (0..ROWS).collect();
+    ids.shuffle(&mut ChaCha8Rng::seed_from_u64(123));
+    for window in ids.chunks(INDEX_RANGE_WIDTH) {
         if let (Some(&start), Some(&end)) = (window.first(), window.last()) {
             ranges.push(format!(
-                "SELECT COUNT(*) FROM bench WHERE id >= {} AND id <= {}",
-                start, end
+                "SELECT COUNT(*) FROM {} WHERE id >= {} AND id <= {}",
+                table, start, end
             ));
         }
         if ranges.len() == POINT_SAMPLES {
             break;
         }
     }
-    let mut range_idx = 0usize;
-    group.bench_function("index_range", |b| {
+    ranges
+}
+
+fn bench_insert(c: &mut Criterion) {
+    let db_path = format!("{}/insert.db", DB_DIR);
+
+    let mut group = c.benchmark_group("insert_10k");
+    group.throughput(Throughput::Elements((INSERT_BATCH * 50) as u64));
+    let insert_opts = quill_bench_options();
+    group.bench_function("quill", move |b| {
+        let create_sql = format!(
+            "CREATE TABLE {}(id BIGINT NOT NULL, val BIGINT)",
+            QUILL_TABLE
+        );
+        let clear_sql = format!("DELETE FROM {}", QUILL_TABLE);
+        let db = RefCell::new({
+            let mut db = Database::new_on_disk_with_options(&db_path, insert_opts.clone())
+                .expect("on-disk db");
+            db.run(&create_sql).expect("create table");
+            db
+        });
         b.iter(|| {
-            let sql = &ranges[range_idx % ranges.len()];
-            range_idx = (range_idx + 1) % ranges.len();
-            let res = db.run(sql).expect("index range");
-            black_box(res);
+            let mut db = db.borrow_mut();
+            db.run(&clear_sql).expect("clear table");
+            bulk_insert(&mut db, 0, 10_000, INSERT_BATCH).unwrap();
+            black_box(());
         });
     });
+
+    group.bench_function("sqlite", |b| {
+        b.iter_batched(
+            || sqlite_empty_table(),
+            |conn| {
+                bulk_insert_sqlite(&conn, SQLITE_TABLE, 0, 10_000, INSERT_BATCH).unwrap();
+                black_box(());
+            },
+            BatchSize::LargeInput,
+        );
+    });
+
+    if let Some(url) = postgres_url() {
+        group.bench_function("postgres", |b| {
+            b.iter_batched(
+                || {
+                    let mut client = Client::connect(&url, NoTls).expect("postgres connect");
+                    reset_postgres_table(&mut client, PG_INSERT_TABLE, false)
+                        .expect("postgres create table");
+                    client
+                },
+                |mut client| {
+                    bulk_insert_postgres(&mut client, PG_INSERT_TABLE, 0, 10_000, INSERT_BATCH)
+                        .unwrap();
+                    black_box(());
+                },
+                BatchSize::LargeInput,
+            );
+        });
+    } else {
+        eprintln!(
+            "skipping postgres insert_10k benchmark: set QUILL_BENCH_POSTGRES_URL or DATABASE_URL"
+        );
+    }
 
     group.finish();
 }
 
-fn bench_all(c: &mut Criterion) {
+fn bench_seq_scan(c: &mut Criterion) {
+    let db_path = format!("{}/scan.db", DB_DIR);
+
+    let mut group = c.benchmark_group("scan_seq");
+    group.throughput(Throughput::Elements(ROWS as u64));
+
+    let mut quill_db = prepare_dataset(&db_path);
+    let quill_full_sql = format!("SELECT COUNT(*) FROM {}", QUILL_TABLE);
+    group.bench_function("quill_full", |b| {
+        b.iter(|| {
+            let res = quill_db.run(&quill_full_sql).expect("quill seq scan");
+            black_box(res);
+        });
+    });
+
+    let quill_range_queries = build_seq_range_queries(QUILL_TABLE);
+    let quill_range_idx = Cell::new(0usize);
+    group.bench_function("quill_range", |b| {
+        b.iter(|| {
+            let idx = quill_range_idx.get();
+            let sql = &quill_range_queries[idx % quill_range_queries.len()];
+            quill_range_idx.set((idx + 1) % quill_range_queries.len());
+            let res = quill_db.run(sql).expect("quill seq range");
+            black_box(res);
+        });
+    });
+
+    let sqlite_conn = RefCell::new(prepare_sqlite_dataset(true));
+    let sqlite_full_sql = format!("SELECT COUNT(*) FROM {}", SQLITE_TABLE);
+    group.bench_function("sqlite_full", |b| {
+        b.iter(|| {
+            let count: i64 = {
+                let conn = sqlite_conn.borrow();
+                conn.query_row(&sqlite_full_sql, [], |row| row.get(0))
+                    .expect("sqlite seq scan")
+            };
+            black_box(count);
+        });
+    });
+
+    let sqlite_range_queries = build_seq_range_queries(SQLITE_TABLE);
+    let sqlite_range_idx = Cell::new(0usize);
+    group.bench_function("sqlite_range", |b| {
+        b.iter(|| {
+            let idx = sqlite_range_idx.get();
+            let sql = &sqlite_range_queries[idx % sqlite_range_queries.len()];
+            sqlite_range_idx.set((idx + 1) % sqlite_range_queries.len());
+            let count: i64 = {
+                let conn = sqlite_conn.borrow();
+                conn.query_row(sql, [], |row| row.get(0))
+                    .expect("sqlite seq range")
+            };
+            black_box(count);
+        });
+    });
+
+    if let Some(url) = postgres_url() {
+        match prepare_postgres_dataset(&url, PG_SCAN_TABLE, true) {
+            Ok(client) => {
+                let pg_client = RefCell::new(client);
+                let pg_full_sql = format!("SELECT COUNT(*) FROM {}", PG_SCAN_TABLE);
+                group.bench_function("postgres_full", |b| {
+                    b.iter(|| {
+                        let count: i64 = {
+                            let mut client = pg_client.borrow_mut();
+                            client
+                                .query_one(&pg_full_sql, &[])
+                                .expect("postgres seq scan")
+                                .get(0)
+                        };
+                        black_box(count);
+                    });
+                });
+
+                let pg_range_queries = build_seq_range_queries(PG_SCAN_TABLE);
+                let pg_range_idx = Cell::new(0usize);
+                group.bench_function("postgres_range", |b| {
+                    b.iter(|| {
+                        let idx = pg_range_idx.get();
+                        let sql = &pg_range_queries[idx % pg_range_queries.len()];
+                        pg_range_idx.set((idx + 1) % pg_range_queries.len());
+                        let count: i64 = {
+                            let mut client = pg_client.borrow_mut();
+                            client
+                                .query_one(sql, &[])
+                                .expect("postgres seq range")
+                                .get(0)
+                        };
+                        black_box(count);
+                    });
+                });
+            }
+            Err(err) => {
+                eprintln!("skipping postgres scan benchmarks: {err}");
+            }
+        }
+    } else {
+        eprintln!(
+            "skipping postgres scan benchmarks: set QUILL_BENCH_POSTGRES_URL or DATABASE_URL"
+        );
+    }
+
+    group.finish();
+}
+
+fn bench_index_scan(c: &mut Criterion) {
+    let db_path = format!("{}/index.db", DB_DIR);
+    let mut db = prepare_dataset(&db_path);
+    let mut group = c.benchmark_group("index_scan");
+    group.throughput(Throughput::Elements(POINT_SAMPLES as u64));
+
+    let point_queries = build_index_point_queries(QUILL_TABLE);
+    let point_idx = Cell::new(0usize);
+    group.bench_function("quill_point", |b| {
+        b.iter(|| {
+            let idx = point_idx.get();
+            let sql = &point_queries[idx % point_queries.len()];
+            point_idx.set((idx + 1) % point_queries.len());
+            let res = db.run(sql).expect("quill index point");
+            black_box(res);
+        });
+    });
+
+    let range_queries = build_index_range_queries(QUILL_TABLE);
+    let range_idx = Cell::new(0usize);
+    group.bench_function("quill_range", |b| {
+        b.iter(|| {
+            let idx = range_idx.get();
+            let sql = &range_queries[idx % range_queries.len()];
+            range_idx.set((idx + 1) % range_queries.len());
+            let res = db.run(sql).expect("quill index range");
+            black_box(res);
+        });
+    });
+
+    let sqlite_conn = RefCell::new(prepare_sqlite_dataset(true));
+    let sqlite_point_queries = build_index_point_queries(SQLITE_TABLE);
+    let sqlite_point_idx = Cell::new(0usize);
+    group.bench_function("sqlite_point", |b| {
+        b.iter(|| {
+            let idx = sqlite_point_idx.get();
+            let sql = &sqlite_point_queries[idx % sqlite_point_queries.len()];
+            sqlite_point_idx.set((idx + 1) % sqlite_point_queries.len());
+            let result: Option<i64> = {
+                let conn = sqlite_conn.borrow();
+                conn.query_row(sql, [], |row| row.get(0)).ok()
+            };
+            black_box(result);
+        });
+    });
+
+    let sqlite_range_queries = build_index_range_queries(SQLITE_TABLE);
+    let sqlite_range_idx = Cell::new(0usize);
+    group.bench_function("sqlite_range", |b| {
+        b.iter(|| {
+            let idx = sqlite_range_idx.get();
+            let sql = &sqlite_range_queries[idx % sqlite_range_queries.len()];
+            sqlite_range_idx.set((idx + 1) % sqlite_range_queries.len());
+            let count: i64 = {
+                let conn = sqlite_conn.borrow();
+                conn.query_row(sql, [], |row| row.get(0))
+                    .expect("sqlite index range")
+            };
+            black_box(count);
+        });
+    });
+
+    if let Some(url) = postgres_url() {
+        match prepare_postgres_dataset(&url, PG_INDEX_TABLE, true) {
+            Ok(client) => {
+                let pg_client = RefCell::new(client);
+                let pg_point_queries = build_index_point_queries(PG_INDEX_TABLE);
+                let pg_point_idx = Cell::new(0usize);
+                group.bench_function("postgres_point", |b| {
+                    b.iter(|| {
+                        let idx = pg_point_idx.get();
+                        let sql = &pg_point_queries[idx % pg_point_queries.len()];
+                        pg_point_idx.set((idx + 1) % pg_point_queries.len());
+                        let result: Option<i64> = {
+                            let mut client = pg_client.borrow_mut();
+                            client
+                                .query_opt(sql, &[])
+                                .expect("postgres index point")
+                                .map(|row| row.get(0))
+                        };
+                        black_box(result);
+                    });
+                });
+
+                let pg_range_queries = build_index_range_queries(PG_INDEX_TABLE);
+                let pg_range_idx = Cell::new(0usize);
+                group.bench_function("postgres_range", |b| {
+                    b.iter(|| {
+                        let idx = pg_range_idx.get();
+                        let sql = &pg_range_queries[idx % pg_range_queries.len()];
+                        pg_range_idx.set((idx + 1) % pg_range_queries.len());
+                        let count: i64 = {
+                            let mut client = pg_client.borrow_mut();
+                            client
+                                .query_one(sql, &[])
+                                .expect("postgres index range")
+                                .get(0)
+                        };
+                        black_box(count);
+                    });
+                });
+            }
+            Err(err) => {
+                eprintln!("skipping postgres index benchmarks: {err}");
+            }
+        }
+    } else {
+        eprintln!(
+            "skipping postgres index benchmarks: set QUILL_BENCH_POSTGRES_URL or DATABASE_URL"
+        );
+    }
+
+    group.finish();
+}
+
+fn bench_main(c: &mut Criterion) {
+    // Global setup
+    fs::remove_dir_all(DB_DIR).ok();
+    fs::create_dir_all(DB_DIR).expect("create bench dir");
+
     bench_insert(c);
     bench_seq_scan(c);
     bench_index_scan(c);
+
+    // Global teardown
+    fs::remove_dir_all(DB_DIR).ok();
 }
 
 criterion_group!(
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = bench_all
+    targets = bench_main
 );
 criterion_main!(benches);
