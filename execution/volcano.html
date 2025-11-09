@@ -178,7 +178,19 @@
 <li><strong><code>Catalog</code></strong>: To look up tables and indexes.</li>
 <li><strong><code>TransactionManager</code> and <code>Transaction</code></strong>: To interact with the current transaction. This is how operators perform locking and visibility checks.</li>
 <li><strong><code>MvccSnapshot</code></strong>: The specific MVCC snapshot for the current transaction, used to determine which tuple versions are visible.</li>
+<li><strong><code>StorageEngine</code></strong>: A pluggable trait that hides TableHeap/B+Tree specifics.</li>
+<li><strong>Helper APIs</strong>: See below.</li>
 </ul>
+<h3 id="executioncontext-helper-apis"><a class="header" href="#executioncontext-helper-apis">ExecutionContext helper APIs</a></h3>
+<p>To keep physical operators tiny, QuillSQL exposes a few battle-tested helpers:</p>
+<ul>
+<li><code>read_visible_tuple(table, rid, meta, tuple)</code> performs the MVCC visibility check and acquires the correct shared locks for the current isolation level.</li>
+<li><code>prepare_row_for_write</code> / <code>apply_update</code> / <code>apply_delete</code> take care of X locks, re-reading the latest version, index maintenance, and undo logging for UPDATE/DELETE.</li>
+<li><code>insert_tuple_with_indexes</code> inserts into the heap <strong>and</strong> updates every index in one call.</li>
+<li><code>eval_predicate</code> / <code>eval_expr</code> encapsulate expression evaluation (and boolean coercion), so operators never have to fiddle with <code>ScalarValue</code>.</li>
+<li>DDL helpers (<code>create_table</code>, <code>drop_table</code>, <code>create_index</code>, …) proxy the catalog so CREATE/DROP operators stay declarative.</li>
+</ul>
+<p>All of these helpers delegate to the storage engine. By default we ship a TableHeap+B+Tree engine, but research exercises can implement their own engine and plug it into the context without modifying operators.</p>
 <p>This design cleanly separates the operator's logic from the transactional context it runs in.</p>
 <h2 id="3-anatomy-of-physical-operators"><a class="header" href="#3-anatomy-of-physical-operators">3. Anatomy of Physical Operators</a></h2>
 <p>Data flows <em>up</em> the tree from the leaves (scans) to the root. Let's see how it works by examining a few key operators.</p>

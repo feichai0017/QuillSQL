@@ -166,7 +166,7 @@
 <p><strong>Physical Operators</strong>: Each logical operation (like a filter or a join) is mapped to a concrete physical operator that implements a specific algorithm (e.g., <code>PhysicalFilter</code>, <code>PhysicalNestedLoopJoin</code>).</p>
 </li>
 <li>
-<p><strong>Execution Context</strong>: As the plan is executed, a shared <code>ExecutionContext</code> is passed between operators. It contains vital information, such as the current transaction and its MVCC snapshot, allowing operators to perform visibility checks and locking.</p>
+<p><strong>Execution Context</strong>: As the plan is executed, a shared <code>ExecutionContext</code> is passed between operators. It contains the current transaction, MVCC snapshot, and a pluggable <code>StorageEngine</code> so operators can call helpers like <code>read_visible_tuple</code>, <code>prepare_row_for_write</code>, <code>insert_tuple_with_indexes</code>, or <code>eval_predicate</code> without knowing anything about TableHeaps or indexes.</p>
 </li>
 </ul>
 <p>This section contains:</p>
