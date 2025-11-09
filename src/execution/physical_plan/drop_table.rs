@@ -27,7 +27,7 @@ impl VolcanoExecutor for PhysicalDropTable {
     }
 
     fn next(&self, context: &mut ExecutionContext) -> QuillSQLResult<Option<Tuple>> {
-        if context.catalog.try_table_heap(&self.table).is_none() {
+        if context.try_table_heap(&self.table).is_none() {
             if self.if_exists {
                 return Ok(None);
             }
@@ -40,7 +40,7 @@ impl VolcanoExecutor for PhysicalDropTable {
         context.ensure_writable(&self.table, "DROP TABLE")?;
         context.lock_table(self.table.clone(), LockMode::Exclusive)?;
 
-        let dropped = context.catalog.drop_table(&self.table)?;
+        let dropped = context.drop_table(&self.table)?;
         if !dropped && !self.if_exists {
             return Err(QuillSQLError::Execution(format!(
                 "table {} does not exist",

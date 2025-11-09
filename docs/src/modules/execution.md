@@ -8,7 +8,7 @@ Once a query has been parsed, planned, and optimized, the resulting `PhysicalPla
 
 - **Physical Operators**: Each logical operation (like a filter or a join) is mapped to a concrete physical operator that implements a specific algorithm (e.g., `PhysicalFilter`, `PhysicalNestedLoopJoin`).
 
-- **Execution Context**: As the plan is executed, a shared `ExecutionContext` is passed between operators. It contains vital information, such as the current transaction and its MVCC snapshot, allowing operators to perform visibility checks and locking.
+- **Execution Context**: As the plan is executed, a shared `ExecutionContext` is passed between operators. It contains the current transaction, MVCC snapshot, and a pluggable `StorageEngine` so operators can call helpers like `read_visible_tuple`, `prepare_row_for_write`, `insert_tuple_with_indexes`, or `eval_predicate` without knowing anything about TableHeaps or indexes.
 
 This section contains:
 

@@ -2,8 +2,7 @@ use log::debug;
 use std::sync::{Arc, Mutex};
 
 use crate::catalog::SchemaRef;
-use crate::expression::{Expr, ExprTrait};
-use crate::utils::scalar::ScalarValue;
+use crate::expression::Expr;
 use crate::{
     error::QuillSQLResult,
     execution::{ExecutionContext, VolcanoExecutor},
@@ -67,27 +66,18 @@ impl VolcanoExecutor for PhysicalNestedLoopJoin {
                 let right_tuple = right_next_tuple.unwrap();
 
                 // TODO judge if matches
-                if self.condition.is_none() {
+                if let Some(condition) = &self.condition {
+                    let merged_tuple =
+                        Tuple::try_merge(vec![left_tuple.clone(), right_tuple.clone()])?;
+                    if context.eval_predicate(condition, &merged_tuple)? {
+                        *self.left_tuple.lock().unwrap() = Some(left_tuple.clone());
+                        return Ok(Some(Tuple::try_merge(vec![left_tuple, right_tuple])?));
+                    }
+                } else {
                     // save latest left_next_result before return
                     *self.left_tuple.lock().unwrap() = Some(left_tuple.clone());
 
                     return Ok(Some(Tuple::try_merge(vec![left_tuple, right_tuple])?));
-                } else {
-                    let condition = self.condition.clone().unwrap();
-                    let merged_tuple =
-                        Tuple::try_merge(vec![left_tuple.clone(), right_tuple.clone()])?;
-                    let evaluate_res = condition.evaluate(&merged_tuple)?;
-                    // TODO support left/right join after null support added
-                    if let ScalarValue::Boolean(Some(v)) = evaluate_res {
-                        if v {
-                            // save latest left_next_result before return
-                            *self.left_tuple.lock().unwrap() = Some(left_tuple.clone());
-
-                            return Ok(Some(Tuple::try_merge(vec![left_tuple, right_tuple])?));
-                        }
-                    } else {
-                        panic!("nested loop join condition should be boolean")
-                    }
                 }
 
                 right_next_tuple = self.right_input.next(context)?;

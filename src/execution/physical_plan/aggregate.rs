@@ -2,7 +2,7 @@ use crate::catalog::SchemaRef;
 use crate::error::QuillSQLError;
 use crate::execution::physical_plan::PhysicalPlan;
 use crate::execution::{ExecutionContext, VolcanoExecutor};
-use crate::expression::{Expr, ExprTrait};
+use crate::expression::Expr;
 use crate::function::Accumulator;
 use crate::utils::scalar::ScalarValue;
 use crate::{error::QuillSQLResult, storage::tuple::Tuple};
@@ -77,7 +77,7 @@ impl VolcanoExecutor for PhysicalAggregate {
                 let group_key = self
                     .group_exprs
                     .iter()
-                    .map(|e| e.evaluate(&tuple))
+                    .map(|e| context.eval_expr(e, &tuple))
                     .collect::<QuillSQLResult<Vec<ScalarValue>>>()?;
                 let group_accumulators = if let Some(acc) = groups.get_mut(&group_key) {
                     acc
@@ -87,7 +87,7 @@ impl VolcanoExecutor for PhysicalAggregate {
                     groups.get_mut(&group_key).unwrap()
                 };
                 for (idx, acc) in group_accumulators.iter_mut().enumerate() {
-                    acc.update_value(&self.aggr_exprs[idx].evaluate(&tuple)?)?;
+                    acc.update_value(&context.eval_expr(&self.aggr_exprs[idx], &tuple)?)?;
                 }
             }
 

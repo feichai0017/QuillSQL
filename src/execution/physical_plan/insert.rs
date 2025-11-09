@@ -96,31 +96,7 @@ impl VolcanoExecutor for PhysicalInsert {
 
             let tuple = Tuple::new(self.table_schema.clone(), full_data);
 
-            let table_heap = context.catalog.table_heap(&self.table)?;
-            let (rid, _) = table_heap.mvcc_insert_version(
-                &tuple,
-                context.txn_id(),
-                context.command_id(),
-                None,
-            )?;
-            let mut index_links = Vec::new();
-
-            let indexes = context.catalog.table_indexes(&self.table)?;
-            for index in indexes {
-                if let Ok(key_tuple) = tuple.project_with_schema(index.key_schema.clone()) {
-                    let root_page_id = index.get_root_page_id()?;
-                    index.insert(&key_tuple, rid)?;
-                    index_links.push((index.clone(), key_tuple));
-                    let new_root_page_id = index.get_root_page_id()?;
-                    if new_root_page_id != root_page_id {
-                        // root change comment
-                    }
-                }
-            }
-
-            context
-                .txn_mut()
-                .push_insert_undo(table_heap.clone(), rid, index_links);
+            context.insert_tuple_with_indexes(&self.table, &tuple)?;
 
             self.insert_rows.fetch_add(1, Ordering::SeqCst);
         }

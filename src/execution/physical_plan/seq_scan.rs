@@ -6,7 +6,6 @@ use crate::catalog::SchemaRef;
 use crate::error::QuillSQLError;
 use crate::storage::page::{RecordId, TupleMeta};
 use crate::storage::table_heap::TableIterator;
-use crate::transaction::IsolationLevel;
 use crate::transaction::LockMode;
 use crate::utils::table_ref::TableReference;
 use crate::{
@@ -67,49 +66,14 @@ impl PhysicalSeqScan {
         meta: TupleMeta,
         tuple: Tuple,
     ) -> QuillSQLResult<Option<Tuple>> {
-        if !context.is_visible(&meta) {
-            return Ok(None);
-        }
-        match context.txn().isolation_level() {
-            IsolationLevel::ReadUncommitted => Ok(Some(tuple)),
-            IsolationLevel::ReadCommitted => {
-                context.lock_row_shared(&self.table, rid, false)?;
-                if !context.is_visible(&meta) {
-                    context.unlock_row_shared(&self.table, rid)?;
-                    return Ok(None);
-                }
-                let result = tuple;
-                context.unlock_row_shared(&self.table, rid)?;
-                Ok(Some(result))
-            }
-            IsolationLevel::RepeatableRead => {
-                context.lock_row_shared(&self.table, rid, true)?;
-                if !context.is_visible(&meta) {
-                    context.unlock_row_shared(&self.table, rid)?;
-                    return Ok(None);
-                }
-                let result = tuple;
-                context.unlock_row_shared(&self.table, rid)?;
-                Ok(Some(result))
-            }
-            IsolationLevel::Serializable => {
-                context.lock_row_shared(&self.table, rid, true)?;
-                if !context.is_visible(&meta) {
-                    context.unlock_row_shared(&self.table, rid)?;
-                    return Ok(None);
-                }
-                let result = tuple;
-                context.unlock_row_shared(&self.table, rid)?;
-                Ok(Some(result))
-            }
-        }
+        context.read_visible_tuple(&self.table, rid, &meta, tuple)
     }
 }
 
 impl VolcanoExecutor for PhysicalSeqScan {
     fn init(&self, context: &mut ExecutionContext) -> QuillSQLResult<()> {
         context.lock_table(self.table.clone(), LockMode::IntentionShared)?;
-        let table_heap = context.catalog.table_heap(&self.table)?;
+        let table_heap = context.table_heap(&self.table)?;
         let iter = if let Some(h) = self.streaming_hint {
             TableIterator::new_with_hint(table_heap, .., Some(h))
         } else {

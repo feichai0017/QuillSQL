@@ -103,33 +103,7 @@ impl PhysicalIndexScan {
         meta: TupleMeta,
         tuple: Tuple,
     ) -> QuillSQLResult<Option<Tuple>> {
-        if !context.is_visible(&meta) {
-            return Ok(None);
-        }
-
-        match context.txn().isolation_level() {
-            IsolationLevel::ReadUncommitted => Ok(Some(tuple)),
-            IsolationLevel::ReadCommitted => {
-                context.lock_row_shared(&self.table_ref, rid, false)?;
-                if !context.is_visible(&meta) {
-                    context.unlock_row_shared(&self.table_ref, rid)?;
-                    return Ok(None);
-                }
-                let result = tuple;
-                context.unlock_row_shared(&self.table_ref, rid)?;
-                Ok(Some(result))
-            }
-            IsolationLevel::RepeatableRead | IsolationLevel::Serializable => {
-                context.lock_row_shared(&self.table_ref, rid, true)?;
-                if !context.is_visible(&meta) {
-                    context.unlock_row_shared(&self.table_ref, rid)?;
-                    return Ok(None);
-                }
-                let result = tuple;
-                context.unlock_row_shared(&self.table_ref, rid)?;
-                Ok(Some(result))
-            }
-        }
+        context.read_visible_tuple(&self.table_ref, rid, &meta, tuple)
     }
 }
 
@@ -144,7 +118,7 @@ impl VolcanoExecutor for PhysicalIndexScan {
             context.lock_table(self.table_ref.clone(), LockMode::IntentionShared)?;
         }
 
-        let table_heap = context.catalog.table_heap(&self.table_ref)?;
+        let table_heap = context.table_heap(&self.table_ref)?;
         let index = context
             .catalog
             .index(&self.table_ref, &self.index_name)?

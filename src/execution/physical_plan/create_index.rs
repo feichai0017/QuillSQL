@@ -35,9 +35,7 @@ impl VolcanoExecutor for PhysicalCreateIndex {
             }
         }
         let key_schema = Arc::new(self.table_schema.project(&key_indices)?);
-        context
-            .catalog
-            .create_index(self.name.clone(), &self.table, key_schema)?;
+        context.create_index(self.name.clone(), &self.table, key_schema)?;
         Ok(None)
     }
     fn output_schema(&self) -> SchemaRef {

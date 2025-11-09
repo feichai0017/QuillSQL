@@ -19,9 +19,10 @@ use crate::{
     catalog::Catalog,
     execution::ExecutionEngine,
     plan::{LogicalPlanner, PlannerContext},
-    storage::disk_manager::DiskManager,
-    storage::disk_scheduler::DiskScheduler,
-    storage::tuple::Tuple,
+    storage::{
+        disk_manager::DiskManager, disk_scheduler::DiskScheduler, tuple::Tuple,
+        DefaultStorageEngine, StorageEngine,
+    },
     transaction::{IsolationLevel, TransactionManager},
 };
 use sqlparser::ast::TransactionAccessMode;
@@ -81,6 +82,7 @@ pub struct Database {
     pub(crate) wal_manager: Arc<WalManager>,
     pub(crate) transaction_manager: Arc<TransactionManager>,
     default_isolation: IsolationLevel,
+    storage_engine: Arc<dyn StorageEngine>,
 }
 impl Database {
     pub fn new_on_disk(db_path: &str) -> QuillSQLResult<Self> {
@@ -140,6 +142,7 @@ impl Database {
         buffer_pool.set_wal_manager(wal_manager.clone());
 
         let catalog = Catalog::new(buffer_pool.clone(), disk_manager.clone());
+        let storage_engine: Arc<dyn StorageEngine> = Arc::new(DefaultStorageEngine::default());
 
         let recovery_summary = RecoveryManager::new(wal_manager.clone(), disk_scheduler.clone())
             .with_buffer_pool(buffer_pool.clone())
@@ -196,6 +199,7 @@ impl Database {
             default_isolation: options
                 .default_isolation_level
                 .unwrap_or(IsolationLevel::ReadUncommitted),
+            storage_engine,
         };
         load_catalog_data(&mut db)?;
         Ok(db)
@@ -284,6 +288,7 @@ impl Database {
                         &mut self.catalog,
                         txn,
                         &self.transaction_manager,
+                        self.storage_engine.clone(),
                     );
                     let mut engine = ExecutionEngine { context };
                     engine.execute(Arc::new(physical_plan))?

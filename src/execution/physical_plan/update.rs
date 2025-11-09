@@ -1,7 +1,7 @@
 use crate::catalog::{SchemaRef, UPDATE_OUTPUT_SCHEMA_REF};
 use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::execution::{ExecutionContext, VolcanoExecutor};
-use crate::expression::{Expr, ExprTrait};
+use crate::expression::Expr;
 use crate::storage::table_heap::TableIterator;
 use crate::storage::tuple::Tuple;
 use crate::transaction::LockMode;
@@ -44,7 +44,7 @@ impl VolcanoExecutor for PhysicalUpdate {
     fn init(&self, context: &mut ExecutionContext) -> QuillSQLResult<()> {
         self.update_rows.store(0, Ordering::SeqCst);
         context.ensure_writable(&self.table, "UPDATE")?;
-        let table_heap = context.catalog.table_heap(&self.table)?;
+        let table_heap = context.table_heap(&self.table)?;
         *self.table_iterator.lock().unwrap() = Some(TableIterator::new(table_heap.clone(), ..));
         context
             .lock_table(self.table.clone(), LockMode::IntentionExclusive)
@@ -64,7 +64,7 @@ impl VolcanoExecutor for PhysicalUpdate {
                 "table iterator not created".to_string(),
             ));
         };
-        let table_heap = context.catalog.table_heap(&self.table)?;
+        let table_heap = context.table_heap(&self.table)?;
 
         loop {
             if let Some((rid, meta, tuple)) = table_iterator.next()? {
@@ -76,22 +76,16 @@ impl VolcanoExecutor for PhysicalUpdate {
                 }
 
                 if let Some(selection) = &self.selection {
-                    if !selection.evaluate(&tuple)?.as_boolean()?.unwrap_or(false) {
+                    if !context.eval_predicate(selection, &tuple)? {
                         continue;
                     }
                 }
 
-                if !context.is_visible(&meta) {
+                let Some((prev_meta, mut current_tuple)) =
+                    context.prepare_row_for_write(&self.table, rid, &table_heap, &meta)?
+                else {
                     continue;
-                }
-
-                context.lock_row_exclusive(&self.table, rid)?;
-
-                let (prev_meta, mut current_tuple) = table_heap.full_tuple(rid)?;
-                if !context.is_visible(&prev_meta) {
-                    context.unlock_row(&self.table, rid);
-                    continue;
-                }
+                };
                 let prev_tuple = current_tuple.clone();
                 let mut eval_tuple = current_tuple.clone();
 
@@ -102,36 +96,20 @@ impl VolcanoExecutor for PhysicalUpdate {
                     // use the updated value for subsequent expressions in this update
                     // e.g., SET a = 1, b = a + 1
                     // should set b to 2
-                    let new_value = value_expr.evaluate(&eval_tuple)?.cast_to(&col_datatype)?;
+                    let new_value = context
+                        .eval_expr(value_expr, &eval_tuple)?
+                        .cast_to(&col_datatype)?;
                     current_tuple.data[index] = new_value.clone();
                     eval_tuple.data[index] = new_value;
                 }
-                let (new_rid, _) = table_heap.mvcc_update(
-                    rid,
-                    current_tuple.clone(),
-                    context.txn_id(),
-                    context.command_id(),
-                )?;
-
-                let mut new_keys = Vec::new();
-                let indexes = context.catalog.table_indexes(&self.table)?;
-                for index in indexes {
-                    if let Ok(new_key_tuple) =
-                        current_tuple.project_with_schema(index.key_schema.clone())
-                    {
-                        index.insert(&new_key_tuple, new_rid)?;
-                        new_keys.push((index.clone(), new_key_tuple));
-                    }
-                }
-
-                context.txn_mut().push_update_undo(
+                context.apply_update(
+                    &self.table,
                     table_heap.clone(),
                     rid,
-                    new_rid,
+                    current_tuple.clone(),
                     prev_meta,
                     prev_tuple,
-                    new_keys,
-                );
+                )?;
 
                 self.update_rows.fetch_add(1, Ordering::SeqCst);
             } else {

@@ -2,9 +2,7 @@ use log::debug;
 use std::sync::Arc;
 
 use crate::catalog::SchemaRef;
-use crate::error::QuillSQLError;
-use crate::expression::{Expr, ExprTrait};
-use crate::utils::scalar::ScalarValue;
+use crate::expression::Expr;
 use crate::{
     error::QuillSQLResult,
     execution::{ExecutionContext, VolcanoExecutor},
@@ -28,15 +26,8 @@ impl VolcanoExecutor for PhysicalFilter {
     fn next(&self, context: &mut ExecutionContext) -> QuillSQLResult<Option<Tuple>> {
         loop {
             if let Some(tuple) = self.input.next(context)? {
-                let compare_res = self.predicate.evaluate(&tuple)?;
-                if let ScalarValue::Boolean(Some(v)) = compare_res {
-                    if v {
-                        return Ok(Some(tuple));
-                    }
-                } else {
-                    return Err(QuillSQLError::Execution(
-                        "filter predicate value should be boolean".to_string(),
-                    ));
+                if context.eval_predicate(&self.predicate, &tuple)? {
+                    return Ok(Some(tuple));
                 }
             } else {
                 return Ok(None);

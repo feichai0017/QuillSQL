@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::catalog::SchemaRef;
-use crate::expression::{Expr, ExprTrait};
+use crate::expression::Expr;
 use crate::storage::tuple::{Tuple, EMPTY_TUPLE};
 use crate::utils::scalar::ScalarValue;
 use crate::{
@@ -26,12 +26,12 @@ impl PhysicalValues {
     }
 }
 impl VolcanoExecutor for PhysicalValues {
-    fn next(&self, _context: &mut ExecutionContext) -> QuillSQLResult<Option<Tuple>> {
+    fn next(&self, context: &mut ExecutionContext) -> QuillSQLResult<Option<Tuple>> {
         let cursor = self.cursor.fetch_add(1, Ordering::SeqCst) as usize;
         if cursor < self.rows.len() {
             let values = self.rows[cursor]
                 .iter()
-                .map(|e| e.evaluate(&EMPTY_TUPLE))
+                .map(|e| context.eval_expr(e, &EMPTY_TUPLE))
                 .collect::<QuillSQLResult<Vec<ScalarValue>>>()?;
             debug_assert_eq!(self.schema.column_count(), values.len());
 

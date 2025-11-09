@@ -4,8 +4,8 @@ use std::sync::{Arc, Mutex};
 
 use crate::catalog::SchemaRef;
 use crate::error::QuillSQLError;
-use crate::expression::ExprTrait;
 use crate::plan::logical_plan::OrderByExpr;
+use crate::utils::scalar::ScalarValue;
 use crate::{
     error::QuillSQLResult,
     execution::{ExecutionContext, VolcanoExecutor},
@@ -32,24 +32,28 @@ impl PhysicalSort {
         }
     }
 
-    fn sort_tuples(&self, a: &Tuple, b: &Tuple) -> QuillSQLResult<CmpOrdering> {
-        let mut ordering = CmpOrdering::Equal;
-        let mut index = 0;
-        while ordering == CmpOrdering::Equal && index < self.order_bys.len() {
-            let a_value = self.order_bys[index].expr.evaluate(a)?;
-            let b_value = self.order_bys[index].expr.evaluate(b)?;
-            ordering = if self.order_bys[index].asc {
-                a_value.partial_cmp(&b_value)
+    fn compare_keys(
+        &self,
+        left: &[ScalarValue],
+        right: &[ScalarValue],
+    ) -> QuillSQLResult<CmpOrdering> {
+        for (idx, order) in self.order_bys.iter().enumerate() {
+            let ordering = if order.asc {
+                left[idx].partial_cmp(&right[idx])
             } else {
-                b_value.partial_cmp(&a_value)
+                right[idx].partial_cmp(&left[idx])
             }
-            .ok_or(QuillSQLError::Execution(format!(
-                "Can not compare {:?} and {:?}",
-                a_value, b_value
-            )))?;
-            index += 1;
+            .ok_or_else(|| {
+                QuillSQLError::Execution(format!(
+                    "Can not compare {:?} and {:?}",
+                    left[idx], right[idx]
+                ))
+            })?;
+            if ordering != CmpOrdering::Equal {
+                return Ok(ordering);
+            }
         }
-        Ok(ordering)
+        Ok(CmpOrdering::Equal)
     }
 }
 
@@ -62,29 +66,35 @@ impl VolcanoExecutor for PhysicalSort {
     }
 
     fn next(&self, context: &mut ExecutionContext) -> QuillSQLResult<Option<Tuple>> {
-        let all_tuples_len = self.all_tuples.lock().unwrap().len();
-        if all_tuples_len == 0 {
-            // load all tuples from input
-            let mut all_tuples = Vec::new();
+        if self.all_tuples.lock().unwrap().is_empty() {
+            let mut keyed_rows: Vec<(Tuple, Vec<ScalarValue>)> = Vec::new();
             while let Some(tuple) = self.input.next(context)? {
-                all_tuples.push(tuple);
+                let mut keys = Vec::with_capacity(self.order_bys.len());
+                for order in &self.order_bys {
+                    keys.push(context.eval_expr(&order.expr, &tuple)?);
+                }
+                keyed_rows.push((tuple, keys));
             }
 
-            // sort all tuples
             let mut error = None;
-            all_tuples.sort_by(|a, b| {
-                let ordering = self.sort_tuples(a, b);
-                if let Ok(ordering) = ordering {
-                    ordering
-                } else {
-                    error = Some(ordering.unwrap_err());
-                    CmpOrdering::Equal
+            keyed_rows.sort_by(|(_, left_keys), (_, right_keys)| {
+                match self.compare_keys(left_keys, right_keys) {
+                    Ok(ord) => ord,
+                    Err(e) => {
+                        error = Some(e);
+                        CmpOrdering::Equal
+                    }
                 }
             });
-            if let Some(error) = error {
-                return Err(error);
+            if let Some(err) = error {
+                return Err(err);
             }
-            *self.all_tuples.lock().unwrap() = all_tuples;
+
+            let tuples = keyed_rows
+                .into_iter()
+                .map(|(tuple, _)| tuple)
+                .collect::<Vec<_>>();
+            *self.all_tuples.lock().unwrap() = tuples;
         }
 
         let cursor = self.cursor.fetch_add(1, Ordering::SeqCst);

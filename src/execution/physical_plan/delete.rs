@@ -4,7 +4,6 @@ use crate::catalog::{SchemaRef, DELETE_OUTPUT_SCHEMA_REF};
 use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::execution::{ExecutionContext, VolcanoExecutor};
 use crate::expression::Expr;
-use crate::expression::ExprTrait;
 use crate::storage::table_heap::TableIterator;
 use crate::storage::tuple::Tuple;
 use crate::transaction::LockMode;
@@ -37,7 +36,7 @@ impl VolcanoExecutor for PhysicalDelete {
         self.deleted_rows.store(0, Ordering::SeqCst);
         context.ensure_writable(&self.table, "DELETE")?;
         context.lock_table(self.table.clone(), LockMode::IntentionExclusive)?;
-        let table_heap = context.catalog.table_heap(&self.table)?;
+        let table_heap = context.table_heap(&self.table)?;
         *self.iterator.lock().unwrap() = Some(TableIterator::new(table_heap, ..));
         Ok(())
     }
@@ -62,31 +61,18 @@ impl VolcanoExecutor for PhysicalDelete {
             };
 
             if let Some(predicate) = &self.predicate {
-                if !predicate.evaluate(&tuple)?.as_boolean()?.unwrap_or(false) {
+                if !context.eval_predicate(predicate, &tuple)? {
                     continue;
                 }
             }
 
-            if !context.is_visible(&meta) {
+            let table_heap = context.table_heap(&self.table)?;
+            let Some((current_meta, current_tuple)) =
+                context.prepare_row_for_write(&self.table, rid, &table_heap, &meta)?
+            else {
                 continue;
-            }
-
-            context.lock_row_exclusive(&self.table, rid)?;
-
-            let table_heap = context.catalog.table_heap(&self.table)?;
-            let (current_meta, current_tuple) = table_heap.full_tuple(rid)?;
-            if !context.is_visible(&current_meta) {
-                context.unlock_row(&self.table, rid);
-                continue;
-            }
-            table_heap.delete_tuple(rid, context.txn_id(), context.command_id())?;
-
-            context.txn_mut().push_delete_undo(
-                table_heap.clone(),
-                rid,
-                current_meta,
-                current_tuple,
-            );
+            };
+            context.apply_delete(table_heap.clone(), rid, current_meta, current_tuple)?;
             self.deleted_rows.fetch_add(1, Ordering::SeqCst);
         }
     }

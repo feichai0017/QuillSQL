@@ -26,6 +26,20 @@ Notice that both `init()` and `next()` take a mutable `ExecutionContext`. This o
 - **`Catalog`**: To look up tables and indexes.
 - **`TransactionManager` and `Transaction`**: To interact with the current transaction. This is how operators perform locking and visibility checks.
 - **`MvccSnapshot`**: The specific MVCC snapshot for the current transaction, used to determine which tuple versions are visible.
+- **`StorageEngine`**: A pluggable trait that hides TableHeap/B+Tree specifics.
+- **Helper APIs**: See below.
+
+### ExecutionContext helper APIs
+
+To keep physical operators tiny, QuillSQL exposes a few battle-tested helpers:
+
+- `read_visible_tuple(table, rid, meta, tuple)` performs the MVCC visibility check and acquires the correct shared locks for the current isolation level.
+- `prepare_row_for_write` / `apply_update` / `apply_delete` take care of X locks, re-reading the latest version, index maintenance, and undo logging for UPDATE/DELETE.
+- `insert_tuple_with_indexes` inserts into the heap **and** updates every index in one call.
+- `eval_predicate` / `eval_expr` encapsulate expression evaluation (and boolean coercion), so operators never have to fiddle with `ScalarValue`.
+- DDL helpers (`create_table`, `drop_table`, `create_index`, …) proxy the catalog so CREATE/DROP operators stay declarative.
+
+All of these helpers delegate to the storage engine. By default we ship a TableHeap+B+Tree engine, but research exercises can implement their own engine and plug it into the context without modifying operators.
 
 This design cleanly separates the operator's logic from the transactional context it runs in.
 
