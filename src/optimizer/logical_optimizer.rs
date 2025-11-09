@@ -1,5 +1,7 @@
 use crate::error::QuillSQLResult;
-use crate::optimizer::rule::{EliminateLimit, MergeLimit, PushDownLimit};
+use crate::optimizer::rule::{
+    EliminateLimit, MergeLimit, PushDownFilterToScan, PushDownLimit, PushLimitIntoScan,
+};
 use crate::plan::logical_plan::LogicalPlan;
 use std::sync::Arc;
 
@@ -38,6 +40,8 @@ pub struct LogicalOptimizer {
 impl LogicalOptimizer {
     pub fn new() -> Self {
         let rules: Vec<Arc<dyn LogicalOptimizerRule + Sync + Send>> = vec![
+            Arc::new(PushDownFilterToScan),
+            Arc::new(PushLimitIntoScan),
             Arc::new(EliminateLimit {}),
             Arc::new(MergeLimit {}),
             Arc::new(PushDownLimit {}),

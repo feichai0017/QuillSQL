@@ -8,7 +8,7 @@ mod util;
 
 pub use aggregate::AggregateFunction;
 pub use alias::Alias;
-pub use binary::BinaryExpr;
+pub use binary::{BinaryExpr, BinaryOp};
 pub use cast::Cast;
 pub use column::ColumnExpr;
 pub use literal::Literal;

@@ -1,6 +1,7 @@
 use crate::catalog::{Catalog, Schema, DEFAULT_SCHEMA_NAME};
 use std::sync::Arc;
 
+use crate::expression::{BinaryExpr, BinaryOp, Expr};
 use crate::plan::logical_plan::{
     Aggregate, CreateIndex, CreateTable, DropIndex, DropTable, EmptyRelation, Filter, Insert, Join,
     Limit, LogicalPlan, Project, Sort, TableScan, Values,
@@ -95,45 +96,7 @@ impl PhysicalPlanner<'_> {
                     Arc::new(input_physical_plan),
                 ))
             }
-            LogicalPlan::TableScan(TableScan {
-                table_ref,
-                table_schema,
-                filters: _,
-                limit: _,
-                streaming_hint,
-            }) => {
-                // TODO fix testing
-                if let Some(catalog_table) = self
-                    .catalog
-                    .schemas
-                    .get(table_ref.schema().unwrap_or(DEFAULT_SCHEMA_NAME))
-                    .unwrap()
-                    .tables
-                    .get(table_ref.table())
-                {
-                    if !catalog_table.indexes.is_empty() {
-                        PhysicalPlan::IndexScan(PhysicalIndexScan::new(
-                            table_ref.clone(),
-                            catalog_table.indexes.keys().next().unwrap().clone(),
-                            table_schema.clone(),
-                            ..,
-                        ))
-                    } else {
-                        {
-                            let mut op =
-                                PhysicalSeqScan::new(table_ref.clone(), table_schema.clone());
-                            op.streaming_hint = *streaming_hint;
-                            PhysicalPlan::SeqScan(op)
-                        }
-                    }
-                } else {
-                    {
-                        let mut op = PhysicalSeqScan::new(table_ref.clone(), table_schema.clone());
-                        op.streaming_hint = *streaming_hint;
-                        PhysicalPlan::SeqScan(op)
-                    }
-                }
-            }
+            LogicalPlan::TableScan(scan) => self.build_table_scan(scan),
             LogicalPlan::Limit(Limit {
                 limit,
                 offset,
@@ -216,4 +179,62 @@ impl PhysicalPlanner<'_> {
         };
         plan
     }
+
+    fn build_table_scan(&self, scan: &TableScan) -> PhysicalPlan {
+        let TableScan {
+            table_ref,
+            table_schema,
+            filters,
+            limit,
+            streaming_hint,
+        } = scan;
+
+        let mut plan = if let Some(catalog_table) = self
+            .catalog
+            .schemas
+            .get(table_ref.schema().unwrap_or(DEFAULT_SCHEMA_NAME))
+            .unwrap()
+            .tables
+            .get(table_ref.table())
+        {
+            if !catalog_table.indexes.is_empty() {
+                PhysicalPlan::IndexScan(PhysicalIndexScan::new(
+                    table_ref.clone(),
+                    catalog_table.indexes.keys().next().unwrap().clone(),
+                    table_schema.clone(),
+                    ..,
+                ))
+            } else {
+                let mut op = PhysicalSeqScan::new(table_ref.clone(), table_schema.clone());
+                op.streaming_hint = *streaming_hint;
+                PhysicalPlan::SeqScan(op)
+            }
+        } else {
+            let mut op = PhysicalSeqScan::new(table_ref.clone(), table_schema.clone());
+            op.streaming_hint = *streaming_hint;
+            PhysicalPlan::SeqScan(op)
+        };
+
+        if let Some(limit_value) = limit {
+            plan = PhysicalPlan::Limit(PhysicalLimit::new(Some(*limit_value), 0, Arc::new(plan)));
+        }
+
+        if let Some(predicate) = conjunction(filters) {
+            plan = PhysicalPlan::Filter(PhysicalFilter::new(predicate, Arc::new(plan)));
+        }
+
+        plan
+    }
+}
+
+fn conjunction(predicates: &[Expr]) -> Option<Expr> {
+    let mut iter = predicates.iter();
+    let first = iter.next()?.clone();
+    Some(iter.fold(first, |acc, expr| {
+        Expr::Binary(BinaryExpr {
+            left: Box::new(acc),
+            op: BinaryOp::And,
+            right: Box::new(expr.clone()),
+        })
+    }))
 }
