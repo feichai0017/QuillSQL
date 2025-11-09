@@ -6,7 +6,11 @@ use std::time::Duration;
 use tempfile::TempDir;
 
 use crate::buffer::{BufferManager, BUFFER_POOL_SIZE};
-use crate::catalog::{load_catalog_data, TableStatistics};
+use crate::catalog::{
+    load_catalog_data,
+    registry::{IndexRegistry, TableRegistry},
+    TableStatistics,
+};
 use crate::config::{background_config, IndexVacuumConfig, MvccVacuumConfig, WalConfig};
 use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::optimizer::LogicalOptimizer;
@@ -86,6 +90,8 @@ pub struct Database {
     pub(crate) transaction_manager: Arc<TransactionManager>,
     default_isolation: IsolationLevel,
     storage_engine: Arc<dyn StorageEngine>,
+    _table_registry: Arc<TableRegistry>,
+    _index_registry: Arc<IndexRegistry>,
 }
 impl Database {
     pub fn new_on_disk(db_path: &str) -> QuillSQLResult<Self> {
@@ -144,7 +150,14 @@ impl Database {
         }
         buffer_pool.set_wal_manager(wal_manager.clone());
 
-        let catalog = Catalog::new(buffer_pool.clone(), disk_manager.clone());
+        let table_registry = Arc::new(TableRegistry::new());
+        let index_registry = Arc::new(IndexRegistry::new());
+        let catalog = Catalog::new(
+            buffer_pool.clone(),
+            disk_manager.clone(),
+            table_registry.clone(),
+            index_registry.clone(),
+        );
         let storage_engine: Arc<dyn StorageEngine> = Arc::new(DefaultStorageEngine::default());
 
         let recovery_summary = RecoveryManager::new(wal_manager.clone(), disk_scheduler.clone())
@@ -179,6 +192,7 @@ impl Database {
             buffer_for_workers.clone(),
             worker_cfg.bg_writer_interval,
             worker_cfg.vacuum,
+            index_registry.clone(),
         ));
 
         let mvcc_interval = if worker_cfg.mvcc_vacuum.interval_ms == 0 {
@@ -190,6 +204,7 @@ impl Database {
             txn_for_workers,
             mvcc_interval,
             worker_cfg.mvcc_vacuum.batch_limit,
+            table_registry.clone(),
         ));
 
         let mut db = Self {
@@ -203,6 +218,8 @@ impl Database {
                 .default_isolation_level
                 .unwrap_or(IsolationLevel::ReadUncommitted),
             storage_engine,
+            _table_registry: table_registry,
+            _index_registry: index_registry,
         };
         load_catalog_data(&mut db)?;
         Ok(db)

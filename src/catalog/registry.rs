@@ -1,14 +1,12 @@
 use std::sync::Arc;
 
 use dashmap::DashMap;
-// Use a simple static with lazy_init to avoid adding new dependencies.
-use std::sync::OnceLock;
 
 use crate::storage::index::btree_index::BPlusTreeIndex;
 use crate::storage::table_heap::TableHeap;
 use crate::utils::table_ref::TableReference;
 
-/// Global registry of indexes for background maintenance.
+/// Registry of indexes for background maintenance.
 /// Maps (table_ref, index_name) -> (Arc<BPlusTreeIndex>, Arc<TableHeap>)
 #[derive(Debug, Default)]
 pub struct IndexRegistry {
@@ -46,14 +44,7 @@ impl IndexRegistry {
     }
 }
 
-/// Global singleton accessor (for now). In a larger system we would plumb this through Database.
-static REGISTRY: OnceLock<IndexRegistry> = OnceLock::new();
-
-pub fn global_index_registry() -> &'static IndexRegistry {
-    REGISTRY.get_or_init(IndexRegistry::new)
-}
-
-/// Global registry of table heaps that may require background maintenance.
+/// Registry of table heaps that may require background maintenance.
 #[derive(Debug, Default)]
 pub struct TableRegistry {
     inner: DashMap<TableReference, Arc<TableHeap>>,
@@ -79,10 +70,4 @@ impl TableRegistry {
             .iter()
             .map(|entry| (entry.key().clone(), entry.value().clone()))
     }
-}
-
-static TABLE_REGISTRY: OnceLock<TableRegistry> = OnceLock::new();
-
-pub fn global_table_registry() -> &'static TableRegistry {
-    TABLE_REGISTRY.get_or_init(TableRegistry::new)
 }

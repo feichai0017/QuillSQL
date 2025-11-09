@@ -1,6 +1,5 @@
 use crate::buffer::{AtomicPageId, PageId, INVALID_PAGE_ID};
 use crate::catalog::catalog::{CatalogSchema, CatalogTable};
-use crate::catalog::registry::global_table_registry;
 use crate::catalog::{
     Catalog, Column, DataType, Schema, SchemaRef, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME,
 };
@@ -10,7 +9,8 @@ use crate::utils::scalar::ScalarValue;
 use crate::utils::table_ref::TableReference;
 
 use crate::storage::index::btree_index::BPlusTreeIndex;
-use crate::storage::table_heap::TableHeap;
+use crate::storage::table_heap::{TableHeap, TableIterator};
+use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 
 pub static INFORMATION_SCHEMA_NAME: &str = "information_schema";
@@ -106,6 +106,7 @@ fn load_information_schema(catalog: &mut Catalog) -> QuillSQLResult<()> {
         INDEXES_SCHEMA.clone(),
     )?;
 
+    let table_registry = catalog.table_registry();
     let mut information_schema = CatalogSchema::new(INFORMATION_SCHEMA_NAME);
 
     let schemas_table = TableHeap {
@@ -119,7 +120,7 @@ fn load_information_schema(catalog: &mut Catalog) -> QuillSQLResult<()> {
         INFORMATION_SCHEMA_SCHEMAS.to_string(),
         CatalogTable::new(INFORMATION_SCHEMA_SCHEMAS, schemas_heap.clone()),
     );
-    global_table_registry().register(
+    table_registry.register(
         TableReference::Full {
             catalog: DEFAULT_CATALOG_NAME.to_string(),
             schema: INFORMATION_SCHEMA_NAME.to_string(),
@@ -139,7 +140,7 @@ fn load_information_schema(catalog: &mut Catalog) -> QuillSQLResult<()> {
         INFORMATION_SCHEMA_TABLES.to_string(),
         CatalogTable::new(INFORMATION_SCHEMA_TABLES, tables_heap.clone()),
     );
-    global_table_registry().register(
+    table_registry.register(
         TableReference::Full {
             catalog: DEFAULT_CATALOG_NAME.to_string(),
             schema: INFORMATION_SCHEMA_NAME.to_string(),
@@ -159,7 +160,7 @@ fn load_information_schema(catalog: &mut Catalog) -> QuillSQLResult<()> {
         INFORMATION_SCHEMA_COLUMNS.to_string(),
         CatalogTable::new(INFORMATION_SCHEMA_COLUMNS, columns_heap.clone()),
     );
-    global_table_registry().register(
+    table_registry.register(
         TableReference::Full {
             catalog: DEFAULT_CATALOG_NAME.to_string(),
             schema: INFORMATION_SCHEMA_NAME.to_string(),
@@ -179,7 +180,7 @@ fn load_information_schema(catalog: &mut Catalog) -> QuillSQLResult<()> {
         INFORMATION_SCHEMA_INDEXES.to_string(),
         CatalogTable::new(INFORMATION_SCHEMA_INDEXES, indexes_heap.clone()),
     );
-    global_table_registry().register(
+    table_registry.register(
         TableReference::Full {
             catalog: DEFAULT_CATALOG_NAME.to_string(),
             schema: INFORMATION_SCHEMA_NAME.to_string(),
@@ -193,131 +194,241 @@ fn load_information_schema(catalog: &mut Catalog) -> QuillSQLResult<()> {
 }
 
 fn load_schemas(db: &mut Database) -> QuillSQLResult<()> {
-    let schema_tuples = db.run(&format!(
-        "select * from {}.{}",
-        INFORMATION_SCHEMA_NAME, INFORMATION_SCHEMA_SCHEMAS
-    ))?;
-    for schema_tuple in schema_tuples.into_iter() {
-        let error = Err(QuillSQLError::Internal(format!(
-            "Failed to decode schema tuple: {:?}",
-            schema_tuple,
-        )));
-        let ScalarValue::Varchar(Some(_catalog)) = schema_tuple.value(0)? else {
-            return error;
+    let schemas_table = {
+        let information_schema =
+            db.catalog
+                .schemas
+                .get(INFORMATION_SCHEMA_NAME)
+                .ok_or_else(|| {
+                    QuillSQLError::Internal("information_schema not initialized".to_string())
+                })?;
+        information_schema
+            .tables
+            .get(INFORMATION_SCHEMA_SCHEMAS)
+            .ok_or_else(|| {
+                QuillSQLError::Internal("information_schema.schemas missing".to_string())
+            })?
+            .table
+            .clone()
+    };
+
+    let mut iterator = TableIterator::new(schemas_table, ..);
+    while let Some((_rid, meta, tuple)) = iterator.next()? {
+        if meta.is_deleted {
+            continue;
+        }
+        let ScalarValue::Varchar(Some(_catalog)) = tuple.value(0)? else {
+            return Err(QuillSQLError::Internal(
+                "invalid catalog value in information_schema.schemas".to_string(),
+            ));
         };
-        let ScalarValue::Varchar(Some(schema_name)) = schema_tuple.value(1)? else {
-            return error;
+        let ScalarValue::Varchar(Some(schema_name)) = tuple.value(1)? else {
+            return Err(QuillSQLError::Internal(
+                "invalid schema value in information_schema.schemas".to_string(),
+            ));
         };
         db.catalog
-            .load_schema(schema_name, CatalogSchema::new(schema_name));
+            .load_schema(schema_name.clone(), CatalogSchema::new(schema_name));
     }
     Ok(())
 }
 
 fn load_user_tables(db: &mut Database) -> QuillSQLResult<()> {
-    let table_tuples = db.run(&format!(
-        "select * from {}.{}",
-        INFORMATION_SCHEMA_NAME, INFORMATION_SCHEMA_TABLES
-    ))?;
-    for table_tuple in table_tuples.into_iter() {
-        let error = Err(QuillSQLError::Internal(format!(
-            "Failed to decode table tuple: {:?}",
-            table_tuple
-        )));
-        let ScalarValue::Varchar(Some(catalog)) = table_tuple.value(0)? else {
-            return error;
-        };
-        let ScalarValue::Varchar(Some(table_schema)) = table_tuple.value(1)? else {
-            return error;
-        };
-        let ScalarValue::Varchar(Some(table_name)) = table_tuple.value(2)? else {
-            return error;
-        };
-        let ScalarValue::UInt32(Some(first_page_id)) = table_tuple.value(3)? else {
-            return error;
-        };
+    let (columns_heap, tables_heap) = {
+        let information_schema =
+            db.catalog
+                .schemas
+                .get(INFORMATION_SCHEMA_NAME)
+                .ok_or_else(|| {
+                    QuillSQLError::Internal("information_schema not initialized".to_string())
+                })?;
+        let columns_heap = information_schema
+            .tables
+            .get(INFORMATION_SCHEMA_COLUMNS)
+            .ok_or_else(|| {
+                QuillSQLError::Internal("information_schema.columns missing".to_string())
+            })?
+            .table
+            .clone();
+        let tables_heap = information_schema
+            .tables
+            .get(INFORMATION_SCHEMA_TABLES)
+            .ok_or_else(|| {
+                QuillSQLError::Internal("information_schema.tables missing".to_string())
+            })?
+            .table
+            .clone();
+        (columns_heap, tables_heap)
+    };
 
-        let column_tuples = db.run(&format!("select * from {}.{} where table_catalog = '{}' and table_schema = '{}' and table_name = '{}'",
-                                            INFORMATION_SCHEMA_NAME, INFORMATION_SCHEMA_COLUMNS, catalog, table_schema, table_name))?;
-        let mut columns = vec![];
-        for column_tuple in column_tuples.into_iter() {
-            let error = Err(QuillSQLError::Internal(format!(
-                "Failed to decode column tuple: {:?}",
-                column_tuple
-            )));
-            let ScalarValue::Varchar(Some(column_name)) = column_tuple.value(3)? else {
-                return error;
-            };
-            let ScalarValue::Varchar(Some(data_type_str)) = column_tuple.value(4)? else {
-                return error;
-            };
-            let ScalarValue::Boolean(Some(nullable)) = column_tuple.value(5)? else {
-                return error;
-            };
-            let ScalarValue::Varchar(Some(default)) = column_tuple.value(6)? else {
-                return error;
-            };
-            let data_type: DataType = data_type_str.as_str().try_into()?;
-            let default = ScalarValue::from_string(default, data_type)?;
-            columns
-                .push(Column::new(column_name.clone(), data_type, *nullable).with_default(default));
+    let mut column_map: HashMap<(String, String, String), Vec<Column>> = HashMap::new();
+    let mut column_iter = TableIterator::new(columns_heap, ..);
+    while let Some((_rid, meta, tuple)) = column_iter.next()? {
+        if meta.is_deleted {
+            continue;
         }
-        let schema = Arc::new(Schema::new(columns));
+        let ScalarValue::Varchar(Some(catalog)) = tuple.value(0)? else {
+            return Err(QuillSQLError::Internal(
+                "invalid catalog in information_schema.columns".to_string(),
+            ));
+        };
+        let ScalarValue::Varchar(Some(schema)) = tuple.value(1)? else {
+            return Err(QuillSQLError::Internal(
+                "invalid schema in information_schema.columns".to_string(),
+            ));
+        };
+        let ScalarValue::Varchar(Some(table)) = tuple.value(2)? else {
+            return Err(QuillSQLError::Internal(
+                "invalid table in information_schema.columns".to_string(),
+            ));
+        };
+        let ScalarValue::Varchar(Some(column_name)) = tuple.value(3)? else {
+            return Err(QuillSQLError::Internal(
+                "invalid column name in information_schema.columns".to_string(),
+            ));
+        };
+        let ScalarValue::Varchar(Some(data_type_str)) = tuple.value(4)? else {
+            return Err(QuillSQLError::Internal(
+                "invalid data type in information_schema.columns".to_string(),
+            ));
+        };
+        let ScalarValue::Boolean(Some(nullable)) = tuple.value(5)? else {
+            return Err(QuillSQLError::Internal(
+                "invalid nullable flag in information_schema.columns".to_string(),
+            ));
+        };
+        let ScalarValue::Varchar(Some(default)) = tuple.value(6)? else {
+            return Err(QuillSQLError::Internal(
+                "invalid default in information_schema.columns".to_string(),
+            ));
+        };
 
-        // load last page id
+        let data_type: DataType = data_type_str.as_str().try_into()?;
+        let default_value = ScalarValue::from_string(default, data_type)?;
+        column_map
+            .entry((catalog.clone(), schema.clone(), table.clone()))
+            .or_default()
+            .push(
+                Column::new(column_name.clone(), data_type, *nullable).with_default(default_value),
+            );
+    }
+
+    let mut table_iter = TableIterator::new(tables_heap, ..);
+    while let Some((_rid, meta, tuple)) = table_iter.next()? {
+        if meta.is_deleted {
+            continue;
+        }
+        let ScalarValue::Varchar(Some(catalog)) = tuple.value(0)? else {
+            return Err(QuillSQLError::Internal(
+                "invalid catalog in information_schema.tables".to_string(),
+            ));
+        };
+        let ScalarValue::Varchar(Some(schema)) = tuple.value(1)? else {
+            return Err(QuillSQLError::Internal(
+                "invalid schema in information_schema.tables".to_string(),
+            ));
+        };
+        let ScalarValue::Varchar(Some(table)) = tuple.value(2)? else {
+            return Err(QuillSQLError::Internal(
+                "invalid table name in information_schema.tables".to_string(),
+            ));
+        };
+        let ScalarValue::UInt32(Some(first_page_id)) = tuple.value(3)? else {
+            return Err(QuillSQLError::Internal(
+                "invalid first_page_id in information_schema.tables".to_string(),
+            ));
+        };
+
+        let columns = column_map
+            .remove(&(catalog.clone(), schema.clone(), table.clone()))
+            .unwrap_or_default();
+        let schema_ref = Arc::new(Schema::new(columns));
+
         let last_page_id =
-            load_table_last_page_id(&mut db.catalog, *first_page_id, schema.clone())?;
+            load_table_last_page_id(&mut db.catalog, *first_page_id, schema_ref.clone())?;
         let table_heap = TableHeap {
-            schema: schema.clone(),
+            schema: schema_ref.clone(),
             buffer_pool: db.buffer_pool.clone(),
             first_page_id: AtomicPageId::new(*first_page_id),
             last_page_id: AtomicPageId::new(last_page_id),
         };
+
         db.catalog.load_table(
             TableReference::Full {
                 catalog: catalog.to_string(),
-                schema: table_schema.to_string(),
-                table: table_name.to_string(),
+                schema: schema.to_string(),
+                table: table.to_string(),
             },
-            CatalogTable::new(table_name, Arc::new(table_heap)),
+            CatalogTable::new(table, Arc::new(table_heap)),
         )?;
     }
     Ok(())
 }
 
 fn load_user_indexes(db: &mut Database) -> QuillSQLResult<()> {
-    let index_tuples = db.run(&format!(
-        "select * from {}.{}",
-        INFORMATION_SCHEMA_NAME, INFORMATION_SCHEMA_INDEXES
-    ))?;
-    for index_tuple in index_tuples.into_iter() {
-        let error = Err(QuillSQLError::Internal(format!(
-            "Failed to decode index tuple: {:?}",
-            index_tuple
-        )));
-        let ScalarValue::Varchar(Some(catalog_name)) = index_tuple.value(0)? else {
-            return error;
+    let indexes_heap = {
+        let information_schema =
+            db.catalog
+                .schemas
+                .get(INFORMATION_SCHEMA_NAME)
+                .ok_or_else(|| {
+                    QuillSQLError::Internal("information_schema not initialized".to_string())
+                })?;
+
+        information_schema
+            .tables
+            .get(INFORMATION_SCHEMA_INDEXES)
+            .ok_or_else(|| {
+                QuillSQLError::Internal("information_schema.indexes missing".to_string())
+            })?
+            .table
+            .clone()
+    };
+
+    let mut iterator = TableIterator::new(indexes_heap, ..);
+    while let Some((_rid, meta, tuple)) = iterator.next()? {
+        if meta.is_deleted {
+            continue;
+        }
+        let ScalarValue::Varchar(Some(catalog_name)) = tuple.value(0)? else {
+            return Err(QuillSQLError::Internal(
+                "invalid catalog in information_schema.indexes".to_string(),
+            ));
         };
-        let ScalarValue::Varchar(Some(table_schema_name)) = index_tuple.value(1)? else {
-            return error;
+        let ScalarValue::Varchar(Some(table_schema_name)) = tuple.value(1)? else {
+            return Err(QuillSQLError::Internal(
+                "invalid schema in information_schema.indexes".to_string(),
+            ));
         };
-        let ScalarValue::Varchar(Some(table_name)) = index_tuple.value(2)? else {
-            return error;
+        let ScalarValue::Varchar(Some(table_name)) = tuple.value(2)? else {
+            return Err(QuillSQLError::Internal(
+                "invalid table in information_schema.indexes".to_string(),
+            ));
         };
-        let ScalarValue::Varchar(Some(index_name)) = index_tuple.value(3)? else {
-            return error;
+        let ScalarValue::Varchar(Some(index_name)) = tuple.value(3)? else {
+            return Err(QuillSQLError::Internal(
+                "invalid index name in information_schema.indexes".to_string(),
+            ));
         };
-        let ScalarValue::Varchar(Some(key_schema_str)) = index_tuple.value(4)? else {
-            return error;
+        let ScalarValue::Varchar(Some(key_schema_str)) = tuple.value(4)? else {
+            return Err(QuillSQLError::Internal(
+                "invalid key schema in information_schema.indexes".to_string(),
+            ));
         };
-        let ScalarValue::UInt32(Some(internal_max_size)) = index_tuple.value(5)? else {
-            return error;
+        let ScalarValue::UInt32(Some(internal_max_size)) = tuple.value(5)? else {
+            return Err(QuillSQLError::Internal(
+                "invalid internal max size in information_schema.indexes".to_string(),
+            ));
         };
-        let ScalarValue::UInt32(Some(leaf_max_size)) = index_tuple.value(6)? else {
-            return error;
+        let ScalarValue::UInt32(Some(leaf_max_size)) = tuple.value(6)? else {
+            return Err(QuillSQLError::Internal(
+                "invalid leaf max size in information_schema.indexes".to_string(),
+            ));
         };
-        let ScalarValue::UInt32(Some(header_page_id)) = index_tuple.value(7)? else {
-            return error;
+        let ScalarValue::UInt32(Some(header_page_id)) = tuple.value(7)? else {
+            return Err(QuillSQLError::Internal(
+                "invalid header page id in information_schema.indexes".to_string(),
+            ));
         };
 
         let table_ref = TableReference::Full {

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use super::registry::{global_index_registry, global_table_registry};
+use super::registry::{IndexRegistry, TableRegistry};
 use crate::catalog::{
     key_schema_to_varchar, SchemaRef, TableStatistics, COLUMNS_SCHEMA, INDEXES_SCHEMA,
     INFORMATION_SCHEMA_COLUMNS, INFORMATION_SCHEMA_INDEXES, INFORMATION_SCHEMA_NAME,
@@ -31,6 +31,8 @@ pub struct Catalog {
     pub schemas: HashMap<String, CatalogSchema>,
     pub buffer_pool: Arc<BufferManager>,
     pub disk_manager: Arc<DiskManager>,
+    table_registry: Arc<TableRegistry>,
+    index_registry: Arc<IndexRegistry>,
 }
 
 #[derive(Debug)]
@@ -71,12 +73,27 @@ const SYSTEM_TXN_ID: TransactionId = 0;
 const SYSTEM_COMMAND_ID: CommandId = 0;
 
 impl Catalog {
-    pub fn new(buffer_pool: Arc<BufferManager>, disk_manager: Arc<DiskManager>) -> Self {
+    pub fn new(
+        buffer_pool: Arc<BufferManager>,
+        disk_manager: Arc<DiskManager>,
+        table_registry: Arc<TableRegistry>,
+        index_registry: Arc<IndexRegistry>,
+    ) -> Self {
         Self {
             schemas: HashMap::new(),
             buffer_pool,
             disk_manager,
+            table_registry,
+            index_registry,
         }
+    }
+
+    pub fn table_registry(&self) -> Arc<TableRegistry> {
+        self.table_registry.clone()
+    }
+
+    pub fn index_registry(&self) -> Arc<IndexRegistry> {
+        self.index_registry.clone()
     }
 
     pub fn create_schema(&mut self, schema_name: impl Into<String>) -> QuillSQLResult<()> {
@@ -156,7 +173,8 @@ impl Catalog {
         catalog_schema
             .tables
             .insert(table_name.clone(), catalog_table);
-        global_table_registry().register(table_ref.clone(), table_heap.clone());
+        self.table_registry
+            .register(table_ref.clone(), table_heap.clone());
 
         // update system table
         let Some(information_schema) = self.schemas.get_mut(INFORMATION_SCHEMA_NAME) else {
@@ -237,7 +255,7 @@ impl Catalog {
             return Ok(false);
         };
 
-        global_table_registry().unregister(table_ref);
+        self.table_registry.unregister(table_ref);
 
         for index_name in catalog_table.indexes.keys() {
             self.unregister_index_variants(
@@ -392,7 +410,7 @@ impl Catalog {
             .insert(index_name.clone(), b_plus_tree_index.clone());
         // register for background maintenance
         let table_heap = catalog_table.table.clone();
-        global_index_registry().register(
+        self.index_registry.register(
             table_ref.clone(),
             index_name.clone(),
             b_plus_tree_index.clone(),
@@ -547,7 +565,8 @@ impl Catalog {
                 catalog_schema_name
             )));
         };
-        global_table_registry().register(table_ref.clone(), table.table.clone());
+        self.table_registry
+            .register(table_ref.clone(), table.table.clone());
         catalog_schema.tables.insert(table_name, table);
         Ok(())
     }
@@ -577,7 +596,8 @@ impl Catalog {
         // register as well
         if let Some(idx) = catalog_table.indexes.get(&idx_name) {
             let table_heap = catalog_table.table.clone();
-            global_index_registry().register(table_ref.clone(), idx_name, idx.clone(), table_heap);
+            self.index_registry
+                .register(table_ref.clone(), idx_name, idx.clone(), table_heap);
         }
         Ok(())
     }
@@ -772,22 +792,21 @@ impl Catalog {
         original_ref: &TableReference,
         index_name: &str,
     ) {
-        let registry = global_index_registry();
-        registry.unregister(original_ref, index_name);
-        registry.unregister(
+        self.index_registry.unregister(original_ref, index_name);
+        self.index_registry.unregister(
             &TableReference::Bare {
                 table: table_name.to_string(),
             },
             index_name,
         );
-        registry.unregister(
+        self.index_registry.unregister(
             &TableReference::Partial {
                 schema: schema_name.to_string(),
                 table: table_name.to_string(),
             },
             index_name,
         );
-        registry.unregister(
+        self.index_registry.unregister(
             &TableReference::Full {
                 catalog: catalog_name.to_string(),
                 schema: schema_name.to_string(),

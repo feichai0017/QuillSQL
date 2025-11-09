@@ -7,7 +7,7 @@ use std::time::Duration;
 use log::{debug, warn};
 
 use crate::buffer::{BufferManager, PageId};
-use crate::catalog::registry::{global_index_registry, global_table_registry};
+use crate::catalog::registry::{IndexRegistry, TableRegistry};
 use crate::catalog::INFORMATION_SCHEMA_NAME;
 use crate::config::IndexVacuumConfig;
 use crate::error::QuillSQLResult;
@@ -229,12 +229,14 @@ pub fn spawn_bg_writer(
     buffer_pool: Arc<dyn BufferMaintenance>,
     interval: Option<Duration>,
     vacuum_cfg: IndexVacuumConfig,
+    index_registry: Arc<IndexRegistry>,
 ) -> Option<WorkerHandle> {
     let interval = interval?;
     if interval.is_zero() {
         return None;
     }
     let bp = buffer_pool.clone();
+    let registry = index_registry.clone();
     spawn_periodic_worker(
         "bg-writer",
         WorkerKind::BufferPoolWriter,
@@ -244,8 +246,6 @@ pub fn spawn_bg_writer(
             for page_id in dirty_ids.into_iter().take(16) {
                 let _ = bp.flush_page(page_id);
             }
-
-            let registry = global_index_registry();
             for (idx, heap) in registry.iter().take(16) {
                 let pending = idx.take_pending_garbage();
                 if pending >= vacuum_cfg.trigger_threshold {
@@ -263,6 +263,7 @@ pub fn spawn_mvcc_vacuum_worker(
     transaction_manager: Arc<dyn TxnSnapshotOps>,
     interval: Option<Duration>,
     batch_limit: usize,
+    table_registry: Arc<TableRegistry>,
 ) -> Option<WorkerHandle> {
     let interval = interval?;
     if interval.is_zero() || batch_limit == 0 {
@@ -270,7 +271,7 @@ pub fn spawn_mvcc_vacuum_worker(
     }
 
     let txn_mgr = transaction_manager.clone();
-    let tables = global_table_registry();
+    let tables = table_registry.clone();
 
     spawn_periodic_worker("mvcc-vacuum", WorkerKind::MvccVacuum, interval, move || {
         let safe_xmin = txn_mgr
