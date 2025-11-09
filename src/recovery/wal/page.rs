@@ -1,7 +1,8 @@
 use std::collections::VecDeque;
 
+use super::record::WalRecord;
 use crate::error::{QuillSQLError, QuillSQLResult};
-use crate::recovery::{Lsn, WalRecord};
+use crate::recovery::Lsn;
 
 pub const WAL_PAGE_SIZE: usize = 4096;
 const WAL_PAGE_MAGIC: u32 = 0x5157_5047; // "QWPG"
