@@ -1,6 +1,7 @@
 use crate::catalog::{Catalog, Schema, DEFAULT_SCHEMA_NAME};
 use std::sync::Arc;
 
+use crate::cost::CostEstimator;
 use crate::expression::{BinaryExpr, BinaryOp, Expr};
 use crate::plan::logical_plan::{
     Aggregate, CreateIndex, CreateTable, DropIndex, DropTable, EmptyRelation, Filter, Insert, Join,
@@ -16,9 +17,19 @@ use crate::execution::physical_plan::{
 
 pub struct PhysicalPlanner<'a> {
     pub catalog: &'a Catalog,
+    cost: CostEstimator<'a>,
 }
 
-impl PhysicalPlanner<'_> {
+impl<'a> PhysicalPlanner<'a> {
+    pub fn new(catalog: &'a Catalog) -> Self {
+        Self {
+            catalog,
+            cost: CostEstimator::new(catalog),
+        }
+    }
+}
+
+impl<'a> PhysicalPlanner<'a> {
     pub fn create_physical_plan(&self, logical_plan: LogicalPlan) -> PhysicalPlan {
         let logical_plan = Arc::new(logical_plan);
         self.build_plan(logical_plan)
@@ -184,50 +195,60 @@ impl PhysicalPlanner<'_> {
     }
 
     fn build_table_scan(&self, scan: &TableScan) -> PhysicalPlan {
-        let TableScan {
-            table_ref,
-            table_schema,
-            filters,
-            limit,
-            streaming_hint,
-            estimated_row_count: _,
-        } = scan;
-
+        // Choose the concrete scan operator by consulting the shared CostEstimator.
         let mut plan = if let Some(catalog_table) = self
             .catalog
             .schemas
-            .get(table_ref.schema().unwrap_or(DEFAULT_SCHEMA_NAME))
-            .unwrap()
-            .tables
-            .get(table_ref.table())
+            .get(scan.table_ref.schema().unwrap_or(DEFAULT_SCHEMA_NAME))
+            .and_then(|schema| schema.tables.get(scan.table_ref.table()))
         {
-            if !catalog_table.indexes.is_empty() {
-                PhysicalPlan::IndexScan(PhysicalIndexScan::new(
-                    table_ref.clone(),
-                    catalog_table.indexes.keys().next().unwrap().clone(),
-                    table_schema.clone(),
-                    ..,
-                ))
+            if let Some((index_name, _index)) = catalog_table.indexes.iter().next() {
+                self.choose_scan_operator(scan, index_name.clone())
             } else {
-                let mut op = PhysicalSeqScan::new(table_ref.clone(), table_schema.clone());
-                op.streaming_hint = *streaming_hint;
-                PhysicalPlan::SeqScan(op)
+                self.new_seq_scan(scan)
             }
         } else {
-            let mut op = PhysicalSeqScan::new(table_ref.clone(), table_schema.clone());
-            op.streaming_hint = *streaming_hint;
-            PhysicalPlan::SeqScan(op)
+            self.new_seq_scan(scan)
         };
 
-        if let Some(limit_value) = limit {
-            plan = PhysicalPlan::Limit(PhysicalLimit::new(Some(*limit_value), 0, Arc::new(plan)));
+        if let Some(limit_value) = scan.limit {
+            plan = PhysicalPlan::Limit(PhysicalLimit::new(Some(limit_value), 0, Arc::new(plan)));
         }
 
-        if let Some(predicate) = conjunction(filters) {
+        if let Some(predicate) = conjunction(&scan.filters) {
             plan = PhysicalPlan::Filter(PhysicalFilter::new(predicate, Arc::new(plan)));
         }
 
         plan
+    }
+}
+
+impl<'a> PhysicalPlanner<'a> {
+    fn new_seq_scan(&self, scan: &TableScan) -> PhysicalPlan {
+        let mut op = PhysicalSeqScan::new(scan.table_ref.clone(), scan.table_schema.clone());
+        op.streaming_hint = scan.streaming_hint;
+        PhysicalPlan::SeqScan(op)
+    }
+
+    fn choose_scan_operator(&self, scan: &TableScan, index_name: String) -> PhysicalPlan {
+        let seq_cost = self.cost.seq_scan_cost(scan);
+        let selectivity = scan.filters.first().and_then(|_| {
+            self.cost
+                .table_statistics(&scan.table_ref)
+                .map(|stats| 1.0 / (stats.row_count.max(1) as f64))
+        });
+        let index_cost = self.cost.index_scan_cost(scan, selectivity);
+
+        if index_cost < seq_cost {
+            PhysicalPlan::IndexScan(PhysicalIndexScan::new(
+                scan.table_ref.clone(),
+                index_name,
+                scan.table_schema.clone(),
+                ..,
+            ))
+        } else {
+            self.new_seq_scan(scan)
+        }
     }
 }
 

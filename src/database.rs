@@ -230,9 +230,7 @@ impl Database {
             pretty_format_logical_plan(&logical_plan)
         );
 
-        let physical_planner = PhysicalPlanner {
-            catalog: &self.catalog,
-        };
+        let physical_planner = PhysicalPlanner::new(&self.catalog);
         let physical_plan = physical_planner.create_physical_plan(optimized_logical_plan.clone());
         debug!(
             "Physical Plan: \n{}",

@@ -1,0 +1,13 @@
+statement ok
+create table analyze_t (v int)
+
+statement ok
+insert into analyze_t values (1), (2), (3)
+
+statement ok
+analyze table analyze_t
+
+query I
+select count(*) from analyze_t
+----
+3
