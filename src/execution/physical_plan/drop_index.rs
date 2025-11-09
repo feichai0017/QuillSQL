@@ -42,8 +42,11 @@ impl VolcanoExecutor for PhysicalDropIndex {
     }
 
     fn next(&self, context: &mut ExecutionContext) -> QuillSQLResult<Option<Tuple>> {
-        let owner =
-            context.find_index_owner(self.catalog.as_deref(), self.schema.as_deref(), &self.name);
+        let owner = context.catalog.find_index_owner(
+            self.catalog.as_deref(),
+            self.schema.as_deref(),
+            &self.name,
+        );
 
         let Some(table_ref) = owner else {
             if self.if_exists {
@@ -55,10 +58,14 @@ impl VolcanoExecutor for PhysicalDropIndex {
             )));
         };
 
-        context.ensure_writable(&table_ref, "DROP INDEX")?;
-        context.lock_table(table_ref.clone(), LockMode::Exclusive)?;
+        context
+            .txn_ctx()
+            .ensure_writable(&table_ref, "DROP INDEX")?;
+        context
+            .txn_ctx_mut()
+            .lock_table(table_ref.clone(), LockMode::Exclusive)?;
 
-        let dropped = context.drop_index(&table_ref, &self.name)?;
+        let dropped = context.catalog.drop_index(&table_ref, &self.name)?;
         if !dropped && !self.if_exists {
             return Err(QuillSQLError::Execution(format!(
                 "index {} does not exist",

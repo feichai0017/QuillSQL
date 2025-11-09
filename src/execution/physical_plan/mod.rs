@@ -12,6 +12,7 @@ mod insert;
 mod limit;
 mod nested_loop_join;
 mod project;
+mod scan;
 mod seq_scan;
 mod sort;
 mod update;

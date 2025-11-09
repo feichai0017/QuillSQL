@@ -20,7 +20,9 @@ impl PhysicalAnalyze {
 
 impl VolcanoExecutor for PhysicalAnalyze {
     fn init(&self, context: &mut ExecutionContext) -> QuillSQLResult<()> {
-        context.lock_table(self.table.clone(), LockMode::IntentionShared)?;
+        context
+            .txn_ctx_mut()
+            .lock_table(self.table.clone(), LockMode::IntentionShared)?;
         context.catalog.analyze_table(&self.table)?;
         Ok(())
     }

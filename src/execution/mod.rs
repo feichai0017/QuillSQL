@@ -2,7 +2,7 @@ pub mod physical_plan;
 
 use std::sync::Arc;
 
-use crate::catalog::{Schema, SchemaRef};
+use crate::catalog::SchemaRef;
 use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::execution::physical_plan::PhysicalPlan;
 use crate::expression::{Expr, ExprTrait};
@@ -38,46 +38,40 @@ pub struct ExecutionContext<'a> {
     /// Pluggable storage engine used for heap/index access.
     storage: Arc<dyn StorageEngine>,
     /// Transaction runtime wrapper (snapshot, locks, undo tracking).
-    txn: TxnRuntime<'a>,
+    txn: TxnContext<'a>,
 }
 
-impl<'a> ExecutionContext<'a> {
-    pub fn new(
-        catalog: &'a mut Catalog,
-        txn: &'a mut Transaction,
-        txn_mgr: &'a TransactionManager,
-        storage: Arc<dyn StorageEngine>,
-    ) -> Self {
-        let runtime = TxnRuntime::new(txn_mgr, txn);
+pub struct TxnContext<'a> {
+    runtime: TxnRuntime<'a>,
+}
+
+impl<'a> TxnContext<'a> {
+    fn new(manager: &'a TransactionManager, txn: &'a mut Transaction) -> Self {
         Self {
-            catalog,
-            storage,
-            txn: runtime,
+            runtime: TxnRuntime::new(manager, txn),
         }
     }
 
     pub fn command_id(&self) -> CommandId {
-        self.txn.command_id()
+        self.runtime.command_id()
     }
 
     pub fn snapshot(&self) -> &TransactionSnapshot {
-        self.txn.snapshot()
+        self.runtime.snapshot()
     }
 
-    pub fn is_visible(&self, meta: &crate::storage::page::TupleMeta) -> bool {
-        self.txn.is_visible(meta)
+    pub fn is_visible(&self, meta: &TupleMeta) -> bool {
+        self.runtime.is_visible(meta)
     }
 
-    /// Perform MVCC visibility checks (and shared locks) based on the current
-    /// isolation level, returning the tuple only if it is visible.
     pub fn read_visible_tuple(
         &mut self,
         table: &TableReference,
-        rid: crate::storage::page::RecordId,
-        meta: &crate::storage::page::TupleMeta,
+        rid: RecordId,
+        meta: &TupleMeta,
         tuple: Tuple,
     ) -> QuillSQLResult<Option<Tuple>> {
-        match self.txn().isolation_level() {
+        match self.transaction().isolation_level() {
             IsolationLevel::ReadUncommitted => {
                 if self.is_visible(meta) {
                     Ok(Some(tuple))
@@ -108,6 +102,124 @@ impl<'a> ExecutionContext<'a> {
         }
     }
 
+    pub fn lock_row_shared(
+        &mut self,
+        table: &TableReference,
+        rid: RecordId,
+        retain: bool,
+    ) -> QuillSQLResult<()> {
+        let acquired = self
+            .runtime_mut()
+            .try_lock_row(table.clone(), rid, LockMode::Shared)?;
+        if !acquired {
+            return Err(QuillSQLError::Execution(
+                "failed to acquire shared row lock".to_string(),
+            ));
+        }
+        if retain {
+            self.runtime_mut()
+                .record_shared_row_lock(table.clone(), rid);
+        } else {
+            self.runtime_mut().remove_row_key_marker(table, rid);
+        }
+        Ok(())
+    }
+
+    pub fn unlock_row_shared(
+        &mut self,
+        table: &TableReference,
+        rid: RecordId,
+    ) -> QuillSQLResult<()> {
+        self.runtime_mut().try_unlock_shared_row(table, rid)
+    }
+
+    pub fn lock_row_exclusive(
+        &mut self,
+        table: &TableReference,
+        rid: RecordId,
+    ) -> QuillSQLResult<()> {
+        if !self
+            .runtime_mut()
+            .try_lock_row(table.clone(), rid, LockMode::Exclusive)?
+        {
+            return Err(QuillSQLError::Execution(
+                "failed to acquire row exclusive lock".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn lock_table(&mut self, table: TableReference, mode: LockMode) -> QuillSQLResult<()> {
+        self.runtime_mut().lock_table(table, mode)
+    }
+
+    pub fn ensure_writable(&self, table: &TableReference, operation: &str) -> QuillSQLResult<()> {
+        if matches!(
+            self.transaction().access_mode(),
+            TransactionAccessMode::ReadOnly
+        ) {
+            warn!(
+                "read-only txn {} attempted '{}' on {}",
+                self.runtime.id(),
+                operation,
+                table.to_log_string()
+            );
+            return Err(QuillSQLError::Execution(format!(
+                "operation '{}' on table {} is not allowed in READ ONLY transaction",
+                operation,
+                table.to_log_string()
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn isolation_level(&self) -> IsolationLevel {
+        self.transaction().isolation_level()
+    }
+
+    pub fn transaction(&self) -> &Transaction {
+        self.runtime.transaction()
+    }
+
+    pub fn transaction_mut(&mut self) -> &mut Transaction {
+        self.runtime.transaction_mut()
+    }
+
+    pub fn manager(&self) -> &TransactionManager {
+        self.runtime.manager()
+    }
+
+    pub fn txn_runtime(&self) -> &TxnRuntime<'a> {
+        &self.runtime
+    }
+
+    pub fn txn_id(&self) -> crate::transaction::TransactionId {
+        self.runtime.id()
+    }
+
+    pub fn unlock_row(&self, table: &TableReference, rid: RecordId) {
+        self.runtime.unlock_row(table, rid);
+    }
+
+    fn runtime_mut(&mut self) -> &mut TxnRuntime<'a> {
+        &mut self.runtime
+    }
+}
+
+impl<'a> ExecutionContext<'a> {
+    pub fn new(
+        catalog: &'a mut Catalog,
+        txn: &'a mut Transaction,
+        txn_mgr: &'a TransactionManager,
+        storage: Arc<dyn StorageEngine>,
+    ) -> Self {
+        Self {
+            catalog,
+            storage,
+            txn: TxnContext::new(txn_mgr, txn),
+        }
+    }
+
     /// Evaluate an expression expected to produce a boolean result.
     pub fn eval_predicate(&self, expr: &Expr, tuple: &Tuple) -> QuillSQLResult<bool> {
         match expr.evaluate(tuple)? {
@@ -135,8 +247,8 @@ impl<'a> ExecutionContext<'a> {
             self.catalog,
             table,
             tuple,
-            self.txn_id(),
-            self.command_id(),
+            self.txn.txn_id(),
+            self.txn.command_id(),
         )?;
 
         let mut index_links = Vec::new();
@@ -147,7 +259,8 @@ impl<'a> ExecutionContext<'a> {
             }
         }
 
-        self.txn_mut()
+        self.txn
+            .transaction_mut()
             .push_insert_undo(table_heap, rid, index_links);
         Ok(())
     }
@@ -161,8 +274,9 @@ impl<'a> ExecutionContext<'a> {
         prev_tuple: Tuple,
     ) -> QuillSQLResult<()> {
         self.storage
-            .mvcc_delete(&table_heap, rid, self.txn_id(), self.command_id())?;
-        self.txn_mut()
+            .mvcc_delete(&table_heap, rid, self.txn.txn_id(), self.txn.command_id())?;
+        self.txn
+            .transaction_mut()
             .push_delete_undo(table_heap, rid, prev_meta, prev_tuple);
         Ok(())
     }
@@ -181,8 +295,8 @@ impl<'a> ExecutionContext<'a> {
             &table_heap,
             rid,
             new_tuple.clone(),
-            self.txn_id(),
-            self.command_id(),
+            self.txn.txn_id(),
+            self.txn.command_id(),
         )?;
 
         let mut new_keys = Vec::new();
@@ -193,7 +307,8 @@ impl<'a> ExecutionContext<'a> {
             }
         }
 
-        self.txn_mut()
+        self.txn
+            .transaction_mut()
             .push_update_undo(table_heap, rid, new_rid, prev_meta, prev_tuple, new_keys);
         Ok(())
     }
@@ -207,112 +322,16 @@ impl<'a> ExecutionContext<'a> {
         table_heap: &Arc<TableHeap>,
         observed_meta: &crate::storage::page::TupleMeta,
     ) -> QuillSQLResult<Option<(crate::storage::page::TupleMeta, Tuple)>> {
-        if !self.is_visible(observed_meta) {
+        if !self.txn.is_visible(observed_meta) {
             return Ok(None);
         }
-        self.lock_row_exclusive(table, rid)?;
+        self.txn.lock_row_exclusive(table, rid)?;
         let (current_meta, current_tuple) = table_heap.full_tuple(rid)?;
-        if !self.is_visible(&current_meta) {
-            self.unlock_row(table, rid);
+        if !self.txn.is_visible(&current_meta) {
+            self.txn.unlock_row(table, rid);
             return Ok(None);
         }
         Ok(Some((current_meta, current_tuple)))
-    }
-
-    pub fn lock_table(&mut self, table: TableReference, mode: LockMode) -> QuillSQLResult<()> {
-        self.txn.lock_table(table, mode)
-    }
-
-    pub fn lock_row_shared(
-        &mut self,
-        table: &TableReference,
-        rid: crate::storage::page::RecordId,
-        retain: bool,
-    ) -> QuillSQLResult<()> {
-        let acquired = self
-            .txn
-            .try_lock_row(table.clone(), rid, LockMode::Shared)?;
-        if !acquired {
-            return Err(QuillSQLError::Execution(
-                "failed to acquire shared row lock".to_string(),
-            ));
-        }
-        if retain {
-            self.txn.record_shared_row_lock(table.clone(), rid);
-        } else {
-            // Track transient shared locks so subsequent attempts still go through the lock manager.
-            self.txn.remove_row_key_marker(table, rid);
-        }
-        Ok(())
-    }
-
-    pub fn unlock_row_shared(
-        &mut self,
-        table: &TableReference,
-        rid: crate::storage::page::RecordId,
-    ) -> QuillSQLResult<()> {
-        self.txn.try_unlock_shared_row(table, rid)
-    }
-
-    pub fn lock_row_exclusive(
-        &mut self,
-        table: &TableReference,
-        rid: crate::storage::page::RecordId,
-    ) -> QuillSQLResult<()> {
-        if !self
-            .txn
-            .try_lock_row(table.clone(), rid, LockMode::Exclusive)?
-        {
-            return Err(QuillSQLError::Execution(
-                "failed to acquire row exclusive lock".to_string(),
-            ));
-        }
-        Ok(())
-    }
-
-    /// Ensure that the current transaction is allowed to perform a write on the given table.
-    pub fn ensure_writable(&self, table: &TableReference, operation: &str) -> QuillSQLResult<()> {
-        if matches!(
-            self.txn.transaction().access_mode(),
-            TransactionAccessMode::ReadOnly
-        ) {
-            warn!(
-                "read-only txn {} attempted '{}' on {}",
-                self.txn.id(),
-                operation,
-                table.to_log_string()
-            );
-            return Err(QuillSQLError::Execution(format!(
-                "operation '{}' on table {} is not allowed in READ ONLY transaction",
-                operation,
-                table.to_log_string()
-            )));
-        }
-        Ok(())
-    }
-
-    pub fn txn(&self) -> &Transaction {
-        self.txn.transaction()
-    }
-
-    pub fn txn_mut(&mut self) -> &mut Transaction {
-        self.txn.transaction_mut()
-    }
-
-    pub fn txn_manager(&self) -> &TransactionManager {
-        self.txn.manager()
-    }
-
-    pub fn txn_runtime(&self) -> &TxnRuntime<'a> {
-        &self.txn
-    }
-
-    pub fn txn_id(&self) -> crate::transaction::TransactionId {
-        self.txn.id()
-    }
-
-    pub fn unlock_row(&self, table: &TableReference, rid: crate::storage::page::RecordId) {
-        self.txn.unlock_row(table, rid);
     }
 
     /// Look up the table heap through the storage engine.
@@ -328,50 +347,12 @@ impl<'a> ExecutionContext<'a> {
         self.storage.table_indexes(self.catalog, table)
     }
 
-    /// Non-allocating helper used by DDL to test for table existence.
-    pub fn try_table_heap(&self, table: &TableReference) -> Option<Arc<TableHeap>> {
-        self.catalog.try_table_heap(table)
+    pub fn txn_ctx(&self) -> &TxnContext<'a> {
+        &self.txn
     }
 
-    /// Create a table (used by the CREATE TABLE physical operator).
-    pub fn create_table(
-        &mut self,
-        table: TableReference,
-        schema: Arc<Schema>,
-    ) -> QuillSQLResult<()> {
-        self.catalog.create_table(table, schema).map(|_| ())
-    }
-
-    /// Drop a table, returning whether it existed.
-    pub fn drop_table(&mut self, table: &TableReference) -> QuillSQLResult<bool> {
-        self.catalog.drop_table(table)
-    }
-
-    /// Create an index (used by CREATE INDEX).
-    pub fn create_index(
-        &mut self,
-        name: String,
-        table: &TableReference,
-        key_schema: Arc<Schema>,
-    ) -> QuillSQLResult<()> {
-        self.catalog
-            .create_index(name, table, key_schema)
-            .map(|_| ())
-    }
-
-    /// Drop an index, returning whether it existed.
-    pub fn drop_index(&mut self, table: &TableReference, name: &str) -> QuillSQLResult<bool> {
-        self.catalog.drop_index(table, name)
-    }
-
-    /// Resolve the table that owns `catalog.schema.index`.
-    pub fn find_index_owner(
-        &self,
-        catalog: Option<&str>,
-        schema: Option<&str>,
-        name: &str,
-    ) -> Option<TableReference> {
-        self.catalog.find_index_owner(catalog, schema, name)
+    pub fn txn_ctx_mut(&mut self) -> &mut TxnContext<'a> {
+        &mut self.txn
     }
 }
 

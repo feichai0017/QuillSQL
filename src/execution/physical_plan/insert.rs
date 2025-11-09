@@ -45,8 +45,9 @@ impl VolcanoExecutor for PhysicalInsert {
         debug!("init insert executor");
         self.input.init(context)?;
         self.insert_rows.store(0, Ordering::SeqCst);
-        context.ensure_writable(&self.table, "INSERT")?;
+        context.txn_ctx().ensure_writable(&self.table, "INSERT")?;
         if context
+            .txn_ctx_mut()
             .lock_table(self.table.clone(), LockMode::IntentionExclusive)
             .is_err()
         {

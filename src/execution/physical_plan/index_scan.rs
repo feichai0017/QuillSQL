@@ -1,9 +1,9 @@
-use std::collections::VecDeque;
 use std::ops::{Bound, RangeBounds};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
 
+use super::scan::ScanPrefetch;
 use crate::catalog::SchemaRef;
 use crate::error::QuillSQLError;
 use crate::execution::{ExecutionContext, VolcanoExecutor};
@@ -26,7 +26,7 @@ pub struct PhysicalIndexScan {
     end_bound: Bound<Tuple>,
     iterator: Mutex<Option<TreeIndexIterator>>,
     table_heap: Mutex<Option<Arc<TableHeap>>>,
-    buffer: Mutex<VecDeque<(RecordId, TupleMeta, Tuple)>>,
+    prefetch: ScanPrefetch,
     invisible_hits: Mutex<usize>,
 }
 
@@ -45,7 +45,7 @@ impl PhysicalIndexScan {
             end_bound: range.end_bound().cloned(),
             iterator: Mutex::new(None),
             table_heap: Mutex::new(None),
-            buffer: Mutex::new(VecDeque::new()),
+            prefetch: ScanPrefetch::new(INDEX_PREFETCH_BATCH),
             invisible_hits: Mutex::new(0),
         }
     }
@@ -58,30 +58,22 @@ impl PhysicalIndexScan {
                 .ok_or_else(|| QuillSQLError::Execution("table heap not initialized".to_string()))?
         };
 
-        let mut fetched = VecDeque::with_capacity(INDEX_PREFETCH_BATCH);
-        {
+        self.prefetch.refill(|limit, out| {
             let mut iter_guard = self.iterator.lock();
             let iterator = iter_guard.as_mut().ok_or_else(|| {
                 QuillSQLError::Execution("index iterator not created".to_string())
             })?;
-            for _ in 0..INDEX_PREFETCH_BATCH {
+            for _ in 0..limit {
                 match iterator.next()? {
                     Some(rid) => {
                         let (meta, tuple) = table_heap.full_tuple(rid)?;
-                        fetched.push_back((rid, meta, tuple));
+                        out.push_back((rid, meta, tuple));
                     }
                     None => break,
                 }
             }
-        }
-
-        if fetched.is_empty() {
-            return Ok(false);
-        }
-
-        let mut buffer = self.buffer.lock();
-        buffer.extend(fetched);
-        Ok(true)
+            Ok(())
+        })
     }
 
     fn handle_invisible(&self, context: &mut ExecutionContext) -> QuillSQLResult<()> {
@@ -103,19 +95,23 @@ impl PhysicalIndexScan {
         meta: TupleMeta,
         tuple: Tuple,
     ) -> QuillSQLResult<Option<Tuple>> {
-        context.read_visible_tuple(&self.table_ref, rid, &meta, tuple)
+        context
+            .txn_ctx_mut()
+            .read_visible_tuple(&self.table_ref, rid, &meta, tuple)
     }
 }
 
 impl VolcanoExecutor for PhysicalIndexScan {
     fn init(&self, context: &mut ExecutionContext) -> QuillSQLResult<()> {
         if matches!(
-            context.txn().isolation_level(),
+            context.txn_ctx().isolation_level(),
             IsolationLevel::ReadCommitted
                 | IsolationLevel::RepeatableRead
                 | IsolationLevel::Serializable
         ) {
-            context.lock_table(self.table_ref.clone(), LockMode::IntentionShared)?;
+            context
+                .txn_ctx_mut()
+                .lock_table(self.table_ref.clone(), LockMode::IntentionShared)?;
         }
 
         let table_heap = context.table_heap(&self.table_ref)?;
@@ -137,7 +133,7 @@ impl VolcanoExecutor for PhysicalIndexScan {
             *heap_guard = Some(table_heap);
         }
 
-        self.buffer.lock().clear();
+        self.prefetch.clear();
         *self.invisible_hits.lock() = 0;
 
         Ok(())
@@ -145,10 +141,7 @@ impl VolcanoExecutor for PhysicalIndexScan {
 
     fn next(&self, context: &mut ExecutionContext) -> QuillSQLResult<Option<Tuple>> {
         loop {
-            if let Some((rid, meta, tuple)) = {
-                let mut buffer = self.buffer.lock();
-                buffer.pop_front()
-            } {
+            if let Some((rid, meta, tuple)) = self.prefetch.pop_front() {
                 if meta.is_deleted {
                     self.handle_invisible(context)?;
                     continue;

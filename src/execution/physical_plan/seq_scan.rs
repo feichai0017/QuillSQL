@@ -1,7 +1,6 @@
-use std::collections::VecDeque;
-
 use parking_lot::Mutex;
 
+use super::scan::ScanPrefetch;
 use crate::catalog::SchemaRef;
 use crate::error::QuillSQLError;
 use crate::storage::page::{RecordId, TupleMeta};
@@ -23,7 +22,7 @@ pub struct PhysicalSeqScan {
     pub streaming_hint: Option<bool>,
 
     iterator: Mutex<Option<TableIterator>>,
-    prefetch: Mutex<VecDeque<(RecordId, TupleMeta, Tuple)>>,
+    prefetch: ScanPrefetch,
 }
 
 impl PhysicalSeqScan {
@@ -33,30 +32,8 @@ impl PhysicalSeqScan {
             table_schema,
             streaming_hint: None,
             iterator: Mutex::new(None),
-            prefetch: Mutex::new(VecDeque::new()),
+            prefetch: ScanPrefetch::new(PREFETCH_BATCH),
         }
-    }
-
-    fn refill_buffer(&self) -> QuillSQLResult<bool> {
-        let mut fetched = VecDeque::with_capacity(PREFETCH_BATCH);
-        {
-            let mut guard = self.iterator.lock();
-            let iterator = guard.as_mut().ok_or_else(|| {
-                QuillSQLError::Execution("table iterator not created".to_string())
-            })?;
-            for _ in 0..PREFETCH_BATCH {
-                match iterator.next()? {
-                    Some(entry) => fetched.push_back(entry),
-                    None => break,
-                }
-            }
-        }
-        if fetched.is_empty() {
-            return Ok(false);
-        }
-        let mut buffer = self.prefetch.lock();
-        buffer.extend(fetched);
-        Ok(true)
     }
 
     fn consume_row(
@@ -66,13 +43,17 @@ impl PhysicalSeqScan {
         meta: TupleMeta,
         tuple: Tuple,
     ) -> QuillSQLResult<Option<Tuple>> {
-        context.read_visible_tuple(&self.table, rid, &meta, tuple)
+        context
+            .txn_ctx_mut()
+            .read_visible_tuple(&self.table, rid, &meta, tuple)
     }
 }
 
 impl VolcanoExecutor for PhysicalSeqScan {
     fn init(&self, context: &mut ExecutionContext) -> QuillSQLResult<()> {
-        context.lock_table(self.table.clone(), LockMode::IntentionShared)?;
+        context
+            .txn_ctx_mut()
+            .lock_table(self.table.clone(), LockMode::IntentionShared)?;
         let table_heap = context.table_heap(&self.table)?;
         let iter = if let Some(h) = self.streaming_hint {
             TableIterator::new_with_hint(table_heap, .., Some(h))
@@ -83,23 +64,32 @@ impl VolcanoExecutor for PhysicalSeqScan {
             let mut guard = self.iterator.lock();
             *guard = Some(iter);
         }
-        self.prefetch.lock().clear();
+        self.prefetch.clear();
         Ok(())
     }
 
     fn next(&self, context: &mut ExecutionContext) -> QuillSQLResult<Option<Tuple>> {
         loop {
-            if let Some((rid, meta, tuple)) = {
-                let mut buffer = self.prefetch.lock();
-                buffer.pop_front()
-            } {
+            if let Some((rid, meta, tuple)) = self.prefetch.pop_front() {
                 if let Some(result) = self.consume_row(context, rid, meta, tuple)? {
                     return Ok(Some(result));
                 }
                 continue;
             }
 
-            if !self.refill_buffer()? {
+            if !self.prefetch.refill(|limit, out| {
+                let mut guard = self.iterator.lock();
+                let iterator = guard.as_mut().ok_or_else(|| {
+                    QuillSQLError::Execution("table iterator not created".to_string())
+                })?;
+                for _ in 0..limit {
+                    match iterator.next()? {
+                        Some(entry) => out.push_back(entry),
+                        None => break,
+                    }
+                }
+                Ok(())
+            })? {
                 return Ok(None);
             }
         }

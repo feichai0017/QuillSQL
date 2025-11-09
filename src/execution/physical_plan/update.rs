@@ -43,10 +43,11 @@ impl PhysicalUpdate {
 impl VolcanoExecutor for PhysicalUpdate {
     fn init(&self, context: &mut ExecutionContext) -> QuillSQLResult<()> {
         self.update_rows.store(0, Ordering::SeqCst);
-        context.ensure_writable(&self.table, "UPDATE")?;
+        context.txn_ctx().ensure_writable(&self.table, "UPDATE")?;
         let table_heap = context.table_heap(&self.table)?;
         *self.table_iterator.lock().unwrap() = Some(TableIterator::new(table_heap.clone(), ..));
         context
+            .txn_ctx_mut()
             .lock_table(self.table.clone(), LockMode::IntentionExclusive)
             .map_err(|_| {
                 QuillSQLError::Execution(format!(
@@ -70,7 +71,8 @@ impl VolcanoExecutor for PhysicalUpdate {
             if let Some((rid, meta, tuple)) = table_iterator.next()? {
                 // Skip versions that were created by this command so we do not
                 // immediately reprocess the freshly inserted MVCC tuple and loop forever.
-                if meta.insert_txn_id == context.txn_id() && meta.insert_cid == context.command_id()
+                if meta.insert_txn_id == context.txn_ctx().txn_id()
+                    && meta.insert_cid == context.txn_ctx().command_id()
                 {
                     continue;
                 }
