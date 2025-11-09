@@ -4,6 +4,7 @@ use crate::transaction::{
     IsolationLevel, LockMode, Transaction, TransactionManager, TransactionSnapshot,
 };
 use crate::utils::table_ref::TableReference;
+use std::sync::Arc;
 
 use crate::storage::page::RecordId;
 
@@ -12,13 +13,13 @@ use crate::storage::page::RecordId;
 /// MVCC/2PL details inside the transaction layer.
 pub struct TxnRuntime<'a> {
     txn: &'a mut Transaction,
-    manager: &'a TransactionManager,
+    manager: Arc<TransactionManager>,
     snapshot: TransactionSnapshot,
     command_id: crate::transaction::CommandId,
 }
 
 impl<'a> TxnRuntime<'a> {
-    pub fn new(manager: &'a TransactionManager, txn: &'a mut Transaction) -> Self {
+    pub fn new(manager: Arc<TransactionManager>, txn: &'a mut Transaction) -> Self {
         let command_id = txn.begin_command();
         let snapshot = match txn.isolation_level() {
             IsolationLevel::RepeatableRead | IsolationLevel::Serializable => {
@@ -65,7 +66,7 @@ impl<'a> TxnRuntime<'a> {
     }
 
     pub fn manager(&self) -> &TransactionManager {
-        self.manager
+        self.manager.as_ref()
     }
 
     pub fn is_visible(&self, meta: &TupleMeta) -> bool {
@@ -88,25 +89,6 @@ impl<'a> TxnRuntime<'a> {
     ) -> QuillSQLResult<bool> {
         self.manager
             .try_acquire_row_lock(self.txn, table, rid, mode)
-    }
-
-    pub fn record_shared_row_lock(&self, table: TableReference, rid: RecordId) {
-        self.manager
-            .record_shared_row_lock(self.txn.id(), table, rid);
-    }
-
-    pub fn remove_row_key_marker(&self, table: &TableReference, rid: RecordId) {
-        self.manager
-            .remove_row_key_marker(self.txn.id(), table, rid);
-    }
-
-    pub fn try_unlock_shared_row(
-        &self,
-        table: &TableReference,
-        rid: RecordId,
-    ) -> QuillSQLResult<()> {
-        self.manager
-            .try_unlock_shared_row(self.txn.id(), table, rid)
     }
 
     pub fn unlock_row(&self, table: &TableReference, rid: RecordId) {

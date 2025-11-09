@@ -20,7 +20,6 @@ struct HeldLocks {
     tables: Vec<(TableReference, LockMode)>,
     rows: Vec<(TableReference, RecordId, LockMode)>,
     row_keys: HashSet<(TableReference, RecordId)>,
-    shared_rows: HashSet<(TableReference, RecordId)>,
 }
 
 pub struct TransactionManager {
@@ -304,55 +303,11 @@ impl TransactionManager {
         }
     }
 
-    pub fn remove_row_key_marker(
-        &self,
-        txn_id: TransactionId,
-        table: &TableReference,
-        rid: RecordId,
-    ) {
-        if let Some(mut entry) = self.held_locks.get_mut(&txn_id) {
-            entry.row_keys.remove(&(table.clone(), rid));
-        }
-    }
-
-    pub fn record_shared_row_lock(
-        &self,
-        txn_id: TransactionId,
-        table: TableReference,
-        rid: RecordId,
-    ) {
-        let mut entry = self.held_locks.entry(txn_id).or_default();
-        entry.shared_rows.insert((table, rid));
-    }
-
-    pub fn remove_shared_row_lock(
-        &self,
-        txn_id: TransactionId,
-        table: &TableReference,
-        rid: RecordId,
-    ) {
-        if let Some(mut entry) = self.held_locks.get_mut(&txn_id) {
-            entry.shared_rows.remove(&(table.clone(), rid));
-        }
-    }
-
-    pub fn try_unlock_shared_row(
-        &self,
-        txn_id: TransactionId,
-        table: &TableReference,
-        rid: RecordId,
-    ) -> QuillSQLResult<()> {
-        let _ = self.lock_manager.unlock_row_raw(txn_id, table.clone(), rid);
-        self.remove_shared_row_lock(txn_id, table, rid);
-        Ok(())
-    }
-
     pub fn unlock_row(&self, txn_id: TransactionId, table: &TableReference, rid: RecordId) {
         if self.lock_manager.unlock_row_raw(txn_id, table.clone(), rid) {
             if let Some(mut entry) = self.held_locks.get_mut(&txn_id) {
                 entry.row_keys.remove(&(table.clone(), rid));
                 entry.rows.retain(|(t, r, _)| !(t == table && *r == rid));
-                entry.shared_rows.remove(&(table.clone(), rid));
             }
         }
     }
@@ -360,9 +315,6 @@ impl TransactionManager {
     fn release_all_locks(&self, txn_id: TransactionId) {
         if let Some((_, mut held)) = self.held_locks.remove(&txn_id) {
             for (table, rid, _) in held.rows.drain(..).rev() {
-                let _ = self.lock_manager.unlock_row_raw(txn_id, table, rid);
-            }
-            for (table, rid) in held.shared_rows.drain() {
                 let _ = self.lock_manager.unlock_row_raw(txn_id, table, rid);
             }
             for (table, _) in held.tables.drain(..).rev() {

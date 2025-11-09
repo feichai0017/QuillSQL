@@ -288,7 +288,7 @@ impl Database {
                     let context = crate::execution::ExecutionContext::new(
                         &mut self.catalog,
                         txn,
-                        &self.transaction_manager,
+                        self.transaction_manager.clone(),
                         self.storage_engine.clone(),
                     );
                     let mut engine = ExecutionEngine { context };

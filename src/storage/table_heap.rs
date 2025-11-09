@@ -4,7 +4,7 @@ use crate::config::TableScanConfig;
 use crate::storage::codec::TablePageCodec;
 use crate::storage::disk_scheduler::{DiskCommandResultReceiver, DiskScheduler};
 use crate::storage::page::{RecordId, TablePage, TupleMeta, INVALID_RID};
-use crate::transaction::{CommandId, TransactionId, INVALID_COMMAND_ID};
+use crate::transaction::{CommandId, TransactionId};
 use crate::{
     buffer::BufferManager,
     error::{QuillSQLError, QuillSQLResult},
@@ -134,126 +134,6 @@ impl TableHeap {
             self.last_page_id.store(new_page_id, Ordering::SeqCst);
             current_page_id = new_page_id;
         }
-    }
-
-    /// MVCC helper: insert a new tuple version with optional link to a previous version.
-    pub fn mvcc_insert_version(
-        &self,
-        tuple: &Tuple,
-        txn_id: TransactionId,
-        cid: CommandId,
-        prev_version: Option<RecordId>,
-    ) -> QuillSQLResult<(RecordId, TupleMeta)> {
-        let mut meta = TupleMeta::new(txn_id, cid);
-        meta.set_prev_version(prev_version);
-        let rid = self.insert_tuple(&meta, tuple)?;
-        Ok((rid, meta))
-    }
-
-    /// Create a new tuple version for UPDATE while marking the source version deleted.
-    /// Returns the RecordId of the new version and the original metadata (pre-change) for undo.
-    pub fn mvcc_update(
-        &self,
-        current_rid: RecordId,
-        new_tuple: Tuple,
-        txn_id: TransactionId,
-        cid: CommandId,
-    ) -> QuillSQLResult<(RecordId, TupleMeta)> {
-        let (current_meta, _existing_tuple) = self.full_tuple(current_rid)?;
-        if current_meta.is_deleted && current_meta.next_version.is_some() {
-            return Err(QuillSQLError::Execution(format!(
-                "tuple {} has already been updated",
-                current_rid
-            )));
-        }
-
-        // Capture previous metadata for undo before mutation.
-        let prev_meta = current_meta;
-
-        // Insert new physical version linked to the current record.
-        let (new_rid, mut new_meta) =
-            self.mvcc_insert_version(&new_tuple, txn_id, cid, Some(current_rid))?;
-        new_meta.set_prev_version(Some(current_rid));
-
-        // Update the source version metadata to mark it deleted and link forward.
-        let mut updated_meta = current_meta;
-        updated_meta.mark_deleted(txn_id, cid);
-        updated_meta.set_next_version(Some(new_rid));
-        self.update_tuple_meta(updated_meta, current_rid)?;
-
-        Ok((new_rid, prev_meta))
-    }
-
-    /// Mark a tuple version as deleted for MVCC-aware DELETE operations.
-    /// Returns the previous metadata prior to marking deleted (for undo purposes).
-    pub fn mvcc_mark_deleted(
-        &self,
-        rid: RecordId,
-        txn_id: TransactionId,
-        cid: CommandId,
-    ) -> QuillSQLResult<TupleMeta> {
-        let (mut current_meta, _) = self.full_tuple(rid)?;
-        if current_meta.is_deleted {
-            return Ok(current_meta);
-        }
-        let prev_meta = current_meta;
-        current_meta.mark_deleted(txn_id, cid);
-        self.update_tuple_meta(current_meta, rid)?;
-        Ok(prev_meta)
-    }
-
-    /// Remove a heap version created by an aborted operation. For safety this currently
-    /// expects the version to live at the tail of the page; otherwise it simply marks the slot
-    /// deleted and leaves full reclamation to vacuum.
-    #[allow(dead_code)]
-    pub fn mvcc_remove_version(&self, rid: RecordId) -> QuillSQLResult<()> {
-        let mut page_guard = self.buffer_pool.fetch_page_write(rid.page_id)?;
-        let mut table_page = TablePageCodec::decode(page_guard.data(), self.schema.clone())?.0;
-        table_page.set_lsn(page_guard.lsn());
-
-        let slot = rid.slot_num as usize;
-        if slot >= table_page.header.num_tuples as usize {
-            return Ok(());
-        }
-
-        if slot + 1 != table_page.header.num_tuples as usize {
-            // Non-tail removal: mark deleted and let vacuum reclaim later.
-            let mut meta = table_page.header.tuple_infos[slot].meta;
-            if !meta.is_deleted {
-                meta.mark_deleted(0, INVALID_COMMAND_ID);
-                table_page.update_tuple_meta(meta, slot as u16)?;
-                self.write_back_page(&mut page_guard, &mut table_page)?;
-            }
-            return Ok(());
-        }
-
-        table_page.reclaim_tuple(slot as u16)?;
-        self.write_back_page(&mut page_guard, &mut table_page)
-    }
-
-    pub fn update_tuple(&self, rid: RecordId, tuple: Tuple) -> QuillSQLResult<()> {
-        let mut page_guard = self.buffer_pool.fetch_page_write(rid.page_id)?;
-        let mut table_page = TablePageCodec::decode(page_guard.data(), self.schema.clone())?.0;
-        table_page.set_lsn(page_guard.lsn());
-
-        let slot = rid.slot_num as u16;
-        let (old_meta, old_tuple) = table_page.tuple(slot)?;
-        let old_tuple_bytes = TupleCodec::encode(&old_tuple);
-        let new_tuple_bytes = TupleCodec::encode(&tuple);
-        table_page.update_tuple(tuple, rid.slot_num as u16)?;
-        let new_meta = table_page.header.tuple_infos[slot as usize].meta;
-        let relation = self.relation_ident();
-        self.append_heap_record(HeapRecordPayload::Update(HeapUpdatePayload {
-            relation,
-            page_id: rid.page_id,
-            slot_id: slot,
-            op_txn_id: new_meta.insert_txn_id,
-            new_tuple_meta: TupleMetaRepr::from(new_meta),
-            new_tuple_data: new_tuple_bytes,
-            old_tuple_meta: Some(TupleMetaRepr::from(old_meta)),
-            old_tuple_data: Some(old_tuple_bytes),
-        }))?;
-        self.write_back_page(&mut page_guard, &mut table_page)
     }
 
     pub fn update_tuple_meta(&self, meta: TupleMeta, rid: RecordId) -> QuillSQLResult<()> {
@@ -468,8 +348,12 @@ impl TableHeap {
         txn_id: TransactionId,
         cid: CommandId,
     ) -> QuillSQLResult<()> {
-        let _ = self.mvcc_mark_deleted(rid, txn_id, cid)?;
-        Ok(())
+        let mut meta = self.tuple_meta(rid)?;
+        if meta.is_deleted {
+            return Ok(());
+        }
+        meta.mark_deleted(txn_id, cid);
+        self.update_tuple_meta(meta, rid)
     }
 
     /// Attempt to reclaim the tuple at `rid` if `predicate` returns true for the current metadata.
@@ -963,45 +847,6 @@ mod tests {
         let (meta, tuple) = table_heap.full_tuple(rid3).unwrap();
         assert_eq!(meta, meta3);
         assert_eq!(tuple.data, vec![3i8.into(), 3i16.into()]);
-    }
-
-    #[test]
-    fn mvcc_update_creates_version_chain() {
-        let temp_dir = TempDir::new().unwrap();
-        let temp_path = temp_dir.path().join("mvcc_test.db");
-
-        let schema = Arc::new(Schema::new(vec![
-            Column::new("id", DataType::Int32, false),
-            Column::new("val", DataType::Int32, false),
-        ]));
-        let disk_manager = DiskManager::try_new(temp_path).unwrap();
-        let disk_scheduler = Arc::new(DiskScheduler::new(Arc::new(disk_manager)));
-        let buffer_pool = Arc::new(BufferManager::new(256, disk_scheduler));
-        let table_heap = TableHeap::try_new(schema.clone(), buffer_pool).unwrap();
-
-        let base_tuple = Tuple::new(
-            schema.clone(),
-            vec![ScalarValue::Int32(Some(1)), ScalarValue::Int32(Some(10))],
-        );
-        let rid = table_heap
-            .insert_tuple(&super::TupleMeta::new(1, 0), &base_tuple)
-            .expect("insert base");
-
-        let updated_tuple = Tuple::new(
-            schema.clone(),
-            vec![ScalarValue::Int32(Some(1)), ScalarValue::Int32(Some(20))],
-        );
-        let (new_rid, _) = table_heap
-            .mvcc_update(rid, updated_tuple, 2, 0)
-            .expect("mvcc update");
-
-        let old_meta = table_heap.tuple_meta(rid).expect("old meta");
-        assert!(old_meta.is_deleted);
-        assert_eq!(old_meta.next_version, Some(new_rid));
-
-        let new_meta = table_heap.tuple_meta(new_rid).expect("new meta");
-        assert_eq!(new_meta.prev_version, Some(rid));
-        assert!(!new_meta.is_deleted);
     }
 
     #[test]

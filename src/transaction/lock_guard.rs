@@ -50,13 +50,12 @@ impl Drop for RowLockGuard {
 
 pub enum TxnReadGuard {
     Temporary(RowLockGuard),
-    Retained,
 }
 
 impl TxnReadGuard {
     pub fn release(self) {
-        if let TxnReadGuard::Temporary(guard) = self {
-            guard.release();
+        match self {
+            TxnReadGuard::Temporary(guard) => guard.release(),
         }
     }
 }

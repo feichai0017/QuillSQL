@@ -1,7 +1,4 @@
 pub mod physical_plan;
-
-use std::sync::Arc;
-
 use crate::catalog::SchemaRef;
 use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::execution::physical_plan::PhysicalPlan;
@@ -9,6 +6,7 @@ use crate::expression::{Expr, ExprTrait};
 use crate::storage::{
     engine::StorageEngine,
     index::btree_index::BPlusTreeIndex,
+    mvcc_heap::MvccHeap,
     page::{RecordId, TupleMeta},
     table_heap::TableHeap,
     tuple::Tuple,
@@ -21,6 +19,8 @@ use crate::utils::scalar::ScalarValue;
 use crate::{catalog::Catalog, transaction::LockMode, utils::table_ref::TableReference};
 use log::warn;
 use sqlparser::ast::TransactionAccessMode;
+use std::sync::Arc;
+
 pub trait VolcanoExecutor {
     fn init(&self, _context: &mut ExecutionContext) -> QuillSQLResult<()> {
         Ok(())
@@ -48,10 +48,11 @@ pub struct TxnContext<'a> {
 }
 
 impl<'a> TxnContext<'a> {
-    fn new(manager: &'a TransactionManager, txn: &'a mut Transaction) -> Self {
+    fn new(manager: Arc<TransactionManager>, txn: &'a mut Transaction) -> Self {
+        let lock_manager = manager.lock_manager_arc();
         Self {
             runtime: TxnRuntime::new(manager, txn),
-            lock_manager: manager.lock_manager_arc(),
+            lock_manager,
         }
     }
 
@@ -82,18 +83,8 @@ impl<'a> TxnContext<'a> {
                     Ok(None)
                 }
             }
-            IsolationLevel::ReadCommitted => {
-                let guard = self.acquire_shared_guard(table, rid, false)?;
-                let visible = self.is_visible(meta);
-                guard.release();
-                if visible {
-                    Ok(Some(tuple))
-                } else {
-                    Ok(None)
-                }
-            }
-            IsolationLevel::RepeatableRead | IsolationLevel::Serializable => {
-                let guard = self.acquire_shared_guard(table, rid, true)?;
+            _ => {
+                let guard = self.acquire_shared_guard(table, rid)?;
                 let visible = self.is_visible(meta);
                 guard.release();
                 if visible {
@@ -109,7 +100,6 @@ impl<'a> TxnContext<'a> {
         &mut self,
         table: &TableReference,
         rid: RecordId,
-        retain: bool,
     ) -> QuillSQLResult<TxnReadGuard> {
         if !self
             .lock_manager
@@ -119,18 +109,12 @@ impl<'a> TxnContext<'a> {
                 "failed to acquire shared row lock".to_string(),
             ));
         }
-        if retain {
-            self.manager()
-                .record_shared_row_lock(self.transaction().id(), table.clone(), rid);
-            Ok(TxnReadGuard::Retained)
-        } else {
-            Ok(TxnReadGuard::Temporary(RowLockGuard::new(
-                self.lock_manager.clone(),
-                self.transaction().id(),
-                table.clone(),
-                rid,
-            )))
-        }
+        Ok(TxnReadGuard::Temporary(RowLockGuard::new(
+            self.lock_manager.clone(),
+            self.transaction().id(),
+            table.clone(),
+            rid,
+        )))
     }
 
     pub fn lock_row_exclusive(
@@ -210,7 +194,7 @@ impl<'a> ExecutionContext<'a> {
     pub fn new(
         catalog: &'a mut Catalog,
         txn: &'a mut Transaction,
-        txn_mgr: &'a TransactionManager,
+        txn_mgr: Arc<TransactionManager>,
         storage: Arc<dyn StorageEngine>,
     ) -> Self {
         Self {
@@ -243,13 +227,9 @@ impl<'a> ExecutionContext<'a> {
         table: &TableReference,
         tuple: &Tuple,
     ) -> QuillSQLResult<()> {
-        let (table_heap, rid) = self.storage.mvcc_insert(
-            self.catalog,
-            table,
-            tuple,
-            self.txn.txn_id(),
-            self.txn.command_id(),
-        )?;
+        let table_heap = self.table_heap(table)?;
+        let mvcc = MvccHeap::new(table_heap.clone());
+        let (rid, _) = mvcc.insert(tuple, self.txn.txn_id(), self.txn.command_id())?;
 
         let mut index_links = Vec::new();
         for index in self.table_indexes(table)? {
@@ -273,8 +253,8 @@ impl<'a> ExecutionContext<'a> {
         prev_meta: TupleMeta,
         prev_tuple: Tuple,
     ) -> QuillSQLResult<()> {
-        self.storage
-            .mvcc_delete(&table_heap, rid, self.txn.txn_id(), self.txn.command_id())?;
+        let mvcc = MvccHeap::new(table_heap.clone());
+        mvcc.mark_deleted(rid, self.txn.txn_id(), self.txn.command_id())?;
         self.txn
             .transaction_mut()
             .push_delete_undo(table_heap, rid, prev_meta, prev_tuple);
@@ -291,8 +271,8 @@ impl<'a> ExecutionContext<'a> {
         prev_meta: TupleMeta,
         prev_tuple: Tuple,
     ) -> QuillSQLResult<()> {
-        let (new_rid, _) = self.storage.mvcc_update(
-            &table_heap,
+        let mvcc = MvccHeap::new(table_heap.clone());
+        let (new_rid, _) = mvcc.update(
             rid,
             new_tuple.clone(),
             self.txn.txn_id(),
@@ -326,7 +306,8 @@ impl<'a> ExecutionContext<'a> {
             return Ok(None);
         }
         self.txn.lock_row_exclusive(table, rid)?;
-        let (current_meta, current_tuple) = table_heap.full_tuple(rid)?;
+        let mvcc = MvccHeap::new(table_heap.clone());
+        let (current_meta, current_tuple) = mvcc.full_tuple(rid)?;
         if !self.txn.is_visible(&current_meta) {
             self.txn.unlock_row(table, rid);
             return Ok(None);
