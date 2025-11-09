@@ -62,6 +62,10 @@ impl TransactionManager {
         }
     }
 
+    pub fn lock_manager_arc(&self) -> Arc<LockManager> {
+        self.lock_manager.clone()
+    }
+
     pub fn begin(
         &self,
         isolation_level: IsolationLevel,

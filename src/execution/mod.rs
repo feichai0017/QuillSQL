@@ -14,7 +14,8 @@ use crate::storage::{
     tuple::Tuple,
 };
 use crate::transaction::{
-    CommandId, IsolationLevel, Transaction, TransactionManager, TransactionSnapshot, TxnRuntime,
+    CommandId, IsolationLevel, LockManager, RowLockGuard, Transaction, TransactionManager,
+    TransactionSnapshot, TxnReadGuard, TxnRuntime,
 };
 use crate::utils::scalar::ScalarValue;
 use crate::{catalog::Catalog, transaction::LockMode, utils::table_ref::TableReference};
@@ -43,12 +44,14 @@ pub struct ExecutionContext<'a> {
 
 pub struct TxnContext<'a> {
     runtime: TxnRuntime<'a>,
+    lock_manager: Arc<LockManager>,
 }
 
 impl<'a> TxnContext<'a> {
     fn new(manager: &'a TransactionManager, txn: &'a mut Transaction) -> Self {
         Self {
             runtime: TxnRuntime::new(manager, txn),
+            lock_manager: manager.lock_manager_arc(),
         }
     }
 
@@ -80,9 +83,9 @@ impl<'a> TxnContext<'a> {
                 }
             }
             IsolationLevel::ReadCommitted => {
-                self.lock_row_shared(table, rid, false)?;
+                let guard = self.acquire_shared_guard(table, rid, false)?;
                 let visible = self.is_visible(meta);
-                self.unlock_row_shared(table, rid)?;
+                guard.release();
                 if visible {
                     Ok(Some(tuple))
                 } else {
@@ -90,9 +93,9 @@ impl<'a> TxnContext<'a> {
                 }
             }
             IsolationLevel::RepeatableRead | IsolationLevel::Serializable => {
-                self.lock_row_shared(table, rid, true)?;
+                let guard = self.acquire_shared_guard(table, rid, true)?;
                 let visible = self.is_visible(meta);
-                self.unlock_row_shared(table, rid)?;
+                guard.release();
                 if visible {
                     Ok(Some(tuple))
                 } else {
@@ -102,35 +105,32 @@ impl<'a> TxnContext<'a> {
         }
     }
 
-    pub fn lock_row_shared(
+    fn acquire_shared_guard(
         &mut self,
         table: &TableReference,
         rid: RecordId,
         retain: bool,
-    ) -> QuillSQLResult<()> {
-        let acquired = self
-            .runtime_mut()
-            .try_lock_row(table.clone(), rid, LockMode::Shared)?;
-        if !acquired {
+    ) -> QuillSQLResult<TxnReadGuard> {
+        if !self
+            .lock_manager
+            .lock_row(self.transaction(), LockMode::Shared, table.clone(), rid)
+        {
             return Err(QuillSQLError::Execution(
                 "failed to acquire shared row lock".to_string(),
             ));
         }
         if retain {
-            self.runtime_mut()
-                .record_shared_row_lock(table.clone(), rid);
+            self.manager()
+                .record_shared_row_lock(self.transaction().id(), table.clone(), rid);
+            Ok(TxnReadGuard::Retained)
         } else {
-            self.runtime_mut().remove_row_key_marker(table, rid);
+            Ok(TxnReadGuard::Temporary(RowLockGuard::new(
+                self.lock_manager.clone(),
+                self.transaction().id(),
+                table.clone(),
+                rid,
+            )))
         }
-        Ok(())
-    }
-
-    pub fn unlock_row_shared(
-        &mut self,
-        table: &TableReference,
-        rid: RecordId,
-    ) -> QuillSQLResult<()> {
-        self.runtime_mut().try_unlock_shared_row(table, rid)
     }
 
     pub fn lock_row_exclusive(
