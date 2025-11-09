@@ -6,15 +6,39 @@ use std::time::Duration;
 
 use log::{debug, warn};
 
-use crate::buffer::BufferManager;
+use crate::buffer::{BufferManager, PageId};
 use crate::catalog::registry::{global_index_registry, global_table_registry};
 use crate::catalog::INFORMATION_SCHEMA_NAME;
 use crate::config::IndexVacuumConfig;
+use crate::error::QuillSQLResult;
 use crate::recovery::wal::codec::CheckpointPayload;
-use crate::recovery::{WalManager, WalWriterHandle};
+use crate::recovery::{Lsn, WalManager, WalWriterHandle};
 use crate::storage::page::{RecordId, TupleMeta};
 use crate::storage::table_heap::{TableHeap, TableIterator};
 use crate::transaction::{TransactionId, TransactionManager, TransactionStatus};
+
+pub trait CheckpointWal: Send + Sync {
+    fn max_assigned_lsn(&self) -> Lsn;
+    fn flush_until(&self, target: Lsn) -> QuillSQLResult<Lsn>;
+    fn log_checkpoint(&self, payload: CheckpointPayload) -> QuillSQLResult<Lsn>;
+}
+
+pub trait BufferMaintenance: Send + Sync {
+    fn dirty_page_ids(&self) -> Vec<PageId>;
+    fn dirty_page_table_snapshot(&self) -> Vec<(PageId, Lsn)>;
+    fn flush_page(&self, page_id: PageId) -> QuillSQLResult<bool>;
+}
+
+pub trait TxnSnapshotOps: Send + Sync {
+    fn active_transactions(&self) -> Vec<TransactionId>;
+    fn oldest_active_txn(&self) -> Option<TransactionId>;
+    fn next_txn_id_hint(&self) -> TransactionId;
+    fn transaction_status(&self, txn_id: TransactionId) -> TransactionStatus;
+}
+
+pub trait WalFlushControl: Send + 'static {
+    fn stop(self) -> QuillSQLResult<()>;
+}
 
 /// High-level categories of background workers maintained by the database.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,6 +104,12 @@ impl Drop for WorkerHandle {
     }
 }
 
+impl WalFlushControl for WalWriterHandle {
+    fn stop(self) -> QuillSQLResult<()> {
+        WalWriterHandle::stop(self)
+    }
+}
+
 pub struct BackgroundWorkers {
     workers: Vec<WorkerHandle>,
 }
@@ -134,7 +164,10 @@ impl Drop for BackgroundWorkers {
     }
 }
 
-pub fn wal_writer_worker(handle: WalWriterHandle, interval: Duration) -> WorkerHandle {
+pub fn wal_writer_worker<H>(handle: H, interval: Duration) -> WorkerHandle
+where
+    H: WalFlushControl,
+{
     WorkerHandle::new(
         WorkerMetadata {
             kind: WorkerKind::WalWriter,
@@ -150,9 +183,9 @@ pub fn wal_writer_worker(handle: WalWriterHandle, interval: Duration) -> WorkerH
 }
 
 pub fn spawn_checkpoint_worker(
-    wal_manager: Arc<WalManager>,
-    buffer_pool: Arc<BufferManager>,
-    transaction_manager: Arc<TransactionManager>,
+    wal: Arc<dyn CheckpointWal>,
+    buffer_pool: Arc<dyn BufferMaintenance>,
+    transaction_manager: Arc<dyn TxnSnapshotOps>,
     interval: Option<Duration>,
 ) -> Option<WorkerHandle> {
     let interval = interval?;
@@ -160,8 +193,8 @@ pub fn spawn_checkpoint_worker(
         return None;
     }
 
-    let wal = wal_manager.clone();
-    let bp = buffer_pool.clone();
+    let wal_ref = wal.clone();
+    let buffer = buffer_pool.clone();
     let txn_mgr = transaction_manager.clone();
 
     spawn_periodic_worker(
@@ -169,13 +202,13 @@ pub fn spawn_checkpoint_worker(
         WorkerKind::Checkpoint,
         interval,
         move || {
-            let dirty_pages = bp.dirty_page_ids();
-            let dpt_snapshot = bp.dirty_page_table_snapshot();
+            let dirty_pages = buffer.dirty_page_ids();
+            let dpt_snapshot = buffer.dirty_page_table_snapshot();
             let active_txns = txn_mgr.active_transactions();
-            let last_lsn = wal.max_assigned_lsn();
+            let last_lsn = wal_ref.max_assigned_lsn();
 
             if last_lsn != 0 {
-                if let Err(e) = wal.flush_until(last_lsn) {
+                if let Err(e) = wal_ref.flush_until(last_lsn) {
                     warn!("Checkpoint flush failed: {}", e);
                 }
                 let payload = CheckpointPayload {
@@ -184,7 +217,7 @@ pub fn spawn_checkpoint_worker(
                     active_transactions: active_txns,
                     dpt: dpt_snapshot,
                 };
-                if let Err(e) = wal.log_checkpoint(payload) {
+                if let Err(e) = wal_ref.log_checkpoint(payload) {
                     warn!("Checkpoint write failed: {}", e);
                 }
             }
@@ -193,7 +226,7 @@ pub fn spawn_checkpoint_worker(
 }
 
 pub fn spawn_bg_writer(
-    buffer_pool: Arc<BufferManager>,
+    buffer_pool: Arc<dyn BufferMaintenance>,
     interval: Option<Duration>,
     vacuum_cfg: IndexVacuumConfig,
 ) -> Option<WorkerHandle> {
@@ -227,7 +260,7 @@ pub fn spawn_bg_writer(
 }
 
 pub fn spawn_mvcc_vacuum_worker(
-    transaction_manager: Arc<TransactionManager>,
+    transaction_manager: Arc<dyn TxnSnapshotOps>,
     interval: Option<Duration>,
     batch_limit: usize,
 ) -> Option<WorkerHandle> {
@@ -274,6 +307,52 @@ pub fn spawn_mvcc_vacuum_worker(
     })
 }
 
+impl CheckpointWal for WalManager {
+    fn max_assigned_lsn(&self) -> Lsn {
+        WalManager::max_assigned_lsn(self)
+    }
+
+    fn flush_until(&self, target: Lsn) -> QuillSQLResult<Lsn> {
+        WalManager::flush_until(self, target)
+    }
+
+    fn log_checkpoint(&self, payload: CheckpointPayload) -> QuillSQLResult<Lsn> {
+        WalManager::log_checkpoint(self, payload)
+    }
+}
+
+impl BufferMaintenance for BufferManager {
+    fn dirty_page_ids(&self) -> Vec<PageId> {
+        BufferManager::dirty_page_ids(self)
+    }
+
+    fn dirty_page_table_snapshot(&self) -> Vec<(PageId, Lsn)> {
+        BufferManager::dirty_page_table_snapshot(self)
+    }
+
+    fn flush_page(&self, page_id: PageId) -> QuillSQLResult<bool> {
+        BufferManager::flush_page(self, page_id)
+    }
+}
+
+impl TxnSnapshotOps for TransactionManager {
+    fn active_transactions(&self) -> Vec<TransactionId> {
+        TransactionManager::active_transactions(self)
+    }
+
+    fn oldest_active_txn(&self) -> Option<TransactionId> {
+        TransactionManager::oldest_active_txn(self)
+    }
+
+    fn next_txn_id_hint(&self) -> TransactionId {
+        TransactionManager::next_txn_id_hint(self)
+    }
+
+    fn transaction_status(&self, txn_id: TransactionId) -> TransactionStatus {
+        TransactionManager::transaction_status(self, txn_id)
+    }
+}
+
 fn spawn_periodic_worker<F>(
     name: &str,
     kind: WorkerKind,
@@ -317,7 +396,7 @@ where
 
 fn vacuum_table_versions(
     table: &Arc<TableHeap>,
-    txn_mgr: &Arc<TransactionManager>,
+    txn_mgr: &Arc<dyn TxnSnapshotOps>,
     safe_xmin: TransactionId,
     remaining: &mut usize,
 ) -> crate::error::QuillSQLResult<usize> {
@@ -348,7 +427,7 @@ fn vacuum_table_versions(
 
 fn try_reclaim_deleted(
     table: &Arc<TableHeap>,
-    txn_mgr: &Arc<TransactionManager>,
+    txn_mgr: &Arc<dyn TxnSnapshotOps>,
     safe_xmin: TransactionId,
     rid: RecordId,
     meta: &TupleMeta,
@@ -379,7 +458,7 @@ fn try_reclaim_deleted(
 
 fn try_reclaim_aborted(
     table: &Arc<TableHeap>,
-    txn_mgr: &Arc<TransactionManager>,
+    txn_mgr: &Arc<dyn TxnSnapshotOps>,
     safe_xmin: TransactionId,
     rid: RecordId,
     meta: &TupleMeta,

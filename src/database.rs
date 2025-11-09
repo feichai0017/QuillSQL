@@ -45,6 +45,34 @@ pub struct DatabaseOptions {
     pub default_isolation_level: Option<IsolationLevel>,
 }
 
+enum DatabaseLocation {
+    OnDisk(String),
+    Temporary,
+}
+
+fn bootstrap_storage(
+    location: DatabaseLocation,
+    wal_options: &WalOptions,
+) -> QuillSQLResult<(Arc<DiskManager>, WalConfig, Option<TempDir>)> {
+    match location {
+        DatabaseLocation::OnDisk(path) => {
+            let disk_manager = Arc::new(DiskManager::try_new(path.as_str())?);
+            let wal_config = wal_config_for_path(path.as_str(), wal_options);
+            Ok((disk_manager, wal_config, None))
+        }
+        DatabaseLocation::Temporary => {
+            let temp_dir = TempDir::new()?;
+            let temp_path = temp_dir.path().join("test.db");
+            let temp_str = temp_path
+                .to_str()
+                .ok_or_else(|| QuillSQLError::Internal("Invalid temp path".to_string()))?;
+            let disk_manager = Arc::new(DiskManager::try_new(temp_str)?);
+            let wal_config = wal_config_for_temp(temp_dir.path(), wal_options);
+            Ok((disk_manager, wal_config, Some(temp_dir)))
+        }
+    }
+}
+
 pub struct Database {
     _temp_dir: Option<TempDir>,
     pub(crate) buffer_pool: Arc<BufferManager>,
@@ -63,95 +91,7 @@ impl Database {
         db_path: &str,
         options: DatabaseOptions,
     ) -> QuillSQLResult<Self> {
-        let disk_manager = Arc::new(DiskManager::try_new(db_path)?);
-        let disk_scheduler = Arc::new(DiskScheduler::new(disk_manager.clone()));
-        let buffer_pool = Arc::new(BufferManager::new(BUFFER_POOL_SIZE, disk_scheduler.clone()));
-
-        let wal_config = wal_config_for_path(db_path, &options.wal);
-        let synchronous_commit = wal_config.synchronous_commit;
-        let (control_file, wal_init) =
-            ControlFileManager::load_or_init(&wal_config.directory, wal_config.segment_size)?;
-        let control_file = Arc::new(control_file);
-        let wal_manager = Arc::new(WalManager::new_with_scheduler(
-            wal_config.clone(),
-            Some(wal_init),
-            Some(control_file.clone()),
-            disk_scheduler.clone(),
-        )?);
-        let transaction_manager = Arc::new(TransactionManager::new(
-            wal_manager.clone(),
-            synchronous_commit,
-        ));
-
-        let worker_cfg = background_config(
-            &wal_config,
-            IndexVacuumConfig::default(),
-            MvccVacuumConfig::default(),
-        );
-        let mut background_workers = BackgroundWorkers::new();
-        if let Some(interval) = worker_cfg.wal_writer_interval {
-            if let Some(handle) = wal_manager.start_background_flush(interval)? {
-                background_workers.register(background::wal_writer_worker(handle, interval));
-            }
-        }
-        buffer_pool.set_wal_manager(wal_manager.clone());
-
-        let catalog = Catalog::new(buffer_pool.clone(), disk_manager.clone());
-
-        let recovery_summary = RecoveryManager::new(wal_manager.clone(), disk_scheduler.clone())
-            .with_buffer_pool(buffer_pool.clone())
-            .replay()?;
-        if recovery_summary.redo_count > 0 {
-            debug!(
-                "Recovery replayed {} record(s) starting at LSN {}",
-                recovery_summary.redo_count, recovery_summary.start_lsn
-            );
-        }
-        if !recovery_summary.loser_transactions.is_empty() {
-            warn!(
-                "{} transaction(s) require undo after recovery: {:?}",
-                recovery_summary.loser_transactions.len(),
-                recovery_summary.loser_transactions
-            );
-        }
-
-        background_workers.register_opt(background::spawn_checkpoint_worker(
-            wal_manager.clone(),
-            buffer_pool.clone(),
-            transaction_manager.clone(),
-            worker_cfg.checkpoint_interval,
-        ));
-
-        background_workers.register_opt(background::spawn_bg_writer(
-            buffer_pool.clone(),
-            worker_cfg.bg_writer_interval,
-            worker_cfg.vacuum,
-        ));
-
-        let mvcc_interval = if worker_cfg.mvcc_vacuum.interval_ms == 0 {
-            None
-        } else {
-            Some(Duration::from_millis(worker_cfg.mvcc_vacuum.interval_ms))
-        };
-        background_workers.register_opt(background::spawn_mvcc_vacuum_worker(
-            transaction_manager.clone(),
-            mvcc_interval,
-            worker_cfg.mvcc_vacuum.batch_limit,
-        ));
-
-        let mut db = Self {
-            _temp_dir: None,
-            buffer_pool,
-            catalog,
-            background_workers,
-            wal_manager,
-            transaction_manager,
-            default_isolation: options
-                .default_isolation_level
-                .unwrap_or(IsolationLevel::ReadUncommitted),
-        };
-        load_catalog_data(&mut db)?;
-        Ok(db)
+        Self::new_with_location(DatabaseLocation::OnDisk(db_path.to_string()), options)
     }
 
     pub fn new_temp() -> QuillSQLResult<Self> {
@@ -159,16 +99,18 @@ impl Database {
     }
 
     pub fn new_temp_with_options(options: DatabaseOptions) -> QuillSQLResult<Self> {
-        let temp_dir = TempDir::new()?;
-        let temp_path = temp_dir.path().join("test.db");
-        let disk_manager =
-            Arc::new(DiskManager::try_new(temp_path.to_str().ok_or(
-                QuillSQLError::Internal("Invalid temp path".to_string()),
-            )?)?);
+        Self::new_with_location(DatabaseLocation::Temporary, options)
+    }
+
+    fn new_with_location(
+        location: DatabaseLocation,
+        options: DatabaseOptions,
+    ) -> QuillSQLResult<Self> {
+        let (disk_manager, wal_config, temp_dir) = bootstrap_storage(location, &options.wal)?;
+
         let disk_scheduler = Arc::new(DiskScheduler::new(disk_manager.clone()));
         let buffer_pool = Arc::new(BufferManager::new(BUFFER_POOL_SIZE, disk_scheduler.clone()));
 
-        let wal_config = wal_config_for_temp(temp_dir.path(), &options.wal);
         let synchronous_commit = wal_config.synchronous_commit;
         let (control_file, wal_init) =
             ControlFileManager::load_or_init(&wal_config.directory, wal_config.segment_size)?;
@@ -216,15 +158,19 @@ impl Database {
             );
         }
 
+        let wal_for_workers: Arc<dyn background::CheckpointWal> = wal_manager.clone();
+        let buffer_for_workers: Arc<dyn background::BufferMaintenance> = buffer_pool.clone();
+        let txn_for_workers: Arc<dyn background::TxnSnapshotOps> = transaction_manager.clone();
+
         background_workers.register_opt(background::spawn_checkpoint_worker(
-            wal_manager.clone(),
-            buffer_pool.clone(),
-            transaction_manager.clone(),
+            wal_for_workers.clone(),
+            buffer_for_workers.clone(),
+            txn_for_workers.clone(),
             worker_cfg.checkpoint_interval,
         ));
 
         background_workers.register_opt(background::spawn_bg_writer(
-            buffer_pool.clone(),
+            buffer_for_workers.clone(),
             worker_cfg.bg_writer_interval,
             worker_cfg.vacuum,
         ));
@@ -235,13 +181,13 @@ impl Database {
             Some(Duration::from_millis(worker_cfg.mvcc_vacuum.interval_ms))
         };
         background_workers.register_opt(background::spawn_mvcc_vacuum_worker(
-            transaction_manager.clone(),
+            txn_for_workers,
             mvcc_interval,
             worker_cfg.mvcc_vacuum.batch_limit,
         ));
 
         let mut db = Self {
-            _temp_dir: Some(temp_dir),
+            _temp_dir: temp_dir,
             buffer_pool,
             catalog,
             background_workers,
