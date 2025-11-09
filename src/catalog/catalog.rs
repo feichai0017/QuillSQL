@@ -343,7 +343,7 @@ impl Catalog {
     pub fn table_indexes(
         &self,
         table_ref: &TableReference,
-    ) -> QuillSQLResult<Vec<Arc<BPlusTreeIndex>>> {
+    ) -> QuillSQLResult<Vec<(String, Arc<BPlusTreeIndex>)>> {
         let catalog_schema_name = table_ref
             .schema()
             .unwrap_or(DEFAULT_SCHEMA_NAME)
@@ -362,7 +362,11 @@ impl Catalog {
                 table_name
             )));
         };
-        Ok(catalog_table.indexes.values().cloned().collect())
+        Ok(catalog_table
+            .indexes
+            .iter()
+            .map(|(name, index)| (name.clone(), index.clone()))
+            .collect())
     }
 
     pub fn create_index(

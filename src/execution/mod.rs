@@ -4,8 +4,7 @@ use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::execution::physical_plan::PhysicalPlan;
 use crate::expression::{Expr, ExprTrait};
 use crate::storage::{
-    engine::StorageEngine,
-    index::btree_index::BPlusTreeIndex,
+    engine::{IndexHandle, StorageEngine, TableHandle},
     mvcc_heap::MvccHeap,
     page::{RecordId, TupleMeta},
     table_heap::TableHeap,
@@ -232,8 +231,9 @@ impl<'a> ExecutionContext<'a> {
         let (rid, _) = mvcc.insert(tuple, self.txn.txn_id(), self.txn.command_id())?;
 
         let mut index_links = Vec::new();
-        for index in self.table_indexes(table)? {
-            if let Ok(key_tuple) = tuple.project_with_schema(index.key_schema.clone()) {
+        for index_handle in self.table_indexes(table)? {
+            let index = index_handle.index();
+            if let Ok(key_tuple) = tuple.project_with_schema(index_handle.key_schema()) {
                 index.insert(&key_tuple, rid)?;
                 index_links.push((index.clone(), key_tuple));
             }
@@ -280,8 +280,9 @@ impl<'a> ExecutionContext<'a> {
         )?;
 
         let mut new_keys = Vec::new();
-        for index in self.table_indexes(table)? {
-            if let Ok(new_key_tuple) = new_tuple.project_with_schema(index.key_schema.clone()) {
+        for index_handle in self.table_indexes(table)? {
+            let index = index_handle.index();
+            if let Ok(new_key_tuple) = new_tuple.project_with_schema(index_handle.key_schema()) {
                 index.insert(&new_key_tuple, new_rid)?;
                 new_keys.push((index.clone(), new_key_tuple));
             }
@@ -316,16 +317,20 @@ impl<'a> ExecutionContext<'a> {
     }
 
     /// Look up the table heap through the storage engine.
+    pub fn table_handle(&self, table: &TableReference) -> QuillSQLResult<Arc<dyn TableHandle>> {
+        self.storage.table(self.catalog, table)
+    }
+
     pub fn table_heap(&self, table: &TableReference) -> QuillSQLResult<Arc<TableHeap>> {
-        self.storage.table_heap(self.catalog, table)
+        Ok(self.table_handle(table)?.table_heap())
     }
 
     /// Fetch all indexes defined on a table.
     pub fn table_indexes(
         &self,
         table: &TableReference,
-    ) -> QuillSQLResult<Vec<Arc<BPlusTreeIndex>>> {
-        self.storage.table_indexes(self.catalog, table)
+    ) -> QuillSQLResult<Vec<Arc<dyn IndexHandle>>> {
+        self.storage.indexes(self.catalog, table)
     }
 
     pub fn txn_ctx(&self) -> &TxnContext<'a> {
