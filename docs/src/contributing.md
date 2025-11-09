@@ -18,7 +18,7 @@ Welcome, and thank you for your interest in contributing to QuillSQL! Whether yo
 
 2.  **Clone Your Fork**: Clone your forked repository to your local machine.
     ```bash
-    git clone https://github.com/YOUR_USERNAME/QuillSQL.git
+    git clone https://github.com/feichai0017/QuillSQL.git
     cd QuillSQL
     ```
 
