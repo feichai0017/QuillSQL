@@ -1,5 +1,6 @@
 use crate::buffer::buffer_pool::{BufferPool, FrameMetaSnapshot};
 use crate::buffer::{BufferManager, FrameId};
+use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::recovery::Lsn;
 use derive_with::With;
 use parking_lot::{RwLockReadGuard, RwLockWriteGuard};
@@ -160,6 +161,30 @@ impl WritePageGuard {
         self.mark_dirty();
     }
 
+    /// Apply a full page image; automatically emits WAL (full or delta) when configured.
+    pub fn apply_page_image(&mut self, image: &[u8]) -> QuillSQLResult<Option<Lsn>> {
+        if image.len() != PAGE_SIZE {
+            return Err(QuillSQLError::Internal(format!(
+                "page {} image length {} differs from PAGE_SIZE",
+                self.page_id(),
+                image.len()
+            )));
+        }
+        if let Some(wal) = self.bpm.wal_manager() {
+            let prev_lsn = self.lsn();
+            let wal_result = wal.log_page_update(self.page_id(), prev_lsn, self.data(), image)?;
+            if let Some(result) = wal_result {
+                self.overwrite(image, Some(result.end_lsn));
+                return Ok(Some(result.end_lsn));
+            }
+            Ok(None)
+        } else {
+            let prev_lsn = self.lsn();
+            self.overwrite(image, Some(prev_lsn));
+            Ok(None)
+        }
+    }
+
     pub fn meta_snapshot(&self) -> FrameMetaSnapshot {
         self.pool.frame_meta(self.frame_id).snapshot()
     }
@@ -225,6 +250,10 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::buffer::BufferManager;
+    use crate::config::WalConfig;
+    use crate::recovery::wal::codec::decode_payload;
+    use crate::recovery::wal_record::WalRecordPayload;
+    use crate::recovery::WalManager;
     use crate::storage::disk_manager::DiskManager;
     use crate::storage::disk_scheduler::DiskScheduler;
 
@@ -239,6 +268,14 @@ mod tests {
         let buffer_pool_manager = Arc::new(BufferManager::new(num_pages, disk_scheduler));
 
         (temp_dir, buffer_pool_manager)
+    }
+
+    fn attach_wal(temp_dir: &TempDir, bpm: &Arc<BufferManager>) -> Arc<WalManager> {
+        let mut config = WalConfig::default();
+        config.directory = temp_dir.path().join("wal_guard");
+        let wal = Arc::new(WalManager::new(config, None, None).expect("wal manager"));
+        bpm.set_wal_manager(wal.clone());
+        wal
     }
 
     #[test]
@@ -333,5 +370,51 @@ mod tests {
         let meta = bpm.buffer_pool().frame_meta(frame_id).snapshot();
         assert!(!meta.is_dirty);
         assert_eq!(meta.pin_count, 0);
+    }
+
+    #[test]
+    fn apply_page_image_logs_wal_records() {
+        let (temp_dir, bpm) = setup_real_bpm_environment(4);
+        let wal = attach_wal(&temp_dir, &bpm);
+
+        let mut guard = bpm.new_page().unwrap();
+        let page_id = guard.page_id();
+        let mut image = vec![0u8; PAGE_SIZE];
+        image[0] = 42;
+        let result = guard.apply_page_image(&image).expect("apply image");
+        assert!(result.is_some());
+        let lsn = result.unwrap();
+        assert_eq!(guard.lsn(), lsn);
+        drop(guard);
+
+        wal.flush(None).expect("flush wal");
+        let mut reader = wal.reader().expect("reader");
+        let frame = reader.next_frame().expect("frame").expect("frame");
+        match decode_payload(&frame).expect("payload") {
+            WalRecordPayload::PageWrite(payload) => {
+                assert_eq!(payload.page_id, page_id);
+            }
+            other => panic!("expected PageWrite, got {:?}", other),
+        }
+        assert!(reader.next_frame().expect("no extra").is_none());
+    }
+
+    #[test]
+    fn apply_page_image_rejects_invalid_length() {
+        let (_temp_dir, bpm) = setup_real_bpm_environment(2);
+        let mut guard = bpm.new_page().unwrap();
+        let err = guard
+            .apply_page_image(&vec![0u8; PAGE_SIZE - 1])
+            .expect_err("length mismatch should fail");
+        match err {
+            crate::error::QuillSQLError::Internal(msg) => {
+                assert!(
+                    msg.contains("image length"),
+                    "unexpected error message: {}",
+                    msg
+                );
+            }
+            other => panic!("unexpected error: {:?}", other),
+        }
     }
 }

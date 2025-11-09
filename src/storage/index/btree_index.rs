@@ -16,13 +16,10 @@ use crate::storage::page::{BPlusTreeHeaderPage, BPlusTreeInternalPage};
 use crate::storage::page::{BPlusTreeLeafPage, BPlusTreePage, RecordId};
 
 use crate::config::BTreeConfig;
-use crate::recovery::wal::codec::{PageDeltaPayload, PageWritePayload};
-use crate::recovery::wal_record::WalRecordPayload;
 use crate::storage::codec::BPlusTreePageTypeCodec;
 pub use crate::storage::index::btree_iterator::TreeIndexIterator;
 use crate::storage::page::BPlusTreePageType;
 use crate::storage::tuple::Tuple;
-use crate::utils::util;
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
 // OLC bounded restart and backoff configuration
@@ -93,50 +90,7 @@ impl BPlusTreeIndex {
         new_image: Vec<u8>,
     ) -> QuillSQLResult<()> {
         debug_assert_eq!(new_image.len(), PAGE_SIZE);
-        let prev_lsn = guard.lsn();
-        if let Some(wal) = self.buffer_pool.wal_manager() {
-            let page_id = guard.page_id();
-            if wal.fpw_first_touch(page_id) {
-                let res = wal.append_record_with(|_| {
-                    WalRecordPayload::PageWrite(PageWritePayload {
-                        page_id,
-                        prev_page_lsn: prev_lsn,
-                        page_image: new_image.clone(),
-                    })
-                })?;
-                guard.overwrite(&new_image, Some(res.end_lsn));
-                return Ok(());
-            }
-
-            let old = guard.data();
-            if let Some((start, end)) = util::find_contiguous_diff(old, &new_image) {
-                let diff_len = end - start;
-                let threshold = PAGE_SIZE / 16;
-                let res = if diff_len <= threshold {
-                    wal.append_record_with(|_| {
-                        WalRecordPayload::PageDelta(PageDeltaPayload {
-                            page_id,
-                            prev_page_lsn: prev_lsn,
-                            offset: start as u16,
-                            data: new_image[start..end].to_vec(),
-                        })
-                    })?
-                } else {
-                    wal.append_record_with(|_| {
-                        WalRecordPayload::PageWrite(PageWritePayload {
-                            page_id,
-                            prev_page_lsn: prev_lsn,
-                            page_image: new_image.clone(),
-                        })
-                    })?
-                };
-                guard.overwrite(&new_image, Some(res.end_lsn));
-            } else {
-                // no-op change
-            }
-        } else {
-            guard.overwrite(&new_image, None);
-        }
+        guard.apply_page_image(&new_image)?;
         Ok(())
     }
     pub fn new(

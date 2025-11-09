@@ -13,13 +13,13 @@ use std::sync::{Arc, Weak};
 use std::thread;
 use std::time::Duration;
 
-use crate::buffer::PageId;
+use crate::buffer::{PageId, PAGE_SIZE};
 use crate::config::WalConfig;
 use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::recovery::control_file::{ControlFileManager, WalInitState};
 use crate::recovery::wal::codec::{
-    decode_frame, encode_body, encode_frame, CheckpointPayload, WalFrame, WAL_CRC_LEN,
-    WAL_HEADER_LEN,
+    decode_frame, encode_body, encode_frame, CheckpointPayload, PageDeltaPayload, PageWritePayload,
+    WalFrame, WAL_CRC_LEN, WAL_HEADER_LEN,
 };
 use crate::recovery::wal::page::{
     WalFrameContinuation, WalPage, WalPageFragmentKind, WAL_PAGE_SIZE,
@@ -27,6 +27,7 @@ use crate::recovery::wal::page::{
 use crate::recovery::wal_record::WalRecordPayload;
 use crate::storage::disk_manager::DiskManager;
 use crate::storage::disk_scheduler::{DiskCommandResultReceiver, DiskScheduler};
+use crate::utils::util::find_contiguous_diff;
 use bytes::Bytes;
 use dashmap::DashSet;
 
@@ -233,6 +234,54 @@ impl WalManager {
             self.flush(Some(end_lsn))?;
         }
         Ok(WalAppendResult { start_lsn, end_lsn })
+    }
+
+    /// Record a page update by automatically choosing between FPW and delta logging.
+    /// Returns `Ok(None)` if the new image matches the existing bytes (no-op).
+    pub fn log_page_update(
+        &self,
+        page_id: PageId,
+        prev_page_lsn: Lsn,
+        old_image: &[u8],
+        new_image: &[u8],
+    ) -> QuillSQLResult<Option<WalAppendResult>> {
+        if old_image.len() != new_image.len() || old_image.len() != PAGE_SIZE {
+            return Err(QuillSQLError::Internal(format!(
+                "page {} image size mismatch: old={}, new={}",
+                page_id,
+                old_image.len(),
+                new_image.len()
+            )));
+        }
+
+        let Some((start, end)) = find_contiguous_diff(old_image, new_image) else {
+            return Ok(None);
+        };
+
+        let delta_threshold = PAGE_SIZE / 16;
+        let first_touch = self.fpw_first_touch(page_id);
+        if first_touch || (end - start) > delta_threshold {
+            let page_image = new_image.to_vec();
+            let result = self.append_record_with(|_| {
+                WalRecordPayload::PageWrite(PageWritePayload {
+                    page_id,
+                    prev_page_lsn,
+                    page_image: page_image.clone(),
+                })
+            })?;
+            return Ok(Some(result));
+        }
+
+        let diff = new_image[start..end].to_vec();
+        let result = self.append_record_with(|_| {
+            WalRecordPayload::PageDelta(PageDeltaPayload {
+                page_id,
+                prev_page_lsn,
+                offset: start as u16,
+                data: diff.clone(),
+            })
+        })?;
+        Ok(Some(result))
     }
 
     pub fn log_checkpoint(&self, payload: CheckpointPayload) -> QuillSQLResult<Lsn> {
@@ -1093,7 +1142,9 @@ impl Drop for WalManager {
 
 #[cfg(test)]
 mod tests {
+    use crate::buffer::PAGE_SIZE;
     use crate::config::WalConfig;
+    use crate::recovery::wal::codec::decode_payload;
     use crate::recovery::wal_record::{
         CheckpointPayload, ResourceManagerId, TransactionPayload, TransactionRecordKind,
         WalRecordPayload,
@@ -1345,6 +1396,65 @@ mod tests {
 
         assert!(wal.pending_records().is_empty());
         assert!(wal.durable_lsn() >= lsn);
+    }
+
+    #[test]
+    fn log_page_update_switches_between_full_and_delta() {
+        let tmp = TempDir::new().expect("tempdir");
+        let wal = build_wal_manager(&tmp);
+        let base = vec![0u8; PAGE_SIZE];
+
+        let mut first_image = base.clone();
+        first_image[0] = 1;
+        let first = wal
+            .log_page_update(5, 0, &base, &first_image)
+            .expect("first update")
+            .expect("should emit page write");
+        wal.flush(None).expect("flush first");
+        let mut reader = wal.reader().expect("reader");
+        let first_frame = reader.next_frame().expect("frame").expect("frame");
+        match decode_payload(&first_frame).expect("payload") {
+            WalRecordPayload::PageWrite(payload) => {
+                assert_eq!(payload.page_id, 5);
+            }
+            other => panic!("expected PageWrite, got {:?}", other),
+        }
+        assert!(reader.next_frame().expect("no extra").is_none());
+
+        let mut second_image = first_image.clone();
+        second_image[128] = 77;
+        let second = wal
+            .log_page_update(5, first.end_lsn, &first_image, &second_image)
+            .expect("second update")
+            .expect("should emit delta");
+        wal.flush(None).expect("flush second");
+        let mut reader = wal.reader().expect("reader");
+        let mut frames = Vec::new();
+        while let Some(frame) = reader.next_frame().expect("frame") {
+            frames.push(frame);
+        }
+        assert_eq!(frames.len(), 2);
+        match decode_payload(&frames[1]).expect("payload") {
+            WalRecordPayload::PageDelta(payload) => {
+                assert_eq!(payload.page_id, 5);
+                assert_eq!(payload.offset as usize, 128);
+                assert_eq!(payload.data.len(), 1);
+                assert_eq!(payload.data[0], 77);
+            }
+            other => panic!("expected PageDelta, got {:?}", other),
+        }
+
+        let none = wal
+            .log_page_update(5, second.end_lsn, &second_image, &second_image)
+            .expect("noop update");
+        assert!(none.is_none());
+        wal.flush(None).expect("flush noop");
+        let mut reader = wal.reader().expect("reader");
+        let mut count = 0usize;
+        while reader.next_frame().expect("frame").is_some() {
+            count += 1;
+        }
+        assert_eq!(count, 2, "noop update should not add frames");
     }
 
     #[test]

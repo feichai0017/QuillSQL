@@ -16,7 +16,6 @@ use std::ops::RangeBounds;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
-use crate::recovery::wal::codec::{PageDeltaPayload, PageWritePayload};
 use crate::recovery::wal_record::WalRecordPayload;
 use crate::storage::codec::TupleCodec;
 use crate::storage::heap::wal_codec::{
@@ -61,66 +60,11 @@ impl TableHeap {
 
     fn write_back_page(
         &self,
-        page_id: PageId,
         guard: &mut WritePageGuard,
         table_page: &mut TablePage,
     ) -> QuillSQLResult<()> {
-        let prev_lsn = guard.lsn();
-        if let Some(wal) = self.buffer_pool.wal_manager() {
-            // FPW: if first touch since checkpoint, force full-page image
-            if wal.fpw_first_touch(page_id) {
-                let new_image = TablePageCodec::encode(table_page);
-                let result = wal.append_record_with(|ctx| {
-                    table_page.set_lsn(ctx.end_lsn);
-                    WalRecordPayload::PageWrite(PageWritePayload {
-                        page_id,
-                        prev_page_lsn: prev_lsn,
-                        page_image: new_image.clone(),
-                    })
-                })?;
-                guard.overwrite(&new_image, Some(result.end_lsn));
-                return Ok(());
-            }
-            // Encode new page image
-            let new_image = TablePageCodec::encode(table_page);
-            // Compute minimal contiguous diff with current buffer page bytes
-            let old = guard.data();
-            let (start, end) =
-                if let Some((s, e)) = crate::utils::util::find_contiguous_diff(old, &new_image) {
-                    (s, e)
-                } else {
-                    return Ok(());
-                };
-            let diff_len = end - start;
-            // Threshold: centralized default PAGE_SIZE/16 (env removed)
-            let delta_threshold = crate::buffer::PAGE_SIZE / 16;
-            let result = if diff_len <= delta_threshold {
-                wal.append_record_with(|ctx| {
-                    table_page.set_lsn(ctx.end_lsn);
-                    WalRecordPayload::PageDelta(PageDeltaPayload {
-                        page_id,
-                        prev_page_lsn: prev_lsn,
-                        offset: start as u16,
-                        data: new_image[start..end].to_vec(),
-                    })
-                })?
-            } else {
-                wal.append_record_with(|ctx| {
-                    table_page.set_lsn(ctx.end_lsn);
-                    WalRecordPayload::PageWrite(PageWritePayload {
-                        page_id,
-                        prev_page_lsn: prev_lsn,
-                        page_image: new_image.clone(),
-                    })
-                })?
-            };
-            guard.overwrite(&new_image, Some(result.end_lsn));
-            // WritePageGuard will capture recLSN via dirty-page table
-        } else {
-            table_page.set_lsn(prev_lsn);
-            let encoded = TablePageCodec::encode(table_page);
-            guard.overwrite(&encoded, Some(table_page.lsn()));
-        }
+        let new_image = TablePageCodec::encode(table_page);
+        guard.apply_page_image(&new_image)?;
         Ok(())
     }
 
@@ -174,17 +118,17 @@ impl TableHeap {
                     tuple_data: tuple_bytes,
                 });
                 self.append_heap_record(payload.clone())?;
-                self.write_back_page(current_page_id, &mut current_page_guard, &mut table_page)?;
+                self.write_back_page(&mut current_page_guard, &mut table_page)?;
                 return Ok(RecordId::new(current_page_id, slot_id as u32));
             }
 
             let mut new_page_guard = self.buffer_pool.new_page()?;
             let new_page_id = new_page_guard.page_id();
             let mut new_table_page = TablePage::new(self.schema.clone(), INVALID_PAGE_ID);
-            self.write_back_page(new_page_id, &mut new_page_guard, &mut new_table_page)?;
+            self.write_back_page(&mut new_page_guard, &mut new_table_page)?;
 
             table_page.header.next_page_id = new_page_id;
-            self.write_back_page(current_page_id, &mut current_page_guard, &mut table_page)?;
+            self.write_back_page(&mut current_page_guard, &mut table_page)?;
             drop(current_page_guard);
 
             self.last_page_id.store(new_page_id, Ordering::SeqCst);
@@ -278,13 +222,13 @@ impl TableHeap {
             if !meta.is_deleted {
                 meta.mark_deleted(0, INVALID_COMMAND_ID);
                 table_page.update_tuple_meta(meta, slot as u16)?;
-                self.write_back_page(rid.page_id, &mut page_guard, &mut table_page)?;
+                self.write_back_page(&mut page_guard, &mut table_page)?;
             }
             return Ok(());
         }
 
         table_page.reclaim_tuple(slot as u16)?;
-        self.write_back_page(rid.page_id, &mut page_guard, &mut table_page)
+        self.write_back_page(&mut page_guard, &mut table_page)
     }
 
     pub fn update_tuple(&self, rid: RecordId, tuple: Tuple) -> QuillSQLResult<()> {
@@ -309,7 +253,7 @@ impl TableHeap {
             old_tuple_meta: Some(TupleMetaRepr::from(old_meta)),
             old_tuple_data: Some(old_tuple_bytes),
         }))?;
-        self.write_back_page(rid.page_id, &mut page_guard, &mut table_page)
+        self.write_back_page(&mut page_guard, &mut table_page)
     }
 
     pub fn update_tuple_meta(&self, meta: TupleMeta, rid: RecordId) -> QuillSQLResult<()> {
@@ -346,7 +290,7 @@ impl TableHeap {
             })
         };
         self.append_heap_record(payload)?;
-        self.write_back_page(rid.page_id, &mut page_guard, &mut table_page)
+        self.write_back_page(&mut page_guard, &mut table_page)
     }
 
     pub fn full_tuple(&self, rid: RecordId) -> QuillSQLResult<(TupleMeta, Tuple)> {
@@ -548,7 +492,7 @@ impl TableHeap {
         }
 
         table_page.reclaim_tuple(slot)?;
-        self.write_back_page(rid.page_id, &mut page_guard, &mut table_page)?;
+        self.write_back_page(&mut page_guard, &mut table_page)?;
         Ok(true)
     }
 }
