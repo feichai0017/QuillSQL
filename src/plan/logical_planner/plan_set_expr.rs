@@ -277,12 +277,19 @@ impl LogicalPlanner<'_> {
                         "0" | "false" | "off" => Some(false),
                         _ => None,
                     });
+                let row_estimate = self
+                    .context
+                    .catalog
+                    .table_statistics(&table_ref)
+                    .map(|stats| stats.row_count)
+                    .filter(|count| *count > 0);
                 Ok(LogicalPlan::TableScan(TableScan {
                     table_ref,
                     table_schema: schema,
                     filters: vec![],
                     limit: None,
                     streaming_hint: hint,
+                    estimated_row_count: row_estimate,
                 }))
             }
             sqlparser::ast::TableFactor::NestedJoin {

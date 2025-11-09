@@ -8,10 +8,10 @@ use crate::plan::logical_plan::{
 };
 
 use crate::execution::physical_plan::{
-    PhysicalAggregate, PhysicalCreateIndex, PhysicalCreateTable, PhysicalDelete, PhysicalDropIndex,
-    PhysicalDropTable, PhysicalEmpty, PhysicalFilter, PhysicalIndexScan, PhysicalInsert,
-    PhysicalLimit, PhysicalNestedLoopJoin, PhysicalPlan, PhysicalProject, PhysicalSeqScan,
-    PhysicalSort, PhysicalUpdate, PhysicalValues,
+    PhysicalAggregate, PhysicalAnalyze, PhysicalCreateIndex, PhysicalCreateTable, PhysicalDelete,
+    PhysicalDropIndex, PhysicalDropTable, PhysicalEmpty, PhysicalFilter, PhysicalIndexScan,
+    PhysicalInsert, PhysicalLimit, PhysicalNestedLoopJoin, PhysicalPlan, PhysicalProject,
+    PhysicalSeqScan, PhysicalSort, PhysicalUpdate, PhysicalValues,
 };
 
 pub struct PhysicalPlanner<'a> {
@@ -170,6 +170,9 @@ impl PhysicalPlanner<'_> {
                 delete.table_schema.clone(),
                 delete.selection.clone(),
             )),
+            LogicalPlan::Analyze(analyze) => {
+                PhysicalPlan::Analyze(PhysicalAnalyze::new(analyze.table.clone()))
+            }
             LogicalPlan::BeginTransaction(_)
             | LogicalPlan::CommitTransaction
             | LogicalPlan::RollbackTransaction
@@ -187,6 +190,7 @@ impl PhysicalPlanner<'_> {
             filters,
             limit,
             streaming_hint,
+            estimated_row_count: _,
         } = scan;
 
         let mut plan = if let Some(catalog_table) = self

@@ -1,4 +1,5 @@
 mod aggregate;
+mod analyze;
 mod create_index;
 mod create_table;
 mod delete;
@@ -17,6 +18,7 @@ mod util;
 mod values;
 
 pub use aggregate::Aggregate;
+pub use analyze::Analyze;
 pub use create_index::CreateIndex;
 pub use create_table::CreateTable;
 pub use delete::Delete;
@@ -61,6 +63,7 @@ pub enum LogicalPlan {
     Aggregate(Aggregate),
     Update(Update),
     Delete(Delete),
+    Analyze(Analyze),
     BeginTransaction(TransactionModes),
     CommitTransaction,
     RollbackTransaction,
@@ -89,6 +92,7 @@ impl LogicalPlan {
             LogicalPlan::Delete(_) => &DELETE_OUTPUT_SCHEMA_REF,
             LogicalPlan::DropTable(_) => &EMPTY_SCHEMA_REF,
             LogicalPlan::DropIndex(_) => &EMPTY_SCHEMA_REF,
+            LogicalPlan::Analyze(_) => &EMPTY_SCHEMA_REF,
             LogicalPlan::BeginTransaction(_)
             | LogicalPlan::CommitTransaction
             | LogicalPlan::RollbackTransaction
@@ -114,6 +118,7 @@ impl LogicalPlan {
             | LogicalPlan::Update(_)
             | LogicalPlan::Delete(_)
             | LogicalPlan::EmptyRelation(_)
+            | LogicalPlan::Analyze(_)
             | LogicalPlan::BeginTransaction(_)
             | LogicalPlan::CommitTransaction
             | LogicalPlan::RollbackTransaction
@@ -269,6 +274,7 @@ impl LogicalPlan {
             | LogicalPlan::Update(_)
             | LogicalPlan::Delete(_)
             | LogicalPlan::EmptyRelation(_)
+            | LogicalPlan::Analyze(_)
             | LogicalPlan::BeginTransaction(_)
             | LogicalPlan::CommitTransaction
             | LogicalPlan::RollbackTransaction
@@ -296,6 +302,7 @@ impl std::fmt::Display for LogicalPlan {
             LogicalPlan::Aggregate(v) => write!(f, "{v}"),
             LogicalPlan::Update(v) => write!(f, "{v}"),
             LogicalPlan::Delete(v) => write!(f, "{v}"),
+            LogicalPlan::Analyze(v) => write!(f, "Analyze: {}", v.table),
             LogicalPlan::BeginTransaction(_) => write!(f, "BeginTransaction"),
             LogicalPlan::CommitTransaction => write!(f, "CommitTransaction"),
             LogicalPlan::RollbackTransaction => write!(f, "RollbackTransaction"),

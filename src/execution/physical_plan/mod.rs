@@ -1,4 +1,5 @@
 mod aggregate;
+mod analyze;
 mod create_index;
 mod create_table;
 mod delete;
@@ -17,6 +18,7 @@ mod update;
 mod values;
 
 pub use aggregate::PhysicalAggregate;
+pub use analyze::PhysicalAnalyze;
 pub use create_index::PhysicalCreateIndex;
 pub use create_table::PhysicalCreateTable;
 pub use delete::PhysicalDelete;
@@ -56,6 +58,7 @@ pub enum PhysicalPlan {
     Filter(PhysicalFilter),
     NestedLoopJoin(PhysicalNestedLoopJoin),
     Aggregate(PhysicalAggregate),
+    Analyze(PhysicalAnalyze),
     CreateTable(PhysicalCreateTable),
     CreateIndex(PhysicalCreateIndex),
     DropTable(PhysicalDropTable),
@@ -85,7 +88,8 @@ impl PhysicalPlan {
             | PhysicalPlan::IndexScan(_)
             | PhysicalPlan::Update(_)
             | PhysicalPlan::Delete(_)
-            | PhysicalPlan::Values(_) => vec![],
+            | PhysicalPlan::Values(_)
+            | PhysicalPlan::Analyze(_) => vec![],
         }
     }
 }
@@ -110,6 +114,7 @@ impl VolcanoExecutor for PhysicalPlan {
             PhysicalPlan::Aggregate(op) => op.init(context),
             PhysicalPlan::Update(op) => op.init(context),
             PhysicalPlan::Delete(op) => op.init(context),
+            PhysicalPlan::Analyze(op) => op.init(context),
         }
     }
 
@@ -132,6 +137,7 @@ impl VolcanoExecutor for PhysicalPlan {
             PhysicalPlan::Aggregate(op) => op.next(context),
             PhysicalPlan::Update(op) => op.next(context),
             PhysicalPlan::Delete(op) => op.next(context),
+            PhysicalPlan::Analyze(op) => op.next(context),
         }
     }
 
@@ -154,6 +160,7 @@ impl VolcanoExecutor for PhysicalPlan {
             Self::Aggregate(op) => op.output_schema(),
             Self::Update(op) => op.output_schema(),
             Self::Delete(op) => op.output_schema(),
+            Self::Analyze(op) => op.output_schema(),
         }
     }
 }
@@ -178,6 +185,7 @@ impl std::fmt::Display for PhysicalPlan {
             Self::Aggregate(op) => write!(f, "{op}"),
             Self::Update(op) => write!(f, "{op}"),
             Self::Delete(op) => write!(f, "{op}"),
+            Self::Analyze(op) => write!(f, "{op}"),
         }
     }
 }

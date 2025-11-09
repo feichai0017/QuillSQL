@@ -1,11 +1,13 @@
 use crate::error::{QuillSQLError, QuillSQLResult};
 
 use crate::catalog::Catalog;
-use crate::plan::logical_plan::{LogicalPlan, OrderByExpr, TransactionModes, TransactionScope};
+use crate::plan::logical_plan::{
+    Analyze, LogicalPlan, OrderByExpr, TransactionModes, TransactionScope,
+};
 use crate::sql::ast;
 use crate::sql::ast::Value;
 use crate::utils::table_ref::TableReference;
-use sqlparser::ast::ObjectType;
+use sqlparser::ast::{Ident, ObjectType};
 
 pub struct PlannerContext<'a> {
     pub catalog: &'a Catalog,
@@ -95,6 +97,22 @@ impl<'a> LogicalPlanner<'a> {
                 snapshot,
                 session,
             } => self.plan_set_transaction(*session, snapshot, modes),
+            ast::Statement::Analyze {
+                table_name,
+                partitions,
+                for_columns,
+                columns,
+                cache_metadata,
+                noscan,
+                compute_statistics: _,
+            } => self.plan_analyze(
+                table_name,
+                partitions,
+                *for_columns,
+                columns,
+                *cache_metadata,
+                *noscan,
+            ),
             _ => unimplemented!(),
         }
     }
@@ -158,5 +176,33 @@ impl<'a> LogicalPlanner<'a> {
                 table_name
             ))),
         }
+    }
+
+    fn plan_analyze(
+        &self,
+        table_name: &ast::ObjectName,
+        partitions: &Option<Vec<ast::Expr>>,
+        for_columns: bool,
+        columns: &[Ident],
+        cache_metadata: bool,
+        noscan: bool,
+    ) -> QuillSQLResult<LogicalPlan> {
+        if partitions.as_ref().map_or(false, |p| !p.is_empty()) {
+            return Err(QuillSQLError::Plan(
+                "ANALYZE PARTITION is not supported".to_string(),
+            ));
+        }
+        if for_columns || !columns.is_empty() {
+            return Err(QuillSQLError::Plan(
+                "ANALYZE FOR COLUMNS is not supported".to_string(),
+            ));
+        }
+        if cache_metadata || noscan {
+            return Err(QuillSQLError::Plan(
+                "ANALYZE options NOSCAN/CACHE METADATA are not supported".to_string(),
+            ));
+        }
+        let table_ref = self.bind_table_name(table_name)?;
+        Ok(LogicalPlan::Analyze(Analyze { table: table_ref }))
     }
 }

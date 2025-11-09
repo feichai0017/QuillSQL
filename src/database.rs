@@ -6,7 +6,7 @@ use std::time::Duration;
 use tempfile::TempDir;
 
 use crate::buffer::{BufferManager, BUFFER_POOL_SIZE};
-use crate::catalog::load_catalog_data;
+use crate::catalog::{load_catalog_data, TableStatistics};
 use crate::config::{background_config, IndexVacuumConfig, MvccVacuumConfig, WalConfig};
 use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::optimizer::LogicalOptimizer;
@@ -14,7 +14,10 @@ use crate::plan::logical_plan::{LogicalPlan, TransactionScope};
 use crate::plan::PhysicalPlanner;
 use crate::recovery::{ControlFileManager, RecoveryManager, WalManager};
 use crate::session::SessionContext;
-use crate::utils::util::{pretty_format_logical_plan, pretty_format_physical_plan};
+use crate::utils::{
+    table_ref::TableReference,
+    util::{pretty_format_logical_plan, pretty_format_physical_plan},
+};
 use crate::{
     catalog::Catalog,
     execution::ExecutionEngine,
@@ -328,9 +331,20 @@ impl Database {
         planner.plan(stmt)
     }
 
+    pub fn analyze_table(&mut self, table_ref: &TableReference) -> QuillSQLResult<TableStatistics> {
+        self.catalog.analyze_table(table_ref)
+    }
+
     pub fn flush(&self) -> QuillSQLResult<()> {
         let _ = self.wal_manager.flush(None)?;
         self.buffer_pool.flush_all_pages()
+    }
+
+    pub fn table_statistics(
+        &self,
+        table_ref: &TableReference,
+    ) -> Option<&crate::catalog::TableStatistics> {
+        self.catalog.table_statistics(table_ref)
     }
 
     pub fn transaction_manager(&self) -> Arc<TransactionManager> {

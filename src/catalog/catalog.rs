@@ -4,9 +4,9 @@ use std::sync::Arc;
 
 use super::registry::{global_index_registry, global_table_registry};
 use crate::catalog::{
-    key_schema_to_varchar, SchemaRef, COLUMNS_SCHEMA, INDEXES_SCHEMA, INFORMATION_SCHEMA_COLUMNS,
-    INFORMATION_SCHEMA_INDEXES, INFORMATION_SCHEMA_NAME, INFORMATION_SCHEMA_SCHEMAS,
-    INFORMATION_SCHEMA_TABLES, SCHEMAS_SCHEMA, TABLES_SCHEMA,
+    key_schema_to_varchar, SchemaRef, TableStatistics, COLUMNS_SCHEMA, INDEXES_SCHEMA,
+    INFORMATION_SCHEMA_COLUMNS, INFORMATION_SCHEMA_INDEXES, INFORMATION_SCHEMA_NAME,
+    INFORMATION_SCHEMA_SCHEMAS, INFORMATION_SCHEMA_TABLES, SCHEMAS_SCHEMA, TABLES_SCHEMA,
 };
 use crate::storage::disk_manager::DiskManager;
 use crate::storage::page::{
@@ -53,6 +53,7 @@ pub struct CatalogTable {
     pub name: String,
     pub table: Arc<TableHeap>,
     pub indexes: HashMap<String, Arc<BPlusTreeIndex>>,
+    pub stats: Option<TableStatistics>,
 }
 
 impl CatalogTable {
@@ -61,6 +62,7 @@ impl CatalogTable {
             name: name.into(),
             table,
             indexes: HashMap::new(),
+            stats: None,
         }
     }
 }
@@ -149,6 +151,7 @@ impl Catalog {
             name: table_name.clone(),
             table: table_heap.clone(),
             indexes: HashMap::new(),
+            stats: None,
         };
         catalog_schema
             .tables
@@ -270,6 +273,42 @@ impl Catalog {
             )));
         };
         Ok(catalog_table.table.clone())
+    }
+
+    pub fn table_statistics(&self, table_ref: &TableReference) -> Option<&TableStatistics> {
+        let catalog_schema_name = table_ref
+            .schema()
+            .unwrap_or(DEFAULT_SCHEMA_NAME)
+            .to_string();
+        self.schemas
+            .get(&catalog_schema_name)
+            .and_then(|schema| schema.tables.get(table_ref.table()))
+            .and_then(|table| table.stats.as_ref())
+    }
+
+    pub fn analyze_table(&mut self, table_ref: &TableReference) -> QuillSQLResult<TableStatistics> {
+        let catalog_schema_name = table_ref
+            .schema()
+            .unwrap_or(DEFAULT_SCHEMA_NAME)
+            .to_string();
+        let table_name = table_ref.table().to_string();
+
+        let Some(catalog_schema) = self.schemas.get_mut(&catalog_schema_name) else {
+            return Err(QuillSQLError::Storage(format!(
+                "catalog schema {} not created yet",
+                catalog_schema_name
+            )));
+        };
+        let Some(catalog_table) = catalog_schema.tables.get_mut(&table_name) else {
+            return Err(QuillSQLError::Storage(format!(
+                "table {} not created yet",
+                table_name
+            )));
+        };
+
+        let stats = TableStatistics::analyze(catalog_table.table.clone())?;
+        catalog_table.stats = Some(stats.clone());
+        Ok(stats)
     }
 
     pub fn try_table_heap(&self, table_ref: &TableReference) -> Option<Arc<TableHeap>> {
@@ -844,5 +883,24 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(index3.key_schema, key_schema1);
+    }
+
+    #[test]
+    fn analyze_table_collects_basic_stats() {
+        let mut db = Database::new_temp().unwrap();
+        db.run("create table t_stats (a int, b int)").unwrap();
+        db.run("insert into t_stats values (1, 10), (null, 20), (2, null)")
+            .unwrap();
+
+        let table_ref = TableReference::Bare {
+            table: "t_stats".to_string(),
+        };
+        let stats = db.catalog.analyze_table(&table_ref).unwrap();
+        assert_eq!(stats.row_count, 3);
+        let col_a = stats.column_stats.get("a").unwrap();
+        assert_eq!(col_a.null_count, 1);
+        assert_eq!(col_a.non_null_count, 2);
+        let stored = db.catalog.table_statistics(&table_ref).unwrap();
+        assert_eq!(stored.row_count, 3);
     }
 }
