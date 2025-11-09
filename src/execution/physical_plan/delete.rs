@@ -68,13 +68,12 @@ impl VolcanoExecutor for PhysicalDelete {
                 }
             }
 
-            let table_heap = context.table_heap(&self.table)?;
             let Some((current_meta, current_tuple)) =
-                context.prepare_row_for_write(&self.table, rid, &table_heap, &meta)?
+                context.prepare_row_for_write(&self.table, rid, &meta)?
             else {
                 continue;
             };
-            context.apply_delete(table_heap.clone(), rid, current_meta, current_tuple)?;
+            context.apply_delete(&self.table, rid, current_meta, current_tuple)?;
             self.deleted_rows.fetch_add(1, Ordering::SeqCst);
         }
     }

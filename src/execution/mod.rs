@@ -5,19 +5,13 @@ use crate::execution::physical_plan::PhysicalPlan;
 use crate::expression::{Expr, ExprTrait};
 use crate::storage::{
     engine::{IndexHandle, StorageEngine, TableHandle},
-    mvcc_heap::MvccHeap,
     page::{RecordId, TupleMeta},
     table_heap::TableHeap,
     tuple::Tuple,
 };
-use crate::transaction::{
-    CommandId, IsolationLevel, LockManager, RowLockGuard, Transaction, TransactionManager,
-    TransactionSnapshot, TxnReadGuard, TxnRuntime,
-};
+use crate::transaction::{Transaction, TransactionManager, TxnContext};
 use crate::utils::scalar::ScalarValue;
-use crate::{catalog::Catalog, transaction::LockMode, utils::table_ref::TableReference};
-use log::warn;
-use sqlparser::ast::TransactionAccessMode;
+use crate::{catalog::Catalog, utils::table_ref::TableReference};
 use std::sync::Arc;
 
 pub trait VolcanoExecutor {
@@ -39,154 +33,6 @@ pub struct ExecutionContext<'a> {
     storage: Arc<dyn StorageEngine>,
     /// Transaction runtime wrapper (snapshot, locks, undo tracking).
     txn: TxnContext<'a>,
-}
-
-pub struct TxnContext<'a> {
-    runtime: TxnRuntime<'a>,
-    lock_manager: Arc<LockManager>,
-}
-
-impl<'a> TxnContext<'a> {
-    fn new(manager: Arc<TransactionManager>, txn: &'a mut Transaction) -> Self {
-        let lock_manager = manager.lock_manager_arc();
-        Self {
-            runtime: TxnRuntime::new(manager, txn),
-            lock_manager,
-        }
-    }
-
-    pub fn command_id(&self) -> CommandId {
-        self.runtime.command_id()
-    }
-
-    pub fn snapshot(&self) -> &TransactionSnapshot {
-        self.runtime.snapshot()
-    }
-
-    pub fn is_visible(&self, meta: &TupleMeta) -> bool {
-        self.runtime.is_visible(meta)
-    }
-
-    pub fn read_visible_tuple(
-        &mut self,
-        table: &TableReference,
-        rid: RecordId,
-        meta: &TupleMeta,
-        tuple: Tuple,
-    ) -> QuillSQLResult<Option<Tuple>> {
-        match self.transaction().isolation_level() {
-            IsolationLevel::ReadUncommitted => {
-                if self.is_visible(meta) {
-                    Ok(Some(tuple))
-                } else {
-                    Ok(None)
-                }
-            }
-            _ => {
-                let guard = self.acquire_shared_guard(table, rid)?;
-                let visible = self.is_visible(meta);
-                guard.release();
-                if visible {
-                    Ok(Some(tuple))
-                } else {
-                    Ok(None)
-                }
-            }
-        }
-    }
-
-    fn acquire_shared_guard(
-        &mut self,
-        table: &TableReference,
-        rid: RecordId,
-    ) -> QuillSQLResult<TxnReadGuard> {
-        if !self
-            .lock_manager
-            .lock_row(self.transaction(), LockMode::Shared, table.clone(), rid)
-        {
-            return Err(QuillSQLError::Execution(
-                "failed to acquire shared row lock".to_string(),
-            ));
-        }
-        Ok(TxnReadGuard::Temporary(RowLockGuard::new(
-            self.lock_manager.clone(),
-            self.transaction().id(),
-            table.clone(),
-            rid,
-        )))
-    }
-
-    pub fn lock_row_exclusive(
-        &mut self,
-        table: &TableReference,
-        rid: RecordId,
-    ) -> QuillSQLResult<()> {
-        if !self
-            .runtime_mut()
-            .try_lock_row(table.clone(), rid, LockMode::Exclusive)?
-        {
-            return Err(QuillSQLError::Execution(
-                "failed to acquire row exclusive lock".to_string(),
-            ));
-        }
-        Ok(())
-    }
-
-    pub fn lock_table(&mut self, table: TableReference, mode: LockMode) -> QuillSQLResult<()> {
-        self.runtime_mut().lock_table(table, mode)
-    }
-
-    pub fn ensure_writable(&self, table: &TableReference, operation: &str) -> QuillSQLResult<()> {
-        if matches!(
-            self.transaction().access_mode(),
-            TransactionAccessMode::ReadOnly
-        ) {
-            warn!(
-                "read-only txn {} attempted '{}' on {}",
-                self.runtime.id(),
-                operation,
-                table.to_log_string()
-            );
-            return Err(QuillSQLError::Execution(format!(
-                "operation '{}' on table {} is not allowed in READ ONLY transaction",
-                operation,
-                table.to_log_string()
-            )));
-        }
-        Ok(())
-    }
-
-    pub fn isolation_level(&self) -> IsolationLevel {
-        self.transaction().isolation_level()
-    }
-
-    pub fn transaction(&self) -> &Transaction {
-        self.runtime.transaction()
-    }
-
-    pub fn transaction_mut(&mut self) -> &mut Transaction {
-        self.runtime.transaction_mut()
-    }
-
-    pub fn manager(&self) -> &TransactionManager {
-        self.runtime.manager()
-    }
-
-    pub fn txn_runtime(&self) -> &TxnRuntime<'a> {
-        &self.runtime
-    }
-
-    pub fn txn_id(&self) -> crate::transaction::TransactionId {
-        self.runtime.id()
-    }
-
-    pub fn unlock_row(&self, table: &TableReference, rid: RecordId) {
-        self.runtime.unlock_row(table, rid);
-    }
-
-    fn runtime_mut(&mut self) -> &mut TxnRuntime<'a> {
-        &mut self.runtime
-    }
 }
 
 impl<'a> ExecutionContext<'a> {
@@ -220,102 +66,6 @@ impl<'a> ExecutionContext<'a> {
         expr.evaluate(tuple)
     }
 
-    /// Insert a tuple, update all indexes, and register undo state.
-    pub fn insert_tuple_with_indexes(
-        &mut self,
-        table: &TableReference,
-        tuple: &Tuple,
-    ) -> QuillSQLResult<()> {
-        let table_heap = self.table_heap(table)?;
-        let mvcc = MvccHeap::new(table_heap.clone());
-        let (rid, _) = mvcc.insert(tuple, self.txn.txn_id(), self.txn.command_id())?;
-
-        let mut index_links = Vec::new();
-        for index_handle in self.table_indexes(table)? {
-            let index = index_handle.index();
-            if let Ok(key_tuple) = tuple.project_with_schema(index_handle.key_schema()) {
-                index.insert(&key_tuple, rid)?;
-                index_links.push((index.clone(), key_tuple));
-            }
-        }
-
-        self.txn
-            .transaction_mut()
-            .push_insert_undo(table_heap, rid, index_links);
-        Ok(())
-    }
-
-    /// Mark a row deleted via MVCC and enqueue undo data.
-    pub fn apply_delete(
-        &mut self,
-        table_heap: Arc<TableHeap>,
-        rid: RecordId,
-        prev_meta: TupleMeta,
-        prev_tuple: Tuple,
-    ) -> QuillSQLResult<()> {
-        let mvcc = MvccHeap::new(table_heap.clone());
-        mvcc.mark_deleted(rid, self.txn.txn_id(), self.txn.command_id())?;
-        self.txn
-            .transaction_mut()
-            .push_delete_undo(table_heap, rid, prev_meta, prev_tuple);
-        Ok(())
-    }
-
-    /// Create a new MVCC version, update indexes, and log undo.
-    pub fn apply_update(
-        &mut self,
-        table: &TableReference,
-        table_heap: Arc<TableHeap>,
-        rid: RecordId,
-        new_tuple: Tuple,
-        prev_meta: TupleMeta,
-        prev_tuple: Tuple,
-    ) -> QuillSQLResult<()> {
-        let mvcc = MvccHeap::new(table_heap.clone());
-        let (new_rid, _) = mvcc.update(
-            rid,
-            new_tuple.clone(),
-            self.txn.txn_id(),
-            self.txn.command_id(),
-        )?;
-
-        let mut new_keys = Vec::new();
-        for index_handle in self.table_indexes(table)? {
-            let index = index_handle.index();
-            if let Ok(new_key_tuple) = new_tuple.project_with_schema(index_handle.key_schema()) {
-                index.insert(&new_key_tuple, new_rid)?;
-                new_keys.push((index.clone(), new_key_tuple));
-            }
-        }
-
-        self.txn
-            .transaction_mut()
-            .push_update_undo(table_heap, rid, new_rid, prev_meta, prev_tuple, new_keys);
-        Ok(())
-    }
-
-    /// Acquire an exclusive lock and re-check visibility before mutating a row.
-    /// Returns the current tuple version if it is still visible.
-    pub fn prepare_row_for_write(
-        &mut self,
-        table: &TableReference,
-        rid: crate::storage::page::RecordId,
-        table_heap: &Arc<TableHeap>,
-        observed_meta: &crate::storage::page::TupleMeta,
-    ) -> QuillSQLResult<Option<(crate::storage::page::TupleMeta, Tuple)>> {
-        if !self.txn.is_visible(observed_meta) {
-            return Ok(None);
-        }
-        self.txn.lock_row_exclusive(table, rid)?;
-        let mvcc = MvccHeap::new(table_heap.clone());
-        let (current_meta, current_tuple) = mvcc.full_tuple(rid)?;
-        if !self.txn.is_visible(&current_meta) {
-            self.txn.unlock_row(table, rid);
-            return Ok(None);
-        }
-        Ok(Some((current_meta, current_tuple)))
-    }
-
     /// Look up the table heap through the storage engine.
     pub fn table_handle(&self, table: &TableReference) -> QuillSQLResult<Arc<dyn TableHandle>> {
         self.storage.table(self.catalog, table)
@@ -339,6 +89,57 @@ impl<'a> ExecutionContext<'a> {
 
     pub fn txn_ctx_mut(&mut self) -> &mut TxnContext<'a> {
         &mut self.txn
+    }
+
+    pub fn insert_tuple_with_indexes(
+        &mut self,
+        table: &TableReference,
+        tuple: &Tuple,
+    ) -> QuillSQLResult<()> {
+        let handle = self.table_handle(table)?;
+        let indexes = self.table_indexes(table)?;
+        handle.insert(self.txn_ctx_mut(), tuple, &indexes)
+    }
+
+    pub fn apply_delete(
+        &mut self,
+        table: &TableReference,
+        rid: RecordId,
+        prev_meta: TupleMeta,
+        prev_tuple: Tuple,
+    ) -> QuillSQLResult<()> {
+        let handle = self.table_handle(table)?;
+        handle.delete(self.txn_ctx_mut(), rid, prev_meta, prev_tuple)
+    }
+
+    pub fn apply_update(
+        &mut self,
+        table: &TableReference,
+        rid: RecordId,
+        new_tuple: Tuple,
+        prev_meta: TupleMeta,
+        prev_tuple: Tuple,
+    ) -> QuillSQLResult<RecordId> {
+        let handle = self.table_handle(table)?;
+        let indexes = self.table_indexes(table)?;
+        handle.update(
+            self.txn_ctx_mut(),
+            rid,
+            new_tuple,
+            prev_meta,
+            prev_tuple,
+            &indexes,
+        )
+    }
+
+    pub fn prepare_row_for_write(
+        &mut self,
+        table: &TableReference,
+        rid: RecordId,
+        observed_meta: &TupleMeta,
+    ) -> QuillSQLResult<Option<(TupleMeta, Tuple)>> {
+        let handle = self.table_handle(table)?;
+        handle.prepare_row_for_write(self.txn_ctx_mut(), rid, observed_meta)
     }
 }
 

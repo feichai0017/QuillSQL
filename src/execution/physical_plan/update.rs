@@ -65,8 +65,6 @@ impl VolcanoExecutor for PhysicalUpdate {
                 "table iterator not created".to_string(),
             ));
         };
-        let table_heap = context.table_heap(&self.table)?;
-
         loop {
             if let Some((rid, meta, tuple)) = table_iterator.next()? {
                 // Skip versions that were created by this command so we do not
@@ -84,7 +82,7 @@ impl VolcanoExecutor for PhysicalUpdate {
                 }
 
                 let Some((prev_meta, mut current_tuple)) =
-                    context.prepare_row_for_write(&self.table, rid, &table_heap, &meta)?
+                    context.prepare_row_for_write(&self.table, rid, &meta)?
                 else {
                     continue;
                 };
@@ -104,9 +102,8 @@ impl VolcanoExecutor for PhysicalUpdate {
                     current_tuple.data[index] = new_value.clone();
                     eval_tuple.data[index] = new_value;
                 }
-                context.apply_update(
+                let _ = context.apply_update(
                     &self.table,
-                    table_heap.clone(),
                     rid,
                     current_tuple.clone(),
                     prev_meta,
