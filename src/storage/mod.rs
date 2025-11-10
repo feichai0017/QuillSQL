@@ -13,7 +13,7 @@ pub use engine::{
     TupleStream,
 };
 
-pub use heap::mvcc_heap::{self, MvccHeap};
 pub use heap::heap_recovery;
+pub use heap::mvcc_heap::{self, MvccHeap};
 pub use heap::table_heap;
 pub use heap::table_heap::{TableHeap, TableIterator};
