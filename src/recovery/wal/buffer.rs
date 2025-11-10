@@ -1,68 +1,91 @@
 use crate::recovery::wal::Lsn;
+use crate::utils::ring_buffer::ConcurrentRingBuffer;
 
 use super::record::WalRecord;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 #[derive(Debug)]
 pub struct WalBuffer {
-    records: Vec<WalRecord>,
-    bytes: usize,
-    last_record_start: Lsn,
+    queue: ConcurrentRingBuffer<WalRecord>,
+    len: AtomicUsize,
+    bytes: AtomicUsize,
+    last_enqueued_end: AtomicU64,
 }
 
 impl WalBuffer {
-    pub fn new(last_start: Lsn) -> Self {
+    pub fn with_capacity(capacity: usize) -> Self {
         Self {
-            records: Vec::new(),
-            bytes: 0,
-            last_record_start: last_start,
+            queue: ConcurrentRingBuffer::with_capacity(capacity.max(1)),
+            len: AtomicUsize::new(0),
+            bytes: AtomicUsize::new(0),
+            last_enqueued_end: AtomicU64::new(0),
         }
     }
 
-    pub fn push(&mut self, record: WalRecord) {
-        self.last_record_start = record.start_lsn;
-        self.bytes = self.bytes.saturating_add(record.encoded_len() as usize);
-        self.records.push(record);
+    pub fn push(&self, record: WalRecord) {
+        let encoded_len = record.encoded_len() as usize;
+        let end_lsn = record.end_lsn;
+        let mut pending = record;
+        loop {
+            match self.queue.try_push(pending) {
+                Ok(()) => break,
+                Err(returned) => {
+                    pending = returned;
+                    std::hint::spin_loop();
+                }
+            }
+        }
+        self.len.fetch_add(1, Ordering::Release);
+        self.bytes.fetch_add(encoded_len, Ordering::Release);
+        self.last_enqueued_end.store(end_lsn, Ordering::Release);
     }
 
+    #[inline]
     pub fn len(&self) -> usize {
-        self.records.len()
+        self.len.load(Ordering::Acquire)
     }
 
+    #[inline]
     pub fn bytes(&self) -> usize {
-        self.bytes
+        self.bytes.load(Ordering::Acquire)
     }
 
-    pub fn last_record_start(&self) -> Lsn {
-        self.last_record_start
-    }
-
+    #[inline]
     pub fn highest_end_lsn(&self) -> Lsn {
-        self.records
-            .last()
-            .map(|record| record.end_lsn)
-            .unwrap_or(self.last_record_start)
+        self.last_enqueued_end.load(Ordering::Acquire)
     }
 
-    pub fn drain_until(&mut self, upto: Lsn) -> (Vec<WalRecord>, usize) {
-        let count = self
-            .records
-            .iter()
-            .take_while(|record| record.end_lsn <= upto)
-            .count();
-        if count == 0 {
-            return (Vec::new(), 0);
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len.load(Ordering::Acquire) == 0
+    }
+
+    pub fn drain_until(&self, upto: Lsn) -> (Vec<WalRecord>, usize) {
+        let mut drained = Vec::new();
+        let mut released = 0usize;
+        loop {
+            let Some(front) = self.queue.peek_clone() else {
+                break;
+            };
+            if front.end_lsn > upto {
+                break;
+            }
+            if let Some(record) = self.queue.pop() {
+                released += record.encoded_len() as usize;
+                drained.push(record);
+            } else {
+                break;
+            }
         }
-        let drained: Vec<WalRecord> = self.records.drain(..count).collect();
-        let released: usize = drained
-            .iter()
-            .map(|record| record.encoded_len() as usize)
-            .sum();
-        self.bytes = self.bytes.saturating_sub(released);
+        if !drained.is_empty() {
+            self.len.fetch_sub(drained.len(), Ordering::Release);
+            self.bytes.fetch_sub(released, Ordering::Release);
+        }
         (drained, released)
     }
 
     pub fn pending(&self) -> Vec<WalRecord> {
-        self.records.clone()
+        self.queue.snapshot()
     }
 }
 
@@ -81,19 +104,18 @@ mod tests {
 
     #[test]
     fn push_updates_length_and_bytes() {
-        let mut buffer = WalBuffer::new(0);
+        let buffer = WalBuffer::with_capacity(8);
         buffer.push(make_record(0, 16));
         buffer.push(make_record(16, 32));
 
         assert_eq!(buffer.len(), 2);
         assert_eq!(buffer.bytes(), 48);
-        assert_eq!(buffer.last_record_start(), 16);
         assert_eq!(buffer.highest_end_lsn(), 48);
     }
 
     #[test]
     fn drain_until_releases_records_and_bytes() {
-        let mut buffer = WalBuffer::new(0);
+        let buffer = WalBuffer::with_capacity(8);
         buffer.push(make_record(0, 10));
         buffer.push(make_record(10, 20));
         buffer.push(make_record(30, 5));

@@ -50,10 +50,7 @@ fn main() -> QuillSQLResult<()> {
         "CREATE TABLE {}(id BIGINT NOT NULL, val BIGINT)",
         TABLE
     ))?;
-    db.run(&format!(
-        "CREATE INDEX idx_{}_id ON {}(id)",
-        TABLE, TABLE
-    ))?;
+    db.run(&format!("CREATE INDEX idx_{}_id ON {}(id)", TABLE, TABLE))?;
 
     let guard = ProfilerGuard::new(100).unwrap();
     let start = Instant::now();

@@ -41,6 +41,7 @@ use storage::{list_segments, segment_path, WalFlushTicket, WalStorage};
 use writer::WalWriterRuntime;
 
 pub type Lsn = u64;
+const DEFAULT_WAL_BUFFER_CAPACITY: usize = 4096;
 
 #[derive(Debug, Clone, Copy)]
 pub struct WalAppendContext {
@@ -55,21 +56,13 @@ pub struct WalAppendResult {
 }
 
 struct WalState {
-    buffer: WalBuffer,
     storage: WalStorage,
-}
-
-impl std::fmt::Debug for WalState {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("WalState")
-            .field("buffer_len", &self.buffer.len())
-            .finish()
-    }
 }
 
 pub struct WalManager {
     next_lsn: AtomicU64,
     durable_lsn: AtomicU64,
+    buffer: WalBuffer,
     state: Mutex<WalState>,
     writer: Mutex<Option<WalWriterRuntime>>,
     persist_control_file_on_flush: bool,
@@ -128,10 +121,11 @@ impl WalManager {
         control_file: Option<Arc<ControlFileManager>>,
         scheduler: Arc<DiskScheduler>,
     ) -> QuillSQLResult<Self> {
-        let max_buffer_records = if config.buffer_capacity == 0 {
+        let buffer_capacity_cfg = config.buffer_capacity;
+        let max_buffer_records = if buffer_capacity_cfg == 0 {
             usize::MAX
         } else {
-            config.buffer_capacity
+            buffer_capacity_cfg
         };
         let flush_bytes = if config.flush_coalesce_bytes == 0 {
             usize::MAX
@@ -154,13 +148,16 @@ impl WalManager {
                 let (next_offset, last_start) = storage.recover_offsets()?;
                 (next_offset, next_offset, last_start, last_start, 0)
             };
+        let ring_capacity = if buffer_capacity_cfg == 0 {
+            DEFAULT_WAL_BUFFER_CAPACITY
+        } else {
+            buffer_capacity_cfg.max(DEFAULT_WAL_BUFFER_CAPACITY)
+        };
         Ok(Self {
             next_lsn: AtomicU64::new(next_ptr),
             durable_lsn: AtomicU64::new(durable_ptr),
-            state: Mutex::new(WalState {
-                buffer: WalBuffer::new(last_record_start),
-                storage,
-            }),
+            buffer: WalBuffer::with_capacity(ring_capacity),
+            state: Mutex::new(WalState { storage }),
             writer: Mutex::new(None),
             persist_control_file_on_flush,
             max_buffer_records,
@@ -197,8 +194,7 @@ impl WalManager {
         let (_, _, preview_body) = encode_body(&preview_payload);
         let preview_frame_len = WAL_HEADER_LEN + preview_body.len() + WAL_CRC_LEN;
 
-        let mut guard = self.state.lock();
-        let prev_start = guard.buffer.last_record_start();
+        let prev_start = self.last_record_start.load(Ordering::Acquire);
         let start_lsn = self
             .next_lsn
             .fetch_add(preview_frame_len as u64, Ordering::SeqCst);
@@ -215,16 +211,17 @@ impl WalManager {
         let end_lsn = start_lsn + frame_len as u64;
         let encoded = Bytes::from(frame_bytes);
 
-        guard.buffer.push(WalRecord {
+        self.buffer.push(WalRecord {
             start_lsn,
             end_lsn,
             payload: encoded,
         });
 
-        let should_flush = guard.buffer.len() >= self.max_buffer_records
-            || guard.buffer.bytes() >= self.flush_coalesce_bytes
-            || guard.buffer.bytes() >= WAL_PAGE_SIZE;
-        drop(guard);
+        let buffer_len = self.buffer.len();
+        let buffer_bytes = self.buffer.bytes();
+        let should_flush = buffer_len >= self.max_buffer_records
+            || buffer_bytes >= self.flush_coalesce_bytes
+            || buffer_bytes >= WAL_PAGE_SIZE;
 
         self.last_record_start.store(start_lsn, Ordering::Release);
 
@@ -344,7 +341,11 @@ impl WalManager {
         let (desired, tickets) = {
             let mut guard = self.state.lock();
             let current_durable = self.durable_lsn();
-            let highest_buffered = guard.buffer.highest_end_lsn().max(current_durable);
+            let highest_buffered = if self.buffer.is_empty() {
+                current_durable
+            } else {
+                self.buffer.highest_end_lsn()
+            };
             let mut desired = target.filter(|lsn| *lsn != 0).unwrap_or(highest_buffered);
             desired = cmp::min(self.max_assigned_lsn(), desired);
 
@@ -354,7 +355,7 @@ impl WalManager {
                 return Ok(current_durable);
             }
 
-            let (to_flush, _) = guard.buffer.drain_until(desired);
+            let (to_flush, _) = self.buffer.drain_until(desired);
             if !to_flush.is_empty() {
                 guard.storage.append_records(&to_flush)?;
                 guard.storage.flush()?;
@@ -375,7 +376,7 @@ impl WalManager {
     }
 
     pub fn pending_records(&self) -> Vec<WalRecord> {
-        self.state.lock().buffer.pending()
+        self.buffer.pending()
     }
 
     fn default_scheduler(config: &WalConfig) -> QuillSQLResult<Arc<DiskScheduler>> {

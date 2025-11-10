@@ -1,9 +1,7 @@
 use std::cell::{Cell, RefCell};
 use std::fmt::Write as _; // for INSERT statement construction
 
-use criterion::{
-    black_box, criterion_group, criterion_main, BatchSize, Criterion, Throughput,
-};
+use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion, Throughput};
 use postgres::{Client, NoTls};
 use pprof::criterion::{Output, PProfProfiler};
 use quill_sql::database::{Database, DatabaseOptions, WalOptions};
