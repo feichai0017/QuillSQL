@@ -226,7 +226,7 @@ impl WalManager {
         self.last_record_start.store(start_lsn, Ordering::Release);
 
         if should_flush {
-            self.flush(Some(end_lsn))?;
+            self.flush_with_mode(Some(end_lsn), false)?;
         }
         Ok(WalAppendResult { start_lsn, end_lsn })
     }
@@ -289,7 +289,7 @@ impl WalManager {
             .store(result.start_lsn, Ordering::Release);
         self.checkpoint_redo_start
             .store(redo_start, Ordering::Release);
-        self.flush(Some(result.end_lsn))?;
+        self.flush_with_mode(Some(result.end_lsn), true)?;
         self.touched_pages.clear();
         if let Some(ctrl) = &self.control_file {
             ctrl.update(
@@ -336,6 +336,10 @@ impl WalManager {
     }
 
     pub fn flush(&self, target: Option<Lsn>) -> QuillSQLResult<Lsn> {
+        self.flush_with_mode(target, false)
+    }
+
+    fn flush_with_mode(&self, target: Option<Lsn>, force_sync: bool) -> QuillSQLResult<Lsn> {
         let recycle_lsn = self.last_checkpoint.load(Ordering::Acquire);
 
         let (desired, tickets) = {
@@ -350,6 +354,7 @@ impl WalManager {
             desired = cmp::min(self.max_assigned_lsn(), desired);
 
             if desired <= current_durable {
+                guard.storage.flush(force_sync)?;
                 guard.storage.recycle_segments(recycle_lsn)?;
                 drop(guard);
                 return Ok(current_durable);
@@ -358,8 +363,8 @@ impl WalManager {
             let (to_flush, _) = self.buffer.drain_until(desired);
             if !to_flush.is_empty() {
                 guard.storage.append_records(&to_flush)?;
-                guard.storage.flush()?;
             }
+            guard.storage.flush(force_sync)?;
 
             guard.storage.recycle_segments(recycle_lsn)?;
             let ready = guard.storage.take_ready(desired);
@@ -422,7 +427,7 @@ impl WalManager {
         if self.durable_lsn() >= target {
             return Ok(self.durable_lsn());
         }
-        self.flush(Some(target))
+        self.flush_with_mode(Some(target), true)
     }
 
     pub fn wait_for_durable(&self, target: Lsn) -> QuillSQLResult<()> {
@@ -432,7 +437,7 @@ impl WalManager {
         if self.durable_lsn() >= target {
             return Ok(());
         }
-        self.flush(Some(target))?;
+        self.flush_with_mode(Some(target), true)?;
         if self.durable_lsn() >= target {
             return Ok(());
         }

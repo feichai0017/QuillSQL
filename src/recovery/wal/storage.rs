@@ -23,6 +23,12 @@ struct WalSegmentInfo {
     size: u64,
 }
 
+#[derive(Clone, Debug)]
+struct SealedSegment {
+    id: u64,
+    last_lsn: Lsn,
+}
+
 pub(super) struct WalFlushTicket {
     pub(super) lsn: Lsn,
     pub(super) receiver: WalIoTicket,
@@ -38,6 +44,8 @@ pub(super) struct WalStorage {
     open_page: Option<WalPage>,
     last_page_end_lsn: Lsn,
     last_sync_request: Lsn,
+    active_segment_synced_lsn: Lsn,
+    sealed_segments: VecDeque<SealedSegment>,
     pending: VecDeque<WalFlushTicket>,
 }
 
@@ -55,6 +63,8 @@ impl WalStorage {
             open_page: None,
             last_page_end_lsn: 0,
             last_sync_request: 0,
+            active_segment_synced_lsn: 0,
+            sealed_segments: VecDeque::new(),
             pending: VecDeque::new(),
         })
     }
@@ -181,6 +191,8 @@ impl WalStorage {
 
         self.last_page_end_lsn = next_lsn;
         self.last_sync_request = next_lsn;
+        self.active_segment_synced_lsn = next_lsn;
+        self.sealed_segments.clear();
         let segment_index = physical_offset / self.segment_size;
         self.current_segment = WalSegmentInfo {
             id: segment_index + 1,
@@ -234,20 +246,12 @@ impl WalStorage {
         Ok(())
     }
 
-    pub(super) fn flush(&mut self) -> QuillSQLResult<()> {
-        if let Some(page) = self.open_page.take() {
-            self.write_page(&page)?;
-        }
+    pub(super) fn flush(&mut self, force_sync: bool) -> QuillSQLResult<()> {
+        self.flush_open_page()?;
 
-        if self.sync_on_flush && self.last_page_end_lsn > self.last_sync_request {
-            let path = segment_path(&self.directory, self.current_segment.id);
-            if let Some(receiver) = self.sink.schedule_fsync(path)? {
-                self.last_sync_request = self.last_page_end_lsn;
-                self.pending.push_back(WalFlushTicket {
-                    lsn: self.last_sync_request,
-                    receiver,
-                });
-            }
+        if self.sync_on_flush || force_sync {
+            self.sync_sealed_segments()?;
+            self.sync_active_segment()?;
         }
         Ok(())
     }
@@ -288,12 +292,54 @@ impl WalStorage {
         self.directory.clone()
     }
 
-    fn rotate_segment(&mut self) -> QuillSQLResult<()> {
-        self.flush()?;
+    fn flush_open_page(&mut self) -> QuillSQLResult<()> {
+        if let Some(page) = self.open_page.take() {
+            self.write_page(&page)?;
+        }
+        Ok(())
+    }
+
+    fn seal_current_segment(&mut self) {
+        if self.current_segment.size == 0 {
+            return;
+        }
+        let sealed = SealedSegment {
+            id: self.current_segment.id,
+            last_lsn: self.last_page_end_lsn,
+        };
+        self.sealed_segments.push_back(sealed);
         self.current_segment = WalSegmentInfo {
             id: self.current_segment.id + 1,
             size: 0,
         };
+        self.active_segment_synced_lsn = 0;
+    }
+
+    fn sync_sealed_segments(&mut self) -> QuillSQLResult<()> {
+        while let Some(segment) = self.sealed_segments.pop_front() {
+            self.schedule_segment_sync(segment.id, segment.last_lsn)?;
+        }
+        Ok(())
+    }
+
+    fn sync_active_segment(&mut self) -> QuillSQLResult<()> {
+        if self.last_page_end_lsn == 0 || self.last_page_end_lsn == self.active_segment_synced_lsn {
+            return Ok(());
+        }
+        self.schedule_segment_sync(self.current_segment.id, self.last_page_end_lsn)?;
+        self.active_segment_synced_lsn = self.last_page_end_lsn;
+        Ok(())
+    }
+
+    fn schedule_segment_sync(&mut self, segment_id: u64, upto_lsn: Lsn) -> QuillSQLResult<()> {
+        let path = segment_path(&self.directory, segment_id);
+        if let Some(receiver) = self.sink.schedule_fsync(path)? {
+            self.pending.push_back(WalFlushTicket {
+                lsn: upto_lsn,
+                receiver,
+            });
+        }
+        self.last_sync_request = self.last_sync_request.max(upto_lsn);
         Ok(())
     }
 
@@ -302,7 +348,7 @@ impl WalStorage {
             return Ok(());
         }
         if self.current_segment.size + WAL_PAGE_SIZE as u64 > self.segment_size {
-            self.rotate_segment()?;
+            self.seal_current_segment();
         }
         let offset = self.current_segment.size;
         let bytes = Bytes::from(page.to_bytes());
@@ -522,7 +568,7 @@ mod tests {
         let mut storage = WalStorage::new(config.clone(), sink.clone()).expect("storage");
         let records = build_records(4);
         storage.append_records(&records).expect("append");
-        storage.flush().expect("flush");
+        storage.flush(true).expect("flush");
         let upto = storage.last_page_end_lsn;
         drain_tickets(&mut storage, upto);
         drop(storage);
@@ -546,7 +592,7 @@ mod tests {
         let records = build_large_page_records(6);
         for chunk in records.chunks(1) {
             storage.append_records(chunk).expect("append");
-            storage.flush().expect("flush");
+            storage.flush(true).expect("flush");
             let upto = storage.last_page_end_lsn;
             drain_tickets(&mut storage, upto);
         }
