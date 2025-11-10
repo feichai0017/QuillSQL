@@ -2082,21 +2082,88 @@ ARIES algorithm, QuillSQL can recover to a consistent state after crashes.</p>
 <hr />
 <h2 id="directory-layout-8"><a class="header" href="#directory-layout-8">Directory Layout</a></h2>
 <div class="table-wrapper"><table><thead><tr><th>Path</th><th>Description</th><th>Key Types</th></tr></thead><tbody>
-<tr><td><code>wal_manager.rs</code></td><td>Log writer, buffer manager, background thread spawner.</td><td><code>WalManager</code>, <code>WalWriterHandle</code></td></tr>
-<tr><td><code>wal_record.rs</code></td><td>All record variants.</td><td><code>WalRecord</code>, <code>LogSequenceNumber</code></td></tr>
-<tr><td><code>recovery_manager.rs</code></td><td>ARIES driver.</td><td><code>RecoveryManager</code>, <code>RecoverySummary</code></td></tr>
-<tr><td><code>control_file.rs</code></td><td>Persistent metadata (checkpoint info).</td><td><code>ControlFileManager</code></td></tr>
+<tr><td><code>recovery/wal/</code></td><td>Log writer, buffer, storage, background writer runtime.</td><td><code>WalManager</code>, <code>WalBuffer</code>, <code>WalStorage</code></td></tr>
+<tr><td><code>recovery/wal_record.rs</code></td><td>Serialized record variants exposed to subsystems.</td><td><code>WalRecordPayload</code>, <code>ResourceManagerId</code></td></tr>
+<tr><td><code>recovery/resource_manager.rs</code></td><td>Registry that maps payloads to redo/undo handlers.</td><td><code>ResourceManager</code>, <code>RedoContext</code>, <code>UndoContext</code></td></tr>
+<tr><td><code>recovery/recovery_manager.rs</code></td><td>ARIES driver.</td><td><code>RecoveryManager</code>, <code>RecoverySummary</code></td></tr>
+<tr><td><code>recovery/control_file.rs</code></td><td>Persistent metadata (checkpoint info).</td><td><code>ControlFileManager</code></td></tr>
 </tbody></table>
 </div>
 <hr />
-<h2 id="wal-highlights"><a class="header" href="#wal-highlights">WAL Highlights</a></h2>
+<h2 id="walmanager--io-pipeline"><a class="header" href="#walmanager--io-pipeline">WalManager &amp; I/O pipeline</a></h2>
 <ul>
-<li><strong>Write-ahead rule</strong> – before flushing a dirty page, ensure <code>page_lsn &lt;= flushed_lsn</code>
-via <code>WalManager::flush_until</code>.</li>
-<li><strong>Record types</strong> – logical (<code>HeapInsert</code>, <code>IndexDelete</code>) for redo/undo and physical
-(<code>PageWrite</code>, <code>PageDelta</code>) for large changes.</li>
-<li><strong>Segmentation</strong> – WAL files are cut into segments per <code>WalOptions::segment_size</code>, and
-background writers can flush them asynchronously.</li>
+<li><strong>Buffering</strong> – <code>WalManager</code> uses a lock-free <code>WalBuffer</code> ring. <code>append_record_with</code>
+attaches an LSN, encodes the frame, pushes it into the ring, and auto-flushes when
+either record count or byte thresholds (<code>max_buffer_records</code>,
+<code>flush_coalesce_bytes</code>, or a full WAL page) are met. Writers never block on Vec
+reallocation and thus scale with concurrent transactions.</li>
+<li><strong>Physical logging</strong> – <code>log_page_update</code> inspects old/new page images using
+<code>find_contiguous_diff</code>. First touches (tracked via <code>DashSet&lt;PageId&gt;</code>) or large diffs
+emit 4 KiB <code>PageWrite</code> FPWs; otherwise <code>PageDelta</code> keeps logs small. Both payloads
+carry the previous <code>page_lsn</code> so redo can enforce the WAL rule.</li>
+<li><strong>Segmentation &amp; flush</strong> – <code>WalStorage</code> appends frames to rolling segments under the
+configured WAL directory, queues async write/fsync tickets via the <code>DiskScheduler</code>
+sink, and recycles sealed segments after checkpoints. <code>flush()</code> drains buffered
+records up to an optional target LSN, waits for outstanding tickets, updates
+<code>durable_lsn</code>, and optionally persists the control file snapshot.</li>
+<li><strong>Background writer</strong> – <code>start_background_flush</code> spawns <code>WalWriterRuntime</code>, which
+periodically calls <code>flush(None)</code>; <code>WalWriterHandle</code> lives in the background worker
+registry so shutdown is coordinated with the db lifecycle.</li>
+<li><strong>Checkpoints</strong> – <code>log_checkpoint</code> writes a <code>Checkpoint</code> frame containing ATT/DPT,
+forces a flush, clears the “first-touch” set (so new FPWs are generated as needed),
+and updates <code>checkpoint_redo_start</code> in the control file. Recovery uses this redo
+start to avoid rescanning the whole log.</li>
+<li><strong>Readers &amp; durability waits</strong> – <code>WalManager::reader</code> iterates frames straight from
+the WAL directory. <code>wait_for_durable</code> is the gate that synchronous commits call
+after emitting a commit record; it reuses <code>flush_with_mode</code> and condition variables
+to block until <code>durable_lsn &gt;= target</code>.</li>
+</ul>
+<h2 id="record-types--resource-managers"><a class="header" href="#record-types--resource-managers">Record types &amp; resource managers</a></h2>
+<p>All log frames share the envelope defined in <code>wal_record.rs</code> and are routed by
+<code>ResourceManagerId</code>:</p>
+<ul>
+<li><strong>Page (<code>ResourceManagerId::Page</code>)</strong> – purely physical <code>PageWrite</code> and <code>PageDelta</code>
+payloads. The default page resource manager checks <code>page_lsn</code> through the buffer
+pool (when available) before rewriting the page on redo. No undo is required
+because these are low-level physical changes.</li>
+<li><strong>Heap (<code>ResourceManagerId::Heap</code>)</strong> – logical payloads emitted by
+<code>TableHeap::append_heap_record</code> include relation id, page/slot, tuple metadata, and
+raw bytes. <code>HeapResourceManager</code> decodes them, rebuilds a temporary page image, and
+replays inserts/updates/deletes by splicing tuples back into the heap. Undo paths
+rely on the same metadata to restore tuple bytes or clear delete flags.</li>
+<li><strong>Index (<code>ResourceManagerId::Index</code>)</strong> – <code>BPlusTreeIndex</code> writes logical leaf
+operations (<code>LeafInsert/Delete/Update</code>) that store key bytes and the target <code>RecordId</code>.
+<code>IndexResourceManager</code> decodes the tuple via <code>TupleCodec</code> and mutates the leaf (via
+the buffer pool if available, otherwise direct disk I/O). Redo is idempotent (missing
+keys are inserted), while undo mirrors insert/delete/update semantics.</li>
+<li><strong>Transaction / CLR / Checkpoint</strong> – <code>TransactionPayload</code> (BEGIN/COMMIT/ABORT)
+enables the undo index to link per-transaction log records. <code>ClrPayload</code> documents
+each undo step so the recovery process can survive crashes mid-undo. Checkpoints
+snapshot ATT + DPT for the analysis phase.</li>
+</ul>
+<p><code>ensure_default_resource_managers_registered</code> wires Page, Heap, and Index resource
+managers together so both redo (<code>RedoExecutor</code>) and undo (<code>UndoExecutor</code>) can dispatch
+records uniformly.</p>
+<h2 id="heap--index-wal-design"><a class="header" href="#heap--index-wal-design">Heap / Index WAL design</a></h2>
+<ul>
+<li><strong>Heap</strong> – Execution operators call <code>ExecutionContext::insert_tuple_with_indexes</code>
+(and friends), which ultimately invoke <code>TableHeap::append_heap_record</code>. Each tuple
+carries <code>TupleMetaRepr</code> (insert/delete txn + CID, MVCC chain pointers) plus encoded
+column bytes. During redo, <code>HeapResourceManager</code> reconstructs page images, inserts
+or overwrites slots, and updates tuple metadata before writing the packed page back
+via <code>TableHeap::recovery_view</code>. Undo leverages the stored “before image” to restore
+bytes or toggle delete flags; vacuum code can later reclaim dead slots once
+<code>safe_xmin</code> passes them.</li>
+<li><strong>Index</strong> – B+Tree leaf operations log the logical key/value change, unaffected by
+page layout. Redo loads the leaf (buffer pool or disk), checks the leaf version to
+avoid reapplying newer changes, and performs the requested insert/delete/update.
+Undo mirrors the inverse operation so loser transactions roll back cleanly without
+touching the heap. This keeps heap and index WAL independent: heap redo never needs
+to read index pages, and vice versa.</li>
+<li><strong>Page images</strong> – For heap/index structural changes that rewrite large sections (e.g.,
+new heap page, B+Tree splits), page guards still emit FPWs through
+<code>WalManager::log_page_update</code>. The logical heap/index WAL layers ensure redo can
+operate even when FPWs are skipped after the first touch.</li>
 </ul>
 <hr />
 <h2 id="aries-recovery"><a class="header" href="#aries-recovery">ARIES Recovery</a></h2>
@@ -2222,89 +2289,134 @@ c.  Decide what information the <code>HeapReclaim</code> record needs to contain
 d.  Implement the <code>redo</code> logic for this new record in the appropriate <code>ResourceManager</code>. What should happen when you redo a <code>HeapReclaim</code> record?</p>
 </li>
 </ol>
-<div style="break-before: page; page-break-before: always;"></div><h1 id="wal-refactor-plan"><a class="header" href="#wal-refactor-plan">WAL Refactor Plan</a></h1>
-<p>This document captures the incremental plan for modernising QuillSQL’s write-ahead log so it behaves more like the logical+physiological WALs used in PostgreSQL and DuckDB. The goal is to keep the system teaching-friendly while unlocking better performance, portability, and clarity.</p>
-<h2 id="current-state-2024-12"><a class="header" href="#current-state-2024-12">Current State (2024-12)</a></h2>
-<ul>
-<li><strong>Redo relies on page images.</strong> <code>WritePageGuard::apply_page_image</code> emits <code>PageWrite</code> or <code>PageDelta</code> records, and the page <code>ResourceManager</code> replays them. Heap-specific WAL payloads only drive UNDO; <code>HeapResourceManager::redo</code> is a no-op.</li>
-<li><strong>Index changes are implicit.</strong> B+Tree operations mutate pages directly and depend on page-level logging. There is no index-specific WAL, so crash recovery assumes page FPWs cover all structure changes.</li>
-<li><strong>WAL buffer is a Vec.</strong> <code>WalBuffer</code> pushes encoded frames into a growable <code>Vec</code> protected by a mutex. There is no ring-buffer behaviour, no lock-free enqueue path, and no segmentation of pending bytes.</li>
-<li><strong>Single-segment, synchronous bias.</strong> <code>WalStorage</code> appends to one file at a time and calls <code>fsync</code> aggressively when <code>sync_on_flush</code> is on. There is no multi-segment writer or async fsync pipeline.</li>
-<li><strong>Platform coupling.</strong> The default sink goes through <code>DiskScheduler</code>, which uses Linux <code>io_uring</code>. Non-Linux builds require feature gates or fall back to synchronous file writes manually.</li>
-</ul>
-<h2 id="pain-points"><a class="header" href="#pain-points">Pain Points</a></h2>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="write-ahead-logging"><a class="header" href="#write-ahead-logging">Write-Ahead Logging</a></h1>
+<p>This note dives into the WAL subsystem that powers QuillSQL’s recovery story. It
+explains how frames are generated, buffered, flushed, and replayed, and why logical
+heap/index records complement traditional physical FPWs.</p>
+<hr />
+<h2 id="1-component-map"><a class="header" href="#1-component-map">1. Component map</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Layer</th><th>Location</th><th>Responsibility</th></tr></thead><tbody>
+<tr><td><strong>WalManager</strong></td><td><code>src/recovery/wal/mod.rs</code></td><td>Assigns LSNs, encodes <code>WalRecordPayload</code>, enqueues frames, and drives <code>WalStorage::flush</code>.</td></tr>
+<tr><td><strong>WalBuffer</strong></td><td><code>src/recovery/wal/buffer.rs</code></td><td>Lock-free ring buffer (<code>ConcurrentRingBuffer</code>) that tracks pending frame count, bytes, and highest end LSN.</td></tr>
+<tr><td><strong>WalStorage</strong></td><td><code>src/recovery/wal/storage.rs</code></td><td>Maintains WAL directory/segments, builds <code>WalPage</code>s, and dispatches write/fsync tickets to a <code>WalSink</code> (default: <code>DiskSchedulerWalSink</code>).</td></tr>
+<tr><td><strong>WalWriterRuntime</strong></td><td><code>src/recovery/wal/writer.rs</code></td><td>Background thread that periodically calls <code>WalManager::flush(None)</code>.</td></tr>
+<tr><td><strong>ControlFileManager</strong></td><td><code>src/recovery/control_file.rs</code></td><td>Persists <code>durable_lsn</code>, <code>max_assigned_lsn</code>, checkpoint metadata, and redo start for fast crash recovery.</td></tr>
+<tr><td><strong>Resource managers</strong></td><td><code>src/recovery/resource_manager.rs</code>, <code>storage/*/heap_recovery.rs</code>, <code>storage/*/index_recovery.rs</code></td><td>Decode payloads per <code>ResourceManagerId</code> and execute redo/undo logic for heap/index/page operations.</td></tr>
+</tbody></table>
+</div>
+<p>End-to-end DML flow:</p>
 <ol>
-<li><strong>Large WAL volume.</strong> Pure page images lead to 4 KiB records for small tuple updates. Teaching scenarios that poke tuple headers end up saturating I/O.</li>
-<li><strong>Redo gaps for heap/index.</strong> ARIES invariants (pageLSN check, idempotent redo) are not enforced per operation, so we cannot safely disable FPWs.</li>
-<li><strong>Difficult to unit test.</strong> Without logical redo, simulating crash/restart flows in Rust tests requires writing real page images, slowing CI.</li>
-<li><strong>Bottlenecked buffer.</strong> The WAL buffer becomes a scaling bottleneck during heavy insert workloads because each writer must lock the Vec and reallocate.</li>
-<li><strong>Portability concerns.</strong> macOS / Windows builds cannot reuse the current scheduler path, so WAL cannot flush reliably there.</li>
+<li><code>ExecutionContext</code> mutates tuples/index entries via <code>TableHeap</code> / <code>BPlusTreeIndex</code>.</li>
+<li>Operators invoke <code>WalManager::append_record_with</code> or <code>log_page_update</code> after data-page
+changes succeed.</li>
+<li>Frames enter <code>WalBuffer</code>. Once thresholds are met, <code>flush()</code> drains frames into
+<code>WalStorage</code>, which schedules asynchronous writes/fsyncs.</li>
+<li>During commit, <code>TransactionManager</code> waits on <code>WalManager::wait_for_durable(lsn)</code> to
+guarantee WAL persistence before releasing locks.</li>
 </ol>
-<h2 id="target-architecture"><a class="header" href="#target-architecture">Target Architecture</a></h2>
-<h3 id="logical-heap-wal"><a class="header" href="#logical-heap-wal">Logical Heap WAL</a></h3>
+<hr />
+<h2 id="2-frame--record-taxonomy"><a class="header" href="#2-frame--record-taxonomy">2. Frame &amp; record taxonomy</a></h2>
+<p><code>wal_record.rs</code> defines the canonical envelope. <code>encode_frame(lsn, prev_lsn, payload)</code>
+serializes a record, while <code>WalAppendContext</code> reports the LSN range back to the caller.</p>
+<div class="table-wrapper"><table><thead><tr><th>ResourceManagerId</th><th>Payload</th><th>Purpose</th></tr></thead><tbody>
+<tr><td><code>Page</code></td><td><code>PageWritePayload</code></td><td>Full-page image (FPW) on first-touch or large diffs; carries <code>prev_page_lsn</code> for redo checks.</td></tr>
+<tr><td><code>Page</code></td><td><code>PageDeltaPayload</code></td><td>Offset + byte slice for small modifications to keep WAL compact.</td></tr>
+<tr><td><code>Heap</code></td><td><code>HeapRecordPayload::{Insert,Update,Delete}</code></td><td>Logical tuples containing relation id, page/slot, <code>TupleMetaRepr</code>, and tuple bytes.</td></tr>
+<tr><td><code>Index</code></td><td><code>IndexRecordPayload::{LeafInsert,LeafDelete,LeafUpdate}</code></td><td>Logical B+Tree leaf mutations with key bytes and <code>RecordId</code>.</td></tr>
+<tr><td><code>Transaction</code></td><td><code>TransactionPayload</code></td><td>BEGIN / COMMIT / ABORT markers that seed Undo’s per-txn chains.</td></tr>
+<tr><td><code>Checkpoint</code></td><td><code>CheckpointPayload</code></td><td>Captures ATT/DPT snapshots plus redo start.</td></tr>
+<tr><td><code>Clr</code></td><td><code>ClrPayload</code></td><td>Compensation Log Records documenting each undo step and its <code>undo_next_lsn</code>.</td></tr>
+</tbody></table>
+</div>
+<p><code>ResourceManagerId</code> determines how <code>RedoExecutor</code> / <code>UndoExecutor</code> route frames:
+Page → physical redo only; Heap/Index → logical redo/undo using storage helpers;
+Transaction/CLR/Checkpoint → interpreted by the analysis/undo phases.</p>
+<hr />
+<h2 id="3-heap-wal-mvcc-aware-logical-logging"><a class="header" href="#3-heap-wal-mvcc-aware-logical-logging">3. Heap WAL: MVCC-aware logical logging</a></h2>
 <ul>
-<li><code>HeapRecordPayload::{Insert,Update,Delete}</code> remain, but redo will decode them and reapply the tuple mutation (insert slot, rewrite bytes, toggle metadata).</li>
-<li>ARIES-style replay: check pageLSN, skip if already applied, otherwise write tuple data and set pageLSN to frame LSN.</li>
-<li>Only emit page images on “first dirty after checkpoint” or when tuple size forces overflow, mirroring PostgreSQL’s FPW policy.</li>
+<li><strong>Emission points</strong> – <code>TableHeap::{insert,update,delete}_tuple</code> call
+<code>append_heap_record</code> (see <code>src/storage/heap/table_heap.rs:72-156</code>) after updating the
+in-memory page. Each record stores the relation identifier, page/slot, tuple metadata,
+and before/after tuple bytes.</li>
+<li><strong>Encoding</strong> – <code>src/storage/heap/wal_codec.rs</code> serializes <code>TupleMeta</code> (insert/delete
+txn id, command id, MVCC chain pointers) plus optional previous tuple bytes in a
+compact layout.</li>
+<li><strong>Redo</strong> – <code>HeapResourceManager</code> (<code>src/storage/heap/heap_recovery.rs</code>) decodes the
+payload, reconstructs a <code>PageImage</code>, applies insert / overwrite / delete to the target
+slot, and writes the rebuilt page back, updating the page LSN. If the buffer pool is
+available, <code>TableHeap::recovery_view</code> mutates the cached page directly.</li>
+<li><strong>Undo</strong> – Uses the stored “before” metadata and bytes to restore tuples or clear
+delete flags when loser transactions roll back.</li>
+<li><strong>Interaction with FPW</strong> – Logical heap redo allows tuple-level replay without FPWs.
+FPWs are still emitted for first touches or large diffs to guard against torn-page
+scenarios, but small updates remain lightweight.</li>
 </ul>
-<h3 id="index-wal--resource-managers"><a class="header" href="#index-wal--resource-managers">Index WAL &amp; Resource Managers</a></h3>
+<hr />
+<h2 id="4-index-wal-logical-btree-leaf-operations"><a class="header" href="#4-index-wal-logical-btree-leaf-operations">4. Index WAL: logical B+Tree leaf operations</a></h2>
 <ul>
-<li>Introduce <code>IndexWalPayload</code> (Insert/Delete/Split/Merge) and <code>BtreeResourceManager</code>.</li>
-<li>Payload stores logical key bytes plus RecordId so redo can replay structural changes without consulting heap.</li>
-<li>Recovery registers the new RM alongside Heap/Page and routes frames via <code>ResourceManagerId::Index</code>.</li>
-</ul>
-<h3 id="wal-buffer--storage"><a class="header" href="#wal-buffer--storage">WAL Buffer &amp; Storage</a></h3>
-<ul>
-<li>Replace <code>WalBuffer</code>’s <code>Vec</code> with the existing <code>RingBuffer&lt;T&gt;</code> plus an atomic enqueue cursor so appenders never contend on reallocation.</li>
-<li>Support multiple WAL segments under <code>wal_dir/segment_{lsn}.wal</code> and allow concurrent writes + asynchronous fsync of sealed segments.</li>
-<li>Default to lazy flush: <code>sync_on_flush = false</code>, and flush only at checkpoints or explicit <code>flush_until</code>.</li>
-</ul>
-<h3 id="platform-fallback"><a class="header" href="#platform-fallback">Platform Fallback</a></h3>
-<ul>
-<li>Wrap <code>DiskSchedulerWalSink</code> behind a trait and provide a synchronous <code>FileWalSink</code> (using <code>std::fs::File</code>) when <code>disk_scheduler</code> feature is disabled.</li>
-<li>Gate Linux-specific code so macOS users can still run tests with the fallback sink.</li>
-</ul>
-<h2 id="incremental-implementation-plan"><a class="header" href="#incremental-implementation-plan">Incremental Implementation Plan</a></h2>
+<li><strong>Emission points</strong> – <code>BPlusTreeIndex</code> records every leaf insert/delete/update via
+<code>append_index_record</code> (<code>src/storage/index/btree_index.rs:86-145</code>), using
+<code>src/storage/index/wal_codec.rs</code> to encode key schema, key bytes, target page, and
+transaction id.</li>
+<li><strong>Redo</strong> (<code>src/storage/index/index_recovery.rs</code>) steps:
 <ol>
-<li>
-<p><strong>Heap Redo Enablement</strong></p>
-<ul>
-<li>Extend <code>TableHeap</code> with recovery helpers (insert/update/delete without WAL, accepting <code>lsn</code>).</li>
-<li>Implement <code>HeapResourceManager::redo</code> to call the helpers.</li>
-<li>Update unit tests to cover redo idempotency.</li>
-</ul>
-</li>
-<li>
-<p><strong>B+Tree WAL</strong></p>
-<ul>
-<li>Define index payloads + codec, add <code>ResourceManagerId::Index</code>.</li>
-<li>Teach recovery to register <code>BtreeResourceManager</code>.</li>
-<li>Emit index WAL from <code>BPlusTreeIndex</code> mutations and add tests that crash/recover around splits.</li>
-</ul>
-</li>
-<li>
-<p><strong>WAL Buffer &amp; Storage</strong></p>
-<ul>
-<li>Swap in ring-buffer implementation with lock-free enqueue (using atomics + <code>parking_lot</code> condvar for flushers).</li>
-<li>Update <code>WalStorage</code> to manage multiple active segments and asynchronous fsync tickets.</li>
-</ul>
-</li>
-<li>
-<p><strong>Portability + Config</strong></p>
-<ul>
-<li>Add <code>FileWalSink</code> fallback and expose a <code>wal_io=fallback</code> feature gate.</li>
-<li>Change defaults (<code>sync_on_flush=false</code>, <code>persist_control_file_on_flush=false</code>) and document the durability trade-offs.</li>
-</ul>
-</li>
-<li>
-<p><strong>Docs &amp; Benchmarks</strong></p>
-<ul>
-<li>Update <code>docs/src/recovery/*.md</code> with the new flow.</li>
-<li>Expand <code>benches/storage_bench.rs</code> to measure throughput with lazy flush and logical redo.</li>
-</ul>
-</li>
+<li>Decode the key with <code>TupleCodec</code> using the stored schema.</li>
+<li>Fetch the leaf through the buffer pool (preferred) or <code>DiskScheduler</code>.</li>
+<li>Skip if <code>page_lsn &gt;= frame_lsn</code>; otherwise apply the logical mutation and bump the
+leaf version.</li>
+<li>Write the updated page back with the frame LSN.</li>
 </ol>
-<p>Each milestone should land with focused tests (unit + integration) plus at least one crash-recovery scenario using the new WAL semantics.</p>
+</li>
+<li><strong>Undo</strong> – Performs the inverse operation (insert→delete, delete→insert old RID,
+update→restore old RID) only for loser transactions.</li>
+<li><strong>Benefits</strong> – Heap and index WAL are decoupled: heap redo never reads index pages,
+and logical leaf updates avoid writing full-page images for small key/value changes.
+Structural operations (splits/merges) still rely on page-level logging.</li>
+</ul>
+<hr />
+<h2 id="5-buffering--flush-strategy"><a class="header" href="#5-buffering--flush-strategy">5. Buffering &amp; flush strategy</a></h2>
+<ul>
+<li><strong>Thresholds</strong> – <code>max_buffer_records</code> (from <code>WalOptions::buffer_capacity</code>),
+<code>flush_coalesce_bytes</code>, and one WAL page (4 KiB) trigger batched flushes.</li>
+<li><strong>Flush mechanics</strong> – <code>WalManager::flush_with_mode</code> drains frames up to a target LSN,
+asks <code>WalStorage::append_records</code> to write them, then waits on all <code>WalFlushTicket</code>s.
+<code>flush_until</code> forces durability before commit or after undo.</li>
+<li><strong>Checkpoints</strong> – <code>log_checkpoint</code> forces a flush, records <code>checkpoint_redo_start</code> in
+the control file, and clears the “touched pages” set so new FPWs fire only once per
+checkpoint interval.</li>
+<li><strong>Background writer</strong> – <code>WalWriterRuntime</code> runs when <code>WalOptions::writer_interval_ms</code>
+is non-zero, smoothing out flush pressure even when foregound transactions are light.</li>
+</ul>
+<hr />
+<h2 id="6-relation-to-aries"><a class="header" href="#6-relation-to-aries">6. Relation to ARIES</a></h2>
+<ol>
+<li><strong>Analysis</strong> – <code>AnalysisPass</code> parses the latest checkpoint, reconstructs ATT/DPT by
+scanning the tail of the log, and chooses a redo start (<code>min(dpt.rec_lsn)</code>).</li>
+<li><strong>Redo (repeat history)</strong> – <code>RedoExecutor</code> iterates from <code>start_lsn</code>, invoking the
+appropriate resource manager for each frame. Page RM checks pageLSN before applying
+FPW/delta; Heap/Index RMs use logical payloads to rebuild tuples or leaf entries.</li>
+<li><strong>Undo</strong> – <code>UndoExecutor</code> chains loser transactions backwards, calling each resource
+manager’s undo method and emitting CLRs with <code>undo_next_lsn</code>. If recovery crashes
+mid-undo, the next run resumes at the recorded <code>undo_next_lsn</code>.</li>
+</ol>
+<hr />
+<h2 id="7-tuning--troubleshooting"><a class="header" href="#7-tuning--troubleshooting">7. Tuning &amp; troubleshooting</a></h2>
+<ul>
+<li><strong>Configuration</strong> – <code>WalOptions</code> inside <code>DatabaseOptions</code> expose <code>segment_size</code>,
+<code>sync_on_flush</code>, <code>writer_interval_ms</code>, <code>synchronous_commit</code>, <code>retain_segments</code>, etc.</li>
+<li><strong>Introspection</strong> – <code>WalManager::pending_records()</code> dumps in-memory frames for
+debugging; <code>background::BackgroundWorkers::snapshot()</code> reports WAL writer/checkpoint
+worker metadata. Enabling <code>RUST_LOG=trace</code> reveals FPW vs delta decisions and flush
+cadence.</li>
+<li><strong>Crash testing</strong> – Insert a forced <code>std::process::exit(1)</code> after specific DMLs, then
+restart and inspect <code>RecoverySummary</code> (redo count + loser transactions) to ensure
+heap/index WAL cover the intended cases.</li>
+</ul>
+<hr />
+<p>With logical heap/index records plus FPWs as a safety net, QuillSQL’s WAL stays
+teaching-friendly while mirroring production-grade recoverability. When introducing
+new components (e.g., custom indexes or vacuum steps), define a payload + resource
+manager and they will automatically participate in ARIES.</p>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="background-services"><a class="header" href="#background-services">Background Services</a></h1>
 <p><code>src/background/</code> hosts the asynchronous workers that keep a database healthy: WAL
 writers, checkpoints, buffer flushers, and MVCC vacuum. A central registry makes it easy

@@ -1,0 +1,337 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Write-Ahead Logging - QuillSQL Internals</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon.svg">
+        <link rel="shortcut icon" href="../favicon.png">
+        <link rel="stylesheet" href="../css/variables.css">
+        <link rel="stylesheet" href="../css/general.css">
+        <link rel="stylesheet" href="../css/chrome.css">
+        <link rel="stylesheet" href="../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="highlight-css" href="../highlight.css">
+        <link rel="stylesheet" id="tomorrow-night-css" href="../tomorrow-night.css">
+        <link rel="stylesheet" id="ayu-highlight-css" href="../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "../";
+            const default_light_theme = "light";
+            const default_dark_theme = "navy";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="../toc.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="../toc.html"></iframe>
+            </noscript>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                    </div>
+
+                    <h1 class="menu-title">QuillSQL Internals</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="write-ahead-logging"><a class="header" href="#write-ahead-logging">Write-Ahead Logging</a></h1>
+<p>This note dives into the WAL subsystem that powers QuillSQL’s recovery story. It
+explains how frames are generated, buffered, flushed, and replayed, and why logical
+heap/index records complement traditional physical FPWs.</p>
+<hr />
+<h2 id="1-component-map"><a class="header" href="#1-component-map">1. Component map</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Layer</th><th>Location</th><th>Responsibility</th></tr></thead><tbody>
+<tr><td><strong>WalManager</strong></td><td><code>src/recovery/wal/mod.rs</code></td><td>Assigns LSNs, encodes <code>WalRecordPayload</code>, enqueues frames, and drives <code>WalStorage::flush</code>.</td></tr>
+<tr><td><strong>WalBuffer</strong></td><td><code>src/recovery/wal/buffer.rs</code></td><td>Lock-free ring buffer (<code>ConcurrentRingBuffer</code>) that tracks pending frame count, bytes, and highest end LSN.</td></tr>
+<tr><td><strong>WalStorage</strong></td><td><code>src/recovery/wal/storage.rs</code></td><td>Maintains WAL directory/segments, builds <code>WalPage</code>s, and dispatches write/fsync tickets to a <code>WalSink</code> (default: <code>DiskSchedulerWalSink</code>).</td></tr>
+<tr><td><strong>WalWriterRuntime</strong></td><td><code>src/recovery/wal/writer.rs</code></td><td>Background thread that periodically calls <code>WalManager::flush(None)</code>.</td></tr>
+<tr><td><strong>ControlFileManager</strong></td><td><code>src/recovery/control_file.rs</code></td><td>Persists <code>durable_lsn</code>, <code>max_assigned_lsn</code>, checkpoint metadata, and redo start for fast crash recovery.</td></tr>
+<tr><td><strong>Resource managers</strong></td><td><code>src/recovery/resource_manager.rs</code>, <code>storage/*/heap_recovery.rs</code>, <code>storage/*/index_recovery.rs</code></td><td>Decode payloads per <code>ResourceManagerId</code> and execute redo/undo logic for heap/index/page operations.</td></tr>
+</tbody></table>
+</div>
+<p>End-to-end DML flow:</p>
+<ol>
+<li><code>ExecutionContext</code> mutates tuples/index entries via <code>TableHeap</code> / <code>BPlusTreeIndex</code>.</li>
+<li>Operators invoke <code>WalManager::append_record_with</code> or <code>log_page_update</code> after data-page
+changes succeed.</li>
+<li>Frames enter <code>WalBuffer</code>. Once thresholds are met, <code>flush()</code> drains frames into
+<code>WalStorage</code>, which schedules asynchronous writes/fsyncs.</li>
+<li>During commit, <code>TransactionManager</code> waits on <code>WalManager::wait_for_durable(lsn)</code> to
+guarantee WAL persistence before releasing locks.</li>
+</ol>
+<hr />
+<h2 id="2-frame--record-taxonomy"><a class="header" href="#2-frame--record-taxonomy">2. Frame &amp; record taxonomy</a></h2>
+<p><code>wal_record.rs</code> defines the canonical envelope. <code>encode_frame(lsn, prev_lsn, payload)</code>
+serializes a record, while <code>WalAppendContext</code> reports the LSN range back to the caller.</p>
+<div class="table-wrapper"><table><thead><tr><th>ResourceManagerId</th><th>Payload</th><th>Purpose</th></tr></thead><tbody>
+<tr><td><code>Page</code></td><td><code>PageWritePayload</code></td><td>Full-page image (FPW) on first-touch or large diffs; carries <code>prev_page_lsn</code> for redo checks.</td></tr>
+<tr><td><code>Page</code></td><td><code>PageDeltaPayload</code></td><td>Offset + byte slice for small modifications to keep WAL compact.</td></tr>
+<tr><td><code>Heap</code></td><td><code>HeapRecordPayload::{Insert,Update,Delete}</code></td><td>Logical tuples containing relation id, page/slot, <code>TupleMetaRepr</code>, and tuple bytes.</td></tr>
+<tr><td><code>Index</code></td><td><code>IndexRecordPayload::{LeafInsert,LeafDelete,LeafUpdate}</code></td><td>Logical B+Tree leaf mutations with key bytes and <code>RecordId</code>.</td></tr>
+<tr><td><code>Transaction</code></td><td><code>TransactionPayload</code></td><td>BEGIN / COMMIT / ABORT markers that seed Undo’s per-txn chains.</td></tr>
+<tr><td><code>Checkpoint</code></td><td><code>CheckpointPayload</code></td><td>Captures ATT/DPT snapshots plus redo start.</td></tr>
+<tr><td><code>Clr</code></td><td><code>ClrPayload</code></td><td>Compensation Log Records documenting each undo step and its <code>undo_next_lsn</code>.</td></tr>
+</tbody></table>
+</div>
+<p><code>ResourceManagerId</code> determines how <code>RedoExecutor</code> / <code>UndoExecutor</code> route frames:
+Page → physical redo only; Heap/Index → logical redo/undo using storage helpers;
+Transaction/CLR/Checkpoint → interpreted by the analysis/undo phases.</p>
+<hr />
+<h2 id="3-heap-wal-mvcc-aware-logical-logging"><a class="header" href="#3-heap-wal-mvcc-aware-logical-logging">3. Heap WAL: MVCC-aware logical logging</a></h2>
+<ul>
+<li><strong>Emission points</strong> – <code>TableHeap::{insert,update,delete}_tuple</code> call
+<code>append_heap_record</code> (see <code>src/storage/heap/table_heap.rs:72-156</code>) after updating the
+in-memory page. Each record stores the relation identifier, page/slot, tuple metadata,
+and before/after tuple bytes.</li>
+<li><strong>Encoding</strong> – <code>src/storage/heap/wal_codec.rs</code> serializes <code>TupleMeta</code> (insert/delete
+txn id, command id, MVCC chain pointers) plus optional previous tuple bytes in a
+compact layout.</li>
+<li><strong>Redo</strong> – <code>HeapResourceManager</code> (<code>src/storage/heap/heap_recovery.rs</code>) decodes the
+payload, reconstructs a <code>PageImage</code>, applies insert / overwrite / delete to the target
+slot, and writes the rebuilt page back, updating the page LSN. If the buffer pool is
+available, <code>TableHeap::recovery_view</code> mutates the cached page directly.</li>
+<li><strong>Undo</strong> – Uses the stored “before” metadata and bytes to restore tuples or clear
+delete flags when loser transactions roll back.</li>
+<li><strong>Interaction with FPW</strong> – Logical heap redo allows tuple-level replay without FPWs.
+FPWs are still emitted for first touches or large diffs to guard against torn-page
+scenarios, but small updates remain lightweight.</li>
+</ul>
+<hr />
+<h2 id="4-index-wal-logical-btree-leaf-operations"><a class="header" href="#4-index-wal-logical-btree-leaf-operations">4. Index WAL: logical B+Tree leaf operations</a></h2>
+<ul>
+<li><strong>Emission points</strong> – <code>BPlusTreeIndex</code> records every leaf insert/delete/update via
+<code>append_index_record</code> (<code>src/storage/index/btree_index.rs:86-145</code>), using
+<code>src/storage/index/wal_codec.rs</code> to encode key schema, key bytes, target page, and
+transaction id.</li>
+<li><strong>Redo</strong> (<code>src/storage/index/index_recovery.rs</code>) steps:
+<ol>
+<li>Decode the key with <code>TupleCodec</code> using the stored schema.</li>
+<li>Fetch the leaf through the buffer pool (preferred) or <code>DiskScheduler</code>.</li>
+<li>Skip if <code>page_lsn &gt;= frame_lsn</code>; otherwise apply the logical mutation and bump the
+leaf version.</li>
+<li>Write the updated page back with the frame LSN.</li>
+</ol>
+</li>
+<li><strong>Undo</strong> – Performs the inverse operation (insert→delete, delete→insert old RID,
+update→restore old RID) only for loser transactions.</li>
+<li><strong>Benefits</strong> – Heap and index WAL are decoupled: heap redo never reads index pages,
+and logical leaf updates avoid writing full-page images for small key/value changes.
+Structural operations (splits/merges) still rely on page-level logging.</li>
+</ul>
+<hr />
+<h2 id="5-buffering--flush-strategy"><a class="header" href="#5-buffering--flush-strategy">5. Buffering &amp; flush strategy</a></h2>
+<ul>
+<li><strong>Thresholds</strong> – <code>max_buffer_records</code> (from <code>WalOptions::buffer_capacity</code>),
+<code>flush_coalesce_bytes</code>, and one WAL page (4 KiB) trigger batched flushes.</li>
+<li><strong>Flush mechanics</strong> – <code>WalManager::flush_with_mode</code> drains frames up to a target LSN,
+asks <code>WalStorage::append_records</code> to write them, then waits on all <code>WalFlushTicket</code>s.
+<code>flush_until</code> forces durability before commit or after undo.</li>
+<li><strong>Checkpoints</strong> – <code>log_checkpoint</code> forces a flush, records <code>checkpoint_redo_start</code> in
+the control file, and clears the “touched pages” set so new FPWs fire only once per
+checkpoint interval.</li>
+<li><strong>Background writer</strong> – <code>WalWriterRuntime</code> runs when <code>WalOptions::writer_interval_ms</code>
+is non-zero, smoothing out flush pressure even when foregound transactions are light.</li>
+</ul>
+<hr />
+<h2 id="6-relation-to-aries"><a class="header" href="#6-relation-to-aries">6. Relation to ARIES</a></h2>
+<ol>
+<li><strong>Analysis</strong> – <code>AnalysisPass</code> parses the latest checkpoint, reconstructs ATT/DPT by
+scanning the tail of the log, and chooses a redo start (<code>min(dpt.rec_lsn)</code>).</li>
+<li><strong>Redo (repeat history)</strong> – <code>RedoExecutor</code> iterates from <code>start_lsn</code>, invoking the
+appropriate resource manager for each frame. Page RM checks pageLSN before applying
+FPW/delta; Heap/Index RMs use logical payloads to rebuild tuples or leaf entries.</li>
+<li><strong>Undo</strong> – <code>UndoExecutor</code> chains loser transactions backwards, calling each resource
+manager’s undo method and emitting CLRs with <code>undo_next_lsn</code>. If recovery crashes
+mid-undo, the next run resumes at the recorded <code>undo_next_lsn</code>.</li>
+</ol>
+<hr />
+<h2 id="7-tuning--troubleshooting"><a class="header" href="#7-tuning--troubleshooting">7. Tuning &amp; troubleshooting</a></h2>
+<ul>
+<li><strong>Configuration</strong> – <code>WalOptions</code> inside <code>DatabaseOptions</code> expose <code>segment_size</code>,
+<code>sync_on_flush</code>, <code>writer_interval_ms</code>, <code>synchronous_commit</code>, <code>retain_segments</code>, etc.</li>
+<li><strong>Introspection</strong> – <code>WalManager::pending_records()</code> dumps in-memory frames for
+debugging; <code>background::BackgroundWorkers::snapshot()</code> reports WAL writer/checkpoint
+worker metadata. Enabling <code>RUST_LOG=trace</code> reveals FPW vs delta decisions and flush
+cadence.</li>
+<li><strong>Crash testing</strong> – Insert a forced <code>std::process::exit(1)</code> after specific DMLs, then
+restart and inspect <code>RecoverySummary</code> (redo count + loser transactions) to ensure
+heap/index WAL cover the intended cases.</li>
+</ul>
+<hr />
+<p>With logical heap/index records plus FPWs as a safety net, QuillSQL’s WAL stays
+teaching-friendly while mirroring production-grade recoverability. When introducing
+new components (e.g., custom indexes or vacuum steps), define a payload + resource
+manager and they will automatically participate in ARIES.</p>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../recovery/aries.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="../modules/background.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../recovery/aries.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="../modules/background.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+
+        <script src="../clipboard.min.js"></script>
+        <script src="../highlight.js"></script>
+        <script src="../book.js"></script>
+
+        <!-- Custom JS scripts -->
+        <script src="../mermaid.min.js"></script>
+        <script src="../mermaid-init.js"></script>
+
+
+
+    </div>
+    </body>
+</html>
