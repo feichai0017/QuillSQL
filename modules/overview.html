@@ -324,7 +324,7 @@ the commit record types, then verify behaviour using the provided transaction te
 <div class="table-wrapper"><table><thead><tr><th>Worker</th><th>What it does</th></tr></thead><tbody>
 <tr><td>WAL writer</td><td>Flushes WAL buffer at configured cadence.</td></tr>
 <tr><td>Checkpoint</td><td>Captures the Dirty Page Table + Active Transaction Table.</td></tr>
-<tr><td>Buffer writer</td><td>Flushes dirty frames and kicks lazy index cleanup.</td></tr>
+<tr><td>Buffer writer</td><td>Flushes dirty frames to keep checkpoints short.</td></tr>
 <tr><td>MVCC vacuum</td><td>Reclaims tuple versions older than <code>safe_xmin</code>.</td></tr>
 </tbody></table>
 </div>

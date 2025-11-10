@@ -275,7 +275,7 @@ Multi-granularity 2PL (IS/IX/S/SIX/X) enforced by <code>LockManager</code>. Repe
 <div class="table-wrapper"><table><thead><tr><th>Worker</th><th>Description</th><th>Trigger</th></tr></thead><tbody>
 <tr><td>WAL writer</td><td>Coalesces buffered WAL into durable segments</td><td><code>WalManager::start_background_flush</code></td></tr>
 <tr><td>Checkpoint</td><td>Flushes LSNs, records ATT + DPT snapshots, resets FPW epoch</td><td>Configurable interval (<code>WalOptions::checkpoint_interval_ms</code>)</td></tr>
-<tr><td>Buffer writer</td><td>Flushes dirty frames, runs index lazy cleanup based on pending garbage counters</td><td><code>IndexVacuumConfig</code></td></tr>
+<tr><td>Buffer writer</td><td>Flushes dirty frames to keep checkpoints short</td><td><code>bg_writer_interval</code></td></tr>
 <tr><td>MVCC vacuum</td><td>Iterates table heaps, removing committed-deleted or aborted-inserted tuples older than <code>safe_xmin</code></td><td><code>MvccVacuumConfig</code> (interval + batch limit)</td></tr>
 </tbody></table>
 </div>

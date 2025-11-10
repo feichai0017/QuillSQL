@@ -163,8 +163,7 @@ foreground queries.</p>
 <hr />
 <h2 id="responsibilities"><a class="header" href="#responsibilities">Responsibilities</a></h2>
 <ul>
-<li>Start workers according to configuration (<code>IndexVacuumConfig</code>, <code>MvccVacuumConfig</code>,
-<code>WalOptions</code>, etc.).</li>
+<li>Start workers according to configuration (<code>WalOptions</code>, <code>MvccVacuumConfig</code>, etc.).</li>
 <li>Define lightweight traits (<code>CheckpointWal</code>, <code>BufferMaintenance</code>, <code>TxnSnapshotOps</code>) so
 workers can run without pulling in an async runtime.</li>
 <li>Provide <code>BackgroundWorkers</code>, a registry that tracks <code>WorkerHandle</code>s and shuts them down
@@ -175,7 +174,7 @@ when <code>Database</code> drops.</li>
 <div class="table-wrapper"><table><thead><tr><th>Worker</th><th>Trigger</th><th>Behavior</th></tr></thead><tbody>
 <tr><td>WAL writer</td><td><code>wal_writer_interval_ms</code></td><td>Calls <code>WalManager::background_flush</code> to durably write log buffers.</td></tr>
 <tr><td>Checkpoint</td><td><code>checkpoint_interval_ms</code></td><td>Captures dirty page / active txn tables and emits <code>Checkpoint</code> records to bound recovery.</td></tr>
-<tr><td>Buffer writer</td><td><code>bg_writer_interval</code></td><td>Flushes dirty frames and nudges index vacuum when garbage accumulates.</td></tr>
+<tr><td>Buffer writer</td><td><code>bg_writer_interval</code></td><td>Flushes dirty frames to reduce checkpoint pressure.</td></tr>
 <tr><td>MVCC vacuum</td><td><code>MvccVacuumConfig</code></td><td>Removes obsolete tuple versions once <code>safe_xmin</code> advances.</td></tr>
 </tbody></table>
 </div>
@@ -188,7 +187,6 @@ exit cleanly during tests or process teardown.</p>
 <li><strong>BufferManager</strong> – background flushers inspect dirty frames and help checkpoints
 capture consistent snapshots.</li>
 <li><strong>TransactionManager</strong> – MVCC vacuum queries <code>TxnSnapshotOps</code> for <code>safe_xmin</code>.</li>
-<li><strong>Catalog</strong> – index vacuum iterates <code>IndexRegistry</code> to locate candidate indexes.</li>
 </ul>
 <hr />
 <h2 id="teaching-ideas"><a class="header" href="#teaching-ideas">Teaching Ideas</a></h2>

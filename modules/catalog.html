@@ -174,7 +174,7 @@ on-disk metadata pages.</li>
 <div class="table-wrapper"><table><thead><tr><th>Path</th><th>Description</th><th>Key Types</th></tr></thead><tbody>
 <tr><td><code>mod.rs</code></td><td>Public API surface.</td><td><code>Catalog</code>, <code>TableHandleRef</code></td></tr>
 <tr><td><code>schema.rs</code></td><td>Schema objects and table references.</td><td><code>Schema</code>, <code>Column</code>, <code>TableReference</code></td></tr>
-<tr><td><code>registry/</code></td><td>Thread-safe registries for heaps and indexes.</td><td><code>TableRegistry</code>, <code>IndexRegistry</code></td></tr>
+<tr><td><code>registry/</code></td><td>Thread-safe registry for heaps (MVCC vacuum).</td><td><code>TableRegistry</code></td></tr>
 <tr><td><code>statistics.rs</code></td><td>ANALYZE output and helpers.</td><td><code>TableStatistics</code></td></tr>
 <tr><td><code>loader.rs</code></td><td>Boot-time metadata loader.</td><td><code>load_catalog_data</code></td></tr>
 </tbody></table>
@@ -185,9 +185,8 @@ on-disk metadata pages.</li>
 <p>Unified identifier (database, schema, table). Logical planner, execution, and transaction
 code all use it when requesting handles from the catalog.</p>
 <h3 id="registries"><a class="header" href="#registries">Registries</a></h3>
-<p><code>TableRegistry</code>/<code>IndexRegistry</code> map internal IDs to <code>Arc&lt;TableHeap&gt;</code> or
-<code>Arc&lt;BPlusTreeIndex&gt;</code> plus logical names. They are thread-safe so background tasks can
-traverse them without blocking the main thread.</p>
+<p><code>TableRegistry</code> maps internal IDs to <code>Arc&lt;TableHeap&gt;</code> plus logical names. It is used by
+the MVCC vacuum worker to iterate user tables without poking directly into catalog data.</p>
 <h3 id="schema--column"><a class="header" href="#schema--column">Schema &amp; Column</a></h3>
 <p><code>Schema</code> stores column definitions (type, default, nullability). Execution uses it when
 materialising tuples; the planner uses it to check expression types. <code>Schema::project</code>

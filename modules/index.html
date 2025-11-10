@@ -189,14 +189,15 @@ necessary (e.g., right before splitting), reducing contention.</p>
 <h3 id="range-scan--tuplestream"><a class="header" href="#range-scan--tuplestream">Range Scan → TupleStream</a></h3>
 <p><code>IndexHandle::range_scan</code> wraps <code>TreeIndexIterator</code> and automatically fetches heap tuples,
 returning <code>(rid, meta, tuple)</code> triples. Execution remains storage-agnostic.</p>
-<h3 id="garbage-signals"><a class="header" href="#garbage-signals">Garbage Signals</a></h3>
-<p><code>BPlusTreeIndex::note_potential_garbage</code> counts invisible keys; background index vacuum
-consults the counter plus <code>IndexVacuumConfig</code> before pruning.</p>
+<h3 id="inline-maintenance"><a class="header" href="#inline-maintenance">Inline Maintenance</a></h3>
+<p>Index inserts/updates/deletes modify the tree immediately and emit logical WAL for redo.
+There is no deferred “index vacuum”; once a heap tuple is deleted its index entry is
+removed in the same transaction.</p>
 <hr />
 <h2 id="interactions"><a class="header" href="#interactions">Interactions</a></h2>
 <ul>
-<li><strong>Catalog</strong> – <code>Catalog::create_index</code> registers the index with <code>IndexRegistry</code>; execution
-fetches <code>Arc&lt;dyn IndexHandle&gt;</code> via the registry.</li>
+<li><strong>Catalog</strong> – stores <code>Arc&lt;BPlusTreeIndex&gt;</code> instances alongside table metadata so
+execution can fetch handles directly.</li>
 <li><strong>Execution</strong> – <code>PhysicalIndexScan</code> uses <code>ExecutionContext::index_stream</code>; DML operators
 call <code>insert_tuple_with_indexes</code> so heap writes and index maintenance stay in sync.</li>
 <li><strong>Transaction/MVCC</strong> – heaps store transaction metadata; indexes just reference RIDs, so

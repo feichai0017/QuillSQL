@@ -164,7 +164,7 @@ buffering, or vacuum behavior changes under different settings.</p>
 <div class="table-wrapper"><table><thead><tr><th>Type</th><th>Description</th></tr></thead><tbody>
 <tr><td><code>DatabaseOptions</code></td><td>Top-level options when constructing a database (WAL config, default isolation, etc.).</td></tr>
 <tr><td><code>WalOptions</code></td><td>WAL directory, segment size, flush strategy, writer interval, sync mode.</td></tr>
-<tr><td><code>IndexVacuumConfig</code> / <code>MvccVacuumConfig</code></td><td>Frequency/batch settings for background cleanup tasks.</td></tr>
+<tr><td><code>IndexVacuumConfig</code> / <code>MvccVacuumConfig</code></td><td>Background worker intervals (buffer writer, MVCC vacuum).</td></tr>
 <tr><td><code>BufferPoolConfig</code></td><td>Optional overrides for pool size, TinyLFU, and replacement policy details.</td></tr>
 </tbody></table>
 </div>
