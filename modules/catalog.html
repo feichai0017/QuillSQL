@@ -194,7 +194,9 @@ materialising tuples; the planner uses it to check expression types. <code>Schem
 helps physical operators build projected outputs.</p>
 <h3 id="tablestatistics"><a class="header" href="#tablestatistics">TableStatistics</a></h3>
 <p><code>ANALYZE</code> writes row counts and histograms into the catalog. Optimizer rules and planner
-heuristics can consult these stats when deciding whether to push filters or pick indexes.</p>
+heuristics can consult these stats when deciding whether to push filters or pick indexes.
+Each column tracks null/non-null counts, min/max values, and a sample-based distinct
+estimate, enabling DuckDB-style selectivity heuristics (<code>1/distinct</code>, uniform ranges).</p>
 <hr />
 <h2 id="interactions"><a class="header" href="#interactions">Interactions</a></h2>
 <ul>
