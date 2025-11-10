@@ -155,25 +155,69 @@
 
                 <div id="content" class="content">
                     <main>
-                        <h1 id="recovery-manager-wal"><a class="header" href="#recovery-manager-wal">Recovery Manager (WAL)</a></h1>
-<p>The Recovery Manager is the component that ensures the <strong>Durability</strong> aspect of ACID. It guarantees that once a transaction is committed, its effects are permanent, even in the face of system crashes or power failures.</p>
-<p>This is achieved through a <strong>Write-Ahead Log (WAL)</strong> and a recovery protocol inspired by <strong>ARIES</strong>.</p>
-<h2 id="core-concepts"><a class="header" href="#core-concepts">Core Concepts</a></h2>
+                        <h1 id="recovery--wal-module"><a class="header" href="#recovery--wal-module">Recovery / WAL Module</a></h1>
+<p><code>src/recovery/</code> guarantees the Durability part of ACID. Through WAL, checkpoints, and the
+ARIES algorithm, QuillSQL can recover to a consistent state after crashes.</p>
+<hr />
+<h2 id="responsibilities"><a class="header" href="#responsibilities">Responsibilities</a></h2>
 <ul>
-<li>
-<p><strong>Write-Ahead Logging</strong>: The fundamental principle is that any change to a data page must be recorded in a log file on durable storage <em>before</em> the data page itself is written back to disk.</p>
-</li>
-<li>
-<p><strong>Log Records</strong>: The WAL is a sequence of records, each with a unique Log Sequence Number (LSN). Records describe changes (<code>PageDelta</code>, <code>HeapInsert</code>), transaction outcomes (<code>Commit</code>, <code>Abort</code>), or internal state (<code>Checkpoint</code>).</p>
-</li>
-<li>
-<p><strong>ARIES Protocol</strong>: On startup, the database replays the log to restore a consistent state. This involves three phases: <strong>Analysis</strong> (to figure out what was happening during the crash), <strong>Redo</strong> (to re-apply all changes since the last checkpoint), and <strong>Undo</strong> (to roll back any transactions that did not commit).</p>
-</li>
+<li>Generate WAL records for every change and assign monotonically increasing LSNs.</li>
+<li>Manage WAL buffers, synchronous flushes, and the optional background WAL writer.</li>
+<li>Run the ARIES Analysis → Redo → Undo sequence during startup.</li>
+<li>Maintain the control file so the latest checkpoint and log truncation point are known.</li>
 </ul>
-<p>This section contains:</p>
+<hr />
+<h2 id="directory-layout"><a class="header" href="#directory-layout">Directory Layout</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Path</th><th>Description</th><th>Key Types</th></tr></thead><tbody>
+<tr><td><code>wal_manager.rs</code></td><td>Log writer, buffer manager, background thread spawner.</td><td><code>WalManager</code>, <code>WalWriterHandle</code></td></tr>
+<tr><td><code>wal_record.rs</code></td><td>All record variants.</td><td><code>WalRecord</code>, <code>LogSequenceNumber</code></td></tr>
+<tr><td><code>recovery_manager.rs</code></td><td>ARIES driver.</td><td><code>RecoveryManager</code>, <code>RecoverySummary</code></td></tr>
+<tr><td><code>control_file.rs</code></td><td>Persistent metadata (checkpoint info).</td><td><code>ControlFileManager</code></td></tr>
+</tbody></table>
+</div>
+<hr />
+<h2 id="wal-highlights"><a class="header" href="#wal-highlights">WAL Highlights</a></h2>
 <ul>
-<li><strong><a href="./../recovery/aries.html">The ARIES Protocol in QuillSQL</a></strong>: A deep dive into the three phases of recovery and how they are implemented.</li>
+<li><strong>Write-ahead rule</strong> – before flushing a dirty page, ensure <code>page_lsn &lt;= flushed_lsn</code>
+via <code>WalManager::flush_until</code>.</li>
+<li><strong>Record types</strong> – logical (<code>HeapInsert</code>, <code>IndexDelete</code>) for redo/undo and physical
+(<code>PageWrite</code>, <code>PageDelta</code>) for large changes.</li>
+<li><strong>Segmentation</strong> – WAL files are cut into segments per <code>WalOptions::segment_size</code>, and
+background writers can flush them asynchronously.</li>
 </ul>
+<hr />
+<h2 id="aries-recovery"><a class="header" href="#aries-recovery">ARIES Recovery</a></h2>
+<ol>
+<li><strong>Analysis</strong> – read the latest checkpoint, rebuild the Dirty Page Table (DPT) and
+Active Transaction Table (ATT).</li>
+<li><strong>Redo</strong> – scan forward from the checkpoint LSN, reapplying operations when the DPT
+indicates a page may be out of date.</li>
+<li><strong>Undo</strong> – roll back transactions still in ATT, writing Compensation Log Records (CLR)
+so the process is idempotent even if another crash happens mid-undo.</li>
+</ol>
+<p><code>RecoverySummary</code> reports how many records were redone and which transactions require
+manual attention—great for classroom demonstrations.</p>
+<hr />
+<h2 id="interactions"><a class="header" href="#interactions">Interactions</a></h2>
+<ul>
+<li><strong>TransactionManager</strong> – emits <code>Begin</code>, <code>Commit</code>, <code>Abort</code> records and supplies undo
+information.</li>
+<li><strong>BufferManager</strong> – links to WAL via <code>set_wal_manager</code>; checkpoints rely on the buffer’s
+dirty page metadata.</li>
+<li><strong>Background workers</strong> – WAL writer and checkpoint worker live in <code>background</code> and use
+handles exposed by <code>WalManager</code>.</li>
+</ul>
+<hr />
+<h2 id="teaching-ideas"><a class="header" href="#teaching-ideas">Teaching Ideas</a></h2>
+<ul>
+<li>Simulate crashes (e.g., panic right after <code>wal_manager.flush(None)</code>) and inspect log
+output on restart.</li>
+<li>Add a new WAL record type (like <code>CreateIndex</code>) to see how <code>RecoveryManager</code> must be
+extended.</li>
+<li>Compare physical vs logical redo costs to discuss ARIES trade-offs.</li>
+</ul>
+<hr />
+<p>Further reading: <a href="../recovery/aries.html">ARIES details</a></p>
 
                     </main>
 

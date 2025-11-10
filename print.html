@@ -354,6 +354,242 @@ COMMIT
 <li>Parallel execution and adaptive readahead hints based on operator feedback.</li>
 </ul>
 <p>Even with these future items, the current layering mirrors production databases (e.g., PostgreSQL): MVCC + 2PL, ARIES-style WAL, asynchronous maintenance, and a modular Volcano executor—all while keeping the codebase approachable for teaching and experimentation.</p>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="module-overview"><a class="header" href="#module-overview">Module Overview</a></h1>
+<p>This page gives a teaching-friendly tour of every QuillSQL subsystem. Each section
+explains where the code lives (<code>src/&lt;module&gt;</code>), the most important types, and the
+design decisions that make the module fit into the whole system. Read it together
+with <a href="modules/../architecture.html"><code>architecture.md</code></a> for the big-picture data flow.</p>
+<hr />
+<h2 id="1-sql-front-end-srcsql"><a class="header" href="#1-sql-front-end-srcsql">1. SQL Front-End (<code>src/sql</code>)</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Submodule</th><th>Responsibilities</th><th>Key Types / Functions</th></tr></thead><tbody>
+<tr><td><code>lexer.rs</code>, <code>parser.rs</code></td><td>Translate raw SQL into an AST using <code>sqlparser</code> plus Quill-specific extensions.</td><td><code>parse_sql(&amp;str) -&gt; Vec&lt;Statement&gt;</code></td></tr>
+<tr><td><code>ast/mod.rs</code></td><td>Normalises identifiers, handles multi-part names, attaches spans for diagnostics.</td><td><code>NormalizedIdent</code>, <code>ObjectNameExt</code></td></tr>
+<tr><td><code>plan/lowering.rs</code></td><td>Bridges AST → planner structs for DDL extras not in upstream <code>sqlparser</code>.</td><td><code>CreateIndexSpec</code>, <code>ColumnDefExt</code></td></tr>
+</tbody></table>
+</div>
+<p>Implementation notes:</p>
+<ul>
+<li>We intentionally keep the AST “SQL-shaped”. No premature desugaring occurs in the
+parser, which keeps the step-by-step teaching narrative simple: <strong>SQL text → AST →
+logical plan</strong>.</li>
+<li>Error messages bubble up with span information, so labs around parser extensions can
+show students exactly which token misbehaved.</li>
+<li>Suggested exercises: extend the parser with <code>ALTER TABLE</code> or window functions, then
+observe how the new AST nodes flow into the planner layer.</li>
+</ul>
+<hr />
+<h2 id="2-logical-planning-srcplan"><a class="header" href="#2-logical-planning-srcplan">2. Logical Planning (<code>src/plan</code>)</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Component</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>LogicalPlanner</code></td><td>Converts AST nodes into strongly typed <code>LogicalPlan</code> variants. Responsible for type checking, alias resolution, and scope handling.</td></tr>
+<tr><td><code>PlannerContext</code></td><td>Surface for catalog lookups while planning.</td></tr>
+<tr><td><code>PhysicalPlanner</code></td><td>Lowers optimized logical plans into physical Volcano operators (<code>PhysicalPlan</code>).</td></tr>
+</tbody></table>
+</div>
+<p>Highlights:</p>
+<ul>
+<li>Every <code>LogicalPlan</code> variant stores its child plans in <code>Arc</code>, so the tree is cheap to
+clone for optimizer passes or debugging prints.</li>
+<li>Planner enforces column binding rules: scope stacks keep track of aliases, CTEs, and
+correlation so students can see how real compilers resolve identifiers.</li>
+<li>DDL nodes capture <code>TableReference</code> + <code>Schema</code> objects. Later phases use them to skip
+repeated catalog lookups (helpful for labs about metadata caching).</li>
+</ul>
+<hr />
+<h2 id="3-optimizer-srcoptimizer"><a class="header" href="#3-optimizer-srcoptimizer">3. Optimizer (<code>src/optimizer</code>)</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Piece</th><th>Responsibility</th></tr></thead><tbody>
+<tr><td><code>LogicalOptimizer</code></td><td>Applies a pipeline of rule-based rewrites (predicate pushdown, projection pruning, constant folding).</td></tr>
+<tr><td><code>rules</code></td><td>Individual <code>OptimizerRule</code> implementations.</td></tr>
+</tbody></table>
+</div>
+<p>Teaching hooks:</p>
+<ul>
+<li>Each rule implements <code>OptimizerRule::rewrite(&amp;LogicalPlan) -&gt; Option&lt;LogicalPlan&gt;</code>. The
+return type makes it obvious whether a rewrite fired, so labs can instrument hit counts
+or add tracing.</li>
+<li>Because rules are pure functions, students can safely reorder or A/B test heuristics in
+isolation (e.g., “what if we only push predicates below joins when the selectivity
+estimate exceeds X?”).</li>
+<li>Example lab: add constant folding or join commutation, run the sqllogictest suite, and
+compare plan dumps to see new shapes.</li>
+</ul>
+<hr />
+<h2 id="4-execution-engine-srcexecution"><a class="header" href="#4-execution-engine-srcexecution">4. Execution Engine (<code>src/execution</code>)</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Element</th><th>Details</th></tr></thead><tbody>
+<tr><td><code>PhysicalPlan</code></td><td>Enum covering all Volcano operators. Each variant implements <code>VolcanoExecutor</code>.</td></tr>
+<tr><td><code>VolcanoExecutor</code></td><td><code>init(&amp;mut ExecutionContext)</code> and <code>next(&amp;mut ExecutionContext)</code> pair define the iterator model.</td></tr>
+<tr><td><code>ExecutionContext</code></td><td>Supplies catalog access, expression evaluation, and (most importantly) a pluggable <code>StorageEngine</code>.</td></tr>
+</tbody></table>
+</div>
+<p>Design notes:</p>
+<ul>
+<li>Operators stay declarative. They describe <em>what</em> to scan or modify and delegate the
+<em>how</em> to storage handles. For example, <code>PhysicalSeqScan</code> now requests a <code>TupleStream</code>
+via <code>ExecutionContext::table_stream</code>, so it never touches <code>TableHeap</code> internals.</li>
+<li>Helper methods such as <code>eval_predicate</code>, <code>insert_tuple_with_indexes</code>, or
+<code>prepare_row_for_write</code> encapsulate MVCC/locking rules so physical plans remain short.</li>
+<li>ExecutionContext caches <code>TxnContext</code>, making it straightforward to teach isolation
+semantics: examine <code>TxnContext::lock_table</code> and <code>read_visible_tuple</code> to see when locks
+are taken or released.</li>
+<li>Suggested lab: implement a new physical operator (e.g., hash join) by wiring two child
+<code>PhysicalPlan</code>s without ever touching storage-specific code. This highlights the payoff
+of the handle abstraction.</li>
+</ul>
+<hr />
+<h2 id="5-transaction-runtime-srctransaction"><a class="header" href="#5-transaction-runtime-srctransaction">5. Transaction Runtime (<code>src/transaction</code>)</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Type</th><th>Purpose</th></tr></thead><tbody>
+<tr><td><code>TransactionManager</code></td><td>Creates/commits/aborts transactions, manages undo chains, and coordinates WAL durability.</td></tr>
+<tr><td><code>TxnContext</code></td><td>Per-command wrapper passed to execution. Provides MVCC snapshot (<code>TransactionSnapshot</code>), lock helpers, and command ids.</td></tr>
+<tr><td><code>LockManager</code></td><td>Multi-granularity 2PL with deadlock detection.</td></tr>
+</tbody></table>
+</div>
+<p>Deeper dive:</p>
+<ul>
+<li><code>Transaction</code> stores a cached <code>TransactionSnapshot</code> plus its undo records. Students can
+inspect <code>Transaction::set_snapshot</code> to see how Repeatable Read/Serializable keep a
+stable view.</li>
+<li><code>TxnRuntime</code> pairs a transaction with a command id. Every SQL statement increments the
+command id so MVCC can distinguish between tuples created earlier in the same
+transaction vs. the current statement—great for explaining “recent writes are invisible
+during UPDATE scanning”.</li>
+<li><code>LockManager</code> exposes functions like <code>lock_table</code> / <code>lock_row</code>. Internally it keeps a
+wait-for graph and victim selection policy, which makes deadlock detection tangible for
+concurrency lectures.</li>
+<li>Undo entries (<code>UndoRecord</code>) store heap + index data. When an abort occurs the engine
+generates CLRs, demonstrating ARIES-style logical undo.</li>
+</ul>
+<hr />
+<h2 id="6-storage-engine--handles-srcstorage"><a class="header" href="#6-storage-engine--handles-srcstorage">6. Storage Engine &amp; Handles (<code>src/storage</code>)</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Component</th><th>Highlights</th></tr></thead><tbody>
+<tr><td><code>engine.rs</code></td><td>Defines <code>StorageEngine</code>, <code>TableHandle</code>, <code>IndexHandle</code>, <code>TupleStream</code>, and the new <code>ScanOptions</code> / <code>IndexScanRequest</code>.</td></tr>
+<tr><td><code>table_heap</code></td><td>Slotted-page heap with MVCC metadata (<code>TupleMeta</code>, forward/back pointers).</td></tr>
+<tr><td><code>index</code></td><td>B+Tree (B-link) implementation with iterators and codecs.</td></tr>
+</tbody></table>
+</div>
+<p>Key ideas for teaching:
+Topics to emphasise:</p>
+<ul>
+<li><strong>Handle abstraction</strong>: Execution asks the engine for a <code>TableHandle</code>, then calls
+<code>full_scan(ScanOptions)</code> to receive a <code>TupleStream</code>. The default engine simply wraps
+<code>TableHeap</code>/<code>BPlusTreeIndex</code>, but students can plug in their own engines for research.</li>
+<li><strong>TupleStream</strong>: Minimal interface returning <code>(RecordId, TupleMeta, Tuple)</code> triples.
+Operators layer MVCC visibility on top, while the stream hides buffering details.</li>
+<li><strong>ScanOptions</strong>: Carry streaming hints, projection slots, or batch sizes. Even when the
+default heap ignores some hints, the API teaches how modern engines negotiate capabilities.</li>
+<li><code>table_heap</code> demonstrates MVCC version chains (forward/back pointers) and the slotted
+page layout. Encourage students to trace <code>MvccHeap::update</code> alongside WAL entries to
+see how new versions link together.</li>
+<li><code>index/btree_index.rs</code> implements a B-link tree with separate codecs. Scanning via
+<code>TreeIndexIterator</code> shows how to perform lock-free range scans using sibling pointers—
+perfect for advanced systems lectures.</li>
+</ul>
+<hr />
+<h2 id="7-buffer-manager--disk-io-srcbuffer-srcstoragedisk_"><a class="header" href="#7-buffer-manager--disk-io-srcbuffer-srcstoragedisk_">7. Buffer Manager &amp; Disk I/O (<code>src/buffer</code>, <code>src/storage/disk_*</code>)</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Module</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>buffer::BufferManager</code></td><td>Page table + LRU-K/TinyLFU replacer, dirty tracking, guard types for safe borrowing.</td></tr>
+<tr><td><code>storage::disk_scheduler</code></td><td><code>io_uring</code>-powered async I/O. Foreground threads enqueue read/write/fsync commands and await completions.</td></tr>
+<tr><td><code>storage::disk_manager</code></td><td>Thin wrapper for file layout, page enlargement, and durability fences.</td></tr>
+</tbody></table>
+</div>
+<p>Extra details:</p>
+<ul>
+<li>Page guards come in three flavours: read, write, and upgradeable. Each implements <code>Drop</code>
+semantics that release latches automatically, reinforcing RAII patterns.</li>
+<li>Replacement policy combines LRU-K history with TinyLFU admission. Labs can toggle the
+feature flag to measure hit-rate differences under sqllogictest or custom workloads.</li>
+<li>DiskScheduler uses lock-free queues plus dedicated worker tasks. A teaching exercise is
+to run with <code>RUST_LOG=debug</code> and observe how read/write/fsync commands are batched.</li>
+</ul>
+<hr />
+<h2 id="8-recovery--wal-srcrecovery"><a class="header" href="#8-recovery--wal-srcrecovery">8. Recovery &amp; WAL (<code>src/recovery</code>)</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Item</th><th>Notes</th></tr></thead><tbody>
+<tr><td><code>WalManager</code></td><td>Allocates LSNs, buffers log records, drives background WAL writer, and integrates with checkpoints.</td></tr>
+<tr><td><code>RecoveryManager</code></td><td>Implements ARIES analysis/redo/undo. Uses <code>ControlFileManager</code> snapshots to seed restart.</td></tr>
+<tr><td><code>wal_record.rs</code></td><td>Defines logical (<code>HeapInsert</code>, <code>IndexDelete</code>) and physical (<code>PageWrite</code>, <code>PageDelta</code>) records.</td></tr>
+</tbody></table>
+</div>
+<p>Teaching hook:</p>
+<ul>
+<li>WAL and data share the disk scheduler. Students can trace one UPDATE from log append,
+to buffer dirtying, to redo/undo via the exact same <code>RecordId</code>.</li>
+<li>Recovery exports statistics (redo count, loser transactions) so labs can check their
+WAL experiments automatically.</li>
+<li><code>recovery/analysis.rs</code> shows how Dirty Page Table and Active Transaction Table are
+reconstructed—ideal for demystifying ARIES’ first phase.</li>
+<li>Students can implement “logical replay only” or “page image replay” modes by toggling
+the commit record types, then verify behaviour using the provided transaction tests.</li>
+</ul>
+<hr />
+<h2 id="9-background-services-srcbackground"><a class="header" href="#9-background-services-srcbackground">9. Background Services (<code>src/background</code>)</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Worker</th><th>What it does</th></tr></thead><tbody>
+<tr><td>WAL writer</td><td>Flushes WAL buffer at configured cadence.</td></tr>
+<tr><td>Checkpoint</td><td>Captures the Dirty Page Table + Active Transaction Table.</td></tr>
+<tr><td>Buffer writer</td><td>Flushes dirty frames and kicks lazy index cleanup.</td></tr>
+<tr><td>MVCC vacuum</td><td>Reclaims tuple versions older than <code>safe_xmin</code>.</td></tr>
+</tbody></table>
+</div>
+<p>More context:</p>
+<ul>
+<li>Workers share a <code>BackgroundWorkers</code> registry so the database can spawn/stop them as a
+group (handy for tests). The registry exposes <code>shutdown_all()</code> which unit tests call to
+ensure a clean exit.</li>
+<li>Config structs (<code>IndexVacuumConfig</code>, <code>MvccVacuumConfig</code>, etc.) live in <code>src/config</code>
+and are exposed through <code>DatabaseOptions</code> for easy fiddling in labs.</li>
+<li>WAL writer and checkpoint worker simply wrap closures around <code>tokio::task::JoinHandle</code>.
+This design keeps async runtime code out of the core engine, making it simpler for
+students to trace background effects.</li>
+<li>Exercise idea: tweak <code>MvccVacuumConfig::batch_limit</code> and observe how many tuple
+versions stay behind by querying hidden statistics tables.</li>
+</ul>
+<hr />
+<h2 id="10-configuration--session-layer-srcdatabase-srcsession-srcconfig"><a class="header" href="#10-configuration--session-layer-srcdatabase-srcsession-srcconfig">10. Configuration &amp; Session Layer (<code>src/database</code>, <code>src/session</code>, <code>src/config</code>)</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Type</th><th>Role</th></tr></thead><tbody>
+<tr><td><code>Database</code></td><td>Boots disk/WAL/buffer components, runs recovery, wires background workers, and executes SQL strings.</td></tr>
+<tr><td><code>SessionContext</code></td><td>Tracks per-connection defaults (autocommit, isolation) and holds the active transaction handle.</td></tr>
+<tr><td><code>config::*</code></td><td>Central place for WAL, buffer pool, vacuum, and HTTP/CLI tuning knobs.</td></tr>
+</tbody></table>
+</div>
+<p>Extra pointers:</p>
+<ul>
+<li>Front-ends (<code>bin/client</code>, <code>bin/server</code>) both embed a <code>Database</code>, proving that the core
+library can serve multiple UIs without change.</li>
+<li><code>DatabaseOptions</code> show how to construct dev/test setups (temporary files, alternate WAL
+directories) in a few lines.</li>
+<li><code>session::SessionContext</code> demonstrates auto-commit semantics: it lazily starts a
+transaction and uses <code>TransactionScope</code> to interpret <code>SET TRANSACTION</code> statements.</li>
+<li>Configuration structs derive <code>Clone + Debug</code>, making them easy to print in labs or
+feed from environment variables (HTTP server uses <code>QUILL_DB_FILE</code>, <code>PORT</code>, etc.).</li>
+</ul>
+<hr />
+<h2 id="11-testing--documentation-tests-docs"><a class="header" href="#11-testing--documentation-tests-docs">11. Testing &amp; Documentation (<code>tests/</code>, <code>docs/</code>)</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Area</th><th>Purpose</th></tr></thead><tbody>
+<tr><td><code>tests/sql_example/*.slt</code></td><td>sqllogictest suites for SQL coverage.</td></tr>
+<tr><td><code>tests/transaction_tests.rs</code></td><td>Unit tests for MVCC invariants, locking, and visibility.</td></tr>
+<tr><td><code>docs/</code></td><td>This mdBook. Every module adds its own deep-dive chapter, making it straightforward for students to jump from code to guided explanations.</td></tr>
+</tbody></table>
+</div>
+<p>Testing strategy:</p>
+<ul>
+<li>Developers can run <code>cargo test -q</code> for fast feedback. Long-running suites can be wrapped
+with <code>timeout</code> as suggested in <code>AGENTS.md</code>.</li>
+<li>Example-driven docs (like this page) mirror the repository layout, so onboarding students
+can find code and tests with minimal guesswork.</li>
+<li>Encourage students to add sqllogictest cases alongside code changes. Because each case lives
+in <code>tests/sql_example</code>, git diffs double as documentation.</li>
+<li>For modules with heavy concurrency (lock manager, WAL), pair unit tests with tracing: the
+CI logs become walkthroughs for tricky paths.</li>
+</ul>
+<hr />
+<h2 id="12-suggested-reading-order-for-learners"><a class="header" href="#12-suggested-reading-order-for-learners">12. Suggested Reading Order for Learners</a></h2>
+<ol>
+<li><strong>Introduction ➜ Architecture</strong> – get the 10,000ft view.</li>
+<li><strong>Module Overview (this page)</strong> – map names to directories.</li>
+<li><strong>Execution + Storage chapters</strong> – understand TupleStreams, handles, and MVCC.</li>
+<li><strong>Recovery + Transaction</strong> – see how WAL &amp;&amp; MVCC interlock.</li>
+<li><strong>Buffer, Index, Background</strong> – dive into advanced systems topics once the basics stick.</li>
+</ol>
+<p>Treat this document as a living index: update it whenever a subsystem gains new entry
+points (e.g., asynchronous scans, new index types) so future contributors always know
+where to look next.</p>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="contributors-guide"><a class="header" href="#contributors-guide">Contributor's Guide</a></h1>
 <p>Welcome, and thank you for your interest in contributing to QuillSQL! Whether you're fixing a bug, adding a new feature, or improving the documentation, this guide will help you get started.</p>
 <h2 id="1-getting-started-your-development-environment"><a class="header" href="#1-getting-started-your-development-environment">1. Getting Started: Your Development Environment</a></h2>
@@ -455,135 +691,827 @@ cargo install mdbook-mermaid
 <p>This will build the book and start a local web server. You can open your browser to <code>http://localhost:3000</code> to see the live-previewed documentation.</p>
 </li>
 </ol>
-<div style="break-before: page; page-break-before: always;"></div><h1 id="buffer-manager"><a class="header" href="#buffer-manager">Buffer Manager</a></h1>
-<p>In any disk-based database, the speed difference between main memory (RAM) and persistent storage (SSD/HDD) is enormous. The <strong>Buffer Manager</strong> is the component designed to solve this problem. It acts as a cache, managing a region of main memory called the <strong>Buffer Pool</strong> and moving data pages between disk and memory as needed.</p>
-<p>Its primary goal is to minimize disk I/O by keeping frequently accessed pages in memory.</p>
-<p>This section is divided into the following parts:</p>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="sql-front-end"><a class="header" href="#sql-front-end">SQL Front-End</a></h1>
+<p>The SQL front-end lives in <code>src/sql/</code>. It turns raw UTF-8 query text into the abstract
+syntax trees (ASTs) consumed by planning, while layering Quill-specific name handling
+and diagnostics on top of <a href="https://docs.rs/sqlparser"><code>sqlparser</code></a>.</p>
+<hr />
+<h2 id="responsibilities"><a class="header" href="#responsibilities">Responsibilities</a></h2>
 <ul>
-<li><strong><a href="modules/../buffer/page.html">Page &amp; Page Guards</a></strong>: Explains the core concepts of pinning and the RAII guards used to safely access pages.</li>
-<li><strong><a href="modules/../buffer/buffer_pool.html">The Buffer Pool</a></strong>: A deep dive into the architecture and lifecycle of a page request, including the page table, replacer, and concurrency.</li>
+<li>Parse SQL text into <code>sqlparser::ast::Statement</code> values.</li>
+<li>Record precise spans so error messages can highlight the exact byte range.</li>
+<li>Normalise identifiers (case folding, quoted names, multi-part paths).</li>
+<li>Provide helper traits so the logical planner can lower AST nodes without duplicating
+syntax checks.</li>
 </ul>
-<div style="break-before: page; page-break-before: always;"></div><h1 id="page--page-guards"><a class="header" href="#page--page-guards">Page &amp; Page Guards</a></h1>
-<p>Before the Buffer Manager can hand out a reference to a page in memory, it must ensure that the page won't be evicted while it's being used by another thread. This is accomplished by <strong>pinning</strong>.</p>
-<h2 id="pinning"><a class="header" href="#pinning">Pinning</a></h2>
-<p>Pinning simply means incrementing a "pin count" associated with the page's frame in the buffer pool. A frame with a pin count greater than zero is forbidden from being chosen as a victim by the page replacer.</p>
-<ul>
-<li>When a thread wants to use a page, it must first pin it.</li>
-<li>When the thread is finished with the page, it must <strong>unpin</strong> it (decrementing the count).</li>
-</ul>
-<p>Manually managing pin counts is tedious and error-prone. Forgetting to unpin a page leads to a memory leak, as the frame can never be evicted. To solve this, QuillSQL uses a common and powerful C++ and Rust pattern: <strong>Resource Acquisition Is Initialization (RAII)</strong>.</p>
-<h2 id="readpageguard-and-writepageguard"><a class="header" href="#readpageguard-and-writepageguard"><code>ReadPageGuard</code> and <code>WritePageGuard</code></a></h2>
-<p>Instead of returning a raw pointer to the page memory, the <code>BufferManager</code>'s <code>fetch_page_*</code> methods return a <strong>guard</strong> object: <code>ReadPageGuard</code> or <code>WritePageGuard</code>.</p>
-<p>These guards are responsible for the lifetime of the pin and the lock on the page:</p>
+<hr />
+<h2 id="directory-layout"><a class="header" href="#directory-layout">Directory Layout</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Path</th><th>Purpose</th><th>Key Types</th></tr></thead><tbody>
+<tr><td><code>lexer.rs</code></td><td>Token helpers that preserve offsets.</td><td><code>Token</code>, <code>TokenExt</code></td></tr>
+<tr><td><code>parser.rs</code></td><td>Single entry point used across the codebase.</td><td><code>parse_sql</code>, <code>SqlInput</code></td></tr>
+<tr><td><code>ast/mod.rs</code></td><td>Planner-facing helpers.</td><td><code>NormalizedIdent</code>, <code>ObjectNameExt</code></td></tr>
+<tr><td><code>error.rs</code></td><td>Span-aware parser errors.</td><td><code>SqlError</code>, <code>SqlSpan</code></td></tr>
+</tbody></table>
+</div>
+<hr />
+<h2 id="parsing-pipeline"><a class="header" href="#parsing-pipeline">Parsing Pipeline</a></h2>
 <ol>
-<li>
-<p><strong>Acquisition</strong>: When a <code>PageGuard</code> is created, its constructor acquires the appropriate lock (<code>RwLock</code>) on the page's frame and increments the frame's pin count.</p>
-<ul>
-<li><code>ReadPageGuard</code> takes a read lock, allowing multiple concurrent readers.</li>
-<li><code>WritePageGuard</code> takes an exclusive write lock.</li>
-</ul>
-</li>
-<li>
-<p><strong>Usage</strong>: The calling code uses the guard object to access the page's data. The guard provides safe, locked access to the underlying byte array.</p>
-</li>
-<li>
-<p><strong>Release</strong>: When the guard variable goes out of scope (e.g., at the end of a function), its <code>drop()</code> method is automatically called by the Rust compiler. This <code>drop()</code> implementation handles all the cleanup:</p>
-<ul>
-<li>It decrements the pin count.</li>
-<li>It releases the lock on the frame.</li>
-<li>If it's a <code>WritePageGuard</code> and the data was modified, it informs the <code>BufferManager</code> that the page is now <strong>dirty</strong>.</li>
-</ul>
-</li>
+<li><strong>Lexing</strong> – wrap sqlparser’s lexer so every token keeps start/end offsets.</li>
+<li><strong>AST generation</strong> – invoke sqlparser to produce standard <code>Statement</code> structs.</li>
+<li><strong>Normalisation</strong> – convert identifiers into <code>NormalizedIdent</code>, deal with schema
+qualifiers, and build pieces of <code>TableReference</code>.</li>
+<li><strong>Planner bridge</strong> – traits like <code>ColumnRefExt</code> expose methods such as <code>relation()</code> or
+<code>column()</code> so <code>LogicalPlanner</code> can treat different SQL syntaxes uniformly.</li>
 </ol>
-<p>This RAII pattern makes using the buffer pool much safer and more ergonomic, as it makes it impossible to forget to unpin a page or release a lock.</p>
-<div style="break-before: page; page-break-before: always;"></div><h1 id="the-buffer-pool-architecture-and-lifecycle"><a class="header" href="#the-buffer-pool-architecture-and-lifecycle">The Buffer Pool: Architecture and Lifecycle</a></h1>
-<h2 id="1-core-components--architecture"><a class="header" href="#1-core-components--architecture">1. Core Components &amp; Architecture</a></h2>
-<p>QuillSQL's buffer management is split into two main structs, reflecting a separation of concerns:</p>
+<hr />
+<h2 id="interactions"><a class="header" href="#interactions">Interactions</a></h2>
 <ul>
-<li><strong><code>BufferPool</code> (<code>buffer/buffer_pool.rs</code>)</strong>: A low-level, "dumb" container. It owns the actual memory arena for pages and provides basic mapping from a <code>PageId</code> to a memory location (<code>FrameId</code>).</li>
-<li><strong><code>BufferManager</code> (<code>buffer/buffer_manager.rs</code>)</strong>: The high-level, "smart" coordinator. It contains the <code>BufferPool</code> and implements all the logic for fetching pages, choosing which pages to evict, and interacting with other database components like the transaction and recovery managers.</li>
+<li><strong>Logical planner</strong> consumes the AST directly and relies on helper traits from this
+module to convert identifiers into catalog references.</li>
+<li><strong>Database / Session</strong> catch <code>SqlError</code> values, so both CLI and HTTP front-ends show
+consistent caret diagnostics.</li>
+<li><strong>Tests</strong> (<code>tests/sql_example/*.slt</code>, <code>tests/sql_parser.rs</code>) assert on parser output and
+error strings to keep teaching feedback stable.</li>
 </ul>
-<p>This architecture is centered around three key data structures:</p>
+<hr />
+<h2 id="implementation-notes"><a class="header" href="#implementation-notes">Implementation Notes</a></h2>
+<ul>
+<li><code>SqlSpan</code> stores byte offsets, which makes it trivial to slice the original SQL and
+render highlighted errors.</li>
+<li>Extended statements (e.g., <code>EXPLAIN</code>, <code>BEGIN TRANSACTION</code>) show how to Layer
+Quill-specific syntax without forking sqlparser entirely.</li>
+<li>We avoid desugaring at this stage so students can trace SQL → AST → logical plan step
+by step.</li>
+</ul>
+<hr />
+<h2 id="teaching-ideas"><a class="header" href="#teaching-ideas">Teaching Ideas</a></h2>
+<ul>
+<li>Add a new statement (<code>CREATE VIEW</code>, <code>ALTER TABLE ...</code>) and follow the AST through the
+pipeline.</li>
+<li>Improve error hints (“Did you forget FROM?”) to see how better diagnostics aid users.</li>
+<li>Write fuzz tests that round-trip SQL → AST → SQL to discuss parser determinism.</li>
+</ul>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="catalog-module"><a class="header" href="#catalog-module">Catalog Module</a></h1>
+<p><code>src/catalog/</code> acts as QuillSQL’s data dictionary. It tracks schema/table/index metadata,
+statistics, and the mapping between logical names and physical storage objects such as
+<code>TableHeap</code> and <code>BPlusTreeIndex</code>. Every layer—planner, execution, background workers—uses
+the catalog to discover structure.</p>
+<hr />
+<h2 id="responsibilities-1"><a class="header" href="#responsibilities-1">Responsibilities</a></h2>
+<ul>
+<li>Persist definitions for schemas, tables, columns, indexes, and constraints.</li>
+<li>Map logical <code>TableReference</code>s to physical handles (heap files, index roots, file ids).</li>
+<li>Store table statistics (row counts, histograms) that drive ANALYZE and optimization.</li>
+<li>Manage the DDL lifecycle: creation and deletion update the in-memory registry and the
+on-disk metadata pages.</li>
+</ul>
+<hr />
+<h2 id="directory-layout-1"><a class="header" href="#directory-layout-1">Directory Layout</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Path</th><th>Description</th><th>Key Types</th></tr></thead><tbody>
+<tr><td><code>mod.rs</code></td><td>Public API surface.</td><td><code>Catalog</code>, <code>TableHandleRef</code></td></tr>
+<tr><td><code>schema.rs</code></td><td>Schema objects and table references.</td><td><code>Schema</code>, <code>Column</code>, <code>TableReference</code></td></tr>
+<tr><td><code>registry/</code></td><td>Thread-safe registries for heaps and indexes.</td><td><code>TableRegistry</code>, <code>IndexRegistry</code></td></tr>
+<tr><td><code>statistics.rs</code></td><td>ANALYZE output and helpers.</td><td><code>TableStatistics</code></td></tr>
+<tr><td><code>loader.rs</code></td><td>Boot-time metadata loader.</td><td><code>load_catalog_data</code></td></tr>
+</tbody></table>
+</div>
+<hr />
+<h2 id="core-concepts"><a class="header" href="#core-concepts">Core Concepts</a></h2>
+<h3 id="tablereference"><a class="header" href="#tablereference">TableReference</a></h3>
+<p>Unified identifier (database, schema, table). Logical planner, execution, and transaction
+code all use it when requesting handles from the catalog.</p>
+<h3 id="registries"><a class="header" href="#registries">Registries</a></h3>
+<p><code>TableRegistry</code>/<code>IndexRegistry</code> map internal IDs to <code>Arc&lt;TableHeap&gt;</code> or
+<code>Arc&lt;BPlusTreeIndex&gt;</code> plus logical names. They are thread-safe so background tasks can
+traverse them without blocking the main thread.</p>
+<h3 id="schema--column"><a class="header" href="#schema--column">Schema &amp; Column</a></h3>
+<p><code>Schema</code> stores column definitions (type, default, nullability). Execution uses it when
+materialising tuples; the planner uses it to check expression types. <code>Schema::project</code>
+helps physical operators build projected outputs.</p>
+<h3 id="tablestatistics"><a class="header" href="#tablestatistics">TableStatistics</a></h3>
+<p><code>ANALYZE</code> writes row counts and histograms into the catalog. Optimizer rules and planner
+heuristics can consult these stats when deciding whether to push filters or pick indexes.</p>
+<hr />
+<h2 id="interactions-1"><a class="header" href="#interactions-1">Interactions</a></h2>
+<ul>
+<li><strong>SQL / Planner</strong> – DDL planning calls <code>Catalog::create_table</code> / <code>create_index</code>; name
+binding relies on <code>Schema</code>.</li>
+<li><strong>Execution</strong> – <code>ExecutionContext::table_handle</code> and <code>index_handle</code> fetch physical
+handles through the catalog, so scans never hard-code heap locations.</li>
+<li><strong>Background workers</strong> – MVCC and index vacuum iterate the registries via <code>Arc</code> clones.</li>
+<li><strong>Recovery</strong> – <code>load_catalog_data</code> rebuilds the in-memory catalog from control files and
+metadata pages during startup.</li>
+</ul>
+<hr />
+<h2 id="teaching-ideas-1"><a class="header" href="#teaching-ideas-1">Teaching Ideas</a></h2>
+<ul>
+<li>Extend the schema system with hidden or computed columns and teach the catalog to store
+the extra metadata.</li>
+<li>Add histogram bins to <code>TableStatistics</code> and demonstrate how a simple cost heuristic can
+choose better plans.</li>
+<li>Turn on <code>RUST_LOG=catalog=debug</code> to observe how DDL mutates the registries.</li>
+</ul>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="expression--scalar-evaluation"><a class="header" href="#expression--scalar-evaluation">Expression &amp; Scalar Evaluation</a></h1>
+<p>The expression subsystem (<code>src/expression/</code>) powers column computations, predicates, and
+UPDATE assignments. It keeps expression trees approachable while demonstrating how they
+are evaluated during execution.</p>
+<hr />
+<h2 id="responsibilities-2"><a class="header" href="#responsibilities-2">Responsibilities</a></h2>
+<ul>
+<li>Store planner-produced expression trees (<code>Expr</code>) in a serializable, traversable enum.</li>
+<li>Bind column references, constants, and built-in functions.</li>
+<li>Evaluate expressions against <code>Tuple</code>s at runtime, yielding <code>ScalarValue</code>.</li>
+<li>Provide type inference and casting so arithmetic/comparison operators remain well-typed.</li>
+</ul>
+<hr />
+<h2 id="directory-layout-2"><a class="header" href="#directory-layout-2">Directory Layout</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Path</th><th>Description</th><th>Key Types</th></tr></thead><tbody>
+<tr><td><code>mod.rs</code></td><td>Public API and core enum.</td><td><code>Expr</code>, <code>ExprTrait</code></td></tr>
+<tr><td><code>scalar.rs</code></td><td>Runtime scalar representation + conversions.</td><td><code>ScalarValue</code>, <code>DataType</code></td></tr>
+<tr><td><code>binder.rs</code></td><td>Helpers for the planner/SQL binder.</td><td><code>BoundExpr</code></td></tr>
+</tbody></table>
+</div>
+<hr />
+<h2 id="concepts"><a class="header" href="#concepts">Concepts</a></h2>
+<h3 id="expr-enum"><a class="header" href="#expr-enum">Expr Enum</a></h3>
+<p>Expresses column refs, literals, comparisons, logical ops, arithmetic, and function
+invocations. Each variant implements <code>ExprTrait::evaluate(&amp;self, tuple)</code> and returns a
+<code>ScalarValue</code>.</p>
+<h3 id="scalarvalue"><a class="header" href="#scalarvalue">ScalarValue</a></h3>
+<p>Unified runtime value across types (int, bigint, bool, decimal, varchar, …). Includes
+<code>cast_to(DataType)</code> so results can be coerced to the target column type before writes.</p>
+<h3 id="type-inference"><a class="header" href="#type-inference">Type Inference</a></h3>
+<p>Planner code invokes <code>Expr::data_type(schema)</code> to predict result types. Execution then
+casts when needed—e.g., <code>UPDATE t SET a = b + 1</code> uses the column’s declared type for <code>a</code>.</p>
+<hr />
+<h2 id="interactions-2"><a class="header" href="#interactions-2">Interactions</a></h2>
+<ul>
+<li><strong>Planner</strong> – builds <code>Expr</code> trees with bound columns; execution reuses them verbatim.</li>
+<li><strong>ExecutionContext</strong> – exposes <code>eval_expr</code> and <code>eval_predicate</code>, wrapping expression
+evaluation plus boolean coercion (<code>NULL</code> becomes false for predicates).</li>
+<li><strong>Optimizer</strong> – rules like constant folding traverse <code>Expr</code> trees and reuse
+<code>ScalarValue</code> arithmetic helpers.</li>
+</ul>
+<hr />
+<h2 id="teaching-ideas-2"><a class="header" href="#teaching-ideas-2">Teaching Ideas</a></h2>
+<ul>
+<li>Add a simple built-in function (<code>length(expr)</code>) to follow the pipeline from parsing to
+evaluation.</li>
+<li>Implement short-circuiting or full three-valued boolean logic and validate with
+sqllogictest.</li>
+<li>Instrument <code>Expr::evaluate</code> with tracing to visualise expression evaluation inside
+physical operators.</li>
+</ul>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="query-planner-module"><a class="header" href="#query-planner-module">Query Planner Module</a></h1>
+<p><code>src/plan/</code> bridges parsed SQL and executable operators. It converts the AST into a
+logical plan, applies rewrites (via the optimizer), and finally emits a physical plan
+(<code>PhysicalPlan</code>) that the Volcano engine can run.</p>
+<hr />
+<h2 id="responsibilities-3"><a class="header" href="#responsibilities-3">Responsibilities</a></h2>
 <ol>
-<li>
-<p><strong>Frames (The Arena)</strong>: The <code>BufferPool</code> pre-allocates a large, contiguous block of memory on the heap. This block is divided into a fixed number of smaller chunks called <strong>frames</strong>. Each frame is exactly <code>PAGE_SIZE</code> (4KB) and can hold the contents of one disk page.</p>
-</li>
-<li>
-<p><strong>Page Table (<code>page_table</code>)</strong>: A hash map (specifically, a concurrent <code>DashMap</code>) that maps a logical <code>PageId</code> to the <code>FrameId</code> where it currently resides in memory. This provides fast O(1) lookups to check if a page is already in the buffer pool.</p>
-</li>
-<li>
-<p><strong>Replacer (<code>LRUKReplacer</code>)</strong>: When a requested page is not in memory and the buffer pool is full, one of the existing pages must be <strong>evicted</strong> to make room. The <code>Replacer</code> is the component that implements the page replacement policy and decides which page is the best candidate for eviction. QuillSQL uses an <strong>LRU-K</strong> replacement policy, a sophisticated variant of the classic Least Recently Used (LRU) algorithm.</p>
-</li>
+<li><strong>LogicalPlanner</strong> – walks the AST, binds table/column names using <code>PlannerContext</code>,
+performs type checking, and builds a <code>LogicalPlan</code> tree.</li>
+<li><strong>PlannerContext</strong> – exposes catalog lookups plus scope information for CTEs, subqueries,
+and aliases.</li>
+<li><strong>PhysicalPlanner</strong> – lowers an optimized <code>LogicalPlan</code> into a tree of Volcano operators.</li>
 </ol>
-<h2 id="2-the-lifecycle-of-a-page-request"><a class="header" href="#2-the-lifecycle-of-a-page-request">2. The Lifecycle of a Page Request</a></h2>
-<p>When another part of the database (e.g., the execution engine) needs to access a page, it calls <code>buffer_manager.fetch_page_read(page_id)</code> or <code>fetch_page_write(page_id)</code>. This initiates a critical sequence of events.</p>
-<p>The flow is as follows:</p>
+<hr />
+<h2 id="directory-layout-3"><a class="header" href="#directory-layout-3">Directory Layout</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Path</th><th>Description</th><th>Key Types</th></tr></thead><tbody>
+<tr><td><code>logical_plan.rs</code></td><td>Logical algebra nodes.</td><td><code>LogicalPlan</code>, <code>LogicalExpr</code>, <code>JoinType</code></td></tr>
+<tr><td><code>logical_planner.rs</code></td><td>AST → logical transformation.</td><td><code>LogicalPlanner</code></td></tr>
+<tr><td><code>physical_plan.rs</code></td><td><code>PhysicalPlan</code> enum definition.</td><td><code>PhysicalPlan</code>, <code>Physical*</code> structs</td></tr>
+<tr><td><code>physical_planner.rs</code></td><td>Logical → physical lowering.</td><td><code>PhysicalPlanner</code></td></tr>
+<tr><td><code>planner_context.rs</code></td><td>Catalog/scope abstraction.</td><td><code>PlannerContext</code></td></tr>
+</tbody></table>
+</div>
+<hr />
+<h2 id="workflow"><a class="header" href="#workflow">Workflow</a></h2>
 <ol>
-<li>
-<p><strong>Request</strong>: An executor requests Page <code>P</code>.</p>
-</li>
-<li>
-<p><strong>Lookup</strong>: The <code>BufferManager</code> consults the <code>PageTable</code>.</p>
-</li>
-<li>
-<p><strong>Case 1: Cache Hit</strong></p>
-<ul>
-<li>The <code>PageTable</code> contains an entry for <code>P</code>, mapping it to <code>FrameId</code> <code>F</code>.</li>
-<li>The <code>BufferManager</code> increments the pin count for frame <code>F</code>.</li>
-<li>It informs the <code>LRUKReplacer</code> that the page has been accessed (updating its priority).</li>
-<li>It returns a <code>PageGuard</code> wrapping a reference to the memory in frame <code>F</code>.</li>
-</ul>
-</li>
-<li>
-<p><strong>Case 2: Cache Miss</strong></p>
-<ul>
-<li>The <code>PageTable</code> has no entry for <code>P</code>.</li>
-<li>The <code>BufferManager</code> must bring the page from disk. It asks the <code>Replacer</code> to choose a <strong>victim frame</strong> <code>F_v</code> to evict.</li>
-<li><strong>If the victim frame <code>F_v</code> is dirty</strong>: The <code>BufferManager</code> first writes the contents of <code>F_v</code> back to disk via the <code>DiskScheduler</code>. This is essential for data durability.</li>
-<li>The <code>PageTable</code> entry for the old page residing in <code>F_v</code> is removed.</li>
-<li>The <code>BufferManager</code> issues a read request to the <code>DiskScheduler</code> to load page <code>P</code>'s data from disk into frame <code>F_v</code>.</li>
-<li>The <code>PageTable</code> is updated with the new mapping: <code>P -&gt; F_v</code>.</li>
-<li>The process then continues like a cache hit: frame <code>F_v</code> is pinned and a <code>PageGuard</code> is returned.</li>
-</ul>
-</li>
+<li><strong>Name binding</strong> – <code>LogicalPlanner</code> resolves table + column references, creates
+<code>TableReference</code>s, and validates schemas via the catalog.</li>
+<li><strong>Logical tree</strong> – each SQL clause becomes a logical node (FROM → <code>SeqScan</code>, WHERE →
+<code>Filter</code>, GROUP BY → <code>Aggregate</code>, etc.).</li>
+<li><strong>Physical selection</strong> – <code>PhysicalPlanner</code> picks concrete algorithms (sequential scan,
+index scan, nested-loop join, sort, limit …). Because every physical node implements
+<code>VolcanoExecutor</code>, the execution engine can pull tuples immediately.</li>
 </ol>
-<h2 id="3-concurrency"><a class="header" href="#3-concurrency">3. Concurrency</a></h2>
-<p>The buffer pool is a shared resource accessed by many concurrent threads. QuillSQL uses a combination of locking strategies:</p>
+<hr />
+<h2 id="interactions-3"><a class="header" href="#interactions-3">Interactions</a></h2>
 <ul>
-<li><strong>Page Table</strong>: A <code>DashMap</code> is used for the page table, which is highly optimized for concurrent reads and writes.</li>
-<li><strong>Frame-Level Locks</strong>: Each frame in the pool has its own <code>RwLock</code>. A <code>ReadPageGuard</code> acquires a read lock on the frame, allowing multiple threads to read the same page concurrently. A <code>WritePageGuard</code> acquires an exclusive write lock, ensuring that only one thread can modify a page at a time.</li>
-<li><strong>Replacer/Free List</strong>: These shared structures are protected by a <code>Mutex</code>.</li>
+<li><strong>SQL front-end</strong> – provides the AST; helper traits (<code>NormalizedIdent</code>, etc.) keep name
+resolution consistent.</li>
+<li><strong>Catalog</strong> – <code>PlannerContext</code> relies on it to confirm table/index existence and fetch
+schemas.</li>
+<li><strong>Optimizer</strong> – operates purely on <code>LogicalPlan</code>; the planner must emit clean,
+traversable trees so rules can fire.</li>
+<li><strong>Execution</strong> – physical nodes carry <code>TableReference</code>, <code>SchemaRef</code>, and hints that the
+execution engine passes to the storage layer.</li>
 </ul>
-<h2 id="4-integration-with-wal-and-recovery"><a class="header" href="#4-integration-with-wal-and-recovery">4. Integration with WAL and Recovery</a></h2>
-<p>The Buffer Manager is a key player in the ARIES recovery protocol.</p>
+<hr />
+<h2 id="teaching-ideas-3"><a class="header" href="#teaching-ideas-3">Teaching Ideas</a></h2>
 <ul>
-<li><strong>Dirty Pages</strong>: When a <code>WritePageGuard</code> is dropped, if it has modified the page, it marks the page as <strong>dirty</strong>. The <code>BufferManager</code> maintains a <code>dirty_page_table</code> that tracks all dirty pages and the Log Sequence Number (LSN) of the first WAL record that caused the page to become dirty.</li>
-<li><strong>Forced WAL (Write-Ahead Logging)</strong>: Before a dirty page can be written back to disk (either during eviction or a checkpoint), the <code>BufferManager</code> must ensure that all WAL records up to that page's current LSN have been flushed to durable storage. This is the fundamental <strong>WAL rule</strong> and is enforced by the <code>flush_page</code> method, which calls <code>wal_manager.flush(lsn)</code> before writing the page to disk.</li>
+<li>Implement a new logical operator (e.g., <code>LogicalDistinct</code>) and add the corresponding
+physical operator to trace the full lifecycle.</li>
+<li>Experiment with early projection inside the logical plan and observe its impact on
+downstream operators.</li>
+<li>Use <code>pretty_format_logical_plan</code>/<code>physical_plan</code> dumps to visualise rewrites before and
+after optimizer passes.</li>
 </ul>
+<hr />
+<p>Further reading: <a href="modules/../plan/lifecycle.html">The Lifecycle of a Query</a></p>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="the-lifecycle-of-a-query"><a class="header" href="#the-lifecycle-of-a-query">The Lifecycle of a Query</a></h1>
+<p>When you submit a SQL query to a database, it doesn't just magically produce a result. The database undertakes a sophisticated, multi-stage process to translate the declarative SQL statement (which describes <em>what</em> data you want) into an imperative, efficient execution plan (which describes <em>how</em> to get that data). This entire process is the responsibility of the <strong>Query Planner</strong>.</p>
+<p>In QuillSQL, this process follows a classic, compiler-like pipeline, which is a cornerstone of modern database architecture as taught in courses like CMU 15-445.</p>
+<p>The journey from a SQL string to an executable plan involves several transformations:</p>
+<p><strong>SQL String</strong> -&gt; <strong>AST (Abstract Syntax Tree)</strong> -&gt; <strong>Logical Plan</strong> -&gt; <strong>Optimized Logical Plan</strong> -&gt; <strong>Physical Plan</strong></p>
+<p>Let's break down each stage.</p>
+<h3 id="stage-1-parsing-sql---ast"><a class="header" href="#stage-1-parsing-sql---ast">Stage 1: Parsing (SQL -&gt; AST)</a></h3>
+<p>The first step is purely syntactic. The raw SQL query string is fed into a parser. QuillSQL uses the excellent <code>sqlparser</code> crate for this. The parser checks if the SQL conforms to valid grammar and, if so, converts it into an <strong>Abstract Syntax Tree (AST)</strong>.</p>
+<p>An AST is a direct tree representation of the SQL query's structure. For example, <code>SELECT id FROM users WHERE age &gt; 30</code> would be parsed into a tree structure with nodes representing the <code>SELECT</code> clause, the table <code>users</code>, the <code>WHERE</code> clause, and the predicate <code>age &gt; 30</code>.</p>
+<h3 id="stage-2-logical-planning-ast---logical-plan"><a class="header" href="#stage-2-logical-planning-ast---logical-plan">Stage 2: Logical Planning (AST -&gt; Logical Plan)</a></h3>
+<p>Next, the <code>LogicalPlanner</code> (<code>plan/logical_planner.rs</code>) walks the AST and converts it into a <strong>Logical Plan</strong>.</p>
+<p>A Logical Plan is a tree of relational algebra operators. It describes the query in terms of high-level data operations, completely independent of how the data is stored or which algorithms will be used. It defines <em>what</em> to do, not <em>how</em> to do it.</p>
+<p>Key logical operators in QuillSQL (<code>plan/logical_plan/mod.rs</code>) include:</p>
+<ul>
+<li><strong><code>TableScan(users)</code></strong>: Represents reading the entire <code>users</code> table.</li>
+<li><strong><code>Filter(predicate: age &gt; 30)</code></strong>: Represents filtering rows based on a condition.</li>
+<li><strong><code>Projection(columns: [id])</code></strong>: Represents selecting specific columns.</li>
+<li><strong><code>Join</code></strong>: Represents joining two data sources.</li>
+<li><strong><code>Aggregate</code></strong>: Represents a <code>GROUP BY</code> operation.</li>
+<li><strong><code>Sort</code></strong>: Represents an <code>ORDER BY</code> operation.</li>
+</ul>
+<p>For our example query, the initial logical plan might look like this:</p>
+<pre><code>Projection(columns=[id])
+  └── Filter(predicate=age &gt; 30)
+        └── TableScan(users)
+</code></pre>
+<h3 id="stage-3-logical-optimization"><a class="header" href="#stage-3-logical-optimization">Stage 3: Logical Optimization</a></h3>
+<p>Before executing the plan, we have a crucial opportunity to make it more efficient. The <code>LogicalOptimizer</code> (<code>optimizer/logical_optimizer.rs</code>) takes the logical plan and applies a series of <strong>transformation rules</strong> to produce a new, equivalent logical plan that is expected to be faster.</p>
+<p>QuillSQL uses a simple but effective rule-based optimizer. A classic example of such a rule is <strong>Predicate Pushdown</strong>. Consider this query:</p>
+<p><code>SELECT name FROM (SELECT * FROM users JOIN cities ON users.city_id = cities.id) WHERE users.age &gt; 30;</code></p>
+<p>A naive logical plan would first perform a full <code>JOIN</code> between <code>users</code> and <code>cities</code> and <em>then</em> filter the massive result. Predicate pushdown is a rule that would rewrite the plan to apply the <code>age &gt; 30</code> filter <em>before</em> the join:</p>
+<p><strong>Before Optimization:</strong></p>
+<pre><code>Filter(users.age &gt; 30)
+  └── Join(users.city_id = cities.id)
+        ├── TableScan(users)
+        └── TableScan(cities)
+</code></pre>
+<p><strong>After Optimization (Predicate Pushdown):</strong></p>
+<pre><code>Join(users.city_id = cities.id)
+  ├── Filter(users.age &gt; 30)
+  │     └── TableScan(users)
+  └── TableScan(cities)
+</code></pre>
+<p>By filtering early, we dramatically reduce the number of rows that need to be processed by the expensive <code>Join</code> operator. QuillSQL implements similar rules, such as <code>PushDownLimit</code>, which pushes <code>LIMIT</code> clauses down the tree to reduce the amount of data processed.</p>
+<h3 id="stage-4-physical-planning-logical-plan---physical-plan"><a class="header" href="#stage-4-physical-planning-logical-plan---physical-plan">Stage 4: Physical Planning (Logical Plan -&gt; Physical Plan)</a></h3>
+<p>Finally, the <code>PhysicalPlanner</code> (<code>plan/physical_planner.rs</code>) converts the optimized logical plan into a <strong>Physical Plan</strong>.</p>
+<p>A Physical Plan describes exactly <em>how</em> the query will be executed. It maps each logical operator to a concrete algorithm or implementation.</p>
+<ul>
+<li>A <code>LogicalPlan::TableScan</code> becomes a <code>PhysicalSeqScan</code> (a sequential scan of the table heap).</li>
+<li>A <code>LogicalPlan::Filter</code> becomes a <code>PhysicalFilter</code>, which implements the filtering logic.</li>
+<li>A <code>LogicalPlan::Join</code> becomes a <code>PhysicalNestedLoopJoin</code>. This is where the database commits to a specific join algorithm. A more advanced database might have multiple options (e.g., <code>PhysicalHashJoin</code>, <code>PhysicalSortMergeJoin</code>) and would use a cost model to choose the best one. QuillSQL currently implements Nested Loop Join.</li>
+</ul>
+<p>Each node in the physical plan tree is an executor that the <a href="plan/../modules/execution.html">Execution Engine</a> can run. This final plan is what gets executed to produce the query result.</p>
+<h2 id="conclusion"><a class="header" href="#conclusion">Conclusion</a></h2>
+<p>This layered approach—from syntax to a logical representation, then to an optimized logical representation, and finally to a concrete physical execution plan—is fundamental to database design. It provides a clear separation of concerns and, most importantly, creates a dedicated <strong>optimization stage</strong>, which is the key to achieving high performance on a wide variety of SQL queries.</p>
 <hr />
 <h2 id="for-study--discussion"><a class="header" href="#for-study--discussion">For Study &amp; Discussion</a></h2>
 <ol>
 <li>
-<p><strong>Replacement Policies</strong>: QuillSQL uses LRU-K. What are the potential advantages of LRU-K over a simple LRU policy? What kind of workload would benefit most? Conversely, what are the trade-offs of using Clock/Second-Chance instead?</p>
+<p><strong>Logical vs. Physical</strong>: Why is the separation between logical and physical plans so important? What would be the disadvantages of a simpler system that converted the AST directly into a physical plan?</p>
 </li>
 <li>
-<p><strong>The "Double Caching" Problem</strong>: We mentioned that using Direct I/O helps avoid double caching. If Direct I/O is disabled, how does the database's buffer pool interact with the operating system's file system cache? Why can this lead to suboptimal performance?</p>
+<p><strong>Join Algorithms</strong>: QuillSQL currently only implements <code>NestedLoopJoin</code>. What are two other common join algorithms? Describe how they work and in what scenarios they would be more performant than a nested loop join.</p>
 </li>
 <li>
-<p><strong>Programming Exercise</strong>: Implement a <code>ClockReplacer</code> that adheres to the <code>Replacer</code> trait. Modify the <code>BufferManager</code> to use your new replacer instead of <code>LRUKReplacer</code>. Run the benchmark suite and compare the performance. Does it change?</p>
+<p><strong>Programming Exercise (Advanced)</strong>: Implement a <code>PhysicalHashJoin</code> operator. This is a significant undertaking that involves:
+a.  Creating a <code>PhysicalHashJoin</code> struct that implements the <code>VolcanoExecutor</code> trait.
+b.  In the <code>init()</code> phase, it should consume the entire "build" side (typically the smaller, right-hand table) and build an in-memory hash table from its rows.
+c.  In the <code>next()</code> phase, it should read from the "probe" side (the left-hand table) one row at a time, probe the hash table for matches, and emit the joined tuples.
+d.  Modify the <code>PhysicalPlanner</code> to choose <code>PhysicalHashJoin</code> instead of <code>PhysicalNestedLoopJoin</code> for equi-joins.</p>
 </li>
 <li>
-<p><strong>Programming Exercise</strong>: Add metrics to the <code>BufferManager</code> to track the buffer pool hit rate (i.e., <code>num_hits / (num_hits + num_misses)</code>). You could expose this via a new <code>SHOW BUFFER_STATS;</code> SQL command.</p>
+<p><strong>Programming Exercise</strong>: Add support for the <code>UNION ALL</code> operator. This would involve:
+a.  Adding a <code>Union</code> variant to the <code>LogicalPlan</code> enum.
+b.  Updating the <code>LogicalPlanner</code> to recognize the <code>UNION</code> syntax in the AST and create a <code>LogicalPlan::Union</code> node.
+c.  Creating a <code>PhysicalUnion</code> executor that pulls tuples from its first child until it's exhausted, and then pulls tuples from its second child.</p>
+</li>
+</ol>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="optimizer-module"><a class="header" href="#optimizer-module">Optimizer Module</a></h1>
+<p><code>src/optimizer/</code> contains a lightweight, teaching-friendly rule engine. It rewrites
+<code>LogicalPlan</code> trees into cheaper equivalents without requiring a full cost-based
+framework.</p>
+<hr />
+<h2 id="responsibilities-4"><a class="header" href="#responsibilities-4">Responsibilities</a></h2>
+<ul>
+<li>Define the <code>OptimizerRule</code> trait (“match → rewrite”).</li>
+<li>Ship built-in rules such as predicate pushdown, projection pruning, and limit pushdown.</li>
+<li>Provide a pipeline (<code>LogicalOptimizer</code>) that repeatedly applies rules until reaching a
+fixpoint, while remaining extensible for future cost models.</li>
+</ul>
+<hr />
+<h2 id="directory-layout-4"><a class="header" href="#directory-layout-4">Directory Layout</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Path</th><th>Description</th><th>Key Types</th></tr></thead><tbody>
+<tr><td><code>mod.rs</code></td><td>Optimizer entry point.</td><td><code>LogicalOptimizer</code></td></tr>
+<tr><td><code>rule.rs</code></td><td>Trait + shared helpers.</td><td><code>OptimizerRule</code></td></tr>
+<tr><td><code>rules/*</code></td><td>Concrete rewrites.</td><td><code>PushDownFilter</code>, <code>PushDownLimit</code>, …</td></tr>
+</tbody></table>
+</div>
+<hr />
+<h2 id="how-it-works"><a class="header" href="#how-it-works">How It Works</a></h2>
+<ol>
+<li><code>LogicalOptimizer::optimize(plan)</code> iterates through the registered rule list.</li>
+<li>Each rule implements <code>fn apply(&amp;LogicalPlan) -&gt; Option&lt;LogicalPlan&gt;</code>. Returning <code>Some</code>
+means the rule fired; the pipeline restarts to reach a fixpoint.</li>
+<li>Rules are pure functions, which keeps them easy to unit test and reason about.</li>
+</ol>
+<p>Examples:</p>
+<ul>
+<li><strong>PushDownFilter</strong> moves filters below scans/joins to reduce input size sooner.</li>
+<li><strong>PushDownLimit</strong> applies LIMIT before expensive joins/sorts when safe.</li>
+<li><strong>PruneProjection</strong> removes unused columns so execution/storage decode less data.</li>
+</ul>
+<hr />
+<h2 id="interactions-4"><a class="header" href="#interactions-4">Interactions</a></h2>
+<ul>
+<li><strong>LogicalPlan</strong> – the optimizer only sees logical nodes; physical/storage layers remain
+untouched.</li>
+<li><strong>Catalog / Statistics</strong> – current rules are heuristic, but <code>TableStatistics</code> is
+available for students to experiment with cost-based decisions (e.g., choose index scan
+when selectivity is low).</li>
+<li><strong>Execution</strong> – leaner logical plans translate into simpler physical plans (e.g.,
+predicate pushdown allows <code>PhysicalSeqScan</code> to discard rows earlier).</li>
+</ul>
+<hr />
+<h2 id="teaching-ideas-4"><a class="header" href="#teaching-ideas-4">Teaching Ideas</a></h2>
+<ul>
+<li>Implement a new rule (join reordering, constant folding) and use <code>RUST_LOG=trace</code> to
+compare plan dumps before/after.</li>
+<li>Discuss pipeline ordering—swap rule order and observe different outcomes.</li>
+<li>Prototype a tiny cost estimator using row counts from <code>TableStatistics</code> to decide on
+index scans vs sequential scans.</li>
+</ul>
+<hr />
+<p>Further reading: <a href="modules/../optimizer/rules.html">Rule-Based Optimization</a></p>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="rule-based-optimization"><a class="header" href="#rule-based-optimization">Rule-Based Optimization</a></h1>
+<p>After the <code>LogicalPlanner</code> creates an initial <code>LogicalPlan</code>, it's passed to the <strong><code>LogicalOptimizer</code></strong>. The initial plan is a direct, syntactically correct translation of the SQL query, but it's often not the most efficient way to execute it. The optimizer's job is to transform this plan into an equivalent, but more performant, logical plan.</p>
+<h2 id="the-optimizer-in-quillsql"><a class="header" href="#the-optimizer-in-quillsql">The Optimizer in QuillSQL</a></h2>
+<p>QuillSQL implements a <strong>Rule-Based Optimizer</strong>. This is a common and powerful approach where the optimizer is equipped with a set of predefined transformation rules. It repeatedly applies these rules to the logical plan tree until no more rules can be applied, or a maximum number of passes is reached.</p>
+<p>The main components are:</p>
+<ul>
+<li><strong><code>LogicalOptimizer</code> (<code>optimizer/logical_optimizer.rs</code>)</strong>: The main driver. It holds a list of rules and contains the logic to recursively walk the plan tree and apply them.</li>
+<li><strong><code>LogicalOptimizerRule</code> Trait</strong>: An interface that every optimization rule must implement. Its core method is <code>try_optimize</code>, which takes a plan node and attempts to return a rewritten, optimized version of that node.</li>
+</ul>
+<h2 id="deep-dive-the-pushdownlimit-rule"><a class="header" href="#deep-dive-the-pushdownlimit-rule">Deep Dive: The <code>PushDownLimit</code> Rule</a></h2>
+<p>One of the most classic and effective optimizations is "pushing down" operations as far as possible towards the data source. Let's examine the <code>PushDownLimit</code> rule (<code>optimizer/rule/push_down_limit.rs</code>) to see this in action.</p>
+<p>Consider the following query:</p>
+<pre><code class="language-sql">SELECT * FROM users ORDER BY signup_date LIMIT 10;
+</code></pre>
+<h4 id="the-naive-plan"><a class="header" href="#the-naive-plan">The Naive Plan</a></h4>
+<p>A naive logical plan for this query would be:</p>
+<pre><code>Limit(10)
+  └── Sort(by: signup_date)
+        └── TableScan(users)
+</code></pre>
+<p>If executed directly, this plan would:</p>
+<ol>
+<li>Scan the <em>entire</em> <code>users</code> table.</li>
+<li>Sort the <em>entire</em> table by <code>signup_date</code>.</li>
+<li>Finally, discard all but the first 10 rows.</li>
+</ol>
+<p>This is incredibly inefficient, especially for a large table, as it involves a massive, memory-intensive sort operation.</p>
+<h4 id="the-optimization-rule"><a class="header" href="#the-optimization-rule">The Optimization Rule</a></h4>
+<p>The <code>PushDownLimit</code> rule is designed to recognize this specific pattern: a <code>Limit</code> operator directly on top of a <code>Sort</code> operator.</p>
+<p>When the optimizer applies this rule, the <code>try_optimize</code> method matches on the <code>Limit</code> node. It inspects its child and sees that it's a <code>Sort</code> node. The rule then knows it can apply its logic.</p>
+<h4 id="the-rewritten-plan"><a class="header" href="#the-rewritten-plan">The Rewritten Plan</a></h4>
+<p>The rule rewrites the plan tree by "pushing" the limit information <em>into</em> the <code>Sort</code> node itself:</p>
+<pre><code>Limit(10)
+  └── Sort(by: signup_date, limit: 10)
+        └── TableScan(users)
+</code></pre>
+<p>Notice the new <code>limit: 10</code> property on the <code>Sort</code> node. This seemingly small change has a huge performance impact. When the <code>PhysicalSort</code> operator is created from this logical node, it now knows that it only needs to find the top 10 rows. Instead of performing a full sort, it can use a much more efficient algorithm, like a <strong>heap sort (using a min-heap of size 10)</strong>, to find the top 10 rows in a single pass over the data.</p>
+<p>This optimization avoids sorting the entire table, dramatically reducing both CPU and memory consumption.</p>
+<h2 id="other-rules"><a class="header" href="#other-rules">Other Rules</a></h2>
+<p>QuillSQL implements other simple but effective rules:</p>
+<ul>
+<li><strong><code>EliminateLimit</code></strong>: Removes a <code>LIMIT</code> clause if it provides no value (e.g., <code>LIMIT NULL</code>).</li>
+<li><strong><code>MergeLimit</code></strong>: If two <code>LIMIT</code> clauses are stacked on top of each other (which can happen after other rule transformations), this rule merges them into a single, more restrictive <code>LIMIT</code>.</li>
+</ul>
+<h2 id="conclusion-1"><a class="header" href="#conclusion-1">Conclusion</a></h2>
+<p>While QuillSQL's optimizer is currently rule-based and relatively simple, it demonstrates the fundamental principles of query optimization. By separating the logical representation of a query from its physical execution and applying equivalence-preserving transformations, a database can achieve massive performance gains. More advanced systems build on this with a <strong>Cost-Based Optimizer</strong>, which uses table statistics to estimate the "cost" of different physical plans (e.g., choosing between a <code>NestedLoopJoin</code> and a <code>HashJoin</code>) and pick the cheapest one.</p>
+<hr />
+<h2 id="for-study--discussion-1"><a class="header" href="#for-study--discussion-1">For Study &amp; Discussion</a></h2>
+<ol>
+<li>
+<p><strong>Rule Ordering</strong>: The <code>LogicalOptimizer</code> applies its list of rules in a fixed order for a set number of passes. Can the order in which rules are applied affect the final, optimized plan? Can one rule's transformation enable another rule to be applied in a subsequent pass?</p>
+</li>
+<li>
+<p><strong>Cost-Based vs. Rule-Based</strong>: What is the primary limitation of a purely rule-based optimizer? When would a rule-based optimizer make a poor decision that a cost-based optimizer (with accurate statistics) would get right? (Hint: consider join algorithm selection).</p>
+</li>
+<li>
+<p><strong>Programming Exercise</strong>: Implement the classic <strong>Predicate Pushdown</strong> rule. Your rule should look for a <code>Filter</code> operator whose child is a <code>Join</code>. If the filter's predicate only uses columns from one side of the join, the rule should push the <code>Filter</code> node down to that side of the join, below the <code>Join</code> node. This is one of the most effective optimizations in any database.</p>
+</li>
+<li>
+<p><strong>Programming Exercise</strong>: Implement a <strong>Constant Folding</strong> rule. This rule would traverse expression trees and pre-compute constant expressions. For example:</p>
+<ul>
+<li>An expression <code>WHERE age = 10 + 5</code> would be rewritten to <code>WHERE age = 15</code>.</li>
+<li>An expression <code>WHERE 1 = 1</code> would be evaluated to <code>true</code>, and a smart optimizer could then potentially eliminate the <code>WHERE</code> clause entirely.</li>
+</ul>
+</li>
+</ol>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="execution-engine"><a class="header" href="#execution-engine">Execution Engine</a></h1>
+<p><code>src/execution/</code> drives <code>PhysicalPlan</code> trees using the Volcano (iterator) model. Every
+operator pulls tuples from its children, coordinating closely with transactions,
+storage, and expression evaluation.</p>
+<hr />
+<h2 id="core-components"><a class="header" href="#core-components">Core Components</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Component</th><th>Role</th></tr></thead><tbody>
+<tr><td><code>PhysicalPlan</code></td><td>Enum covering all physical operators; each implements <code>VolcanoExecutor</code>.</td></tr>
+<tr><td><code>ExecutionContext</code></td><td>Shared context carrying the catalog, <code>TxnContext</code>, storage engine, and expression helpers.</td></tr>
+<tr><td><code>TupleStream</code></td><td>Unified scan interface returned by table/index handles.</td></tr>
+</tbody></table>
+</div>
+<hr />
+<h2 id="execution-flow"><a class="header" href="#execution-flow">Execution Flow</a></h2>
+<ol>
+<li><code>ExecutionEngine::execute</code> calls <code>init</code> on the root plan (and recursively on children).</li>
+<li>The engine loops calling <code>next</code>, with parents pulling tuples from children.</li>
+<li><code>ExecutionContext</code> supplies transaction snapshots, lock helpers, and expression
+evaluation per call.</li>
+<li>Once <code>next</code> returns <code>None</code>, the accumulated results are returned to the caller (CLI,
+HTTP API, or tests).</li>
+</ol>
+<hr />
+<h2 id="operator-examples"><a class="header" href="#operator-examples">Operator Examples</a></h2>
+<ul>
+<li><strong>PhysicalSeqScan</strong> – acquires a <code>table_stream</code> from the storage engine, uses
+<code>ScanPrefetch</code> for batching, and relies on <code>TxnContext::read_visible_tuple</code> for MVCC.</li>
+<li><strong>PhysicalIndexScan</strong> – uses <code>index_stream</code>, tracks <code>invisible_hits</code>, and notifies the
+catalog when garbage accumulates.</li>
+<li><strong>PhysicalUpdate/PhysicalDelete</strong> – call <code>prepare_row_for_write</code> to re-validate locks
+and the latest tuple before invoking <code>apply_update/delete</code>.</li>
+<li><strong>PhysicalNestedLoopJoin</strong> – showcases the parent/child pull loop and acts as a baseline
+for more advanced joins.</li>
+</ul>
+<hr />
+<h2 id="interactions-5"><a class="header" href="#interactions-5">Interactions</a></h2>
+<ul>
+<li><strong>StorageEngine</strong> – all data access goes through handles/streams, keeping execution
+storage-agnostic.</li>
+<li><strong>Transaction</strong> – <code>TxnContext</code> enforces locking, snapshots, and undo logging; operators
+never talk to <code>LockManager</code> directly.</li>
+<li><strong>Expression</strong> – <code>ExecutionContext::eval_expr</code> / <code>eval_predicate</code> evaluate expressions
+built by the planner.</li>
+<li><strong>Optimizer/Planner</strong> – execution honours the plan as-is; all structural choices happen
+upstream.</li>
+</ul>
+<hr />
+<h2 id="teaching-ideas-5"><a class="header" href="#teaching-ideas-5">Teaching Ideas</a></h2>
+<ul>
+<li>Implement a new operator (e.g., <code>PhysicalMergeJoin</code>) to see how <code>ExecutionContext</code>
+support generalises.</li>
+<li>Add adaptive prefetching inside <code>PhysicalSeqScan</code> to explore iterator hints.</li>
+<li>Enable <code>RUST_LOG=execution=trace</code> to watch the <code>init</code>/<code>next</code> call sequence during a
+query.</li>
+</ul>
+<hr />
+<p>Further reading: <a href="modules/../execution/volcano.html">The Volcano Execution Model</a></p>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="the-volcano-execution-model"><a class="header" href="#the-volcano-execution-model">The Volcano Execution Model</a></h1>
+<p>Once the <a href="execution/../modules/plan.html">Query Planner</a> has produced an optimized <code>PhysicalPlan</code>, it's the job of the <strong>Execution Engine</strong> to run it and produce results. The execution engine is the component that brings the plan to life, interacting with the transaction manager and storage layer to process data.</p>
+<p>QuillSQL uses the classic <strong>Volcano Model</strong>, also known as the <strong>Iterator Model</strong>. This is a pull-based execution model where each physical operator in the plan tree acts as an iterator that the parent operator can "pull" rows from.</p>
+<h2 id="1-the-volcanoexecutor-trait"><a class="header" href="#1-the-volcanoexecutor-trait">1. The <code>VolcanoExecutor</code> Trait</a></h2>
+<p>At the heart of the execution model is the <code>VolcanoExecutor</code> trait (<code>execution/mod.rs</code>). Every physical operator implements this simple trait:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>pub trait VolcanoExecutor {
+    fn init(&amp;self, context: &amp;mut ExecutionContext) -&gt; QuillSQLResult&lt;()&gt;;
+    fn next(&amp;self, context: &amp;mut ExecutionContext) -&gt; QuillSQLResult&lt;Option&lt;Tuple&gt;&gt;;
+    fn output_schema(&amp;self) -&gt; SchemaRef;
+}
+<span class="boring">}</span></code></pre></pre>
+<ul>
+<li><strong><code>init()</code></strong>: This method is called once at the beginning of execution. It allows an operator to set up its initial state (e.g., a <code>SeqScan</code> operator would initialize its table iterator here).</li>
+<li><strong><code>next()</code></strong>: This is the core method. When called, the operator produces its next output tuple. It returns <code>Some(tuple)</code> if it has a row, or <code>None</code> if it has exhausted its data source. The top-level <code>ExecutionEngine</code> simply calls <code>next()</code> on the root of the plan tree in a loop until it receives <code>None</code>.</li>
+</ul>
+<h2 id="2-the-executioncontext"><a class="header" href="#2-the-executioncontext">2. The <code>ExecutionContext</code></a></h2>
+<p>Notice that both <code>init()</code> and <code>next()</code> take a mutable <code>ExecutionContext</code>. This object is the "context" or "world" in which the query runs. It is passed down the entire operator tree and gives each operator access to crucial services:</p>
+<ul>
+<li><strong><code>Catalog</code></strong>: To look up tables and indexes.</li>
+<li><strong><code>TransactionManager</code> and <code>Transaction</code></strong>: To interact with the current transaction. This is how operators perform locking and visibility checks.</li>
+<li><strong><code>MvccSnapshot</code></strong>: The specific MVCC snapshot for the current transaction, used to determine which tuple versions are visible.</li>
+<li><strong><code>StorageEngine</code></strong>: A pluggable trait that hides TableHeap/B+Tree specifics.</li>
+<li><strong>Helper APIs</strong>: See below.</li>
+</ul>
+<h3 id="executioncontext-helper-apis"><a class="header" href="#executioncontext-helper-apis">ExecutionContext helper APIs</a></h3>
+<p>To keep physical operators tiny, QuillSQL exposes a few battle-tested helpers:</p>
+<ul>
+<li><code>read_visible_tuple(table, rid, meta, tuple)</code> performs the MVCC visibility check and acquires the correct shared locks for the current isolation level.</li>
+<li><code>prepare_row_for_write</code> / <code>apply_update</code> / <code>apply_delete</code> take care of X locks, re-reading the latest version, index maintenance, and undo logging for UPDATE/DELETE.</li>
+<li><code>insert_tuple_with_indexes</code> inserts into the heap <strong>and</strong> updates every index in one call.</li>
+<li><code>eval_predicate</code> / <code>eval_expr</code> encapsulate expression evaluation (and boolean coercion), so operators never have to fiddle with <code>ScalarValue</code>.</li>
+<li>DDL helpers (<code>create_table</code>, <code>drop_table</code>, <code>create_index</code>, …) proxy the catalog so CREATE/DROP operators stay declarative.</li>
+</ul>
+<p>All of these helpers delegate to the storage engine. By default we ship a TableHeap+B+Tree engine, but research exercises can implement their own engine and plug it into the context without modifying operators.</p>
+<p>This design cleanly separates the operator's logic from the transactional context it runs in.</p>
+<h2 id="3-anatomy-of-physical-operators"><a class="header" href="#3-anatomy-of-physical-operators">3. Anatomy of Physical Operators</a></h2>
+<p>Data flows <em>up</em> the tree from the leaves (scans) to the root. Let's see how it works by examining a few key operators.</p>
+<h3 id="leaf-operator-physicalseqscan"><a class="header" href="#leaf-operator-physicalseqscan">Leaf Operator: <code>PhysicalSeqScan</code></a></h3>
+<p>A sequential scan is at the leaf of a plan tree. It's responsible for reading tuples from a table on disk.</p>
+<ul>
+<li><strong><code>init()</code></strong>: It acquires an <code>IntentionShared</code> lock on the table and creates a <code>TableIterator</code> for the table heap.</li>
+<li><strong><code>next()</code></strong>: In a loop, it does the following:
+<ol>
+<li>Pulls the next raw tuple <code>(rid, meta, tuple)</code> from the <code>TableIterator</code>.</li>
+<li>Calls <code>context.is_visible(&amp;meta)</code> to perform an <strong>MVCC visibility check</strong> using the transaction's snapshot.</li>
+<li>If the tuple version is visible, it acquires the necessary row lock (e.g., <code>Shared</code> lock) and returns the tuple.</li>
+<li>If the tuple is not visible, it ignores it and loops to get the next one.</li>
+</ol>
+</li>
+</ul>
+<h3 id="unary-operator-physicalfilter"><a class="header" href="#unary-operator-physicalfilter">Unary Operator: <code>PhysicalFilter</code></a></h3>
+<p>A filter has one child operator (its <code>input</code>). It implements a <code>WHERE</code> clause.</p>
+<ul>
+<li><strong><code>next()</code></strong>: Its logic is a simple, tight loop:
+<ol>
+<li>It calls <code>self.input.next()</code> to get a tuple from its child.</li>
+<li>If the child returns <code>None</code>, the filter is also exhausted and returns <code>None</code>.</li>
+<li>If it receives a tuple, it evaluates its predicate expression (e.g., <code>age &gt; 30</code>) against the tuple.</li>
+<li>If the predicate evaluates to <code>true</code>, it returns the tuple. Otherwise, it loops back to step 1.</li>
+</ol>
+</li>
+</ul>
+<h3 id="binary-operator-physicalnestedloopjoin"><a class="header" href="#binary-operator-physicalnestedloopjoin">Binary Operator: <code>PhysicalNestedLoopJoin</code></a></h3>
+<p>A join has two children: a left (outer) and a right (inner).</p>
+<ul>
+<li><strong><code>next()</code></strong>: It implements the classic nested loop join algorithm:
+<ol>
+<li>Fetch one tuple from the <strong>outer</strong> (left) child and hold onto it.</li>
+<li>Enter a loop: fetch tuples one by one from the <strong>inner</strong> (right) child.</li>
+<li>For each inner tuple, combine it with the held outer tuple and evaluate the join condition. If it matches, return the combined tuple.</li>
+<li>When the inner child is exhausted, <strong>rewind it</strong> by calling <code>self.right_input.init()</code> again.</li>
+<li>Go back to step 1 to fetch the <em>next</em> tuple from the outer child.</li>
+<li>Repeat until the outer child is also exhausted.</li>
+</ol>
+</li>
+</ul>
+<h2 id="4-putting-it-all-together"><a class="header" href="#4-putting-it-all-together">4. Putting It All Together</a></h2>
+<p>Consider the query <code>SELECT name FROM users WHERE age &gt; 30</code>. The physical plan is <code>Projection -&gt; Filter -&gt; SeqScan</code>.</p>
+<ol>
+<li>The <code>ExecutionEngine</code> calls <code>next()</code> on the <code>Projection</code> operator.</li>
+<li>The <code>Projection</code> operator needs a tuple, so it calls <code>next()</code> on its child, <code>Filter</code>.</li>
+<li>The <code>Filter</code> operator needs a tuple, so it calls <code>next()</code> on its child, <code>SeqScan</code>.</li>
+<li>The <code>SeqScan</code> operator fetches a raw tuple from the <code>TableHeap</code>, checks its MVCC visibility, and finds a visible tuple for a user with <code>age = 25</code>.</li>
+<li><code>SeqScan</code> returns this tuple up to <code>Filter</code>.</li>
+<li><code>Filter</code> evaluates <code>age &gt; 30</code> on the tuple. It's false, so it loops, calling <code>SeqScan.next()</code> again.</li>
+<li><code>SeqScan</code> finds another visible tuple, this time for a user with <code>age = 40</code> and <code>name = 'Alice'</code>.</li>
+<li><code>SeqScan</code> returns this tuple up to <code>Filter</code>.</li>
+<li><code>Filter</code> evaluates <code>age &gt; 30</code>. It's true! It returns the tuple for Alice up to <code>Projection</code>.</li>
+<li><code>Projection</code> takes the full tuple for Alice, creates a new tuple containing only the <code>name</code> column (<code>'Alice'</code>), and returns this new tuple as the result.</li>
+</ol>
+<p>This process repeats, with tuples flowing up the tree one at a time, until the <code>SeqScan</code> operator runs out of pages and returns <code>None</code>, which then propagates up the tree, signaling the end of execution.</p>
+<hr />
+<h2 id="for-study--discussion-2"><a class="header" href="#for-study--discussion-2">For Study &amp; Discussion</a></h2>
+<ol>
+<li>
+<p><strong>Push vs. Pull Models</strong>: The Volcano model is a "pull-based" model. An alternative is a "push-based" model, where operators push their results to their parents as soon as they are ready. What are the potential advantages and disadvantages of each model, particularly concerning cache efficiency and control flow?</p>
+</li>
+<li>
+<p><strong>Blocking vs. Non-Blocking Operators</strong>: Some operators, like <code>PhysicalFilter</code>, can produce their first output row as soon as they receive their first input row. These are <strong>non-blocking</strong>. Other operators, like <code>PhysicalSort</code>, must consume their <em>entire</em> input before they can produce even a single row of output. These are <strong>blocking</strong>. What is the impact of blocking operators on query latency and memory usage?</p>
+</li>
+<li>
+<p><strong>Programming Exercise</strong>: The current <code>PhysicalNestedLoopJoin</code> is simple but can be inefficient as it re-scans the entire inner table for every outer row. Implement a <code>PhysicalBlockNestedLoopJoin</code> operator. This version would read a <em>block</em> (a small batch) of tuples from the outer table into an in-memory buffer, and then iterate through the inner table once for that entire block. This can significantly reduce the number of times the inner table needs to be scanned.</p>
+</li>
+<li>
+<p><strong>Programming Exercise</strong>: Implement the <code>PhysicalLimit</code> operator. Its <code>next()</code> method should:
+a.  Keep an internal counter.
+b.  If the counter is less than the <code>offset</code>, pull and discard tuples from its child.
+c.  If the counter is between <code>offset</code> and <code>offset + limit</code>, pull a tuple from its child and return it.
+d.  Once the limit is reached, it should stop pulling from its child and return <code>None</code> for all subsequent calls. This is important for efficiency, as it stops the execution of the entire sub-tree below it.</p>
+</li>
+</ol>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="transaction-module"><a class="header" href="#transaction-module">Transaction Module</a></h1>
+<p><code>src/transaction/</code> enforces the Atomicity and Isolation parts of ACID. It combines MVCC
+with strict two-phase locking so reads and writes can proceed concurrently without
+violating correctness.</p>
+<hr />
+<h2 id="main-components"><a class="header" href="#main-components">Main Components</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Type</th><th>Role</th></tr></thead><tbody>
+<tr><td><code>TransactionManager</code></td><td>Creates/commits/aborts transactions, assigns txn &amp; command ids, coordinates WAL.</td></tr>
+<tr><td><code>Transaction</code></td><td>Stores state, held locks, undo chain, and cached snapshot.</td></tr>
+<tr><td><code>TxnContext</code> / <code>TxnRuntime</code></td><td>Execution-time wrapper exposing MVCC + locking helpers.</td></tr>
+<tr><td><code>LockManager</code></td><td>Multi-granularity locking (IS/IX/S/SIX/X) with deadlock detection.</td></tr>
+<tr><td><code>TransactionSnapshot</code></td><td>Tracks <code>xmin/xmax/active_txns</code> for visibility checks.</td></tr>
+</tbody></table>
+</div>
+<hr />
+<h2 id="workflow-1"><a class="header" href="#workflow-1">Workflow</a></h2>
+<ol>
+<li><code>SessionContext</code> calls <code>TransactionManager::begin</code> to create a transaction.</li>
+<li>Each SQL statement builds a <code>TxnRuntime</code>, yielding a fresh command id and snapshot.</li>
+<li>Operators call <code>TxnContext::lock_table/lock_row</code> to obey strict 2PL.</li>
+<li><code>TableHandle::insert/delete/update</code> records undo, acquires locks, and emits WAL via
+<code>TxnContext</code>.</li>
+<li>Commit: write a <code>Commit</code> record → flush depending on <code>synchronous_commit</code> → release
+locks.</li>
+<li>Abort: walk the undo list, write CLRs, restore heap/index state, release locks.</li>
+</ol>
+<hr />
+<h2 id="mvcc-details"><a class="header" href="#mvcc-details">MVCC Details</a></h2>
+<ul>
+<li><code>TupleMeta</code> stores inserting/deleting txn ids and command ids. <code>read_visible_tuple</code>
+checks snapshots and, if needed, rewinds to the latest visible version.</li>
+<li>Isolation levels:
+<ul>
+<li><strong>Read Uncommitted</strong> – minimal snapshot caching.</li>
+<li><strong>Read Committed</strong> – refresh snapshot each command to avoid dirty reads.</li>
+<li><strong>Repeatable Read / Serializable</strong> – capture the snapshot once; RR releases shared
+locks at statement end, Serializable holds them to commit to avoid phantoms.</li>
+</ul>
+</li>
+<li>UPDATE skips versions created by the same <code>(txn_id, command_id)</code> to avoid looping back
+over freshly inserted tuples.</li>
+</ul>
+<hr />
+<h2 id="locking"><a class="header" href="#locking">Locking</a></h2>
+<ul>
+<li>Multi-granularity hierarchy: table-level IS/IX/S/SIX/X plus row-level S/X.</li>
+<li>Deadlock detection: <code>LockManager</code> maintains a wait-for graph and periodically chooses a
+victim (usually the longest waiter).</li>
+<li>Release policy: exclusive/intent locks stay until commit; RR drops shared row locks at
+statement end, Serializable waits until commit.</li>
+</ul>
+<hr />
+<h2 id="interactions-6"><a class="header" href="#interactions-6">Interactions</a></h2>
+<ul>
+<li><strong>ExecutionContext</strong> – all helpers (lock acquisition, visibility checks, undo logging)
+are exposed here, so physical operators never touch <code>LockManager</code> directly.</li>
+<li><strong>StorageEngine</strong> – handles call <code>TxnContext</code> before mutating heaps/indexes; MVCC metadata
+lives in <code>TupleMeta</code>.</li>
+<li><strong>Recovery</strong> – Begin/Commit/Abort records emitted here drive ARIES undo/redo.</li>
+<li><strong>Background</strong> – MVCC vacuum reads <code>TransactionManager::oldest_active_txn()</code> to compute
+<code>safe_xmin</code>.</li>
+</ul>
+<hr />
+<h2 id="teaching-ideas-6"><a class="header" href="#teaching-ideas-6">Teaching Ideas</a></h2>
+<ul>
+<li>Change <code>DatabaseOptions::default_isolation_level</code> and compare SELECT behaviour under
+RC vs RR.</li>
+<li>Write a unit test that deadlocks two transactions and watch <code>LockManager</code> pick a victim.</li>
+<li>Implement statement-level snapshot refresh or Serializable Snapshot Isolation (SSI) as
+an advanced exercise.</li>
+</ul>
+<hr />
+<p>Further reading: <a href="modules/../transaction/mvcc_and_2pl.html">MVCC and 2PL</a></p>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="mvcc-and-2pl"><a class="header" href="#mvcc-and-2pl">MVCC and 2PL</a></h1>
+<p>Of the four ACID properties, <strong>Isolation</strong> is often the most complex to implement. It ensures that concurrent transactions do not interfere with each other, making it appear as if each transaction is executing sequentially, one after another. Without proper isolation, a database would suffer from concurrency-related anomalies like dirty reads, non-repeatable reads, and phantom reads.</p>
+<p>Databases typically use two main strategies for concurrency control:</p>
+<ol>
+<li><strong>Pessimistic Concurrency Control</strong>: Assumes conflicts are likely and prevents them from happening by using locks. The most common protocol is <strong>Two-Phase Locking (2PL)</strong>.</li>
+<li><strong>Optimistic Concurrency Control</strong>: Assumes conflicts are rare. Transactions proceed without locking, and the database validates at commit time that no conflicts occurred. A popular variant is <strong>Multi-Version Concurrency Control (MVCC)</strong>.</li>
+</ol>
+<p>QuillSQL, like many modern relational databases (e.g., PostgreSQL, Oracle), implements a powerful <strong>hybrid model that combines MVCC with 2PL</strong>.</p>
+<h2 id="1-mvcc-reading-without-blocking"><a class="header" href="#1-mvcc-reading-without-blocking">1. MVCC: Reading without Blocking</a></h2>
+<p>The core idea of MVCC is <strong>"writers don't block readers, and readers don't block writers."</strong> This is achieved by never overwriting data in-place. When a row is updated, the database creates a <em>new version</em> of that row, preserving the old one.</p>
+<h3 id="version-chains-and-tuplemeta"><a class="header" href="#version-chains-and-tuplemeta">Version Chains and <code>TupleMeta</code></a></h3>
+<p>As discussed in the <a href="transaction/../storage/table_heap.html">Storage Engine</a> chapter, every tuple on disk has associated metadata (<code>TupleMeta</code>) that includes:</p>
+<ul>
+<li><code>insert_txn_id</code>: The ID of the transaction that created this version.</li>
+<li><code>delete_txn_id</code>: The ID of the transaction that marked this version as deleted.</li>
+<li><code>prev_version</code> / <code>next_version</code>: Pointers (RIDs) that form a linked list of versions for a single logical row, called the <strong>version chain</strong>.</li>
+</ul>
+<h3 id="transaction-snapshots"><a class="header" href="#transaction-snapshots">Transaction Snapshots</a></h3>
+<p>When a transaction begins, it asks the <code>TransactionManager</code> for a <strong>snapshot</strong> of the database state. This snapshot, defined in <code>transaction/mvcc.rs</code>, contains three key pieces of information:</p>
+<ul>
+<li><code>xmin</code>: The oldest active transaction ID at the time of the snapshot. Any transaction with an ID less than <code>xmin</code> is guaranteed to be either committed or aborted.</li>
+<li><code>xmax</code>: The next transaction ID to be assigned. Any transaction with an ID greater than or equal to <code>xmax</code> was not yet started when the snapshot was taken.</li>
+<li><code>active_txns</code>: A list of all other transaction IDs that were active when the snapshot was taken.</li>
+</ul>
+<h3 id="the-visibility-check"><a class="header" href="#the-visibility-check">The Visibility Check</a></h3>
+<p>When a transaction scans the database, for every tuple version it encounters, it performs a <strong>visibility check</strong> using its snapshot. The logic in <code>MvccSnapshot::is_visible</code> determines if the version should be "seen" by the current transaction. In simplified terms, a tuple version is visible if:</p>
+<ol>
+<li>Its <code>insert_txn_id</code> belongs to a transaction that was already committed before our snapshot was taken.</li>
+<li><strong>AND</strong> its <code>delete_txn_id</code> is either not set, OR it belongs to a transaction that was not yet committed when our snapshot was taken.</li>
+</ol>
+<p>This mechanism elegantly solves several concurrency problems. Since a reader transaction only ever sees a consistent snapshot of the database, it is completely immune to changes being made by other concurrent writer transactions. This prevents dirty reads and non-repeatable reads.</p>
+<h2 id="2-two-phase-locking-2pl-preventing-write-write-conflicts"><a class="header" href="#2-two-phase-locking-2pl-preventing-write-write-conflicts">2. Two-Phase Locking (2PL): Preventing Write-Write Conflicts</a></h2>
+<p>While MVCC is excellent for read-write conflicts, it does not, by itself, prevent two transactions from trying to modify the same logical row at the same time (a write-write conflict). This is where locking comes in.</p>
+<p>QuillSQL implements a strict <strong>Two-Phase Locking</strong> protocol via the <code>LockManager</code> (<code>transaction/lock_manager.rs</code>).</p>
+<h3 id="the-two-phases"><a class="header" href="#the-two-phases">The Two Phases</a></h3>
+<ol>
+<li><strong>Growing Phase</strong>: The transaction can acquire new locks as it executes.</li>
+<li><strong>Shrinking Phase</strong>: Once the transaction releases its first lock, it cannot acquire any new locks.</li>
+</ol>
+<p>In practice, QuillSQL uses <strong>Strict 2PL</strong>, where the shrinking phase is delayed until the transaction commits or aborts. All locks are held until the very end.</p>
+<h3 id="hierarchical-locking-intention-locks"><a class="header" href="#hierarchical-locking-intention-locks">Hierarchical Locking (Intention Locks)</a></h3>
+<p>To be efficient, the <code>LockManager</code> uses a multi-granularity, hierarchical locking scheme. Before a transaction can take a fine-grained lock on a row (a <code>Shared</code> or <code>Exclusive</code> lock), it must first acquire a coarser-grained <strong>intention lock</strong> on the table.</p>
+<ul>
+<li><strong><code>IntentionShared (IS)</code></strong>: Signals the intent to read rows from the table.</li>
+<li><strong><code>IntentionExclusive (IX)</code></strong>: Signals the intent to modify rows in the table.</li>
+</ul>
+<p>This prevents a transaction wanting to lock the entire table from conflicting with another transaction that is already modifying a single row. For example, a <code>SELECT * FROM users FOR UPDATE</code> (which needs an <code>X</code> lock on the table) will be blocked if another transaction already holds an <code>IX</code> lock on <code>users</code>.</p>
+<h3 id="deadlock-detection"><a class="header" href="#deadlock-detection">Deadlock Detection</a></h3>
+<p>When two or more transactions are waiting for each other to release locks in a circular chain, a <strong>deadlock</strong> occurs. The <code>LockManager</code> detects this by building a <strong>waits-for graph</strong>. When a transaction <code>T1</code> has to wait for a lock held by <code>T2</code>, an edge <code>T1 -&gt; T2</code> is added to the graph. If adding an edge creates a cycle, a deadlock is detected, and one of the transactions (the victim) is immediately aborted to break the cycle.</p>
+<h2 id="3-the-hybrid-model-mvcc--2pl-in-action"><a class="header" href="#3-the-hybrid-model-mvcc--2pl-in-action">3. The Hybrid Model: MVCC + 2PL in Action</a></h2>
+<p>In QuillSQL, these two mechanisms work in concert:</p>
+<ul>
+<li>
+<p>A <strong>reader</strong> (<code>SELECT</code>) transaction acquires an MVCC snapshot. It uses this snapshot to determine visibility. It only needs to acquire <code>Shared</code> (S) locks on the rows it reads to prevent other transactions from modifying them, thus ensuring repeatable reads in higher isolation levels.</p>
+</li>
+<li>
+<p>A <strong>writer</strong> (<code>UPDATE</code>, <code>DELETE</code>) transaction must acquire an <code>Exclusive</code> (X) lock on the specific row it intends to modify. Once the lock is granted, it knows no other writer can interfere. It can then safely create a new tuple version as part of the MVCC protocol.</p>
+</li>
+</ul>
+<p>This hybrid approach provides the best of both worlds: reads are fast and non-blocking, while write-write conflicts are safely prevented by the locking protocol.</p>
+<hr />
+<h2 id="for-study--discussion-3"><a class="header" href="#for-study--discussion-3">For Study &amp; Discussion</a></h2>
+<ol>
+<li>
+<p><strong>Isolation Levels</strong>: QuillSQL supports multiple SQL isolation levels. How does the behavior of MVCC snapshots and 2PL change between <code>ReadCommitted</code> and <code>RepeatableRead</code>? In <code>ReadCommitted</code>, a transaction gets a new snapshot for every statement, whereas in <code>RepeatableRead</code>, it uses the same snapshot for the entire transaction. What concurrency anomalies does this difference prevent?</p>
+</li>
+<li>
+<p><strong>Phantom Reads</strong>: Even with MVCC and row-level 2PL, a <code>RepeatableRead</code> transaction can suffer from <em>phantom reads</em>. Imagine <code>T1</code> runs <code>SELECT COUNT(*) FROM users WHERE age &gt; 30</code>. Then, <code>T2</code> inserts a new user with <code>age = 40</code> and commits. If <code>T1</code> runs its <code>SELECT</code> query again, it will see a new "phantom" row that wasn't there before. How can a database prevent this to achieve the <code>Serializable</code> isolation level? (Hint: research predicate locking and index-range locking).</p>
+</li>
+<li>
+<p><strong>Deadlock Handling</strong>: QuillSQL detects deadlocks by building a waits-for graph and aborting a transaction. What is an alternative strategy for handling deadlocks? For example, what are the pros and cons of using lock timeouts instead of cycle detection?</p>
+</li>
+<li>
+<p><strong>Programming Exercise (Advanced)</strong>: A full implementation of <code>Serializable</code> isolation often requires index-range locking to prevent phantoms. Extend the <code>LockManager</code> to support locking a <em>range</em> of keys within a B+Tree index. This would require a new lock type and a way to check for overlapping ranges. When a <code>SELECT ... WHERE age &gt; 30</code> query runs, it would place a shared lock on the <code>(30, +∞)</code> range in the index on the <code>age</code> column, preventing any other transaction from inserting a new user with an age in that range.</p>
 </li>
 </ol>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="storage-engine"><a class="header" href="#storage-engine">Storage Engine</a></h1>
-<p>The storage engine is where the logical world of SQL tables and rows meets the physical world of disk blocks and bytes. Understanding how data is laid out on disk is fundamental to understanding database performance, concurrency control, and recovery.</p>
-<p>This section is divided into the following parts:</p>
+<p>The storage engine persists relational data, covering heap files, indexes, page formats,
+and the handles exposed to execution. Understanding this layer is key to reasoning about
+performance, MVCC, and recovery.</p>
+<hr />
+<h2 id="responsibilities-5"><a class="header" href="#responsibilities-5">Responsibilities</a></h2>
 <ul>
-<li><strong><a href="modules/../storage/disk_io.html">Disk I/O</a></strong>: A look at the asynchronous I/O layer using <code>io_uring</code>.</li>
-<li><strong><a href="modules/../storage/page_layouts.html">Page &amp; Tuple Layout</a></strong>: A deep dive into how pages and tuples are physically structured on disk, including the slotted page layout.</li>
-<li><strong><a href="modules/../storage/table_heap.html">Table Heap</a></strong>: Explains how tuple versions are managed for MVCC.</li>
+<li>Manage <code>TableHeap</code> insert/delete/update paths and their MVCC metadata.</li>
+<li>Maintain indexes (see the <a href="modules/./index.html">Index module</a> for details).</li>
+<li>Expose the <code>StorageEngine</code> trait so execution can fetch <code>TableHandle</code> / <code>IndexHandle</code>
+instances per table.</li>
+<li>Provide <code>TupleStream</code> so sequential and index scans share a unified interface.</li>
 </ul>
+<hr />
+<h2 id="directory-layout-5"><a class="header" href="#directory-layout-5">Directory Layout</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Path</th><th>Purpose</th><th>Key Types</th></tr></thead><tbody>
+<tr><td><code>engine.rs</code></td><td>Default engine plus handle definitions.</td><td><code>StorageEngine</code>, <code>TableHandle</code>, <code>TupleStream</code>, <code>ScanOptions</code></td></tr>
+<tr><td><code>table_heap/</code></td><td>Heap storage + MVCC logic.</td><td><code>TableHeap</code>, <code>MvccHeap</code></td></tr>
+<tr><td><code>index/</code></td><td>B+Tree implementation.</td><td><code>BPlusTreeIndex</code></td></tr>
+<tr><td><code>page/</code></td><td>Page, RID, tuple metadata.</td><td><code>Page</code>, <code>RecordId</code>, <code>TupleMeta</code></td></tr>
+<tr><td><code>tuple/</code></td><td>Row encoding and projection helpers.</td><td><code>Tuple</code></td></tr>
+<tr><td><code>disk_manager.rs</code></td><td>File layout and page I/O.</td><td><code>DiskManager</code></td></tr>
+<tr><td><code>disk_scheduler.rs</code></td><td><code>io_uring</code>-backed async scheduler.</td><td><code>DiskScheduler</code></td></tr>
+</tbody></table>
+</div>
+<hr />
+<h2 id="core-abstractions"><a class="header" href="#core-abstractions">Core Abstractions</a></h2>
+<h3 id="storageengine-trait"><a class="header" href="#storageengine-trait">StorageEngine Trait</a></h3>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>pub trait StorageEngine {
+    fn table(&amp;self, catalog: &amp;Catalog, table: &amp;TableReference)
+        -&gt; QuillSQLResult&lt;Arc&lt;dyn TableHandle&gt;&gt;;
+    fn indexes(&amp;self, catalog: &amp;Catalog, table: &amp;TableReference)
+        -&gt; QuillSQLResult&lt;Vec&lt;Arc&lt;dyn IndexHandle&gt;&gt;&gt;;
+}
+<span class="boring">}</span></code></pre></pre>
+<p>The default implementation wraps the row-oriented heap + B+Tree combo, but the trait is
+ready for column stores, remote storage, or async engines.</p>
+<h3 id="tablehandle"><a class="header" href="#tablehandle">TableHandle</a></h3>
+<p>Offers <code>full_scan(ScanOptions)</code>, <code>insert</code>, <code>delete</code>, <code>update</code>, and
+<code>prepare_row_for_write</code>. MVCC, undo, and locking concerns live here so execution operators
+only describe intent.</p>
+<h3 id="tuplestream"><a class="header" href="#tuplestream">TupleStream</a></h3>
+<p>Minimal iterator that returns <code>(RecordId, TupleMeta, Tuple)</code> triples. <code>ScanOptions</code> carry
+streaming hints, projection lists, or batch sizes; index scans use <code>IndexScanRequest</code> to
+describe ranges.</p>
+<hr />
+<h2 id="interactions-7"><a class="header" href="#interactions-7">Interactions</a></h2>
+<ul>
+<li><strong>Execution</strong> – <code>ExecutionContext::table_stream</code> / <code>index_stream</code> delegate to handles.</li>
+<li><strong>Transaction</strong> – Handle methods call into <code>TxnContext</code> to acquire locks, record undo,
+and emit WAL.</li>
+<li><strong>Buffer Manager</strong> – <code>TableHeap</code>/<code>BPlusTreeIndex</code> access pages through the shared buffer
+pool.</li>
+<li><strong>Recovery</strong> – Heap/index mutations generate WAL records (<code>HeapInsert</code>, <code>HeapUpdate</code>,
+<code>IndexInsert</code>, …) that ARIES replays.</li>
+<li><strong>Background</strong> – MVCC vacuum and index cleanup obtain handles and iterate tuples via
+the same abstractions as foreground scans.</li>
+</ul>
+<hr />
+<h2 id="teaching-ideas-7"><a class="header" href="#teaching-ideas-7">Teaching Ideas</a></h2>
+<ul>
+<li>Implement a toy columnar handle to show how the execution engine can stay agnostic to
+storage layout.</li>
+<li>Use <code>ScanOptions::projection</code> to push down column pruning into <code>TableIterator</code>.</li>
+<li>Enable <code>RUST_LOG=storage::table_heap=trace</code> and trace MVCC version chains as updates
+occur.</li>
+</ul>
+<hr />
+<p>Further reading: <a href="modules/../storage/disk_io.html">Disk I/O</a>,
+<a href="modules/../storage/page_layouts.html">Page &amp; Tuple Layout</a>,
+<a href="modules/../storage/table_heap.html">Table Heap &amp; MVCC</a></p>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="disk-io--scheduler-io_uring-data-pages--wal-runtime"><a class="header" href="#disk-io--scheduler-io_uring-data-pages--wal-runtime">Disk I/O — Scheduler, io_uring Data Pages &amp; WAL Runtime</a></h1>
 <h2 id="1-architecture"><a class="header" href="#1-architecture">1. Architecture</a></h2>
 <ul>
@@ -690,7 +1618,7 @@ cargo install mdbook-mermaid
 </li>
 </ul>
 <hr />
-<h2 id="for-study--discussion-1"><a class="header" href="#for-study--discussion-1">For Study &amp; Discussion</a></h2>
+<h2 id="for-study--discussion-4"><a class="header" href="#for-study--discussion-4">For Study &amp; Discussion</a></h2>
 <ol>
 <li>
 <p><strong>Layout Trade-offs</strong>: What is the main benefit of having the tuple data grow from the end of the page backwards, while the header and slot array grow from the beginning forwards? What happens when they meet?</p>
@@ -732,7 +1660,7 @@ cargo install mdbook-mermaid
 </ol>
 <p>A transaction can then traverse this chain and use the transaction IDs in the <code>TupleMeta</code> to determine which version of a row is visible to it based on its own transaction ID and isolation level, thus achieving transaction isolation without long-held read locks.</p>
 <hr />
-<h2 id="for-study--discussion-2"><a class="header" href="#for-study--discussion-2">For Study &amp; Discussion</a></h2>
+<h2 id="for-study--discussion-5"><a class="header" href="#for-study--discussion-5">For Study &amp; Discussion</a></h2>
 <ol>
 <li>
 <p><strong>Version Chain Traversal</strong>: Imagine a transaction with ID <code>T10</code> needs to read a row. It finds a version of the row that was inserted by <code>T5</code> (committed) but deleted by <code>T12</code> (in-progress). Should <code>T10</code> see this version? What if the deleter was <code>T8</code> (committed)? What if the deleter was <code>T10</code> itself? Walk through the visibility check logic.</p>
@@ -744,25 +1672,245 @@ cargo install mdbook-mermaid
 <p><strong>Programming Exercise (Advanced)</strong>: Implement a basic <code>VACUUM</code> function for a <code>TableHeap</code>. This function should scan the table and identify dead tuple versions that are no longer visible to <em>any</em> currently active transaction. Once identified, it should physically remove them from their pages. This is a challenging exercise that touches transaction management, storage, and concurrency.</p>
 </li>
 </ol>
-<div style="break-before: page; page-break-before: always;"></div><h1 id="indexes"><a class="header" href="#indexes">Indexes</a></h1>
-<p>Indexes are crucial for database performance. They are redundant data structures that allow the system to find rows matching specific criteria quickly, without having to scan the entire table. While indexes speed up queries (reads), they incur a cost during data modification (writes), as both the table and its indexes must be updated.</p>
-<p>QuillSQL currently provides a <code>BPlusTreeIndex</code>.</p>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="buffer-manager"><a class="header" href="#buffer-manager">Buffer Manager</a></h1>
+<p>The buffer manager (<code>src/buffer/</code>) implements QuillSQL’s shared buffer pool, bridging the
+speed gap between RAM and disk. It lets storage/execution read and write pages safely
+while coordinating with WAL and asynchronous I/O.</p>
+<hr />
+<h2 id="responsibilities-6"><a class="header" href="#responsibilities-6">Responsibilities</a></h2>
+<ul>
+<li>Maintain a fixed-size set of page frames caching <code>TableHeap</code> and B+Tree pages.</li>
+<li>Expose RAII-style guards (pin/unpin) that enforce safe concurrent access.</li>
+<li>Keep the page table, replacement policy, dirty-page tracking, and WAL coordination in
+sync.</li>
+<li>Submit async I/O through <code>DiskScheduler</code>.</li>
+</ul>
+<hr />
+<h2 id="directory-layout-6"><a class="header" href="#directory-layout-6">Directory Layout</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Path</th><th>Description</th><th>Key Types</th></tr></thead><tbody>
+<tr><td><code>buffer_manager.rs</code></td><td>Core buffer pool.</td><td><code>BufferManager</code>, <code>BufferFrame</code></td></tr>
+<tr><td><code>page.rs</code></td><td>Guard types and pin/unpin logic.</td><td><code>ReadPageGuard</code>, <code>WritePageGuard</code></td></tr>
+<tr><td><code>replacer.rs</code></td><td>LRU-K + TinyLFU replacement.</td><td><code>Replacer</code></td></tr>
+<tr><td><code>metrics.rs</code></td><td>Optional instrumentation hooks.</td><td><code>BufferMetrics</code></td></tr>
+</tbody></table>
+</div>
+<hr />
+<h2 id="key-mechanisms"><a class="header" href="#key-mechanisms">Key Mechanisms</a></h2>
+<h3 id="guard-model"><a class="header" href="#guard-model">Guard Model</a></h3>
+<ul>
+<li><code>ReadPageGuard</code>, <code>WritePageGuard</code>, and <code>UpgradeableGuard</code> ensure only compatible access
+modes coexist on a page.</li>
+<li>Guards drop automatically to release pins; paired with Rust’s borrow checker, they make
+latch semantics tangible.</li>
+</ul>
+<h3 id="replacement-policy"><a class="header" href="#replacement-policy">Replacement Policy</a></h3>
+<ul>
+<li><strong>LRU-K</strong> tracks the last K touches to protect hot pages from scan pollution.</li>
+<li><strong>TinyLFU</strong> decides whether a new page should enter the cache, offering probabilistic
+admission against noisy workloads.</li>
+</ul>
+<h3 id="wal-coordination"><a class="header" href="#wal-coordination">WAL Coordination</a></h3>
+<ul>
+<li>Before flushing a dirty page, the buffer checks <code>page_lsn</code> and asks <code>WalManager</code> to
+flush up to that LSN (write-ahead rule).</li>
+<li><code>set_wal_manager</code> wires the buffer to WAL so checkpoints can inspect the oldest dirty
+LSN.</li>
+</ul>
+<h3 id="disk-scheduler"><a class="header" href="#disk-scheduler">Disk Scheduler</a></h3>
+<ul>
+<li>All physical reads/writes go through <code>DiskScheduler::submit_*</code>, sharing worker threads
+with WAL and demonstrating the benefits of a unified I/O layer.</li>
+</ul>
+<hr />
+<h2 id="interactions-8"><a class="header" href="#interactions-8">Interactions</a></h2>
+<ul>
+<li><strong>Storage engine</strong> – <code>TableHeap</code> and <code>BPlusTreeIndex</code> access pages exclusively through
+the buffer manager.</li>
+<li><strong>Recovery</strong> – checkpoints consult the buffer’s dirty page table to build the ARIES DPT.</li>
+<li><strong>Background writer</strong> – periodically walks <code>dirty_frames</code> to flush pages in the
+background.</li>
+</ul>
+<hr />
+<h2 id="teaching-ideas-8"><a class="header" href="#teaching-ideas-8">Teaching Ideas</a></h2>
+<ul>
+<li>Disable TinyLFU via feature flag, rerun sqllogictest, and compare hit rates.</li>
+<li>Swap the replacement policy with CLOCK to experiment with cache algorithms.</li>
+<li>Enable <code>RUST_LOG=buffer=debug</code> and trace the pin/unpin lifecycle of hot pages.</li>
+</ul>
+<hr />
+<p>Further reading: <a href="modules/../buffer/page.html">Page &amp; Page Guards</a>,
+<a href="modules/../buffer/buffer_pool.html">The Buffer Pool</a></p>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="page--page-guards"><a class="header" href="#page--page-guards">Page &amp; Page Guards</a></h1>
+<p>Before the Buffer Manager can hand out a reference to a page in memory, it must ensure that the page won't be evicted while it's being used by another thread. This is accomplished by <strong>pinning</strong>.</p>
+<h2 id="pinning"><a class="header" href="#pinning">Pinning</a></h2>
+<p>Pinning simply means incrementing a "pin count" associated with the page's frame in the buffer pool. A frame with a pin count greater than zero is forbidden from being chosen as a victim by the page replacer.</p>
+<ul>
+<li>When a thread wants to use a page, it must first pin it.</li>
+<li>When the thread is finished with the page, it must <strong>unpin</strong> it (decrementing the count).</li>
+</ul>
+<p>Manually managing pin counts is tedious and error-prone. Forgetting to unpin a page leads to a memory leak, as the frame can never be evicted. To solve this, QuillSQL uses a common and powerful C++ and Rust pattern: <strong>Resource Acquisition Is Initialization (RAII)</strong>.</p>
+<h2 id="readpageguard-and-writepageguard"><a class="header" href="#readpageguard-and-writepageguard"><code>ReadPageGuard</code> and <code>WritePageGuard</code></a></h2>
+<p>Instead of returning a raw pointer to the page memory, the <code>BufferManager</code>'s <code>fetch_page_*</code> methods return a <strong>guard</strong> object: <code>ReadPageGuard</code> or <code>WritePageGuard</code>.</p>
+<p>These guards are responsible for the lifetime of the pin and the lock on the page:</p>
+<ol>
+<li>
+<p><strong>Acquisition</strong>: When a <code>PageGuard</code> is created, its constructor acquires the appropriate lock (<code>RwLock</code>) on the page's frame and increments the frame's pin count.</p>
+<ul>
+<li><code>ReadPageGuard</code> takes a read lock, allowing multiple concurrent readers.</li>
+<li><code>WritePageGuard</code> takes an exclusive write lock.</li>
+</ul>
+</li>
+<li>
+<p><strong>Usage</strong>: The calling code uses the guard object to access the page's data. The guard provides safe, locked access to the underlying byte array.</p>
+</li>
+<li>
+<p><strong>Release</strong>: When the guard variable goes out of scope (e.g., at the end of a function), its <code>drop()</code> method is automatically called by the Rust compiler. This <code>drop()</code> implementation handles all the cleanup:</p>
+<ul>
+<li>It decrements the pin count.</li>
+<li>It releases the lock on the frame.</li>
+<li>If it's a <code>WritePageGuard</code> and the data was modified, it informs the <code>BufferManager</code> that the page is now <strong>dirty</strong>.</li>
+</ul>
+</li>
+</ol>
+<p>This RAII pattern makes using the buffer pool much safer and more ergonomic, as it makes it impossible to forget to unpin a page or release a lock.</p>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="the-buffer-pool-architecture-and-lifecycle"><a class="header" href="#the-buffer-pool-architecture-and-lifecycle">The Buffer Pool: Architecture and Lifecycle</a></h1>
+<h2 id="1-core-components--architecture"><a class="header" href="#1-core-components--architecture">1. Core Components &amp; Architecture</a></h2>
+<p>QuillSQL's buffer management is split into two main structs, reflecting a separation of concerns:</p>
+<ul>
+<li><strong><code>BufferPool</code> (<code>buffer/buffer_pool.rs</code>)</strong>: A low-level, "dumb" container. It owns the actual memory arena for pages and provides basic mapping from a <code>PageId</code> to a memory location (<code>FrameId</code>).</li>
+<li><strong><code>BufferManager</code> (<code>buffer/buffer_manager.rs</code>)</strong>: The high-level, "smart" coordinator. It contains the <code>BufferPool</code> and implements all the logic for fetching pages, choosing which pages to evict, and interacting with other database components like the transaction and recovery managers.</li>
+</ul>
+<p>This architecture is centered around three key data structures:</p>
+<ol>
+<li>
+<p><strong>Frames (The Arena)</strong>: The <code>BufferPool</code> pre-allocates a large, contiguous block of memory on the heap. This block is divided into a fixed number of smaller chunks called <strong>frames</strong>. Each frame is exactly <code>PAGE_SIZE</code> (4KB) and can hold the contents of one disk page.</p>
+</li>
+<li>
+<p><strong>Page Table (<code>page_table</code>)</strong>: A hash map (specifically, a concurrent <code>DashMap</code>) that maps a logical <code>PageId</code> to the <code>FrameId</code> where it currently resides in memory. This provides fast O(1) lookups to check if a page is already in the buffer pool.</p>
+</li>
+<li>
+<p><strong>Replacer (<code>LRUKReplacer</code>)</strong>: When a requested page is not in memory and the buffer pool is full, one of the existing pages must be <strong>evicted</strong> to make room. The <code>Replacer</code> is the component that implements the page replacement policy and decides which page is the best candidate for eviction. QuillSQL uses an <strong>LRU-K</strong> replacement policy, a sophisticated variant of the classic Least Recently Used (LRU) algorithm.</p>
+</li>
+</ol>
+<h2 id="2-the-lifecycle-of-a-page-request"><a class="header" href="#2-the-lifecycle-of-a-page-request">2. The Lifecycle of a Page Request</a></h2>
+<p>When another part of the database (e.g., the execution engine) needs to access a page, it calls <code>buffer_manager.fetch_page_read(page_id)</code> or <code>fetch_page_write(page_id)</code>. This initiates a critical sequence of events.</p>
+<p>The flow is as follows:</p>
+<ol>
+<li>
+<p><strong>Request</strong>: An executor requests Page <code>P</code>.</p>
+</li>
+<li>
+<p><strong>Lookup</strong>: The <code>BufferManager</code> consults the <code>PageTable</code>.</p>
+</li>
+<li>
+<p><strong>Case 1: Cache Hit</strong></p>
+<ul>
+<li>The <code>PageTable</code> contains an entry for <code>P</code>, mapping it to <code>FrameId</code> <code>F</code>.</li>
+<li>The <code>BufferManager</code> increments the pin count for frame <code>F</code>.</li>
+<li>It informs the <code>LRUKReplacer</code> that the page has been accessed (updating its priority).</li>
+<li>It returns a <code>PageGuard</code> wrapping a reference to the memory in frame <code>F</code>.</li>
+</ul>
+</li>
+<li>
+<p><strong>Case 2: Cache Miss</strong></p>
+<ul>
+<li>The <code>PageTable</code> has no entry for <code>P</code>.</li>
+<li>The <code>BufferManager</code> must bring the page from disk. It asks the <code>Replacer</code> to choose a <strong>victim frame</strong> <code>F_v</code> to evict.</li>
+<li><strong>If the victim frame <code>F_v</code> is dirty</strong>: The <code>BufferManager</code> first writes the contents of <code>F_v</code> back to disk via the <code>DiskScheduler</code>. This is essential for data durability.</li>
+<li>The <code>PageTable</code> entry for the old page residing in <code>F_v</code> is removed.</li>
+<li>The <code>BufferManager</code> issues a read request to the <code>DiskScheduler</code> to load page <code>P</code>'s data from disk into frame <code>F_v</code>.</li>
+<li>The <code>PageTable</code> is updated with the new mapping: <code>P -&gt; F_v</code>.</li>
+<li>The process then continues like a cache hit: frame <code>F_v</code> is pinned and a <code>PageGuard</code> is returned.</li>
+</ul>
+</li>
+</ol>
+<h2 id="3-concurrency"><a class="header" href="#3-concurrency">3. Concurrency</a></h2>
+<p>The buffer pool is a shared resource accessed by many concurrent threads. QuillSQL uses a combination of locking strategies:</p>
+<ul>
+<li><strong>Page Table</strong>: A <code>DashMap</code> is used for the page table, which is highly optimized for concurrent reads and writes.</li>
+<li><strong>Frame-Level Locks</strong>: Each frame in the pool has its own <code>RwLock</code>. A <code>ReadPageGuard</code> acquires a read lock on the frame, allowing multiple threads to read the same page concurrently. A <code>WritePageGuard</code> acquires an exclusive write lock, ensuring that only one thread can modify a page at a time.</li>
+<li><strong>Replacer/Free List</strong>: These shared structures are protected by a <code>Mutex</code>.</li>
+</ul>
+<h2 id="4-integration-with-wal-and-recovery"><a class="header" href="#4-integration-with-wal-and-recovery">4. Integration with WAL and Recovery</a></h2>
+<p>The Buffer Manager is a key player in the ARIES recovery protocol.</p>
+<ul>
+<li><strong>Dirty Pages</strong>: When a <code>WritePageGuard</code> is dropped, if it has modified the page, it marks the page as <strong>dirty</strong>. The <code>BufferManager</code> maintains a <code>dirty_page_table</code> that tracks all dirty pages and the Log Sequence Number (LSN) of the first WAL record that caused the page to become dirty.</li>
+<li><strong>Forced WAL (Write-Ahead Logging)</strong>: Before a dirty page can be written back to disk (either during eviction or a checkpoint), the <code>BufferManager</code> must ensure that all WAL records up to that page's current LSN have been flushed to durable storage. This is the fundamental <strong>WAL rule</strong> and is enforced by the <code>flush_page</code> method, which calls <code>wal_manager.flush(lsn)</code> before writing the page to disk.</li>
+</ul>
+<hr />
+<h2 id="for-study--discussion-6"><a class="header" href="#for-study--discussion-6">For Study &amp; Discussion</a></h2>
+<ol>
+<li>
+<p><strong>Replacement Policies</strong>: QuillSQL uses LRU-K. What are the potential advantages of LRU-K over a simple LRU policy? What kind of workload would benefit most? Conversely, what are the trade-offs of using Clock/Second-Chance instead?</p>
+</li>
+<li>
+<p><strong>The "Double Caching" Problem</strong>: We mentioned that using Direct I/O helps avoid double caching. If Direct I/O is disabled, how does the database's buffer pool interact with the operating system's file system cache? Why can this lead to suboptimal performance?</p>
+</li>
+<li>
+<p><strong>Programming Exercise</strong>: Implement a <code>ClockReplacer</code> that adheres to the <code>Replacer</code> trait. Modify the <code>BufferManager</code> to use your new replacer instead of <code>LRUKReplacer</code>. Run the benchmark suite and compare the performance. Does it change?</p>
+</li>
+<li>
+<p><strong>Programming Exercise</strong>: Add metrics to the <code>BufferManager</code> to track the buffer pool hit rate (i.e., <code>num_hits / (num_hits + num_misses)</code>). You could expose this via a new <code>SHOW BUFFER_STATS;</code> SQL command.</p>
+</li>
+</ol>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="index-module"><a class="header" href="#index-module">Index Module</a></h1>
+<p>Indexes live in <code>src/storage/index/</code>. QuillSQL currently ships a B+Tree (B-link variant)
+that is exposed to execution via <code>IndexHandle</code>. Indexes allow point lookups and range
+scans in O(log n), dramatically reducing the need for full table scans.</p>
+<hr />
+<h2 id="responsibilities-7"><a class="header" href="#responsibilities-7">Responsibilities</a></h2>
+<ul>
+<li>Maintain an ordered key → <code>RecordId</code> mapping per indexed table.</li>
+<li>Support point probes, range scans, insert/update/delete maintenance.</li>
+<li>Cooperate with MVCC: entries reference heap tuples while visibility checks remain in
+execution/transaction code.</li>
+<li>Provide <code>IndexHandle::range_scan</code>, returning a <code>TupleStream</code> so physical operators don’t
+need to know tree internals.</li>
+</ul>
+<hr />
+<h2 id="directory-layout-7"><a class="header" href="#directory-layout-7">Directory Layout</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Path</th><th>Purpose</th><th>Key Types</th></tr></thead><tbody>
+<tr><td><code>btree_index.rs</code></td><td>Core B+Tree, page formats, insert/delete logic.</td><td><code>BPlusTreeIndex</code></td></tr>
+<tr><td><code>btree_iterator.rs</code></td><td>Range-scan iterator with sibling traversal.</td><td><code>TreeIndexIterator</code></td></tr>
+<tr><td><code>btree_codec.rs</code></td><td>Page encode/decode utilities.</td><td><code>BPlusTreeLeafPageCodec</code></td></tr>
+</tbody></table>
+</div>
+<hr />
 <h2 id="key-concepts"><a class="header" href="#key-concepts">Key Concepts</a></h2>
+<h3 id="b-link-structure"><a class="header" href="#b-link-structure">B-link Structure</a></h3>
+<p>Each leaf stores a pointer to its right sibling. Iterators use this to keep scanning even
+if a concurrent split occurs, avoiding restarts from the root and enabling latch-free
+range scans.</p>
+<h3 id="latch-crabbing"><a class="header" href="#latch-crabbing">Latch Crabbing</a></h3>
+<p>Insert/delete operations climb the tree with shared latches and upgrade only when
+necessary (e.g., right before splitting), reducing contention.</p>
+<h3 id="range-scan--tuplestream"><a class="header" href="#range-scan--tuplestream">Range Scan → TupleStream</a></h3>
+<p><code>IndexHandle::range_scan</code> wraps <code>TreeIndexIterator</code> and automatically fetches heap tuples,
+returning <code>(rid, meta, tuple)</code> triples. Execution remains storage-agnostic.</p>
+<h3 id="garbage-signals"><a class="header" href="#garbage-signals">Garbage Signals</a></h3>
+<p><code>BPlusTreeIndex::note_potential_garbage</code> counts invisible keys; background index vacuum
+consults the counter plus <code>IndexVacuumConfig</code> before pruning.</p>
+<hr />
+<h2 id="interactions-9"><a class="header" href="#interactions-9">Interactions</a></h2>
 <ul>
-<li>
-<p><strong>Data Structure</strong>: The index is built using a B+Tree, a self-balancing tree data structure that maintains sorted data and allows for efficient insertion, deletion, and search operations (typically in O(log n) time).</p>
-</li>
-<li>
-<p><strong>Index Keys</strong>: The B+Tree stores key-value pairs. The "key" is the value from the indexed column(s) (e.g., a user's ID), and the "value" is the <code>RecordId</code> (RID) of the row containing that key. This allows the database to first find the key in the B+Tree and then use the RID to immediately locate the full row data on its data page.</p>
-</li>
-<li>
-<p><strong>Concurrency Control</strong>: The B+Tree implementation must be highly concurrent. QuillSQL's implementation uses advanced techniques like <strong>B-link (or B-link tree)</strong> page connections and <strong>latch-crabbing</strong> to allow multiple readers and writers to access the tree simultaneously with minimal contention.</p>
-</li>
+<li><strong>Catalog</strong> – <code>Catalog::create_index</code> registers the index with <code>IndexRegistry</code>; execution
+fetches <code>Arc&lt;dyn IndexHandle&gt;</code> via the registry.</li>
+<li><strong>Execution</strong> – <code>PhysicalIndexScan</code> uses <code>ExecutionContext::index_stream</code>; DML operators
+call <code>insert_tuple_with_indexes</code> so heap writes and index maintenance stay in sync.</li>
+<li><strong>Transaction/MVCC</strong> – heaps store transaction metadata; indexes just reference RIDs, so
+MVCC visibility is enforced when tuples are materialised.</li>
+<li><strong>Recovery</strong> – WAL contains <code>IndexInsert/IndexDelete</code> records to replay structural
+changes after crashes.</li>
 </ul>
-<p>This section contains:</p>
+<hr />
+<h2 id="teaching-ideas-9"><a class="header" href="#teaching-ideas-9">Teaching Ideas</a></h2>
 <ul>
-<li><strong><a href="modules/../index/btree_index.html">B+Tree</a></strong>: A look at the classic B+Tree data structure.</li>
+<li>Build a covering index example to show how avoiding heap lookups improves latency.</li>
+<li>Instrument <code>TreeIndexIterator</code> to visualise sibling traversal during range scans.</li>
+<li>Compare SeqScan vs IndexScan on selective predicates to highlight indexing benefits.</li>
 </ul>
+<hr />
+<p>Further reading: <a href="modules/../index/btree_index.html">B+Tree internals</a></p>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="b-tree-index--architecture-and-concurrency"><a class="header" href="#b-tree-index--architecture-and-concurrency">B+ Tree Index — Architecture and Concurrency</a></h1>
 <h2 id="1-architecture-overview"><a class="header" href="#1-architecture-overview">1. Architecture Overview</a></h2>
 <h3 id="11-node-and-page-structure"><a class="header" href="#11-node-and-page-structure">1.1 Node and Page Structure</a></h3>
@@ -907,25 +2055,69 @@ Defaults are conservative; increase <code>seq_window</code> for long scans to re
 <li>NUMA-aware partitioning and router.</li>
 <li>WAL/MVCC for crash recovery and snapshot isolation.</li>
 </ul>
-<div style="break-before: page; page-break-before: always;"></div><h1 id="recovery-manager-wal"><a class="header" href="#recovery-manager-wal">Recovery Manager (WAL)</a></h1>
-<p>The Recovery Manager is the component that ensures the <strong>Durability</strong> aspect of ACID. It guarantees that once a transaction is committed, its effects are permanent, even in the face of system crashes or power failures.</p>
-<p>This is achieved through a <strong>Write-Ahead Log (WAL)</strong> and a recovery protocol inspired by <strong>ARIES</strong>.</p>
-<h2 id="core-concepts"><a class="header" href="#core-concepts">Core Concepts</a></h2>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="recovery--wal-module"><a class="header" href="#recovery--wal-module">Recovery / WAL Module</a></h1>
+<p><code>src/recovery/</code> guarantees the Durability part of ACID. Through WAL, checkpoints, and the
+ARIES algorithm, QuillSQL can recover to a consistent state after crashes.</p>
+<hr />
+<h2 id="responsibilities-8"><a class="header" href="#responsibilities-8">Responsibilities</a></h2>
 <ul>
-<li>
-<p><strong>Write-Ahead Logging</strong>: The fundamental principle is that any change to a data page must be recorded in a log file on durable storage <em>before</em> the data page itself is written back to disk.</p>
-</li>
-<li>
-<p><strong>Log Records</strong>: The WAL is a sequence of records, each with a unique Log Sequence Number (LSN). Records describe changes (<code>PageDelta</code>, <code>HeapInsert</code>), transaction outcomes (<code>Commit</code>, <code>Abort</code>), or internal state (<code>Checkpoint</code>).</p>
-</li>
-<li>
-<p><strong>ARIES Protocol</strong>: On startup, the database replays the log to restore a consistent state. This involves three phases: <strong>Analysis</strong> (to figure out what was happening during the crash), <strong>Redo</strong> (to re-apply all changes since the last checkpoint), and <strong>Undo</strong> (to roll back any transactions that did not commit).</p>
-</li>
+<li>Generate WAL records for every change and assign monotonically increasing LSNs.</li>
+<li>Manage WAL buffers, synchronous flushes, and the optional background WAL writer.</li>
+<li>Run the ARIES Analysis → Redo → Undo sequence during startup.</li>
+<li>Maintain the control file so the latest checkpoint and log truncation point are known.</li>
 </ul>
-<p>This section contains:</p>
+<hr />
+<h2 id="directory-layout-8"><a class="header" href="#directory-layout-8">Directory Layout</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Path</th><th>Description</th><th>Key Types</th></tr></thead><tbody>
+<tr><td><code>wal_manager.rs</code></td><td>Log writer, buffer manager, background thread spawner.</td><td><code>WalManager</code>, <code>WalWriterHandle</code></td></tr>
+<tr><td><code>wal_record.rs</code></td><td>All record variants.</td><td><code>WalRecord</code>, <code>LogSequenceNumber</code></td></tr>
+<tr><td><code>recovery_manager.rs</code></td><td>ARIES driver.</td><td><code>RecoveryManager</code>, <code>RecoverySummary</code></td></tr>
+<tr><td><code>control_file.rs</code></td><td>Persistent metadata (checkpoint info).</td><td><code>ControlFileManager</code></td></tr>
+</tbody></table>
+</div>
+<hr />
+<h2 id="wal-highlights"><a class="header" href="#wal-highlights">WAL Highlights</a></h2>
 <ul>
-<li><strong><a href="modules/./../recovery/aries.html">The ARIES Protocol in QuillSQL</a></strong>: A deep dive into the three phases of recovery and how they are implemented.</li>
+<li><strong>Write-ahead rule</strong> – before flushing a dirty page, ensure <code>page_lsn &lt;= flushed_lsn</code>
+via <code>WalManager::flush_until</code>.</li>
+<li><strong>Record types</strong> – logical (<code>HeapInsert</code>, <code>IndexDelete</code>) for redo/undo and physical
+(<code>PageWrite</code>, <code>PageDelta</code>) for large changes.</li>
+<li><strong>Segmentation</strong> – WAL files are cut into segments per <code>WalOptions::segment_size</code>, and
+background writers can flush them asynchronously.</li>
 </ul>
+<hr />
+<h2 id="aries-recovery"><a class="header" href="#aries-recovery">ARIES Recovery</a></h2>
+<ol>
+<li><strong>Analysis</strong> – read the latest checkpoint, rebuild the Dirty Page Table (DPT) and
+Active Transaction Table (ATT).</li>
+<li><strong>Redo</strong> – scan forward from the checkpoint LSN, reapplying operations when the DPT
+indicates a page may be out of date.</li>
+<li><strong>Undo</strong> – roll back transactions still in ATT, writing Compensation Log Records (CLR)
+so the process is idempotent even if another crash happens mid-undo.</li>
+</ol>
+<p><code>RecoverySummary</code> reports how many records were redone and which transactions require
+manual attention—great for classroom demonstrations.</p>
+<hr />
+<h2 id="interactions-10"><a class="header" href="#interactions-10">Interactions</a></h2>
+<ul>
+<li><strong>TransactionManager</strong> – emits <code>Begin</code>, <code>Commit</code>, <code>Abort</code> records and supplies undo
+information.</li>
+<li><strong>BufferManager</strong> – links to WAL via <code>set_wal_manager</code>; checkpoints rely on the buffer’s
+dirty page metadata.</li>
+<li><strong>Background workers</strong> – WAL writer and checkpoint worker live in <code>background</code> and use
+handles exposed by <code>WalManager</code>.</li>
+</ul>
+<hr />
+<h2 id="teaching-ideas-10"><a class="header" href="#teaching-ideas-10">Teaching Ideas</a></h2>
+<ul>
+<li>Simulate crashes (e.g., panic right after <code>wal_manager.flush(None)</code>) and inspect log
+output on restart.</li>
+<li>Add a new WAL record type (like <code>CreateIndex</code>) to see how <code>RecoveryManager</code> must be
+extended.</li>
+<li>Compare physical vs logical redo costs to discuss ARIES trade-offs.</li>
+</ul>
+<hr />
+<p>Further reading: <a href="modules/../recovery/aries.html">ARIES details</a></p>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="the-aries-recovery-protocol"><a class="header" href="#the-aries-recovery-protocol">The ARIES Recovery Protocol</a></h1>
 <p>Of the four ACID properties, <strong>Durability</strong> is the one that guarantees that once a transaction is committed, its changes will survive any subsequent system failure. In a disk-based database, this is achieved through a careful and robust recovery protocol. QuillSQL implements a recovery strategy inspired by the well-known <strong>ARIES</strong> (Algorithm for Recovery and Isolation Exploiting Semantics) protocol, centered around a <strong>Write-Ahead Log (WAL)</strong>.</p>
 <h2 id="1-the-write-ahead-logging-wal-principle"><a class="header" href="#1-the-write-ahead-logging-wal-principle">1. The Write-Ahead Logging (WAL) Principle</a></h2>
@@ -998,7 +2190,7 @@ Defaults are conservative; increase <code>seq_window</code> for long scans to re
 </ol>
 <p>Once a checkpoint is complete, the <code>RecoveryManager</code> knows that all changes described in log records before the <code>BEGIN_CHECKPOINT</code> record are safely on disk. Therefore, those older parts of the WAL file are no longer needed for recovery and can be truncated or recycled, keeping the recovery process efficient.</p>
 <hr />
-<h2 id="for-study--discussion-3"><a class="header" href="#for-study--discussion-3">For Study &amp; Discussion</a></h2>
+<h2 id="for-study--discussion-7"><a class="header" href="#for-study--discussion-7">For Study &amp; Discussion</a></h2>
 <ol>
 <li>
 <p><strong>Repeating History</strong>: The Redo phase re-applies changes from <em>all</em> transactions, including those that will be undone later (the "losers"). This seems wasteful. Why is this "repeating history" approach a core principle of ARIES? What would go wrong if we tried to only redo changes from committed transactions?</p>
@@ -1017,411 +2209,152 @@ c.  Decide what information the <code>HeapReclaim</code> record needs to contain
 d.  Implement the <code>redo</code> logic for this new record in the appropriate <code>ResourceManager</code>. What should happen when you redo a <code>HeapReclaim</code> record?</p>
 </li>
 </ol>
-<div style="break-before: page; page-break-before: always;"></div><h1 id="transaction-manager"><a class="header" href="#transaction-manager">Transaction Manager</a></h1>
-<p>The Transaction Manager is responsible for one of the most critical aspects of a database: guaranteeing the <strong>ACID</strong> properties, specifically <strong>Isolation</strong> and <strong>Atomicity</strong>.</p>
-<p>It allows multiple clients to access the database concurrently without interfering with each other, and it ensures that transactions are treated as single, indivisible operations (all or nothing).</p>
-<h2 id="core-concepts-1"><a class="header" href="#core-concepts-1">Core Concepts</a></h2>
-<ul>
-<li>
-<p><strong>Concurrency Control</strong>: To handle simultaneous operations, QuillSQL uses a hybrid approach that combines two powerful techniques:</p>
-<ol>
-<li><strong>Multi-Version Concurrency Control (MVCC)</strong>: Instead of overwriting data, writers create new <em>versions</em> of rows. Readers are given a consistent <em>snapshot</em> of the database, which allows them to proceed without being blocked by writers.</li>
-<li><strong>Two-Phase Locking (2PL)</strong>: To prevent two writers from modifying the same row at the same time, a strict two-phase locking protocol is used. Transactions must acquire locks on data before modifying it and hold those locks until the transaction ends.</li>
-</ol>
-</li>
-<li>
-<p><strong>Atomicity</strong>: The transaction manager records all actions performed by a transaction. If the transaction needs to be aborted, it can use this record to perform the necessary undo operations, rolling the database back to its state before the transaction began.</p>
-</li>
-</ul>
-<p>This section contains:</p>
-<ul>
-<li><strong><a href="modules/./../transaction/mvcc_and_2pl.html">MVCC and 2PL</a></strong>: A deep dive into QuillSQL's hybrid concurrency control model.</li>
-</ul>
-<div style="break-before: page; page-break-before: always;"></div><h1 id="mvcc-and-2pl"><a class="header" href="#mvcc-and-2pl">MVCC and 2PL</a></h1>
-<p>Of the four ACID properties, <strong>Isolation</strong> is often the most complex to implement. It ensures that concurrent transactions do not interfere with each other, making it appear as if each transaction is executing sequentially, one after another. Without proper isolation, a database would suffer from concurrency-related anomalies like dirty reads, non-repeatable reads, and phantom reads.</p>
-<p>Databases typically use two main strategies for concurrency control:</p>
-<ol>
-<li><strong>Pessimistic Concurrency Control</strong>: Assumes conflicts are likely and prevents them from happening by using locks. The most common protocol is <strong>Two-Phase Locking (2PL)</strong>.</li>
-<li><strong>Optimistic Concurrency Control</strong>: Assumes conflicts are rare. Transactions proceed without locking, and the database validates at commit time that no conflicts occurred. A popular variant is <strong>Multi-Version Concurrency Control (MVCC)</strong>.</li>
-</ol>
-<p>QuillSQL, like many modern relational databases (e.g., PostgreSQL, Oracle), implements a powerful <strong>hybrid model that combines MVCC with 2PL</strong>.</p>
-<h2 id="1-mvcc-reading-without-blocking"><a class="header" href="#1-mvcc-reading-without-blocking">1. MVCC: Reading without Blocking</a></h2>
-<p>The core idea of MVCC is <strong>"writers don't block readers, and readers don't block writers."</strong> This is achieved by never overwriting data in-place. When a row is updated, the database creates a <em>new version</em> of that row, preserving the old one.</p>
-<h3 id="version-chains-and-tuplemeta"><a class="header" href="#version-chains-and-tuplemeta">Version Chains and <code>TupleMeta</code></a></h3>
-<p>As discussed in the <a href="transaction/../storage/table_heap.html">Storage Engine</a> chapter, every tuple on disk has associated metadata (<code>TupleMeta</code>) that includes:</p>
-<ul>
-<li><code>insert_txn_id</code>: The ID of the transaction that created this version.</li>
-<li><code>delete_txn_id</code>: The ID of the transaction that marked this version as deleted.</li>
-<li><code>prev_version</code> / <code>next_version</code>: Pointers (RIDs) that form a linked list of versions for a single logical row, called the <strong>version chain</strong>.</li>
-</ul>
-<h3 id="transaction-snapshots"><a class="header" href="#transaction-snapshots">Transaction Snapshots</a></h3>
-<p>When a transaction begins, it asks the <code>TransactionManager</code> for a <strong>snapshot</strong> of the database state. This snapshot, defined in <code>transaction/mvcc.rs</code>, contains three key pieces of information:</p>
-<ul>
-<li><code>xmin</code>: The oldest active transaction ID at the time of the snapshot. Any transaction with an ID less than <code>xmin</code> is guaranteed to be either committed or aborted.</li>
-<li><code>xmax</code>: The next transaction ID to be assigned. Any transaction with an ID greater than or equal to <code>xmax</code> was not yet started when the snapshot was taken.</li>
-<li><code>active_txns</code>: A list of all other transaction IDs that were active when the snapshot was taken.</li>
-</ul>
-<h3 id="the-visibility-check"><a class="header" href="#the-visibility-check">The Visibility Check</a></h3>
-<p>When a transaction scans the database, for every tuple version it encounters, it performs a <strong>visibility check</strong> using its snapshot. The logic in <code>MvccSnapshot::is_visible</code> determines if the version should be "seen" by the current transaction. In simplified terms, a tuple version is visible if:</p>
-<ol>
-<li>Its <code>insert_txn_id</code> belongs to a transaction that was already committed before our snapshot was taken.</li>
-<li><strong>AND</strong> its <code>delete_txn_id</code> is either not set, OR it belongs to a transaction that was not yet committed when our snapshot was taken.</li>
-</ol>
-<p>This mechanism elegantly solves several concurrency problems. Since a reader transaction only ever sees a consistent snapshot of the database, it is completely immune to changes being made by other concurrent writer transactions. This prevents dirty reads and non-repeatable reads.</p>
-<h2 id="2-two-phase-locking-2pl-preventing-write-write-conflicts"><a class="header" href="#2-two-phase-locking-2pl-preventing-write-write-conflicts">2. Two-Phase Locking (2PL): Preventing Write-Write Conflicts</a></h2>
-<p>While MVCC is excellent for read-write conflicts, it does not, by itself, prevent two transactions from trying to modify the same logical row at the same time (a write-write conflict). This is where locking comes in.</p>
-<p>QuillSQL implements a strict <strong>Two-Phase Locking</strong> protocol via the <code>LockManager</code> (<code>transaction/lock_manager.rs</code>).</p>
-<h3 id="the-two-phases"><a class="header" href="#the-two-phases">The Two Phases</a></h3>
-<ol>
-<li><strong>Growing Phase</strong>: The transaction can acquire new locks as it executes.</li>
-<li><strong>Shrinking Phase</strong>: Once the transaction releases its first lock, it cannot acquire any new locks.</li>
-</ol>
-<p>In practice, QuillSQL uses <strong>Strict 2PL</strong>, where the shrinking phase is delayed until the transaction commits or aborts. All locks are held until the very end.</p>
-<h3 id="hierarchical-locking-intention-locks"><a class="header" href="#hierarchical-locking-intention-locks">Hierarchical Locking (Intention Locks)</a></h3>
-<p>To be efficient, the <code>LockManager</code> uses a multi-granularity, hierarchical locking scheme. Before a transaction can take a fine-grained lock on a row (a <code>Shared</code> or <code>Exclusive</code> lock), it must first acquire a coarser-grained <strong>intention lock</strong> on the table.</p>
-<ul>
-<li><strong><code>IntentionShared (IS)</code></strong>: Signals the intent to read rows from the table.</li>
-<li><strong><code>IntentionExclusive (IX)</code></strong>: Signals the intent to modify rows in the table.</li>
-</ul>
-<p>This prevents a transaction wanting to lock the entire table from conflicting with another transaction that is already modifying a single row. For example, a <code>SELECT * FROM users FOR UPDATE</code> (which needs an <code>X</code> lock on the table) will be blocked if another transaction already holds an <code>IX</code> lock on <code>users</code>.</p>
-<h3 id="deadlock-detection"><a class="header" href="#deadlock-detection">Deadlock Detection</a></h3>
-<p>When two or more transactions are waiting for each other to release locks in a circular chain, a <strong>deadlock</strong> occurs. The <code>LockManager</code> detects this by building a <strong>waits-for graph</strong>. When a transaction <code>T1</code> has to wait for a lock held by <code>T2</code>, an edge <code>T1 -&gt; T2</code> is added to the graph. If adding an edge creates a cycle, a deadlock is detected, and one of the transactions (the victim) is immediately aborted to break the cycle.</p>
-<h2 id="3-the-hybrid-model-mvcc--2pl-in-action"><a class="header" href="#3-the-hybrid-model-mvcc--2pl-in-action">3. The Hybrid Model: MVCC + 2PL in Action</a></h2>
-<p>In QuillSQL, these two mechanisms work in concert:</p>
-<ul>
-<li>
-<p>A <strong>reader</strong> (<code>SELECT</code>) transaction acquires an MVCC snapshot. It uses this snapshot to determine visibility. It only needs to acquire <code>Shared</code> (S) locks on the rows it reads to prevent other transactions from modifying them, thus ensuring repeatable reads in higher isolation levels.</p>
-</li>
-<li>
-<p>A <strong>writer</strong> (<code>UPDATE</code>, <code>DELETE</code>) transaction must acquire an <code>Exclusive</code> (X) lock on the specific row it intends to modify. Once the lock is granted, it knows no other writer can interfere. It can then safely create a new tuple version as part of the MVCC protocol.</p>
-</li>
-</ul>
-<p>This hybrid approach provides the best of both worlds: reads are fast and non-blocking, while write-write conflicts are safely prevented by the locking protocol.</p>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="background-services"><a class="header" href="#background-services">Background Services</a></h1>
+<p><code>src/background/</code> hosts the asynchronous workers that keep a database healthy: WAL
+writers, checkpoints, buffer flushers, and MVCC vacuum. A central registry makes it easy
+to start/stop workers together—ideal for teaching how background maintenance supports
+foreground queries.</p>
 <hr />
-<h2 id="for-study--discussion-4"><a class="header" href="#for-study--discussion-4">For Study &amp; Discussion</a></h2>
-<ol>
-<li>
-<p><strong>Isolation Levels</strong>: QuillSQL supports multiple SQL isolation levels. How does the behavior of MVCC snapshots and 2PL change between <code>ReadCommitted</code> and <code>RepeatableRead</code>? In <code>ReadCommitted</code>, a transaction gets a new snapshot for every statement, whereas in <code>RepeatableRead</code>, it uses the same snapshot for the entire transaction. What concurrency anomalies does this difference prevent?</p>
-</li>
-<li>
-<p><strong>Phantom Reads</strong>: Even with MVCC and row-level 2PL, a <code>RepeatableRead</code> transaction can suffer from <em>phantom reads</em>. Imagine <code>T1</code> runs <code>SELECT COUNT(*) FROM users WHERE age &gt; 30</code>. Then, <code>T2</code> inserts a new user with <code>age = 40</code> and commits. If <code>T1</code> runs its <code>SELECT</code> query again, it will see a new "phantom" row that wasn't there before. How can a database prevent this to achieve the <code>Serializable</code> isolation level? (Hint: research predicate locking and index-range locking).</p>
-</li>
-<li>
-<p><strong>Deadlock Handling</strong>: QuillSQL detects deadlocks by building a waits-for graph and aborting a transaction. What is an alternative strategy for handling deadlocks? For example, what are the pros and cons of using lock timeouts instead of cycle detection?</p>
-</li>
-<li>
-<p><strong>Programming Exercise (Advanced)</strong>: A full implementation of <code>Serializable</code> isolation often requires index-range locking to prevent phantoms. Extend the <code>LockManager</code> to support locking a <em>range</em> of keys within a B+Tree index. This would require a new lock type and a way to check for overlapping ranges. When a <code>SELECT ... WHERE age &gt; 30</code> query runs, it would place a shared lock on the <code>(30, +∞)</code> range in the index on the <code>age</code> column, preventing any other transaction from inserting a new user with an age in that range.</p>
-</li>
-</ol>
-<div style="break-before: page; page-break-before: always;"></div><h1 id="query-plan"><a class="header" href="#query-plan">Query Plan</a></h1>
-<p>The Query Planner is the "brain" of the database. It is responsible for taking a declarative SQL query string (which describes <em>what</em> data to retrieve) and converting it into a highly optimized, imperative plan (which describes <em>how</em> to retrieve that data).</p>
-<p>This process is one of the most complex and important aspects of a relational database system.</p>
-<h2 id="core-concepts-2"><a class="header" href="#core-concepts-2">Core Concepts</a></h2>
+<h2 id="responsibilities-9"><a class="header" href="#responsibilities-9">Responsibilities</a></h2>
 <ul>
-<li>
-<p><strong>AST (Abstract Syntax Tree)</strong>: The raw SQL text is first parsed into a tree structure that represents the syntax of the query.</p>
-</li>
-<li>
-<p><strong>Logical Plan</strong>: The AST is then converted into a logical plan. This is a tree of relational algebra operators (e.g., <code>Filter</code>, <code>Projection</code>, <code>Join</code>) that describes the logical steps required to fulfill the query, independent of any specific algorithm or data layout.</p>
-</li>
-<li>
-<p><strong>Physical Plan</strong>: The logical plan is then converted into a physical plan. This plan consists of concrete operators (or "iterators") that implement specific algorithms (e.g., <code>NestedLoopJoin</code>, <code>SeqScan</code>). This is the plan that is actually executed.</p>
-</li>
+<li>Start workers according to configuration (<code>IndexVacuumConfig</code>, <code>MvccVacuumConfig</code>,
+<code>WalOptions</code>, etc.).</li>
+<li>Define lightweight traits (<code>CheckpointWal</code>, <code>BufferMaintenance</code>, <code>TxnSnapshotOps</code>) so
+workers can run without pulling in an async runtime.</li>
+<li>Provide <code>BackgroundWorkers</code>, a registry that tracks <code>WorkerHandle</code>s and shuts them down
+when <code>Database</code> drops.</li>
 </ul>
-<p>This section contains:</p>
-<ul>
-<li><strong><a href="modules/./../plan/lifecycle.html">The Lifecycle of a Query</a></strong>: A deep dive into the journey from SQL string to executable physical plan.</li>
-</ul>
-<div style="break-before: page; page-break-before: always;"></div><h1 id="the-lifecycle-of-a-query"><a class="header" href="#the-lifecycle-of-a-query">The Lifecycle of a Query</a></h1>
-<p>When you submit a SQL query to a database, it doesn't just magically produce a result. The database undertakes a sophisticated, multi-stage process to translate the declarative SQL statement (which describes <em>what</em> data you want) into an imperative, efficient execution plan (which describes <em>how</em> to get that data). This entire process is the responsibility of the <strong>Query Planner</strong>.</p>
-<p>In QuillSQL, this process follows a classic, compiler-like pipeline, which is a cornerstone of modern database architecture as taught in courses like CMU 15-445.</p>
-<p>The journey from a SQL string to an executable plan involves several transformations:</p>
-<p><strong>SQL String</strong> -&gt; <strong>AST (Abstract Syntax Tree)</strong> -&gt; <strong>Logical Plan</strong> -&gt; <strong>Optimized Logical Plan</strong> -&gt; <strong>Physical Plan</strong></p>
-<p>Let's break down each stage.</p>
-<h3 id="stage-1-parsing-sql---ast"><a class="header" href="#stage-1-parsing-sql---ast">Stage 1: Parsing (SQL -&gt; AST)</a></h3>
-<p>The first step is purely syntactic. The raw SQL query string is fed into a parser. QuillSQL uses the excellent <code>sqlparser</code> crate for this. The parser checks if the SQL conforms to valid grammar and, if so, converts it into an <strong>Abstract Syntax Tree (AST)</strong>.</p>
-<p>An AST is a direct tree representation of the SQL query's structure. For example, <code>SELECT id FROM users WHERE age &gt; 30</code> would be parsed into a tree structure with nodes representing the <code>SELECT</code> clause, the table <code>users</code>, the <code>WHERE</code> clause, and the predicate <code>age &gt; 30</code>.</p>
-<h3 id="stage-2-logical-planning-ast---logical-plan"><a class="header" href="#stage-2-logical-planning-ast---logical-plan">Stage 2: Logical Planning (AST -&gt; Logical Plan)</a></h3>
-<p>Next, the <code>LogicalPlanner</code> (<code>plan/logical_planner.rs</code>) walks the AST and converts it into a <strong>Logical Plan</strong>.</p>
-<p>A Logical Plan is a tree of relational algebra operators. It describes the query in terms of high-level data operations, completely independent of how the data is stored or which algorithms will be used. It defines <em>what</em> to do, not <em>how</em> to do it.</p>
-<p>Key logical operators in QuillSQL (<code>plan/logical_plan/mod.rs</code>) include:</p>
-<ul>
-<li><strong><code>TableScan(users)</code></strong>: Represents reading the entire <code>users</code> table.</li>
-<li><strong><code>Filter(predicate: age &gt; 30)</code></strong>: Represents filtering rows based on a condition.</li>
-<li><strong><code>Projection(columns: [id])</code></strong>: Represents selecting specific columns.</li>
-<li><strong><code>Join</code></strong>: Represents joining two data sources.</li>
-<li><strong><code>Aggregate</code></strong>: Represents a <code>GROUP BY</code> operation.</li>
-<li><strong><code>Sort</code></strong>: Represents an <code>ORDER BY</code> operation.</li>
-</ul>
-<p>For our example query, the initial logical plan might look like this:</p>
-<pre><code>Projection(columns=[id])
-  └── Filter(predicate=age &gt; 30)
-        └── TableScan(users)
-</code></pre>
-<h3 id="stage-3-logical-optimization"><a class="header" href="#stage-3-logical-optimization">Stage 3: Logical Optimization</a></h3>
-<p>Before executing the plan, we have a crucial opportunity to make it more efficient. The <code>LogicalOptimizer</code> (<code>optimizer/logical_optimizer.rs</code>) takes the logical plan and applies a series of <strong>transformation rules</strong> to produce a new, equivalent logical plan that is expected to be faster.</p>
-<p>QuillSQL uses a simple but effective rule-based optimizer. A classic example of such a rule is <strong>Predicate Pushdown</strong>. Consider this query:</p>
-<p><code>SELECT name FROM (SELECT * FROM users JOIN cities ON users.city_id = cities.id) WHERE users.age &gt; 30;</code></p>
-<p>A naive logical plan would first perform a full <code>JOIN</code> between <code>users</code> and <code>cities</code> and <em>then</em> filter the massive result. Predicate pushdown is a rule that would rewrite the plan to apply the <code>age &gt; 30</code> filter <em>before</em> the join:</p>
-<p><strong>Before Optimization:</strong></p>
-<pre><code>Filter(users.age &gt; 30)
-  └── Join(users.city_id = cities.id)
-        ├── TableScan(users)
-        └── TableScan(cities)
-</code></pre>
-<p><strong>After Optimization (Predicate Pushdown):</strong></p>
-<pre><code>Join(users.city_id = cities.id)
-  ├── Filter(users.age &gt; 30)
-  │     └── TableScan(users)
-  └── TableScan(cities)
-</code></pre>
-<p>By filtering early, we dramatically reduce the number of rows that need to be processed by the expensive <code>Join</code> operator. QuillSQL implements similar rules, such as <code>PushDownLimit</code>, which pushes <code>LIMIT</code> clauses down the tree to reduce the amount of data processed.</p>
-<h3 id="stage-4-physical-planning-logical-plan---physical-plan"><a class="header" href="#stage-4-physical-planning-logical-plan---physical-plan">Stage 4: Physical Planning (Logical Plan -&gt; Physical Plan)</a></h3>
-<p>Finally, the <code>PhysicalPlanner</code> (<code>plan/physical_planner.rs</code>) converts the optimized logical plan into a <strong>Physical Plan</strong>.</p>
-<p>A Physical Plan describes exactly <em>how</em> the query will be executed. It maps each logical operator to a concrete algorithm or implementation.</p>
-<ul>
-<li>A <code>LogicalPlan::TableScan</code> becomes a <code>PhysicalSeqScan</code> (a sequential scan of the table heap).</li>
-<li>A <code>LogicalPlan::Filter</code> becomes a <code>PhysicalFilter</code>, which implements the filtering logic.</li>
-<li>A <code>LogicalPlan::Join</code> becomes a <code>PhysicalNestedLoopJoin</code>. This is where the database commits to a specific join algorithm. A more advanced database might have multiple options (e.g., <code>PhysicalHashJoin</code>, <code>PhysicalSortMergeJoin</code>) and would use a cost model to choose the best one. QuillSQL currently implements Nested Loop Join.</li>
-</ul>
-<p>Each node in the physical plan tree is an executor that the <a href="plan/../modules/execution.html">Execution Engine</a> can run. This final plan is what gets executed to produce the query result.</p>
-<h2 id="conclusion"><a class="header" href="#conclusion">Conclusion</a></h2>
-<p>This layered approach—from syntax to a logical representation, then to an optimized logical representation, and finally to a concrete physical execution plan—is fundamental to database design. It provides a clear separation of concerns and, most importantly, creates a dedicated <strong>optimization stage</strong>, which is the key to achieving high performance on a wide variety of SQL queries.</p>
 <hr />
-<h2 id="for-study--discussion-5"><a class="header" href="#for-study--discussion-5">For Study &amp; Discussion</a></h2>
-<ol>
-<li>
-<p><strong>Logical vs. Physical</strong>: Why is the separation between logical and physical plans so important? What would be the disadvantages of a simpler system that converted the AST directly into a physical plan?</p>
-</li>
-<li>
-<p><strong>Join Algorithms</strong>: QuillSQL currently only implements <code>NestedLoopJoin</code>. What are two other common join algorithms? Describe how they work and in what scenarios they would be more performant than a nested loop join.</p>
-</li>
-<li>
-<p><strong>Programming Exercise (Advanced)</strong>: Implement a <code>PhysicalHashJoin</code> operator. This is a significant undertaking that involves:
-a.  Creating a <code>PhysicalHashJoin</code> struct that implements the <code>VolcanoExecutor</code> trait.
-b.  In the <code>init()</code> phase, it should consume the entire "build" side (typically the smaller, right-hand table) and build an in-memory hash table from its rows.
-c.  In the <code>next()</code> phase, it should read from the "probe" side (the left-hand table) one row at a time, probe the hash table for matches, and emit the joined tuples.
-d.  Modify the <code>PhysicalPlanner</code> to choose <code>PhysicalHashJoin</code> instead of <code>PhysicalNestedLoopJoin</code> for equi-joins.</p>
-</li>
-<li>
-<p><strong>Programming Exercise</strong>: Add support for the <code>UNION ALL</code> operator. This would involve:
-a.  Adding a <code>Union</code> variant to the <code>LogicalPlan</code> enum.
-b.  Updating the <code>LogicalPlanner</code> to recognize the <code>UNION</code> syntax in the AST and create a <code>LogicalPlan::Union</code> node.
-c.  Creating a <code>PhysicalUnion</code> executor that pulls tuples from its first child until it's exhausted, and then pulls tuples from its second child.</p>
-</li>
-</ol>
-<div style="break-before: page; page-break-before: always;"></div><h1 id="query-optimizer"><a class="header" href="#query-optimizer">Query Optimizer</a></h1>
-<p>A naive, direct translation of a SQL query into an execution plan is often dramatically inefficient. The <strong>Query Optimizer</strong> is a critical stage in the query processing pipeline that rearranges and transforms the initial logical plan into an equivalent, but far cheaper, plan to execute.</p>
-<h2 id="core-concepts-3"><a class="header" href="#core-concepts-3">Core Concepts</a></h2>
-<ul>
-<li>
-<p><strong>Rule-Based Optimization</strong>: QuillSQL uses a rule-based optimizer. It applies a series of pre-defined, heuristic rules to the logical plan to improve it. This is in contrast to a cost-based optimizer, which would estimate the "cost" of many possible plans and choose the cheapest one.</p>
-</li>
-<li>
-<p><strong>Logical Transformations</strong>: The key insight is that many different logical plans can produce the exact same result. For example, filtering data before a join is usually much faster than joining two large tables and filtering the result, but the final output is identical. The optimizer's job is to find and apply these beneficial transformations.</p>
-</li>
-</ul>
-<p>This section contains:</p>
-<ul>
-<li><strong><a href="modules/./../optimizer/rules.html">Rule-Based Optimization</a></strong>: A deep dive into how the rule-based optimizer works, using the <code>PushDownLimit</code> rule as a concrete example.</li>
-</ul>
-<div style="break-before: page; page-break-before: always;"></div><h1 id="rule-based-optimization"><a class="header" href="#rule-based-optimization">Rule-Based Optimization</a></h1>
-<p>After the <code>LogicalPlanner</code> creates an initial <code>LogicalPlan</code>, it's passed to the <strong><code>LogicalOptimizer</code></strong>. The initial plan is a direct, syntactically correct translation of the SQL query, but it's often not the most efficient way to execute it. The optimizer's job is to transform this plan into an equivalent, but more performant, logical plan.</p>
-<h2 id="the-optimizer-in-quillsql"><a class="header" href="#the-optimizer-in-quillsql">The Optimizer in QuillSQL</a></h2>
-<p>QuillSQL implements a <strong>Rule-Based Optimizer</strong>. This is a common and powerful approach where the optimizer is equipped with a set of predefined transformation rules. It repeatedly applies these rules to the logical plan tree until no more rules can be applied, or a maximum number of passes is reached.</p>
-<p>The main components are:</p>
-<ul>
-<li><strong><code>LogicalOptimizer</code> (<code>optimizer/logical_optimizer.rs</code>)</strong>: The main driver. It holds a list of rules and contains the logic to recursively walk the plan tree and apply them.</li>
-<li><strong><code>LogicalOptimizerRule</code> Trait</strong>: An interface that every optimization rule must implement. Its core method is <code>try_optimize</code>, which takes a plan node and attempts to return a rewritten, optimized version of that node.</li>
-</ul>
-<h2 id="deep-dive-the-pushdownlimit-rule"><a class="header" href="#deep-dive-the-pushdownlimit-rule">Deep Dive: The <code>PushDownLimit</code> Rule</a></h2>
-<p>One of the most classic and effective optimizations is "pushing down" operations as far as possible towards the data source. Let's examine the <code>PushDownLimit</code> rule (<code>optimizer/rule/push_down_limit.rs</code>) to see this in action.</p>
-<p>Consider the following query:</p>
-<pre><code class="language-sql">SELECT * FROM users ORDER BY signup_date LIMIT 10;
-</code></pre>
-<h4 id="the-naive-plan"><a class="header" href="#the-naive-plan">The Naive Plan</a></h4>
-<p>A naive logical plan for this query would be:</p>
-<pre><code>Limit(10)
-  └── Sort(by: signup_date)
-        └── TableScan(users)
-</code></pre>
-<p>If executed directly, this plan would:</p>
-<ol>
-<li>Scan the <em>entire</em> <code>users</code> table.</li>
-<li>Sort the <em>entire</em> table by <code>signup_date</code>.</li>
-<li>Finally, discard all but the first 10 rows.</li>
-</ol>
-<p>This is incredibly inefficient, especially for a large table, as it involves a massive, memory-intensive sort operation.</p>
-<h4 id="the-optimization-rule"><a class="header" href="#the-optimization-rule">The Optimization Rule</a></h4>
-<p>The <code>PushDownLimit</code> rule is designed to recognize this specific pattern: a <code>Limit</code> operator directly on top of a <code>Sort</code> operator.</p>
-<p>When the optimizer applies this rule, the <code>try_optimize</code> method matches on the <code>Limit</code> node. It inspects its child and sees that it's a <code>Sort</code> node. The rule then knows it can apply its logic.</p>
-<h4 id="the-rewritten-plan"><a class="header" href="#the-rewritten-plan">The Rewritten Plan</a></h4>
-<p>The rule rewrites the plan tree by "pushing" the limit information <em>into</em> the <code>Sort</code> node itself:</p>
-<pre><code>Limit(10)
-  └── Sort(by: signup_date, limit: 10)
-        └── TableScan(users)
-</code></pre>
-<p>Notice the new <code>limit: 10</code> property on the <code>Sort</code> node. This seemingly small change has a huge performance impact. When the <code>PhysicalSort</code> operator is created from this logical node, it now knows that it only needs to find the top 10 rows. Instead of performing a full sort, it can use a much more efficient algorithm, like a <strong>heap sort (using a min-heap of size 10)</strong>, to find the top 10 rows in a single pass over the data.</p>
-<p>This optimization avoids sorting the entire table, dramatically reducing both CPU and memory consumption.</p>
-<h2 id="other-rules"><a class="header" href="#other-rules">Other Rules</a></h2>
-<p>QuillSQL implements other simple but effective rules:</p>
-<ul>
-<li><strong><code>EliminateLimit</code></strong>: Removes a <code>LIMIT</code> clause if it provides no value (e.g., <code>LIMIT NULL</code>).</li>
-<li><strong><code>MergeLimit</code></strong>: If two <code>LIMIT</code> clauses are stacked on top of each other (which can happen after other rule transformations), this rule merges them into a single, more restrictive <code>LIMIT</code>.</li>
-</ul>
-<h2 id="conclusion-1"><a class="header" href="#conclusion-1">Conclusion</a></h2>
-<p>While QuillSQL's optimizer is currently rule-based and relatively simple, it demonstrates the fundamental principles of query optimization. By separating the logical representation of a query from its physical execution and applying equivalence-preserving transformations, a database can achieve massive performance gains. More advanced systems build on this with a <strong>Cost-Based Optimizer</strong>, which uses table statistics to estimate the "cost" of different physical plans (e.g., choosing between a <code>NestedLoopJoin</code> and a <code>HashJoin</code>) and pick the cheapest one.</p>
+<h2 id="built-in-workers"><a class="header" href="#built-in-workers">Built-in Workers</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Worker</th><th>Trigger</th><th>Behavior</th></tr></thead><tbody>
+<tr><td>WAL writer</td><td><code>wal_writer_interval_ms</code></td><td>Calls <code>WalManager::background_flush</code> to durably write log buffers.</td></tr>
+<tr><td>Checkpoint</td><td><code>checkpoint_interval_ms</code></td><td>Captures dirty page / active txn tables and emits <code>Checkpoint</code> records to bound recovery.</td></tr>
+<tr><td>Buffer writer</td><td><code>bg_writer_interval</code></td><td>Flushes dirty frames and nudges index vacuum when garbage accumulates.</td></tr>
+<tr><td>MVCC vacuum</td><td><code>MvccVacuumConfig</code></td><td>Removes obsolete tuple versions once <code>safe_xmin</code> advances.</td></tr>
+</tbody></table>
+</div>
+<p>Every worker registers itself with <code>BackgroundWorkers</code>; <code>shutdown_all()</code> ensures threads
+exit cleanly during tests or process teardown.</p>
 <hr />
-<h2 id="for-study--discussion-6"><a class="header" href="#for-study--discussion-6">For Study &amp; Discussion</a></h2>
-<ol>
-<li>
-<p><strong>Rule Ordering</strong>: The <code>LogicalOptimizer</code> applies its list of rules in a fixed order for a set number of passes. Can the order in which rules are applied affect the final, optimized plan? Can one rule's transformation enable another rule to be applied in a subsequent pass?</p>
-</li>
-<li>
-<p><strong>Cost-Based vs. Rule-Based</strong>: What is the primary limitation of a purely rule-based optimizer? When would a rule-based optimizer make a poor decision that a cost-based optimizer (with accurate statistics) would get right? (Hint: consider join algorithm selection).</p>
-</li>
-<li>
-<p><strong>Programming Exercise</strong>: Implement the classic <strong>Predicate Pushdown</strong> rule. Your rule should look for a <code>Filter</code> operator whose child is a <code>Join</code>. If the filter's predicate only uses columns from one side of the join, the rule should push the <code>Filter</code> node down to that side of the join, below the <code>Join</code> node. This is one of the most effective optimizations in any database.</p>
-</li>
-<li>
-<p><strong>Programming Exercise</strong>: Implement a <strong>Constant Folding</strong> rule. This rule would traverse expression trees and pre-compute constant expressions. For example:</p>
+<h2 id="interactions-11"><a class="header" href="#interactions-11">Interactions</a></h2>
 <ul>
-<li>An expression <code>WHERE age = 10 + 5</code> would be rewritten to <code>WHERE age = 15</code>.</li>
-<li>An expression <code>WHERE 1 = 1</code> would be evaluated to <code>true</code>, and a smart optimizer could then potentially eliminate the <code>WHERE</code> clause entirely.</li>
+<li><strong>WalManager</strong> – WAL writer and checkpoint workers operate on <code>Arc&lt;dyn CheckpointWal&gt;</code>.</li>
+<li><strong>BufferManager</strong> – background flushers inspect dirty frames and help checkpoints
+capture consistent snapshots.</li>
+<li><strong>TransactionManager</strong> – MVCC vacuum queries <code>TxnSnapshotOps</code> for <code>safe_xmin</code>.</li>
+<li><strong>Catalog</strong> – index vacuum iterates <code>IndexRegistry</code> to locate candidate indexes.</li>
 </ul>
-</li>
-</ol>
-<div style="break-before: page; page-break-before: always;"></div><h1 id="execution-engine"><a class="header" href="#execution-engine">Execution Engine</a></h1>
-<p>Once a query has been parsed, planned, and optimized, the resulting <code>PhysicalPlan</code> is handed to the <strong>Execution Engine</strong>. This component is the workhorse of the database, responsible for actually running the plan and producing the final results.</p>
-<h2 id="core-concepts-4"><a class="header" href="#core-concepts-4">Core Concepts</a></h2>
-<ul>
-<li>
-<p><strong>Volcano (Iterator) Model</strong>: QuillSQL uses a pull-based execution model. Each operator in the physical plan tree is an "iterator" that provides a <code>next()</code> method. The parent operator calls <code>next()</code> on its children to pull rows upwards through the tree, from the storage layer to the client.</p>
-</li>
-<li>
-<p><strong>Physical Operators</strong>: Each logical operation (like a filter or a join) is mapped to a concrete physical operator that implements a specific algorithm (e.g., <code>PhysicalFilter</code>, <code>PhysicalNestedLoopJoin</code>).</p>
-</li>
-<li>
-<p><strong>Execution Context</strong>: As the plan is executed, a shared <code>ExecutionContext</code> is passed between operators. It contains the current transaction, MVCC snapshot, and a pluggable <code>StorageEngine</code> so operators can call helpers like <code>read_visible_tuple</code>, <code>prepare_row_for_write</code>, <code>insert_tuple_with_indexes</code>, or <code>eval_predicate</code> without knowing anything about TableHeaps or indexes.</p>
-</li>
-</ul>
-<p>This section contains:</p>
-<ul>
-<li><strong><a href="modules/./../execution/volcano.html">The Volcano Execution Model</a></strong>: A deep dive into the pull-based execution model and the lifecycle of a query.</li>
-</ul>
-<div style="break-before: page; page-break-before: always;"></div><h1 id="the-volcano-execution-model"><a class="header" href="#the-volcano-execution-model">The Volcano Execution Model</a></h1>
-<p>Once the <a href="execution/../modules/plan.html">Query Planner</a> has produced an optimized <code>PhysicalPlan</code>, it's the job of the <strong>Execution Engine</strong> to run it and produce results. The execution engine is the component that brings the plan to life, interacting with the transaction manager and storage layer to process data.</p>
-<p>QuillSQL uses the classic <strong>Volcano Model</strong>, also known as the <strong>Iterator Model</strong>. This is a pull-based execution model where each physical operator in the plan tree acts as an iterator that the parent operator can "pull" rows from.</p>
-<h2 id="1-the-volcanoexecutor-trait"><a class="header" href="#1-the-volcanoexecutor-trait">1. The <code>VolcanoExecutor</code> Trait</a></h2>
-<p>At the heart of the execution model is the <code>VolcanoExecutor</code> trait (<code>execution/mod.rs</code>). Every physical operator implements this simple trait:</p>
-<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
-</span><span class="boring">fn main() {
-</span>pub trait VolcanoExecutor {
-    fn init(&amp;self, context: &amp;mut ExecutionContext) -&gt; QuillSQLResult&lt;()&gt;;
-    fn next(&amp;self, context: &amp;mut ExecutionContext) -&gt; QuillSQLResult&lt;Option&lt;Tuple&gt;&gt;;
-    fn output_schema(&amp;self) -&gt; SchemaRef;
-}
-<span class="boring">}</span></code></pre></pre>
-<ul>
-<li><strong><code>init()</code></strong>: This method is called once at the beginning of execution. It allows an operator to set up its initial state (e.g., a <code>SeqScan</code> operator would initialize its table iterator here).</li>
-<li><strong><code>next()</code></strong>: This is the core method. When called, the operator produces its next output tuple. It returns <code>Some(tuple)</code> if it has a row, or <code>None</code> if it has exhausted its data source. The top-level <code>ExecutionEngine</code> simply calls <code>next()</code> on the root of the plan tree in a loop until it receives <code>None</code>.</li>
-</ul>
-<h2 id="2-the-executioncontext"><a class="header" href="#2-the-executioncontext">2. The <code>ExecutionContext</code></a></h2>
-<p>Notice that both <code>init()</code> and <code>next()</code> take a mutable <code>ExecutionContext</code>. This object is the "context" or "world" in which the query runs. It is passed down the entire operator tree and gives each operator access to crucial services:</p>
-<ul>
-<li><strong><code>Catalog</code></strong>: To look up tables and indexes.</li>
-<li><strong><code>TransactionManager</code> and <code>Transaction</code></strong>: To interact with the current transaction. This is how operators perform locking and visibility checks.</li>
-<li><strong><code>MvccSnapshot</code></strong>: The specific MVCC snapshot for the current transaction, used to determine which tuple versions are visible.</li>
-<li><strong><code>StorageEngine</code></strong>: A pluggable trait that hides TableHeap/B+Tree specifics.</li>
-<li><strong>Helper APIs</strong>: See below.</li>
-</ul>
-<h3 id="executioncontext-helper-apis"><a class="header" href="#executioncontext-helper-apis">ExecutionContext helper APIs</a></h3>
-<p>To keep physical operators tiny, QuillSQL exposes a few battle-tested helpers:</p>
-<ul>
-<li><code>read_visible_tuple(table, rid, meta, tuple)</code> performs the MVCC visibility check and acquires the correct shared locks for the current isolation level.</li>
-<li><code>prepare_row_for_write</code> / <code>apply_update</code> / <code>apply_delete</code> take care of X locks, re-reading the latest version, index maintenance, and undo logging for UPDATE/DELETE.</li>
-<li><code>insert_tuple_with_indexes</code> inserts into the heap <strong>and</strong> updates every index in one call.</li>
-<li><code>eval_predicate</code> / <code>eval_expr</code> encapsulate expression evaluation (and boolean coercion), so operators never have to fiddle with <code>ScalarValue</code>.</li>
-<li>DDL helpers (<code>create_table</code>, <code>drop_table</code>, <code>create_index</code>, …) proxy the catalog so CREATE/DROP operators stay declarative.</li>
-</ul>
-<p>All of these helpers delegate to the storage engine. By default we ship a TableHeap+B+Tree engine, but research exercises can implement their own engine and plug it into the context without modifying operators.</p>
-<p>This design cleanly separates the operator's logic from the transactional context it runs in.</p>
-<h2 id="3-anatomy-of-physical-operators"><a class="header" href="#3-anatomy-of-physical-operators">3. Anatomy of Physical Operators</a></h2>
-<p>Data flows <em>up</em> the tree from the leaves (scans) to the root. Let's see how it works by examining a few key operators.</p>
-<h3 id="leaf-operator-physicalseqscan"><a class="header" href="#leaf-operator-physicalseqscan">Leaf Operator: <code>PhysicalSeqScan</code></a></h3>
-<p>A sequential scan is at the leaf of a plan tree. It's responsible for reading tuples from a table on disk.</p>
-<ul>
-<li><strong><code>init()</code></strong>: It acquires an <code>IntentionShared</code> lock on the table and creates a <code>TableIterator</code> for the table heap.</li>
-<li><strong><code>next()</code></strong>: In a loop, it does the following:
-<ol>
-<li>Pulls the next raw tuple <code>(rid, meta, tuple)</code> from the <code>TableIterator</code>.</li>
-<li>Calls <code>context.is_visible(&amp;meta)</code> to perform an <strong>MVCC visibility check</strong> using the transaction's snapshot.</li>
-<li>If the tuple version is visible, it acquires the necessary row lock (e.g., <code>Shared</code> lock) and returns the tuple.</li>
-<li>If the tuple is not visible, it ignores it and loops to get the next one.</li>
-</ol>
-</li>
-</ul>
-<h3 id="unary-operator-physicalfilter"><a class="header" href="#unary-operator-physicalfilter">Unary Operator: <code>PhysicalFilter</code></a></h3>
-<p>A filter has one child operator (its <code>input</code>). It implements a <code>WHERE</code> clause.</p>
-<ul>
-<li><strong><code>next()</code></strong>: Its logic is a simple, tight loop:
-<ol>
-<li>It calls <code>self.input.next()</code> to get a tuple from its child.</li>
-<li>If the child returns <code>None</code>, the filter is also exhausted and returns <code>None</code>.</li>
-<li>If it receives a tuple, it evaluates its predicate expression (e.g., <code>age &gt; 30</code>) against the tuple.</li>
-<li>If the predicate evaluates to <code>true</code>, it returns the tuple. Otherwise, it loops back to step 1.</li>
-</ol>
-</li>
-</ul>
-<h3 id="binary-operator-physicalnestedloopjoin"><a class="header" href="#binary-operator-physicalnestedloopjoin">Binary Operator: <code>PhysicalNestedLoopJoin</code></a></h3>
-<p>A join has two children: a left (outer) and a right (inner).</p>
-<ul>
-<li><strong><code>next()</code></strong>: It implements the classic nested loop join algorithm:
-<ol>
-<li>Fetch one tuple from the <strong>outer</strong> (left) child and hold onto it.</li>
-<li>Enter a loop: fetch tuples one by one from the <strong>inner</strong> (right) child.</li>
-<li>For each inner tuple, combine it with the held outer tuple and evaluate the join condition. If it matches, return the combined tuple.</li>
-<li>When the inner child is exhausted, <strong>rewind it</strong> by calling <code>self.right_input.init()</code> again.</li>
-<li>Go back to step 1 to fetch the <em>next</em> tuple from the outer child.</li>
-<li>Repeat until the outer child is also exhausted.</li>
-</ol>
-</li>
-</ul>
-<h2 id="4-putting-it-all-together"><a class="header" href="#4-putting-it-all-together">4. Putting It All Together</a></h2>
-<p>Consider the query <code>SELECT name FROM users WHERE age &gt; 30</code>. The physical plan is <code>Projection -&gt; Filter -&gt; SeqScan</code>.</p>
-<ol>
-<li>The <code>ExecutionEngine</code> calls <code>next()</code> on the <code>Projection</code> operator.</li>
-<li>The <code>Projection</code> operator needs a tuple, so it calls <code>next()</code> on its child, <code>Filter</code>.</li>
-<li>The <code>Filter</code> operator needs a tuple, so it calls <code>next()</code> on its child, <code>SeqScan</code>.</li>
-<li>The <code>SeqScan</code> operator fetches a raw tuple from the <code>TableHeap</code>, checks its MVCC visibility, and finds a visible tuple for a user with <code>age = 25</code>.</li>
-<li><code>SeqScan</code> returns this tuple up to <code>Filter</code>.</li>
-<li><code>Filter</code> evaluates <code>age &gt; 30</code> on the tuple. It's false, so it loops, calling <code>SeqScan.next()</code> again.</li>
-<li><code>SeqScan</code> finds another visible tuple, this time for a user with <code>age = 40</code> and <code>name = 'Alice'</code>.</li>
-<li><code>SeqScan</code> returns this tuple up to <code>Filter</code>.</li>
-<li><code>Filter</code> evaluates <code>age &gt; 30</code>. It's true! It returns the tuple for Alice up to <code>Projection</code>.</li>
-<li><code>Projection</code> takes the full tuple for Alice, creates a new tuple containing only the <code>name</code> column (<code>'Alice'</code>), and returns this new tuple as the result.</li>
-</ol>
-<p>This process repeats, with tuples flowing up the tree one at a time, until the <code>SeqScan</code> operator runs out of pages and returns <code>None</code>, which then propagates up the tree, signaling the end of execution.</p>
 <hr />
-<h2 id="for-study--discussion-7"><a class="header" href="#for-study--discussion-7">For Study &amp; Discussion</a></h2>
-<ol>
-<li>
-<p><strong>Push vs. Pull Models</strong>: The Volcano model is a "pull-based" model. An alternative is a "push-based" model, where operators push their results to their parents as soon as they are ready. What are the potential advantages and disadvantages of each model, particularly concerning cache efficiency and control flow?</p>
+<h2 id="teaching-ideas-11"><a class="header" href="#teaching-ideas-11">Teaching Ideas</a></h2>
+<ul>
+<li>Tune <code>MvccVacuumConfig::batch_limit</code> and chart how quickly old tuple versions disappear.</li>
+<li>Disable a worker in tests to show why unflushed WAL or missing checkpoints lengthen
+recovery.</li>
+<li>Enable <code>RUST_LOG=background=info</code> to trace how these tasks complement foreground load.</li>
+</ul>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="configuration--runtime-options"><a class="header" href="#configuration--runtime-options">Configuration &amp; Runtime Options</a></h1>
+<p><code>src/config/</code> centralizes tunables used by <code>DatabaseOptions</code>, the CLI/HTTP front-ends, and
+background workers. Keeping knobs in one place makes it easy to demonstrate how WAL,
+buffering, or vacuum behavior changes under different settings.</p>
+<hr />
+<h2 id="key-types"><a class="header" href="#key-types">Key Types</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Type</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>DatabaseOptions</code></td><td>Top-level options when constructing a database (WAL config, default isolation, etc.).</td></tr>
+<tr><td><code>WalOptions</code></td><td>WAL directory, segment size, flush strategy, writer interval, sync mode.</td></tr>
+<tr><td><code>IndexVacuumConfig</code> / <code>MvccVacuumConfig</code></td><td>Frequency/batch settings for background cleanup tasks.</td></tr>
+<tr><td><code>BufferPoolConfig</code></td><td>Optional overrides for pool size, TinyLFU, and replacement policy details.</td></tr>
+</tbody></table>
+</div>
+<hr />
+<h2 id="usage"><a class="header" href="#usage">Usage</a></h2>
+<ul>
+<li>CLI/HTTP front-ends parse env vars or config files into <code>DatabaseOptions</code> and pass them
+to <code>Database::new_*</code>.</li>
+<li>During <code>bootstrap_storage</code>, the database wires these options into <code>WalManager</code>,
+<code>DiskScheduler</code>, and <code>BackgroundWorkers</code>.</li>
+<li>Workers and execution components receive <code>Arc</code> references to the relevant configs so
+they can adapt at runtime without global state.</li>
+</ul>
+<hr />
+<h2 id="teaching-ideas-12"><a class="header" href="#teaching-ideas-12">Teaching Ideas</a></h2>
+<ul>
+<li>Toggle <code>WalOptions::synchronous_commit</code> to discuss commit latency vs durability.</li>
+<li>Shrink the buffer pool to highlight eviction behavior under different replacement
+policies.</li>
+<li>Adjust <code>MvccVacuumConfig</code> intervals and measure how vacuum frequency affects foreground
+write throughput.</li>
+</ul>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="front-ends-cli--http"><a class="header" href="#front-ends-cli--http">Front-Ends (CLI / HTTP)</a></h1>
+<p>The <code>bin/</code> directory contains the user-facing entry points. Both binaries embed the same
+<code>Database</code> type, so they demonstrate how the core engine can power different UIs.</p>
+<div class="table-wrapper"><table><thead><tr><th>Binary</th><th>Purpose</th></tr></thead><tbody>
+<tr><td><code>client.rs</code></td><td>Interactive CLI (REPL) that reads SQL, executes it, and prints tabular output.</td></tr>
+<tr><td><code>server.rs</code></td><td>HTTP + JSON API for integration tests or web UIs.</td></tr>
+</tbody></table>
+</div>
+<hr />
+<h2 id="cli-binclientrs"><a class="header" href="#cli-binclientrs">CLI (<code>bin/client.rs</code>)</a></h2>
+<ul>
+<li>Uses <code>rustyline</code> to provide history, multi-line editing, and familiar shell shortcuts.</li>
+<li>Each command calls <code>database.run(sql)</code> and formats the resulting <code>Vec&lt;Tuple&gt;</code>.</li>
+<li>Supports meta commands (e.g., <code>.tables</code>) that expose catalog metadata—great for
+teaching how logical objects map to physical handles.</li>
+</ul>
+<h2 id="http-binserverrs"><a class="header" href="#http-binserverrs">HTTP (<code>bin/server.rs</code>)</a></h2>
+<ul>
+<li>Built with <code>axum</code>/<code>hyper</code> (depending on the current <code>Cargo.toml</code>), exposing endpoints such as:
+<ul>
+<li><code>POST /query</code> – run arbitrary SQL and return rows or an error payload.</li>
+<li>Health/metrics endpoints—which you can extend in labs to surface background worker
+status or buffer metrics.</li>
+</ul>
 </li>
-<li>
-<p><strong>Blocking vs. Non-Blocking Operators</strong>: Some operators, like <code>PhysicalFilter</code>, can produce their first output row as soon as they receive their first input row. These are <strong>non-blocking</strong>. Other operators, like <code>PhysicalSort</code>, must consume their <em>entire</em> input before they can produce even a single row of output. These are <strong>blocking</strong>. What is the impact of blocking operators on query latency and memory usage?</p>
-</li>
-<li>
-<p><strong>Programming Exercise</strong>: The current <code>PhysicalNestedLoopJoin</code> is simple but can be inefficient as it re-scans the entire inner table for every outer row. Implement a <code>PhysicalBlockNestedLoopJoin</code> operator. This version would read a <em>block</em> (a small batch) of tuples from the outer table into an in-memory buffer, and then iterate through the inner table once for that entire block. This can significantly reduce the number of times the inner table needs to be scanned.</p>
-</li>
-<li>
-<p><strong>Programming Exercise</strong>: Implement the <code>PhysicalLimit</code> operator. Its <code>next()</code> method should:
-a.  Keep an internal counter.
-b.  If the counter is less than the <code>offset</code>, pull and discard tuples from its child.
-c.  If the counter is between <code>offset</code> and <code>offset + limit</code>, pull a tuple from its child and return it.
-d.  Once the limit is reached, it should stop pulling from its child and return <code>None</code> for all subsequent calls. This is important for efficiency, as it stops the execution of the entire sub-tree below it.</p>
-</li>
-</ol>
+<li>Configuration comes from <code>QUILL_DB_FILE</code>, <code>QUILL_HTTP_ADDR</code>, <code>PORT</code>, etc., mirroring
+how production services inject settings.</li>
+</ul>
+<hr />
+<h2 id="teaching-ideas-13"><a class="header" href="#teaching-ideas-13">Teaching Ideas</a></h2>
+<ul>
+<li>Extend the CLI with <code>\describe table</code> to practice catalog lookups.</li>
+<li>Add transaction endpoints (BEGIN/COMMIT) to the HTTP server to demonstrate how
+<code>SessionContext</code> scopes transactions per connection.</li>
+<li>Combine CLI interaction with <code>RUST_LOG</code> tracing to walk through the entire query
+lifecycle.</li>
+</ul>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="testing--documentation"><a class="header" href="#testing--documentation">Testing &amp; Documentation</a></h1>
+<p>QuillSQL is intended for teaching, so the repo invests heavily in examples and automated
+verification. The <code>tests/</code> tree and this mdBook work together to illustrate every module.</p>
+<hr />
+<h2 id="test-suite"><a class="header" href="#test-suite">Test Suite</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Location</th><th>Purpose</th></tr></thead><tbody>
+<tr><td><code>tests/sql_example/*.slt</code></td><td><a href="https://www.sqlite.org/sqllogictest.html">sqllogictest</a> suites covering DDL, DML, transactions, and indexes.</td></tr>
+<tr><td><code>tests/transaction_tests.rs</code></td><td>Rust unit tests that stress MVCC visibility, lock conflicts, and isolation semantics.</td></tr>
+<tr><td><code>tests/storage_*</code></td><td>Component tests for heap/index/buffer internals—perfect references for lab exercises.</td></tr>
+</tbody></table>
+</div>
+<p>Common commands:</p>
+<pre><code class="language-bash">cargo test -q
+# focused run
+cargo test tests::transaction_tests::repeatable_read_sees_consistent_snapshot_after_update -- --nocapture
+</code></pre>
+<p>For long-running suites, wrap with <code>timeout</code> to guard against hangs.</p>
+<hr />
+<h2 id="documentation-mdbook"><a class="header" href="#documentation-mdbook">Documentation (mdBook)</a></h2>
+<ul>
+<li>The <code>docs/</code> directory is an mdBook; run <code>mdbook serve docs</code> to browse locally.</li>
+<li>Each module, including this page, has a dedicated chapter so instructors can teach
+subsystem by subsystem.</li>
+<li>Anchor chapters such as <code>architecture.md</code>, <code>transactions.md</code>, and <code>wal.md</code> walk through
+end-to-end flows and subsystem deep dives.</li>
+</ul>
+<hr />
+<h2 id="teaching-ideas-14"><a class="header" href="#teaching-ideas-14">Teaching Ideas</a></h2>
+<ul>
+<li>Require sqllogictest additions alongside code changes to reinforce “tests as docs”.</li>
+<li>Use the mdBook site during lectures to connect diagrams with source files.</li>
+<li>Assign “doc walk-through” tasks where students extend diagrams or add experiment
+instructions to existing chapters.</li>
+</ul>
 
                     </main>
 

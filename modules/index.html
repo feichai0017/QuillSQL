@@ -155,31 +155,70 @@
 
                 <div id="content" class="content">
                     <main>
-                        <h1 id="indexes"><a class="header" href="#indexes">Indexes</a></h1>
-<p>Indexes are crucial for database performance. They are redundant data structures that allow the system to find rows matching specific criteria quickly, without having to scan the entire table. While indexes speed up queries (reads), they incur a cost during data modification (writes), as both the table and its indexes must be updated.</p>
-<p>QuillSQL currently provides a <code>BPlusTreeIndex</code>.</p>
+                        <h1 id="index-module"><a class="header" href="#index-module">Index Module</a></h1>
+<p>Indexes live in <code>src/storage/index/</code>. QuillSQL currently ships a B+Tree (B-link variant)
+that is exposed to execution via <code>IndexHandle</code>. Indexes allow point lookups and range
+scans in O(log n), dramatically reducing the need for full table scans.</p>
+<hr />
+<h2 id="responsibilities"><a class="header" href="#responsibilities">Responsibilities</a></h2>
+<ul>
+<li>Maintain an ordered key → <code>RecordId</code> mapping per indexed table.</li>
+<li>Support point probes, range scans, insert/update/delete maintenance.</li>
+<li>Cooperate with MVCC: entries reference heap tuples while visibility checks remain in
+execution/transaction code.</li>
+<li>Provide <code>IndexHandle::range_scan</code>, returning a <code>TupleStream</code> so physical operators don’t
+need to know tree internals.</li>
+</ul>
+<hr />
+<h2 id="directory-layout"><a class="header" href="#directory-layout">Directory Layout</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Path</th><th>Purpose</th><th>Key Types</th></tr></thead><tbody>
+<tr><td><code>btree_index.rs</code></td><td>Core B+Tree, page formats, insert/delete logic.</td><td><code>BPlusTreeIndex</code></td></tr>
+<tr><td><code>btree_iterator.rs</code></td><td>Range-scan iterator with sibling traversal.</td><td><code>TreeIndexIterator</code></td></tr>
+<tr><td><code>btree_codec.rs</code></td><td>Page encode/decode utilities.</td><td><code>BPlusTreeLeafPageCodec</code></td></tr>
+</tbody></table>
+</div>
+<hr />
 <h2 id="key-concepts"><a class="header" href="#key-concepts">Key Concepts</a></h2>
+<h3 id="b-link-structure"><a class="header" href="#b-link-structure">B-link Structure</a></h3>
+<p>Each leaf stores a pointer to its right sibling. Iterators use this to keep scanning even
+if a concurrent split occurs, avoiding restarts from the root and enabling latch-free
+range scans.</p>
+<h3 id="latch-crabbing"><a class="header" href="#latch-crabbing">Latch Crabbing</a></h3>
+<p>Insert/delete operations climb the tree with shared latches and upgrade only when
+necessary (e.g., right before splitting), reducing contention.</p>
+<h3 id="range-scan--tuplestream"><a class="header" href="#range-scan--tuplestream">Range Scan → TupleStream</a></h3>
+<p><code>IndexHandle::range_scan</code> wraps <code>TreeIndexIterator</code> and automatically fetches heap tuples,
+returning <code>(rid, meta, tuple)</code> triples. Execution remains storage-agnostic.</p>
+<h3 id="garbage-signals"><a class="header" href="#garbage-signals">Garbage Signals</a></h3>
+<p><code>BPlusTreeIndex::note_potential_garbage</code> counts invisible keys; background index vacuum
+consults the counter plus <code>IndexVacuumConfig</code> before pruning.</p>
+<hr />
+<h2 id="interactions"><a class="header" href="#interactions">Interactions</a></h2>
 <ul>
-<li>
-<p><strong>Data Structure</strong>: The index is built using a B+Tree, a self-balancing tree data structure that maintains sorted data and allows for efficient insertion, deletion, and search operations (typically in O(log n) time).</p>
-</li>
-<li>
-<p><strong>Index Keys</strong>: The B+Tree stores key-value pairs. The "key" is the value from the indexed column(s) (e.g., a user's ID), and the "value" is the <code>RecordId</code> (RID) of the row containing that key. This allows the database to first find the key in the B+Tree and then use the RID to immediately locate the full row data on its data page.</p>
-</li>
-<li>
-<p><strong>Concurrency Control</strong>: The B+Tree implementation must be highly concurrent. QuillSQL's implementation uses advanced techniques like <strong>B-link (or B-link tree)</strong> page connections and <strong>latch-crabbing</strong> to allow multiple readers and writers to access the tree simultaneously with minimal contention.</p>
-</li>
+<li><strong>Catalog</strong> – <code>Catalog::create_index</code> registers the index with <code>IndexRegistry</code>; execution
+fetches <code>Arc&lt;dyn IndexHandle&gt;</code> via the registry.</li>
+<li><strong>Execution</strong> – <code>PhysicalIndexScan</code> uses <code>ExecutionContext::index_stream</code>; DML operators
+call <code>insert_tuple_with_indexes</code> so heap writes and index maintenance stay in sync.</li>
+<li><strong>Transaction/MVCC</strong> – heaps store transaction metadata; indexes just reference RIDs, so
+MVCC visibility is enforced when tuples are materialised.</li>
+<li><strong>Recovery</strong> – WAL contains <code>IndexInsert/IndexDelete</code> records to replay structural
+changes after crashes.</li>
 </ul>
-<p>This section contains:</p>
+<hr />
+<h2 id="teaching-ideas"><a class="header" href="#teaching-ideas">Teaching Ideas</a></h2>
 <ul>
-<li><strong><a href="../index/btree_index.html">B+Tree</a></strong>: A look at the classic B+Tree data structure.</li>
+<li>Build a covering index example to show how avoiding heap lookups improves latency.</li>
+<li>Instrument <code>TreeIndexIterator</code> to visualise sibling traversal during range scans.</li>
+<li>Compare SeqScan vs IndexScan on selective predicates to highlight indexing benefits.</li>
 </ul>
+<hr />
+<p>Further reading: <a href="../index/btree_index.html">B+Tree internals</a></p>
 
                     </main>
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
-                            <a rel="prev" href="../storage/table_heap.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                            <a rel="prev" href="../buffer/buffer_pool.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                                 <i class="fa fa-angle-left"></i>
                             </a>
 
@@ -193,7 +232,7 @@
             </div>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
-                    <a rel="prev" href="../storage/table_heap.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                    <a rel="prev" href="../buffer/buffer_pool.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                         <i class="fa fa-angle-left"></i>
                     </a>
 

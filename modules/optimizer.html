@@ -155,21 +155,62 @@
 
                 <div id="content" class="content">
                     <main>
-                        <h1 id="query-optimizer"><a class="header" href="#query-optimizer">Query Optimizer</a></h1>
-<p>A naive, direct translation of a SQL query into an execution plan is often dramatically inefficient. The <strong>Query Optimizer</strong> is a critical stage in the query processing pipeline that rearranges and transforms the initial logical plan into an equivalent, but far cheaper, plan to execute.</p>
-<h2 id="core-concepts"><a class="header" href="#core-concepts">Core Concepts</a></h2>
+                        <h1 id="optimizer-module"><a class="header" href="#optimizer-module">Optimizer Module</a></h1>
+<p><code>src/optimizer/</code> contains a lightweight, teaching-friendly rule engine. It rewrites
+<code>LogicalPlan</code> trees into cheaper equivalents without requiring a full cost-based
+framework.</p>
+<hr />
+<h2 id="responsibilities"><a class="header" href="#responsibilities">Responsibilities</a></h2>
 <ul>
-<li>
-<p><strong>Rule-Based Optimization</strong>: QuillSQL uses a rule-based optimizer. It applies a series of pre-defined, heuristic rules to the logical plan to improve it. This is in contrast to a cost-based optimizer, which would estimate the "cost" of many possible plans and choose the cheapest one.</p>
-</li>
-<li>
-<p><strong>Logical Transformations</strong>: The key insight is that many different logical plans can produce the exact same result. For example, filtering data before a join is usually much faster than joining two large tables and filtering the result, but the final output is identical. The optimizer's job is to find and apply these beneficial transformations.</p>
-</li>
+<li>Define the <code>OptimizerRule</code> trait (“match → rewrite”).</li>
+<li>Ship built-in rules such as predicate pushdown, projection pruning, and limit pushdown.</li>
+<li>Provide a pipeline (<code>LogicalOptimizer</code>) that repeatedly applies rules until reaching a
+fixpoint, while remaining extensible for future cost models.</li>
 </ul>
-<p>This section contains:</p>
+<hr />
+<h2 id="directory-layout"><a class="header" href="#directory-layout">Directory Layout</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Path</th><th>Description</th><th>Key Types</th></tr></thead><tbody>
+<tr><td><code>mod.rs</code></td><td>Optimizer entry point.</td><td><code>LogicalOptimizer</code></td></tr>
+<tr><td><code>rule.rs</code></td><td>Trait + shared helpers.</td><td><code>OptimizerRule</code></td></tr>
+<tr><td><code>rules/*</code></td><td>Concrete rewrites.</td><td><code>PushDownFilter</code>, <code>PushDownLimit</code>, …</td></tr>
+</tbody></table>
+</div>
+<hr />
+<h2 id="how-it-works"><a class="header" href="#how-it-works">How It Works</a></h2>
+<ol>
+<li><code>LogicalOptimizer::optimize(plan)</code> iterates through the registered rule list.</li>
+<li>Each rule implements <code>fn apply(&amp;LogicalPlan) -&gt; Option&lt;LogicalPlan&gt;</code>. Returning <code>Some</code>
+means the rule fired; the pipeline restarts to reach a fixpoint.</li>
+<li>Rules are pure functions, which keeps them easy to unit test and reason about.</li>
+</ol>
+<p>Examples:</p>
 <ul>
-<li><strong><a href="./../optimizer/rules.html">Rule-Based Optimization</a></strong>: A deep dive into how the rule-based optimizer works, using the <code>PushDownLimit</code> rule as a concrete example.</li>
+<li><strong>PushDownFilter</strong> moves filters below scans/joins to reduce input size sooner.</li>
+<li><strong>PushDownLimit</strong> applies LIMIT before expensive joins/sorts when safe.</li>
+<li><strong>PruneProjection</strong> removes unused columns so execution/storage decode less data.</li>
 </ul>
+<hr />
+<h2 id="interactions"><a class="header" href="#interactions">Interactions</a></h2>
+<ul>
+<li><strong>LogicalPlan</strong> – the optimizer only sees logical nodes; physical/storage layers remain
+untouched.</li>
+<li><strong>Catalog / Statistics</strong> – current rules are heuristic, but <code>TableStatistics</code> is
+available for students to experiment with cost-based decisions (e.g., choose index scan
+when selectivity is low).</li>
+<li><strong>Execution</strong> – leaner logical plans translate into simpler physical plans (e.g.,
+predicate pushdown allows <code>PhysicalSeqScan</code> to discard rows earlier).</li>
+</ul>
+<hr />
+<h2 id="teaching-ideas"><a class="header" href="#teaching-ideas">Teaching Ideas</a></h2>
+<ul>
+<li>Implement a new rule (join reordering, constant folding) and use <code>RUST_LOG=trace</code> to
+compare plan dumps before/after.</li>
+<li>Discuss pipeline ordering—swap rule order and observe different outcomes.</li>
+<li>Prototype a tiny cost estimator using row counts from <code>TableStatistics</code> to decide on
+index scans vs sequential scans.</li>
+</ul>
+<hr />
+<p>Further reading: <a href="../optimizer/rules.html">Rule-Based Optimization</a></p>
 
                     </main>
 

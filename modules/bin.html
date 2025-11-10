@@ -3,7 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>Query Plan - QuillSQL Internals</title>
+        <title>Front-Ends (CLI / HTTP) - QuillSQL Internals</title>
 
 
         <!-- Custom HTML head -->
@@ -155,74 +155,53 @@
 
                 <div id="content" class="content">
                     <main>
-                        <h1 id="query-planner-module"><a class="header" href="#query-planner-module">Query Planner Module</a></h1>
-<p><code>src/plan/</code> bridges parsed SQL and executable operators. It converts the AST into a
-logical plan, applies rewrites (via the optimizer), and finally emits a physical plan
-(<code>PhysicalPlan</code>) that the Volcano engine can run.</p>
-<hr />
-<h2 id="responsibilities"><a class="header" href="#responsibilities">Responsibilities</a></h2>
-<ol>
-<li><strong>LogicalPlanner</strong> – walks the AST, binds table/column names using <code>PlannerContext</code>,
-performs type checking, and builds a <code>LogicalPlan</code> tree.</li>
-<li><strong>PlannerContext</strong> – exposes catalog lookups plus scope information for CTEs, subqueries,
-and aliases.</li>
-<li><strong>PhysicalPlanner</strong> – lowers an optimized <code>LogicalPlan</code> into a tree of Volcano operators.</li>
-</ol>
-<hr />
-<h2 id="directory-layout"><a class="header" href="#directory-layout">Directory Layout</a></h2>
-<div class="table-wrapper"><table><thead><tr><th>Path</th><th>Description</th><th>Key Types</th></tr></thead><tbody>
-<tr><td><code>logical_plan.rs</code></td><td>Logical algebra nodes.</td><td><code>LogicalPlan</code>, <code>LogicalExpr</code>, <code>JoinType</code></td></tr>
-<tr><td><code>logical_planner.rs</code></td><td>AST → logical transformation.</td><td><code>LogicalPlanner</code></td></tr>
-<tr><td><code>physical_plan.rs</code></td><td><code>PhysicalPlan</code> enum definition.</td><td><code>PhysicalPlan</code>, <code>Physical*</code> structs</td></tr>
-<tr><td><code>physical_planner.rs</code></td><td>Logical → physical lowering.</td><td><code>PhysicalPlanner</code></td></tr>
-<tr><td><code>planner_context.rs</code></td><td>Catalog/scope abstraction.</td><td><code>PlannerContext</code></td></tr>
+                        <h1 id="front-ends-cli--http"><a class="header" href="#front-ends-cli--http">Front-Ends (CLI / HTTP)</a></h1>
+<p>The <code>bin/</code> directory contains the user-facing entry points. Both binaries embed the same
+<code>Database</code> type, so they demonstrate how the core engine can power different UIs.</p>
+<div class="table-wrapper"><table><thead><tr><th>Binary</th><th>Purpose</th></tr></thead><tbody>
+<tr><td><code>client.rs</code></td><td>Interactive CLI (REPL) that reads SQL, executes it, and prints tabular output.</td></tr>
+<tr><td><code>server.rs</code></td><td>HTTP + JSON API for integration tests or web UIs.</td></tr>
 </tbody></table>
 </div>
 <hr />
-<h2 id="workflow"><a class="header" href="#workflow">Workflow</a></h2>
-<ol>
-<li><strong>Name binding</strong> – <code>LogicalPlanner</code> resolves table + column references, creates
-<code>TableReference</code>s, and validates schemas via the catalog.</li>
-<li><strong>Logical tree</strong> – each SQL clause becomes a logical node (FROM → <code>SeqScan</code>, WHERE →
-<code>Filter</code>, GROUP BY → <code>Aggregate</code>, etc.).</li>
-<li><strong>Physical selection</strong> – <code>PhysicalPlanner</code> picks concrete algorithms (sequential scan,
-index scan, nested-loop join, sort, limit …). Because every physical node implements
-<code>VolcanoExecutor</code>, the execution engine can pull tuples immediately.</li>
-</ol>
-<hr />
-<h2 id="interactions"><a class="header" href="#interactions">Interactions</a></h2>
+<h2 id="cli-binclientrs"><a class="header" href="#cli-binclientrs">CLI (<code>bin/client.rs</code>)</a></h2>
 <ul>
-<li><strong>SQL front-end</strong> – provides the AST; helper traits (<code>NormalizedIdent</code>, etc.) keep name
-resolution consistent.</li>
-<li><strong>Catalog</strong> – <code>PlannerContext</code> relies on it to confirm table/index existence and fetch
-schemas.</li>
-<li><strong>Optimizer</strong> – operates purely on <code>LogicalPlan</code>; the planner must emit clean,
-traversable trees so rules can fire.</li>
-<li><strong>Execution</strong> – physical nodes carry <code>TableReference</code>, <code>SchemaRef</code>, and hints that the
-execution engine passes to the storage layer.</li>
+<li>Uses <code>rustyline</code> to provide history, multi-line editing, and familiar shell shortcuts.</li>
+<li>Each command calls <code>database.run(sql)</code> and formats the resulting <code>Vec&lt;Tuple&gt;</code>.</li>
+<li>Supports meta commands (e.g., <code>.tables</code>) that expose catalog metadata—great for
+teaching how logical objects map to physical handles.</li>
+</ul>
+<h2 id="http-binserverrs"><a class="header" href="#http-binserverrs">HTTP (<code>bin/server.rs</code>)</a></h2>
+<ul>
+<li>Built with <code>axum</code>/<code>hyper</code> (depending on the current <code>Cargo.toml</code>), exposing endpoints such as:
+<ul>
+<li><code>POST /query</code> – run arbitrary SQL and return rows or an error payload.</li>
+<li>Health/metrics endpoints—which you can extend in labs to surface background worker
+status or buffer metrics.</li>
+</ul>
+</li>
+<li>Configuration comes from <code>QUILL_DB_FILE</code>, <code>QUILL_HTTP_ADDR</code>, <code>PORT</code>, etc., mirroring
+how production services inject settings.</li>
 </ul>
 <hr />
 <h2 id="teaching-ideas"><a class="header" href="#teaching-ideas">Teaching Ideas</a></h2>
 <ul>
-<li>Implement a new logical operator (e.g., <code>LogicalDistinct</code>) and add the corresponding
-physical operator to trace the full lifecycle.</li>
-<li>Experiment with early projection inside the logical plan and observe its impact on
-downstream operators.</li>
-<li>Use <code>pretty_format_logical_plan</code>/<code>physical_plan</code> dumps to visualise rewrites before and
-after optimizer passes.</li>
+<li>Extend the CLI with <code>\describe table</code> to practice catalog lookups.</li>
+<li>Add transaction endpoints (BEGIN/COMMIT) to the HTTP server to demonstrate how
+<code>SessionContext</code> scopes transactions per connection.</li>
+<li>Combine CLI interaction with <code>RUST_LOG</code> tracing to walk through the entire query
+lifecycle.</li>
 </ul>
-<hr />
-<p>Further reading: <a href="../plan/lifecycle.html">The Lifecycle of a Query</a></p>
 
                     </main>
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
-                            <a rel="prev" href="../modules/expression.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                            <a rel="prev" href="../modules/config.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                                 <i class="fa fa-angle-left"></i>
                             </a>
 
-                            <a rel="next prefetch" href="../plan/lifecycle.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                            <a rel="next prefetch" href="../modules/tests.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                                 <i class="fa fa-angle-right"></i>
                             </a>
 
@@ -232,11 +211,11 @@ after optimizer passes.</li>
             </div>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
-                    <a rel="prev" href="../modules/expression.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                    <a rel="prev" href="../modules/config.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                         <i class="fa fa-angle-left"></i>
                     </a>
 
-                    <a rel="next prefetch" href="../plan/lifecycle.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                    <a rel="next prefetch" href="../modules/tests.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                         <i class="fa fa-angle-right"></i>
                     </a>
             </nav>

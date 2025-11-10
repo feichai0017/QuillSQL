@@ -156,19 +156,79 @@
                 <div id="content" class="content">
                     <main>
                         <h1 id="buffer-manager"><a class="header" href="#buffer-manager">Buffer Manager</a></h1>
-<p>In any disk-based database, the speed difference between main memory (RAM) and persistent storage (SSD/HDD) is enormous. The <strong>Buffer Manager</strong> is the component designed to solve this problem. It acts as a cache, managing a region of main memory called the <strong>Buffer Pool</strong> and moving data pages between disk and memory as needed.</p>
-<p>Its primary goal is to minimize disk I/O by keeping frequently accessed pages in memory.</p>
-<p>This section is divided into the following parts:</p>
+<p>The buffer manager (<code>src/buffer/</code>) implements QuillSQL’s shared buffer pool, bridging the
+speed gap between RAM and disk. It lets storage/execution read and write pages safely
+while coordinating with WAL and asynchronous I/O.</p>
+<hr />
+<h2 id="responsibilities"><a class="header" href="#responsibilities">Responsibilities</a></h2>
 <ul>
-<li><strong><a href="../buffer/page.html">Page &amp; Page Guards</a></strong>: Explains the core concepts of pinning and the RAII guards used to safely access pages.</li>
-<li><strong><a href="../buffer/buffer_pool.html">The Buffer Pool</a></strong>: A deep dive into the architecture and lifecycle of a page request, including the page table, replacer, and concurrency.</li>
+<li>Maintain a fixed-size set of page frames caching <code>TableHeap</code> and B+Tree pages.</li>
+<li>Expose RAII-style guards (pin/unpin) that enforce safe concurrent access.</li>
+<li>Keep the page table, replacement policy, dirty-page tracking, and WAL coordination in
+sync.</li>
+<li>Submit async I/O through <code>DiskScheduler</code>.</li>
 </ul>
+<hr />
+<h2 id="directory-layout"><a class="header" href="#directory-layout">Directory Layout</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Path</th><th>Description</th><th>Key Types</th></tr></thead><tbody>
+<tr><td><code>buffer_manager.rs</code></td><td>Core buffer pool.</td><td><code>BufferManager</code>, <code>BufferFrame</code></td></tr>
+<tr><td><code>page.rs</code></td><td>Guard types and pin/unpin logic.</td><td><code>ReadPageGuard</code>, <code>WritePageGuard</code></td></tr>
+<tr><td><code>replacer.rs</code></td><td>LRU-K + TinyLFU replacement.</td><td><code>Replacer</code></td></tr>
+<tr><td><code>metrics.rs</code></td><td>Optional instrumentation hooks.</td><td><code>BufferMetrics</code></td></tr>
+</tbody></table>
+</div>
+<hr />
+<h2 id="key-mechanisms"><a class="header" href="#key-mechanisms">Key Mechanisms</a></h2>
+<h3 id="guard-model"><a class="header" href="#guard-model">Guard Model</a></h3>
+<ul>
+<li><code>ReadPageGuard</code>, <code>WritePageGuard</code>, and <code>UpgradeableGuard</code> ensure only compatible access
+modes coexist on a page.</li>
+<li>Guards drop automatically to release pins; paired with Rust’s borrow checker, they make
+latch semantics tangible.</li>
+</ul>
+<h3 id="replacement-policy"><a class="header" href="#replacement-policy">Replacement Policy</a></h3>
+<ul>
+<li><strong>LRU-K</strong> tracks the last K touches to protect hot pages from scan pollution.</li>
+<li><strong>TinyLFU</strong> decides whether a new page should enter the cache, offering probabilistic
+admission against noisy workloads.</li>
+</ul>
+<h3 id="wal-coordination"><a class="header" href="#wal-coordination">WAL Coordination</a></h3>
+<ul>
+<li>Before flushing a dirty page, the buffer checks <code>page_lsn</code> and asks <code>WalManager</code> to
+flush up to that LSN (write-ahead rule).</li>
+<li><code>set_wal_manager</code> wires the buffer to WAL so checkpoints can inspect the oldest dirty
+LSN.</li>
+</ul>
+<h3 id="disk-scheduler"><a class="header" href="#disk-scheduler">Disk Scheduler</a></h3>
+<ul>
+<li>All physical reads/writes go through <code>DiskScheduler::submit_*</code>, sharing worker threads
+with WAL and demonstrating the benefits of a unified I/O layer.</li>
+</ul>
+<hr />
+<h2 id="interactions"><a class="header" href="#interactions">Interactions</a></h2>
+<ul>
+<li><strong>Storage engine</strong> – <code>TableHeap</code> and <code>BPlusTreeIndex</code> access pages exclusively through
+the buffer manager.</li>
+<li><strong>Recovery</strong> – checkpoints consult the buffer’s dirty page table to build the ARIES DPT.</li>
+<li><strong>Background writer</strong> – periodically walks <code>dirty_frames</code> to flush pages in the
+background.</li>
+</ul>
+<hr />
+<h2 id="teaching-ideas"><a class="header" href="#teaching-ideas">Teaching Ideas</a></h2>
+<ul>
+<li>Disable TinyLFU via feature flag, rerun sqllogictest, and compare hit rates.</li>
+<li>Swap the replacement policy with CLOCK to experiment with cache algorithms.</li>
+<li>Enable <code>RUST_LOG=buffer=debug</code> and trace the pin/unpin lifecycle of hot pages.</li>
+</ul>
+<hr />
+<p>Further reading: <a href="../buffer/page.html">Page &amp; Page Guards</a>,
+<a href="../buffer/buffer_pool.html">The Buffer Pool</a></p>
 
                     </main>
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
-                            <a rel="prev" href="../contributing.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                            <a rel="prev" href="../storage/table_heap.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                                 <i class="fa fa-angle-left"></i>
                             </a>
 
@@ -182,7 +242,7 @@
             </div>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
-                    <a rel="prev" href="../contributing.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                    <a rel="prev" href="../storage/table_heap.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                         <i class="fa fa-angle-left"></i>
                     </a>
 

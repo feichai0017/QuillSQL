@@ -1,0 +1,445 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Module Overview - QuillSQL Internals</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon.svg">
+        <link rel="shortcut icon" href="../favicon.png">
+        <link rel="stylesheet" href="../css/variables.css">
+        <link rel="stylesheet" href="../css/general.css">
+        <link rel="stylesheet" href="../css/chrome.css">
+        <link rel="stylesheet" href="../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="highlight-css" href="../highlight.css">
+        <link rel="stylesheet" id="tomorrow-night-css" href="../tomorrow-night.css">
+        <link rel="stylesheet" id="ayu-highlight-css" href="../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "../";
+            const default_light_theme = "light";
+            const default_dark_theme = "navy";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="../toc.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="../toc.html"></iframe>
+            </noscript>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                    </div>
+
+                    <h1 class="menu-title">QuillSQL Internals</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="module-overview"><a class="header" href="#module-overview">Module Overview</a></h1>
+<p>This page gives a teaching-friendly tour of every QuillSQL subsystem. Each section
+explains where the code lives (<code>src/&lt;module&gt;</code>), the most important types, and the
+design decisions that make the module fit into the whole system. Read it together
+with <a href="../architecture.html"><code>architecture.md</code></a> for the big-picture data flow.</p>
+<hr />
+<h2 id="1-sql-front-end-srcsql"><a class="header" href="#1-sql-front-end-srcsql">1. SQL Front-End (<code>src/sql</code>)</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Submodule</th><th>Responsibilities</th><th>Key Types / Functions</th></tr></thead><tbody>
+<tr><td><code>lexer.rs</code>, <code>parser.rs</code></td><td>Translate raw SQL into an AST using <code>sqlparser</code> plus Quill-specific extensions.</td><td><code>parse_sql(&amp;str) -&gt; Vec&lt;Statement&gt;</code></td></tr>
+<tr><td><code>ast/mod.rs</code></td><td>Normalises identifiers, handles multi-part names, attaches spans for diagnostics.</td><td><code>NormalizedIdent</code>, <code>ObjectNameExt</code></td></tr>
+<tr><td><code>plan/lowering.rs</code></td><td>Bridges AST → planner structs for DDL extras not in upstream <code>sqlparser</code>.</td><td><code>CreateIndexSpec</code>, <code>ColumnDefExt</code></td></tr>
+</tbody></table>
+</div>
+<p>Implementation notes:</p>
+<ul>
+<li>We intentionally keep the AST “SQL-shaped”. No premature desugaring occurs in the
+parser, which keeps the step-by-step teaching narrative simple: <strong>SQL text → AST →
+logical plan</strong>.</li>
+<li>Error messages bubble up with span information, so labs around parser extensions can
+show students exactly which token misbehaved.</li>
+<li>Suggested exercises: extend the parser with <code>ALTER TABLE</code> or window functions, then
+observe how the new AST nodes flow into the planner layer.</li>
+</ul>
+<hr />
+<h2 id="2-logical-planning-srcplan"><a class="header" href="#2-logical-planning-srcplan">2. Logical Planning (<code>src/plan</code>)</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Component</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>LogicalPlanner</code></td><td>Converts AST nodes into strongly typed <code>LogicalPlan</code> variants. Responsible for type checking, alias resolution, and scope handling.</td></tr>
+<tr><td><code>PlannerContext</code></td><td>Surface for catalog lookups while planning.</td></tr>
+<tr><td><code>PhysicalPlanner</code></td><td>Lowers optimized logical plans into physical Volcano operators (<code>PhysicalPlan</code>).</td></tr>
+</tbody></table>
+</div>
+<p>Highlights:</p>
+<ul>
+<li>Every <code>LogicalPlan</code> variant stores its child plans in <code>Arc</code>, so the tree is cheap to
+clone for optimizer passes or debugging prints.</li>
+<li>Planner enforces column binding rules: scope stacks keep track of aliases, CTEs, and
+correlation so students can see how real compilers resolve identifiers.</li>
+<li>DDL nodes capture <code>TableReference</code> + <code>Schema</code> objects. Later phases use them to skip
+repeated catalog lookups (helpful for labs about metadata caching).</li>
+</ul>
+<hr />
+<h2 id="3-optimizer-srcoptimizer"><a class="header" href="#3-optimizer-srcoptimizer">3. Optimizer (<code>src/optimizer</code>)</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Piece</th><th>Responsibility</th></tr></thead><tbody>
+<tr><td><code>LogicalOptimizer</code></td><td>Applies a pipeline of rule-based rewrites (predicate pushdown, projection pruning, constant folding).</td></tr>
+<tr><td><code>rules</code></td><td>Individual <code>OptimizerRule</code> implementations.</td></tr>
+</tbody></table>
+</div>
+<p>Teaching hooks:</p>
+<ul>
+<li>Each rule implements <code>OptimizerRule::rewrite(&amp;LogicalPlan) -&gt; Option&lt;LogicalPlan&gt;</code>. The
+return type makes it obvious whether a rewrite fired, so labs can instrument hit counts
+or add tracing.</li>
+<li>Because rules are pure functions, students can safely reorder or A/B test heuristics in
+isolation (e.g., “what if we only push predicates below joins when the selectivity
+estimate exceeds X?”).</li>
+<li>Example lab: add constant folding or join commutation, run the sqllogictest suite, and
+compare plan dumps to see new shapes.</li>
+</ul>
+<hr />
+<h2 id="4-execution-engine-srcexecution"><a class="header" href="#4-execution-engine-srcexecution">4. Execution Engine (<code>src/execution</code>)</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Element</th><th>Details</th></tr></thead><tbody>
+<tr><td><code>PhysicalPlan</code></td><td>Enum covering all Volcano operators. Each variant implements <code>VolcanoExecutor</code>.</td></tr>
+<tr><td><code>VolcanoExecutor</code></td><td><code>init(&amp;mut ExecutionContext)</code> and <code>next(&amp;mut ExecutionContext)</code> pair define the iterator model.</td></tr>
+<tr><td><code>ExecutionContext</code></td><td>Supplies catalog access, expression evaluation, and (most importantly) a pluggable <code>StorageEngine</code>.</td></tr>
+</tbody></table>
+</div>
+<p>Design notes:</p>
+<ul>
+<li>Operators stay declarative. They describe <em>what</em> to scan or modify and delegate the
+<em>how</em> to storage handles. For example, <code>PhysicalSeqScan</code> now requests a <code>TupleStream</code>
+via <code>ExecutionContext::table_stream</code>, so it never touches <code>TableHeap</code> internals.</li>
+<li>Helper methods such as <code>eval_predicate</code>, <code>insert_tuple_with_indexes</code>, or
+<code>prepare_row_for_write</code> encapsulate MVCC/locking rules so physical plans remain short.</li>
+<li>ExecutionContext caches <code>TxnContext</code>, making it straightforward to teach isolation
+semantics: examine <code>TxnContext::lock_table</code> and <code>read_visible_tuple</code> to see when locks
+are taken or released.</li>
+<li>Suggested lab: implement a new physical operator (e.g., hash join) by wiring two child
+<code>PhysicalPlan</code>s without ever touching storage-specific code. This highlights the payoff
+of the handle abstraction.</li>
+</ul>
+<hr />
+<h2 id="5-transaction-runtime-srctransaction"><a class="header" href="#5-transaction-runtime-srctransaction">5. Transaction Runtime (<code>src/transaction</code>)</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Type</th><th>Purpose</th></tr></thead><tbody>
+<tr><td><code>TransactionManager</code></td><td>Creates/commits/aborts transactions, manages undo chains, and coordinates WAL durability.</td></tr>
+<tr><td><code>TxnContext</code></td><td>Per-command wrapper passed to execution. Provides MVCC snapshot (<code>TransactionSnapshot</code>), lock helpers, and command ids.</td></tr>
+<tr><td><code>LockManager</code></td><td>Multi-granularity 2PL with deadlock detection.</td></tr>
+</tbody></table>
+</div>
+<p>Deeper dive:</p>
+<ul>
+<li><code>Transaction</code> stores a cached <code>TransactionSnapshot</code> plus its undo records. Students can
+inspect <code>Transaction::set_snapshot</code> to see how Repeatable Read/Serializable keep a
+stable view.</li>
+<li><code>TxnRuntime</code> pairs a transaction with a command id. Every SQL statement increments the
+command id so MVCC can distinguish between tuples created earlier in the same
+transaction vs. the current statement—great for explaining “recent writes are invisible
+during UPDATE scanning”.</li>
+<li><code>LockManager</code> exposes functions like <code>lock_table</code> / <code>lock_row</code>. Internally it keeps a
+wait-for graph and victim selection policy, which makes deadlock detection tangible for
+concurrency lectures.</li>
+<li>Undo entries (<code>UndoRecord</code>) store heap + index data. When an abort occurs the engine
+generates CLRs, demonstrating ARIES-style logical undo.</li>
+</ul>
+<hr />
+<h2 id="6-storage-engine--handles-srcstorage"><a class="header" href="#6-storage-engine--handles-srcstorage">6. Storage Engine &amp; Handles (<code>src/storage</code>)</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Component</th><th>Highlights</th></tr></thead><tbody>
+<tr><td><code>engine.rs</code></td><td>Defines <code>StorageEngine</code>, <code>TableHandle</code>, <code>IndexHandle</code>, <code>TupleStream</code>, and the new <code>ScanOptions</code> / <code>IndexScanRequest</code>.</td></tr>
+<tr><td><code>table_heap</code></td><td>Slotted-page heap with MVCC metadata (<code>TupleMeta</code>, forward/back pointers).</td></tr>
+<tr><td><code>index</code></td><td>B+Tree (B-link) implementation with iterators and codecs.</td></tr>
+</tbody></table>
+</div>
+<p>Key ideas for teaching:
+Topics to emphasise:</p>
+<ul>
+<li><strong>Handle abstraction</strong>: Execution asks the engine for a <code>TableHandle</code>, then calls
+<code>full_scan(ScanOptions)</code> to receive a <code>TupleStream</code>. The default engine simply wraps
+<code>TableHeap</code>/<code>BPlusTreeIndex</code>, but students can plug in their own engines for research.</li>
+<li><strong>TupleStream</strong>: Minimal interface returning <code>(RecordId, TupleMeta, Tuple)</code> triples.
+Operators layer MVCC visibility on top, while the stream hides buffering details.</li>
+<li><strong>ScanOptions</strong>: Carry streaming hints, projection slots, or batch sizes. Even when the
+default heap ignores some hints, the API teaches how modern engines negotiate capabilities.</li>
+<li><code>table_heap</code> demonstrates MVCC version chains (forward/back pointers) and the slotted
+page layout. Encourage students to trace <code>MvccHeap::update</code> alongside WAL entries to
+see how new versions link together.</li>
+<li><code>index/btree_index.rs</code> implements a B-link tree with separate codecs. Scanning via
+<code>TreeIndexIterator</code> shows how to perform lock-free range scans using sibling pointers—
+perfect for advanced systems lectures.</li>
+</ul>
+<hr />
+<h2 id="7-buffer-manager--disk-io-srcbuffer-srcstoragedisk_"><a class="header" href="#7-buffer-manager--disk-io-srcbuffer-srcstoragedisk_">7. Buffer Manager &amp; Disk I/O (<code>src/buffer</code>, <code>src/storage/disk_*</code>)</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Module</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>buffer::BufferManager</code></td><td>Page table + LRU-K/TinyLFU replacer, dirty tracking, guard types for safe borrowing.</td></tr>
+<tr><td><code>storage::disk_scheduler</code></td><td><code>io_uring</code>-powered async I/O. Foreground threads enqueue read/write/fsync commands and await completions.</td></tr>
+<tr><td><code>storage::disk_manager</code></td><td>Thin wrapper for file layout, page enlargement, and durability fences.</td></tr>
+</tbody></table>
+</div>
+<p>Extra details:</p>
+<ul>
+<li>Page guards come in three flavours: read, write, and upgradeable. Each implements <code>Drop</code>
+semantics that release latches automatically, reinforcing RAII patterns.</li>
+<li>Replacement policy combines LRU-K history with TinyLFU admission. Labs can toggle the
+feature flag to measure hit-rate differences under sqllogictest or custom workloads.</li>
+<li>DiskScheduler uses lock-free queues plus dedicated worker tasks. A teaching exercise is
+to run with <code>RUST_LOG=debug</code> and observe how read/write/fsync commands are batched.</li>
+</ul>
+<hr />
+<h2 id="8-recovery--wal-srcrecovery"><a class="header" href="#8-recovery--wal-srcrecovery">8. Recovery &amp; WAL (<code>src/recovery</code>)</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Item</th><th>Notes</th></tr></thead><tbody>
+<tr><td><code>WalManager</code></td><td>Allocates LSNs, buffers log records, drives background WAL writer, and integrates with checkpoints.</td></tr>
+<tr><td><code>RecoveryManager</code></td><td>Implements ARIES analysis/redo/undo. Uses <code>ControlFileManager</code> snapshots to seed restart.</td></tr>
+<tr><td><code>wal_record.rs</code></td><td>Defines logical (<code>HeapInsert</code>, <code>IndexDelete</code>) and physical (<code>PageWrite</code>, <code>PageDelta</code>) records.</td></tr>
+</tbody></table>
+</div>
+<p>Teaching hook:</p>
+<ul>
+<li>WAL and data share the disk scheduler. Students can trace one UPDATE from log append,
+to buffer dirtying, to redo/undo via the exact same <code>RecordId</code>.</li>
+<li>Recovery exports statistics (redo count, loser transactions) so labs can check their
+WAL experiments automatically.</li>
+<li><code>recovery/analysis.rs</code> shows how Dirty Page Table and Active Transaction Table are
+reconstructed—ideal for demystifying ARIES’ first phase.</li>
+<li>Students can implement “logical replay only” or “page image replay” modes by toggling
+the commit record types, then verify behaviour using the provided transaction tests.</li>
+</ul>
+<hr />
+<h2 id="9-background-services-srcbackground"><a class="header" href="#9-background-services-srcbackground">9. Background Services (<code>src/background</code>)</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Worker</th><th>What it does</th></tr></thead><tbody>
+<tr><td>WAL writer</td><td>Flushes WAL buffer at configured cadence.</td></tr>
+<tr><td>Checkpoint</td><td>Captures the Dirty Page Table + Active Transaction Table.</td></tr>
+<tr><td>Buffer writer</td><td>Flushes dirty frames and kicks lazy index cleanup.</td></tr>
+<tr><td>MVCC vacuum</td><td>Reclaims tuple versions older than <code>safe_xmin</code>.</td></tr>
+</tbody></table>
+</div>
+<p>More context:</p>
+<ul>
+<li>Workers share a <code>BackgroundWorkers</code> registry so the database can spawn/stop them as a
+group (handy for tests). The registry exposes <code>shutdown_all()</code> which unit tests call to
+ensure a clean exit.</li>
+<li>Config structs (<code>IndexVacuumConfig</code>, <code>MvccVacuumConfig</code>, etc.) live in <code>src/config</code>
+and are exposed through <code>DatabaseOptions</code> for easy fiddling in labs.</li>
+<li>WAL writer and checkpoint worker simply wrap closures around <code>tokio::task::JoinHandle</code>.
+This design keeps async runtime code out of the core engine, making it simpler for
+students to trace background effects.</li>
+<li>Exercise idea: tweak <code>MvccVacuumConfig::batch_limit</code> and observe how many tuple
+versions stay behind by querying hidden statistics tables.</li>
+</ul>
+<hr />
+<h2 id="10-configuration--session-layer-srcdatabase-srcsession-srcconfig"><a class="header" href="#10-configuration--session-layer-srcdatabase-srcsession-srcconfig">10. Configuration &amp; Session Layer (<code>src/database</code>, <code>src/session</code>, <code>src/config</code>)</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Type</th><th>Role</th></tr></thead><tbody>
+<tr><td><code>Database</code></td><td>Boots disk/WAL/buffer components, runs recovery, wires background workers, and executes SQL strings.</td></tr>
+<tr><td><code>SessionContext</code></td><td>Tracks per-connection defaults (autocommit, isolation) and holds the active transaction handle.</td></tr>
+<tr><td><code>config::*</code></td><td>Central place for WAL, buffer pool, vacuum, and HTTP/CLI tuning knobs.</td></tr>
+</tbody></table>
+</div>
+<p>Extra pointers:</p>
+<ul>
+<li>Front-ends (<code>bin/client</code>, <code>bin/server</code>) both embed a <code>Database</code>, proving that the core
+library can serve multiple UIs without change.</li>
+<li><code>DatabaseOptions</code> show how to construct dev/test setups (temporary files, alternate WAL
+directories) in a few lines.</li>
+<li><code>session::SessionContext</code> demonstrates auto-commit semantics: it lazily starts a
+transaction and uses <code>TransactionScope</code> to interpret <code>SET TRANSACTION</code> statements.</li>
+<li>Configuration structs derive <code>Clone + Debug</code>, making them easy to print in labs or
+feed from environment variables (HTTP server uses <code>QUILL_DB_FILE</code>, <code>PORT</code>, etc.).</li>
+</ul>
+<hr />
+<h2 id="11-testing--documentation-tests-docs"><a class="header" href="#11-testing--documentation-tests-docs">11. Testing &amp; Documentation (<code>tests/</code>, <code>docs/</code>)</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Area</th><th>Purpose</th></tr></thead><tbody>
+<tr><td><code>tests/sql_example/*.slt</code></td><td>sqllogictest suites for SQL coverage.</td></tr>
+<tr><td><code>tests/transaction_tests.rs</code></td><td>Unit tests for MVCC invariants, locking, and visibility.</td></tr>
+<tr><td><code>docs/</code></td><td>This mdBook. Every module adds its own deep-dive chapter, making it straightforward for students to jump from code to guided explanations.</td></tr>
+</tbody></table>
+</div>
+<p>Testing strategy:</p>
+<ul>
+<li>Developers can run <code>cargo test -q</code> for fast feedback. Long-running suites can be wrapped
+with <code>timeout</code> as suggested in <code>AGENTS.md</code>.</li>
+<li>Example-driven docs (like this page) mirror the repository layout, so onboarding students
+can find code and tests with minimal guesswork.</li>
+<li>Encourage students to add sqllogictest cases alongside code changes. Because each case lives
+in <code>tests/sql_example</code>, git diffs double as documentation.</li>
+<li>For modules with heavy concurrency (lock manager, WAL), pair unit tests with tracing: the
+CI logs become walkthroughs for tricky paths.</li>
+</ul>
+<hr />
+<h2 id="12-suggested-reading-order-for-learners"><a class="header" href="#12-suggested-reading-order-for-learners">12. Suggested Reading Order for Learners</a></h2>
+<ol>
+<li><strong>Introduction ➜ Architecture</strong> – get the 10,000ft view.</li>
+<li><strong>Module Overview (this page)</strong> – map names to directories.</li>
+<li><strong>Execution + Storage chapters</strong> – understand TupleStreams, handles, and MVCC.</li>
+<li><strong>Recovery + Transaction</strong> – see how WAL &amp;&amp; MVCC interlock.</li>
+<li><strong>Buffer, Index, Background</strong> – dive into advanced systems topics once the basics stick.</li>
+</ol>
+<p>Treat this document as a living index: update it whenever a subsystem gains new entry
+points (e.g., asynchronous scans, new index types) so future contributors always know
+where to look next.</p>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../architecture.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="../contributing.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../architecture.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="../contributing.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+
+        <script src="../clipboard.min.js"></script>
+        <script src="../highlight.js"></script>
+        <script src="../book.js"></script>
+
+        <!-- Custom JS scripts -->
+        <script src="../mermaid.min.js"></script>
+        <script src="../mermaid-init.js"></script>
+
+
+
+    </div>
+    </body>
+</html>

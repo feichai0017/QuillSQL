@@ -3,7 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>Query Plan - QuillSQL Internals</title>
+        <title>Configuration - QuillSQL Internals</title>
 
 
         <!-- Custom HTML head -->
@@ -155,74 +155,48 @@
 
                 <div id="content" class="content">
                     <main>
-                        <h1 id="query-planner-module"><a class="header" href="#query-planner-module">Query Planner Module</a></h1>
-<p><code>src/plan/</code> bridges parsed SQL and executable operators. It converts the AST into a
-logical plan, applies rewrites (via the optimizer), and finally emits a physical plan
-(<code>PhysicalPlan</code>) that the Volcano engine can run.</p>
+                        <h1 id="configuration--runtime-options"><a class="header" href="#configuration--runtime-options">Configuration &amp; Runtime Options</a></h1>
+<p><code>src/config/</code> centralizes tunables used by <code>DatabaseOptions</code>, the CLI/HTTP front-ends, and
+background workers. Keeping knobs in one place makes it easy to demonstrate how WAL,
+buffering, or vacuum behavior changes under different settings.</p>
 <hr />
-<h2 id="responsibilities"><a class="header" href="#responsibilities">Responsibilities</a></h2>
-<ol>
-<li><strong>LogicalPlanner</strong> – walks the AST, binds table/column names using <code>PlannerContext</code>,
-performs type checking, and builds a <code>LogicalPlan</code> tree.</li>
-<li><strong>PlannerContext</strong> – exposes catalog lookups plus scope information for CTEs, subqueries,
-and aliases.</li>
-<li><strong>PhysicalPlanner</strong> – lowers an optimized <code>LogicalPlan</code> into a tree of Volcano operators.</li>
-</ol>
-<hr />
-<h2 id="directory-layout"><a class="header" href="#directory-layout">Directory Layout</a></h2>
-<div class="table-wrapper"><table><thead><tr><th>Path</th><th>Description</th><th>Key Types</th></tr></thead><tbody>
-<tr><td><code>logical_plan.rs</code></td><td>Logical algebra nodes.</td><td><code>LogicalPlan</code>, <code>LogicalExpr</code>, <code>JoinType</code></td></tr>
-<tr><td><code>logical_planner.rs</code></td><td>AST → logical transformation.</td><td><code>LogicalPlanner</code></td></tr>
-<tr><td><code>physical_plan.rs</code></td><td><code>PhysicalPlan</code> enum definition.</td><td><code>PhysicalPlan</code>, <code>Physical*</code> structs</td></tr>
-<tr><td><code>physical_planner.rs</code></td><td>Logical → physical lowering.</td><td><code>PhysicalPlanner</code></td></tr>
-<tr><td><code>planner_context.rs</code></td><td>Catalog/scope abstraction.</td><td><code>PlannerContext</code></td></tr>
+<h2 id="key-types"><a class="header" href="#key-types">Key Types</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Type</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>DatabaseOptions</code></td><td>Top-level options when constructing a database (WAL config, default isolation, etc.).</td></tr>
+<tr><td><code>WalOptions</code></td><td>WAL directory, segment size, flush strategy, writer interval, sync mode.</td></tr>
+<tr><td><code>IndexVacuumConfig</code> / <code>MvccVacuumConfig</code></td><td>Frequency/batch settings for background cleanup tasks.</td></tr>
+<tr><td><code>BufferPoolConfig</code></td><td>Optional overrides for pool size, TinyLFU, and replacement policy details.</td></tr>
 </tbody></table>
 </div>
 <hr />
-<h2 id="workflow"><a class="header" href="#workflow">Workflow</a></h2>
-<ol>
-<li><strong>Name binding</strong> – <code>LogicalPlanner</code> resolves table + column references, creates
-<code>TableReference</code>s, and validates schemas via the catalog.</li>
-<li><strong>Logical tree</strong> – each SQL clause becomes a logical node (FROM → <code>SeqScan</code>, WHERE →
-<code>Filter</code>, GROUP BY → <code>Aggregate</code>, etc.).</li>
-<li><strong>Physical selection</strong> – <code>PhysicalPlanner</code> picks concrete algorithms (sequential scan,
-index scan, nested-loop join, sort, limit …). Because every physical node implements
-<code>VolcanoExecutor</code>, the execution engine can pull tuples immediately.</li>
-</ol>
-<hr />
-<h2 id="interactions"><a class="header" href="#interactions">Interactions</a></h2>
+<h2 id="usage"><a class="header" href="#usage">Usage</a></h2>
 <ul>
-<li><strong>SQL front-end</strong> – provides the AST; helper traits (<code>NormalizedIdent</code>, etc.) keep name
-resolution consistent.</li>
-<li><strong>Catalog</strong> – <code>PlannerContext</code> relies on it to confirm table/index existence and fetch
-schemas.</li>
-<li><strong>Optimizer</strong> – operates purely on <code>LogicalPlan</code>; the planner must emit clean,
-traversable trees so rules can fire.</li>
-<li><strong>Execution</strong> – physical nodes carry <code>TableReference</code>, <code>SchemaRef</code>, and hints that the
-execution engine passes to the storage layer.</li>
+<li>CLI/HTTP front-ends parse env vars or config files into <code>DatabaseOptions</code> and pass them
+to <code>Database::new_*</code>.</li>
+<li>During <code>bootstrap_storage</code>, the database wires these options into <code>WalManager</code>,
+<code>DiskScheduler</code>, and <code>BackgroundWorkers</code>.</li>
+<li>Workers and execution components receive <code>Arc</code> references to the relevant configs so
+they can adapt at runtime without global state.</li>
 </ul>
 <hr />
 <h2 id="teaching-ideas"><a class="header" href="#teaching-ideas">Teaching Ideas</a></h2>
 <ul>
-<li>Implement a new logical operator (e.g., <code>LogicalDistinct</code>) and add the corresponding
-physical operator to trace the full lifecycle.</li>
-<li>Experiment with early projection inside the logical plan and observe its impact on
-downstream operators.</li>
-<li>Use <code>pretty_format_logical_plan</code>/<code>physical_plan</code> dumps to visualise rewrites before and
-after optimizer passes.</li>
+<li>Toggle <code>WalOptions::synchronous_commit</code> to discuss commit latency vs durability.</li>
+<li>Shrink the buffer pool to highlight eviction behavior under different replacement
+policies.</li>
+<li>Adjust <code>MvccVacuumConfig</code> intervals and measure how vacuum frequency affects foreground
+write throughput.</li>
 </ul>
-<hr />
-<p>Further reading: <a href="../plan/lifecycle.html">The Lifecycle of a Query</a></p>
 
                     </main>
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
-                            <a rel="prev" href="../modules/expression.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                            <a rel="prev" href="../modules/background.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                                 <i class="fa fa-angle-left"></i>
                             </a>
 
-                            <a rel="next prefetch" href="../plan/lifecycle.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                            <a rel="next prefetch" href="../modules/bin.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                                 <i class="fa fa-angle-right"></i>
                             </a>
 
@@ -232,11 +206,11 @@ after optimizer passes.</li>
             </div>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
-                    <a rel="prev" href="../modules/expression.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                    <a rel="prev" href="../modules/background.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                         <i class="fa fa-angle-left"></i>
                     </a>
 
-                    <a rel="next prefetch" href="../plan/lifecycle.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                    <a rel="next prefetch" href="../modules/bin.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                         <i class="fa fa-angle-right"></i>
                     </a>
             </nav>

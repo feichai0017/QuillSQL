@@ -3,7 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>Query Plan - QuillSQL Internals</title>
+        <title>SQL Front-End - QuillSQL Internals</title>
 
 
         <!-- Custom HTML head -->
@@ -155,74 +155,76 @@
 
                 <div id="content" class="content">
                     <main>
-                        <h1 id="query-planner-module"><a class="header" href="#query-planner-module">Query Planner Module</a></h1>
-<p><code>src/plan/</code> bridges parsed SQL and executable operators. It converts the AST into a
-logical plan, applies rewrites (via the optimizer), and finally emits a physical plan
-(<code>PhysicalPlan</code>) that the Volcano engine can run.</p>
+                        <h1 id="sql-front-end"><a class="header" href="#sql-front-end">SQL Front-End</a></h1>
+<p>The SQL front-end lives in <code>src/sql/</code>. It turns raw UTF-8 query text into the abstract
+syntax trees (ASTs) consumed by planning, while layering Quill-specific name handling
+and diagnostics on top of <a href="https://docs.rs/sqlparser"><code>sqlparser</code></a>.</p>
 <hr />
 <h2 id="responsibilities"><a class="header" href="#responsibilities">Responsibilities</a></h2>
-<ol>
-<li><strong>LogicalPlanner</strong> – walks the AST, binds table/column names using <code>PlannerContext</code>,
-performs type checking, and builds a <code>LogicalPlan</code> tree.</li>
-<li><strong>PlannerContext</strong> – exposes catalog lookups plus scope information for CTEs, subqueries,
-and aliases.</li>
-<li><strong>PhysicalPlanner</strong> – lowers an optimized <code>LogicalPlan</code> into a tree of Volcano operators.</li>
-</ol>
+<ul>
+<li>Parse SQL text into <code>sqlparser::ast::Statement</code> values.</li>
+<li>Record precise spans so error messages can highlight the exact byte range.</li>
+<li>Normalise identifiers (case folding, quoted names, multi-part paths).</li>
+<li>Provide helper traits so the logical planner can lower AST nodes without duplicating
+syntax checks.</li>
+</ul>
 <hr />
 <h2 id="directory-layout"><a class="header" href="#directory-layout">Directory Layout</a></h2>
-<div class="table-wrapper"><table><thead><tr><th>Path</th><th>Description</th><th>Key Types</th></tr></thead><tbody>
-<tr><td><code>logical_plan.rs</code></td><td>Logical algebra nodes.</td><td><code>LogicalPlan</code>, <code>LogicalExpr</code>, <code>JoinType</code></td></tr>
-<tr><td><code>logical_planner.rs</code></td><td>AST → logical transformation.</td><td><code>LogicalPlanner</code></td></tr>
-<tr><td><code>physical_plan.rs</code></td><td><code>PhysicalPlan</code> enum definition.</td><td><code>PhysicalPlan</code>, <code>Physical*</code> structs</td></tr>
-<tr><td><code>physical_planner.rs</code></td><td>Logical → physical lowering.</td><td><code>PhysicalPlanner</code></td></tr>
-<tr><td><code>planner_context.rs</code></td><td>Catalog/scope abstraction.</td><td><code>PlannerContext</code></td></tr>
+<div class="table-wrapper"><table><thead><tr><th>Path</th><th>Purpose</th><th>Key Types</th></tr></thead><tbody>
+<tr><td><code>lexer.rs</code></td><td>Token helpers that preserve offsets.</td><td><code>Token</code>, <code>TokenExt</code></td></tr>
+<tr><td><code>parser.rs</code></td><td>Single entry point used across the codebase.</td><td><code>parse_sql</code>, <code>SqlInput</code></td></tr>
+<tr><td><code>ast/mod.rs</code></td><td>Planner-facing helpers.</td><td><code>NormalizedIdent</code>, <code>ObjectNameExt</code></td></tr>
+<tr><td><code>error.rs</code></td><td>Span-aware parser errors.</td><td><code>SqlError</code>, <code>SqlSpan</code></td></tr>
 </tbody></table>
 </div>
 <hr />
-<h2 id="workflow"><a class="header" href="#workflow">Workflow</a></h2>
+<h2 id="parsing-pipeline"><a class="header" href="#parsing-pipeline">Parsing Pipeline</a></h2>
 <ol>
-<li><strong>Name binding</strong> – <code>LogicalPlanner</code> resolves table + column references, creates
-<code>TableReference</code>s, and validates schemas via the catalog.</li>
-<li><strong>Logical tree</strong> – each SQL clause becomes a logical node (FROM → <code>SeqScan</code>, WHERE →
-<code>Filter</code>, GROUP BY → <code>Aggregate</code>, etc.).</li>
-<li><strong>Physical selection</strong> – <code>PhysicalPlanner</code> picks concrete algorithms (sequential scan,
-index scan, nested-loop join, sort, limit …). Because every physical node implements
-<code>VolcanoExecutor</code>, the execution engine can pull tuples immediately.</li>
+<li><strong>Lexing</strong> – wrap sqlparser’s lexer so every token keeps start/end offsets.</li>
+<li><strong>AST generation</strong> – invoke sqlparser to produce standard <code>Statement</code> structs.</li>
+<li><strong>Normalisation</strong> – convert identifiers into <code>NormalizedIdent</code>, deal with schema
+qualifiers, and build pieces of <code>TableReference</code>.</li>
+<li><strong>Planner bridge</strong> – traits like <code>ColumnRefExt</code> expose methods such as <code>relation()</code> or
+<code>column()</code> so <code>LogicalPlanner</code> can treat different SQL syntaxes uniformly.</li>
 </ol>
 <hr />
 <h2 id="interactions"><a class="header" href="#interactions">Interactions</a></h2>
 <ul>
-<li><strong>SQL front-end</strong> – provides the AST; helper traits (<code>NormalizedIdent</code>, etc.) keep name
-resolution consistent.</li>
-<li><strong>Catalog</strong> – <code>PlannerContext</code> relies on it to confirm table/index existence and fetch
-schemas.</li>
-<li><strong>Optimizer</strong> – operates purely on <code>LogicalPlan</code>; the planner must emit clean,
-traversable trees so rules can fire.</li>
-<li><strong>Execution</strong> – physical nodes carry <code>TableReference</code>, <code>SchemaRef</code>, and hints that the
-execution engine passes to the storage layer.</li>
+<li><strong>Logical planner</strong> consumes the AST directly and relies on helper traits from this
+module to convert identifiers into catalog references.</li>
+<li><strong>Database / Session</strong> catch <code>SqlError</code> values, so both CLI and HTTP front-ends show
+consistent caret diagnostics.</li>
+<li><strong>Tests</strong> (<code>tests/sql_example/*.slt</code>, <code>tests/sql_parser.rs</code>) assert on parser output and
+error strings to keep teaching feedback stable.</li>
+</ul>
+<hr />
+<h2 id="implementation-notes"><a class="header" href="#implementation-notes">Implementation Notes</a></h2>
+<ul>
+<li><code>SqlSpan</code> stores byte offsets, which makes it trivial to slice the original SQL and
+render highlighted errors.</li>
+<li>Extended statements (e.g., <code>EXPLAIN</code>, <code>BEGIN TRANSACTION</code>) show how to Layer
+Quill-specific syntax without forking sqlparser entirely.</li>
+<li>We avoid desugaring at this stage so students can trace SQL → AST → logical plan step
+by step.</li>
 </ul>
 <hr />
 <h2 id="teaching-ideas"><a class="header" href="#teaching-ideas">Teaching Ideas</a></h2>
 <ul>
-<li>Implement a new logical operator (e.g., <code>LogicalDistinct</code>) and add the corresponding
-physical operator to trace the full lifecycle.</li>
-<li>Experiment with early projection inside the logical plan and observe its impact on
-downstream operators.</li>
-<li>Use <code>pretty_format_logical_plan</code>/<code>physical_plan</code> dumps to visualise rewrites before and
-after optimizer passes.</li>
+<li>Add a new statement (<code>CREATE VIEW</code>, <code>ALTER TABLE ...</code>) and follow the AST through the
+pipeline.</li>
+<li>Improve error hints (“Did you forget FROM?”) to see how better diagnostics aid users.</li>
+<li>Write fuzz tests that round-trip SQL → AST → SQL to discuss parser determinism.</li>
 </ul>
-<hr />
-<p>Further reading: <a href="../plan/lifecycle.html">The Lifecycle of a Query</a></p>
 
                     </main>
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
-                            <a rel="prev" href="../modules/expression.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                            <a rel="prev" href="../contributing.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                                 <i class="fa fa-angle-left"></i>
                             </a>
 
-                            <a rel="next prefetch" href="../plan/lifecycle.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                            <a rel="next prefetch" href="../modules/catalog.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                                 <i class="fa fa-angle-right"></i>
                             </a>
 
@@ -232,11 +234,11 @@ after optimizer passes.</li>
             </div>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
-                    <a rel="prev" href="../modules/expression.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                    <a rel="prev" href="../contributing.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                         <i class="fa fa-angle-left"></i>
                     </a>
 
-                    <a rel="next prefetch" href="../plan/lifecycle.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                    <a rel="next prefetch" href="../modules/catalog.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                         <i class="fa fa-angle-right"></i>
                     </a>
             </nav>

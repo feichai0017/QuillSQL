@@ -3,7 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>Query Plan - QuillSQL Internals</title>
+        <title>Expression System - QuillSQL Internals</title>
 
 
         <!-- Custom HTML head -->
@@ -155,74 +155,67 @@
 
                 <div id="content" class="content">
                     <main>
-                        <h1 id="query-planner-module"><a class="header" href="#query-planner-module">Query Planner Module</a></h1>
-<p><code>src/plan/</code> bridges parsed SQL and executable operators. It converts the AST into a
-logical plan, applies rewrites (via the optimizer), and finally emits a physical plan
-(<code>PhysicalPlan</code>) that the Volcano engine can run.</p>
+                        <h1 id="expression--scalar-evaluation"><a class="header" href="#expression--scalar-evaluation">Expression &amp; Scalar Evaluation</a></h1>
+<p>The expression subsystem (<code>src/expression/</code>) powers column computations, predicates, and
+UPDATE assignments. It keeps expression trees approachable while demonstrating how they
+are evaluated during execution.</p>
 <hr />
 <h2 id="responsibilities"><a class="header" href="#responsibilities">Responsibilities</a></h2>
-<ol>
-<li><strong>LogicalPlanner</strong> – walks the AST, binds table/column names using <code>PlannerContext</code>,
-performs type checking, and builds a <code>LogicalPlan</code> tree.</li>
-<li><strong>PlannerContext</strong> – exposes catalog lookups plus scope information for CTEs, subqueries,
-and aliases.</li>
-<li><strong>PhysicalPlanner</strong> – lowers an optimized <code>LogicalPlan</code> into a tree of Volcano operators.</li>
-</ol>
+<ul>
+<li>Store planner-produced expression trees (<code>Expr</code>) in a serializable, traversable enum.</li>
+<li>Bind column references, constants, and built-in functions.</li>
+<li>Evaluate expressions against <code>Tuple</code>s at runtime, yielding <code>ScalarValue</code>.</li>
+<li>Provide type inference and casting so arithmetic/comparison operators remain well-typed.</li>
+</ul>
 <hr />
 <h2 id="directory-layout"><a class="header" href="#directory-layout">Directory Layout</a></h2>
 <div class="table-wrapper"><table><thead><tr><th>Path</th><th>Description</th><th>Key Types</th></tr></thead><tbody>
-<tr><td><code>logical_plan.rs</code></td><td>Logical algebra nodes.</td><td><code>LogicalPlan</code>, <code>LogicalExpr</code>, <code>JoinType</code></td></tr>
-<tr><td><code>logical_planner.rs</code></td><td>AST → logical transformation.</td><td><code>LogicalPlanner</code></td></tr>
-<tr><td><code>physical_plan.rs</code></td><td><code>PhysicalPlan</code> enum definition.</td><td><code>PhysicalPlan</code>, <code>Physical*</code> structs</td></tr>
-<tr><td><code>physical_planner.rs</code></td><td>Logical → physical lowering.</td><td><code>PhysicalPlanner</code></td></tr>
-<tr><td><code>planner_context.rs</code></td><td>Catalog/scope abstraction.</td><td><code>PlannerContext</code></td></tr>
+<tr><td><code>mod.rs</code></td><td>Public API and core enum.</td><td><code>Expr</code>, <code>ExprTrait</code></td></tr>
+<tr><td><code>scalar.rs</code></td><td>Runtime scalar representation + conversions.</td><td><code>ScalarValue</code>, <code>DataType</code></td></tr>
+<tr><td><code>binder.rs</code></td><td>Helpers for the planner/SQL binder.</td><td><code>BoundExpr</code></td></tr>
 </tbody></table>
 </div>
 <hr />
-<h2 id="workflow"><a class="header" href="#workflow">Workflow</a></h2>
-<ol>
-<li><strong>Name binding</strong> – <code>LogicalPlanner</code> resolves table + column references, creates
-<code>TableReference</code>s, and validates schemas via the catalog.</li>
-<li><strong>Logical tree</strong> – each SQL clause becomes a logical node (FROM → <code>SeqScan</code>, WHERE →
-<code>Filter</code>, GROUP BY → <code>Aggregate</code>, etc.).</li>
-<li><strong>Physical selection</strong> – <code>PhysicalPlanner</code> picks concrete algorithms (sequential scan,
-index scan, nested-loop join, sort, limit …). Because every physical node implements
-<code>VolcanoExecutor</code>, the execution engine can pull tuples immediately.</li>
-</ol>
+<h2 id="concepts"><a class="header" href="#concepts">Concepts</a></h2>
+<h3 id="expr-enum"><a class="header" href="#expr-enum">Expr Enum</a></h3>
+<p>Expresses column refs, literals, comparisons, logical ops, arithmetic, and function
+invocations. Each variant implements <code>ExprTrait::evaluate(&amp;self, tuple)</code> and returns a
+<code>ScalarValue</code>.</p>
+<h3 id="scalarvalue"><a class="header" href="#scalarvalue">ScalarValue</a></h3>
+<p>Unified runtime value across types (int, bigint, bool, decimal, varchar, …). Includes
+<code>cast_to(DataType)</code> so results can be coerced to the target column type before writes.</p>
+<h3 id="type-inference"><a class="header" href="#type-inference">Type Inference</a></h3>
+<p>Planner code invokes <code>Expr::data_type(schema)</code> to predict result types. Execution then
+casts when needed—e.g., <code>UPDATE t SET a = b + 1</code> uses the column’s declared type for <code>a</code>.</p>
 <hr />
 <h2 id="interactions"><a class="header" href="#interactions">Interactions</a></h2>
 <ul>
-<li><strong>SQL front-end</strong> – provides the AST; helper traits (<code>NormalizedIdent</code>, etc.) keep name
-resolution consistent.</li>
-<li><strong>Catalog</strong> – <code>PlannerContext</code> relies on it to confirm table/index existence and fetch
-schemas.</li>
-<li><strong>Optimizer</strong> – operates purely on <code>LogicalPlan</code>; the planner must emit clean,
-traversable trees so rules can fire.</li>
-<li><strong>Execution</strong> – physical nodes carry <code>TableReference</code>, <code>SchemaRef</code>, and hints that the
-execution engine passes to the storage layer.</li>
+<li><strong>Planner</strong> – builds <code>Expr</code> trees with bound columns; execution reuses them verbatim.</li>
+<li><strong>ExecutionContext</strong> – exposes <code>eval_expr</code> and <code>eval_predicate</code>, wrapping expression
+evaluation plus boolean coercion (<code>NULL</code> becomes false for predicates).</li>
+<li><strong>Optimizer</strong> – rules like constant folding traverse <code>Expr</code> trees and reuse
+<code>ScalarValue</code> arithmetic helpers.</li>
 </ul>
 <hr />
 <h2 id="teaching-ideas"><a class="header" href="#teaching-ideas">Teaching Ideas</a></h2>
 <ul>
-<li>Implement a new logical operator (e.g., <code>LogicalDistinct</code>) and add the corresponding
-physical operator to trace the full lifecycle.</li>
-<li>Experiment with early projection inside the logical plan and observe its impact on
-downstream operators.</li>
-<li>Use <code>pretty_format_logical_plan</code>/<code>physical_plan</code> dumps to visualise rewrites before and
-after optimizer passes.</li>
+<li>Add a simple built-in function (<code>length(expr)</code>) to follow the pipeline from parsing to
+evaluation.</li>
+<li>Implement short-circuiting or full three-valued boolean logic and validate with
+sqllogictest.</li>
+<li>Instrument <code>Expr::evaluate</code> with tracing to visualise expression evaluation inside
+physical operators.</li>
 </ul>
-<hr />
-<p>Further reading: <a href="../plan/lifecycle.html">The Lifecycle of a Query</a></p>
 
                     </main>
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
-                            <a rel="prev" href="../modules/expression.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                            <a rel="prev" href="../modules/catalog.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                                 <i class="fa fa-angle-left"></i>
                             </a>
 
-                            <a rel="next prefetch" href="../plan/lifecycle.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                            <a rel="next prefetch" href="../modules/plan.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                                 <i class="fa fa-angle-right"></i>
                             </a>
 
@@ -232,11 +225,11 @@ after optimizer passes.</li>
             </div>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
-                    <a rel="prev" href="../modules/expression.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                    <a rel="prev" href="../modules/catalog.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                         <i class="fa fa-angle-left"></i>
                     </a>
 
-                    <a rel="next prefetch" href="../plan/lifecycle.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                    <a rel="next prefetch" href="../modules/plan.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                         <i class="fa fa-angle-right"></i>
                     </a>
             </nav>

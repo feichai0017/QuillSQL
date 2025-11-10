@@ -155,32 +155,85 @@
 
                 <div id="content" class="content">
                     <main>
-                        <h1 id="transaction-manager"><a class="header" href="#transaction-manager">Transaction Manager</a></h1>
-<p>The Transaction Manager is responsible for one of the most critical aspects of a database: guaranteeing the <strong>ACID</strong> properties, specifically <strong>Isolation</strong> and <strong>Atomicity</strong>.</p>
-<p>It allows multiple clients to access the database concurrently without interfering with each other, and it ensures that transactions are treated as single, indivisible operations (all or nothing).</p>
-<h2 id="core-concepts"><a class="header" href="#core-concepts">Core Concepts</a></h2>
-<ul>
-<li>
-<p><strong>Concurrency Control</strong>: To handle simultaneous operations, QuillSQL uses a hybrid approach that combines two powerful techniques:</p>
+                        <h1 id="transaction-module"><a class="header" href="#transaction-module">Transaction Module</a></h1>
+<p><code>src/transaction/</code> enforces the Atomicity and Isolation parts of ACID. It combines MVCC
+with strict two-phase locking so reads and writes can proceed concurrently without
+violating correctness.</p>
+<hr />
+<h2 id="main-components"><a class="header" href="#main-components">Main Components</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Type</th><th>Role</th></tr></thead><tbody>
+<tr><td><code>TransactionManager</code></td><td>Creates/commits/aborts transactions, assigns txn &amp; command ids, coordinates WAL.</td></tr>
+<tr><td><code>Transaction</code></td><td>Stores state, held locks, undo chain, and cached snapshot.</td></tr>
+<tr><td><code>TxnContext</code> / <code>TxnRuntime</code></td><td>Execution-time wrapper exposing MVCC + locking helpers.</td></tr>
+<tr><td><code>LockManager</code></td><td>Multi-granularity locking (IS/IX/S/SIX/X) with deadlock detection.</td></tr>
+<tr><td><code>TransactionSnapshot</code></td><td>Tracks <code>xmin/xmax/active_txns</code> for visibility checks.</td></tr>
+</tbody></table>
+</div>
+<hr />
+<h2 id="workflow"><a class="header" href="#workflow">Workflow</a></h2>
 <ol>
-<li><strong>Multi-Version Concurrency Control (MVCC)</strong>: Instead of overwriting data, writers create new <em>versions</em> of rows. Readers are given a consistent <em>snapshot</em> of the database, which allows them to proceed without being blocked by writers.</li>
-<li><strong>Two-Phase Locking (2PL)</strong>: To prevent two writers from modifying the same row at the same time, a strict two-phase locking protocol is used. Transactions must acquire locks on data before modifying it and hold those locks until the transaction ends.</li>
+<li><code>SessionContext</code> calls <code>TransactionManager::begin</code> to create a transaction.</li>
+<li>Each SQL statement builds a <code>TxnRuntime</code>, yielding a fresh command id and snapshot.</li>
+<li>Operators call <code>TxnContext::lock_table/lock_row</code> to obey strict 2PL.</li>
+<li><code>TableHandle::insert/delete/update</code> records undo, acquires locks, and emits WAL via
+<code>TxnContext</code>.</li>
+<li>Commit: write a <code>Commit</code> record → flush depending on <code>synchronous_commit</code> → release
+locks.</li>
+<li>Abort: walk the undo list, write CLRs, restore heap/index state, release locks.</li>
 </ol>
-</li>
-<li>
-<p><strong>Atomicity</strong>: The transaction manager records all actions performed by a transaction. If the transaction needs to be aborted, it can use this record to perform the necessary undo operations, rolling the database back to its state before the transaction began.</p>
-</li>
-</ul>
-<p>This section contains:</p>
+<hr />
+<h2 id="mvcc-details"><a class="header" href="#mvcc-details">MVCC Details</a></h2>
 <ul>
-<li><strong><a href="./../transaction/mvcc_and_2pl.html">MVCC and 2PL</a></strong>: A deep dive into QuillSQL's hybrid concurrency control model.</li>
+<li><code>TupleMeta</code> stores inserting/deleting txn ids and command ids. <code>read_visible_tuple</code>
+checks snapshots and, if needed, rewinds to the latest visible version.</li>
+<li>Isolation levels:
+<ul>
+<li><strong>Read Uncommitted</strong> – minimal snapshot caching.</li>
+<li><strong>Read Committed</strong> – refresh snapshot each command to avoid dirty reads.</li>
+<li><strong>Repeatable Read / Serializable</strong> – capture the snapshot once; RR releases shared
+locks at statement end, Serializable holds them to commit to avoid phantoms.</li>
 </ul>
+</li>
+<li>UPDATE skips versions created by the same <code>(txn_id, command_id)</code> to avoid looping back
+over freshly inserted tuples.</li>
+</ul>
+<hr />
+<h2 id="locking"><a class="header" href="#locking">Locking</a></h2>
+<ul>
+<li>Multi-granularity hierarchy: table-level IS/IX/S/SIX/X plus row-level S/X.</li>
+<li>Deadlock detection: <code>LockManager</code> maintains a wait-for graph and periodically chooses a
+victim (usually the longest waiter).</li>
+<li>Release policy: exclusive/intent locks stay until commit; RR drops shared row locks at
+statement end, Serializable waits until commit.</li>
+</ul>
+<hr />
+<h2 id="interactions"><a class="header" href="#interactions">Interactions</a></h2>
+<ul>
+<li><strong>ExecutionContext</strong> – all helpers (lock acquisition, visibility checks, undo logging)
+are exposed here, so physical operators never touch <code>LockManager</code> directly.</li>
+<li><strong>StorageEngine</strong> – handles call <code>TxnContext</code> before mutating heaps/indexes; MVCC metadata
+lives in <code>TupleMeta</code>.</li>
+<li><strong>Recovery</strong> – Begin/Commit/Abort records emitted here drive ARIES undo/redo.</li>
+<li><strong>Background</strong> – MVCC vacuum reads <code>TransactionManager::oldest_active_txn()</code> to compute
+<code>safe_xmin</code>.</li>
+</ul>
+<hr />
+<h2 id="teaching-ideas"><a class="header" href="#teaching-ideas">Teaching Ideas</a></h2>
+<ul>
+<li>Change <code>DatabaseOptions::default_isolation_level</code> and compare SELECT behaviour under
+RC vs RR.</li>
+<li>Write a unit test that deadlocks two transactions and watch <code>LockManager</code> pick a victim.</li>
+<li>Implement statement-level snapshot refresh or Serializable Snapshot Isolation (SSI) as
+an advanced exercise.</li>
+</ul>
+<hr />
+<p>Further reading: <a href="../transaction/mvcc_and_2pl.html">MVCC and 2PL</a></p>
 
                     </main>
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
-                            <a rel="prev" href="../recovery/aries.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                            <a rel="prev" href="../execution/volcano.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                                 <i class="fa fa-angle-left"></i>
                             </a>
 
@@ -194,7 +247,7 @@
             </div>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
-                    <a rel="prev" href="../recovery/aries.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                    <a rel="prev" href="../execution/volcano.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                         <i class="fa fa-angle-left"></i>
                     </a>
 

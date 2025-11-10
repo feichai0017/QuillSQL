@@ -156,19 +156,84 @@
                 <div id="content" class="content">
                     <main>
                         <h1 id="storage-engine"><a class="header" href="#storage-engine">Storage Engine</a></h1>
-<p>The storage engine is where the logical world of SQL tables and rows meets the physical world of disk blocks and bytes. Understanding how data is laid out on disk is fundamental to understanding database performance, concurrency control, and recovery.</p>
-<p>This section is divided into the following parts:</p>
+<p>The storage engine persists relational data, covering heap files, indexes, page formats,
+and the handles exposed to execution. Understanding this layer is key to reasoning about
+performance, MVCC, and recovery.</p>
+<hr />
+<h2 id="responsibilities"><a class="header" href="#responsibilities">Responsibilities</a></h2>
 <ul>
-<li><strong><a href="../storage/disk_io.html">Disk I/O</a></strong>: A look at the asynchronous I/O layer using <code>io_uring</code>.</li>
-<li><strong><a href="../storage/page_layouts.html">Page &amp; Tuple Layout</a></strong>: A deep dive into how pages and tuples are physically structured on disk, including the slotted page layout.</li>
-<li><strong><a href="../storage/table_heap.html">Table Heap</a></strong>: Explains how tuple versions are managed for MVCC.</li>
+<li>Manage <code>TableHeap</code> insert/delete/update paths and their MVCC metadata.</li>
+<li>Maintain indexes (see the <a href="./index.html">Index module</a> for details).</li>
+<li>Expose the <code>StorageEngine</code> trait so execution can fetch <code>TableHandle</code> / <code>IndexHandle</code>
+instances per table.</li>
+<li>Provide <code>TupleStream</code> so sequential and index scans share a unified interface.</li>
 </ul>
+<hr />
+<h2 id="directory-layout"><a class="header" href="#directory-layout">Directory Layout</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Path</th><th>Purpose</th><th>Key Types</th></tr></thead><tbody>
+<tr><td><code>engine.rs</code></td><td>Default engine plus handle definitions.</td><td><code>StorageEngine</code>, <code>TableHandle</code>, <code>TupleStream</code>, <code>ScanOptions</code></td></tr>
+<tr><td><code>table_heap/</code></td><td>Heap storage + MVCC logic.</td><td><code>TableHeap</code>, <code>MvccHeap</code></td></tr>
+<tr><td><code>index/</code></td><td>B+Tree implementation.</td><td><code>BPlusTreeIndex</code></td></tr>
+<tr><td><code>page/</code></td><td>Page, RID, tuple metadata.</td><td><code>Page</code>, <code>RecordId</code>, <code>TupleMeta</code></td></tr>
+<tr><td><code>tuple/</code></td><td>Row encoding and projection helpers.</td><td><code>Tuple</code></td></tr>
+<tr><td><code>disk_manager.rs</code></td><td>File layout and page I/O.</td><td><code>DiskManager</code></td></tr>
+<tr><td><code>disk_scheduler.rs</code></td><td><code>io_uring</code>-backed async scheduler.</td><td><code>DiskScheduler</code></td></tr>
+</tbody></table>
+</div>
+<hr />
+<h2 id="core-abstractions"><a class="header" href="#core-abstractions">Core Abstractions</a></h2>
+<h3 id="storageengine-trait"><a class="header" href="#storageengine-trait">StorageEngine Trait</a></h3>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>pub trait StorageEngine {
+    fn table(&amp;self, catalog: &amp;Catalog, table: &amp;TableReference)
+        -&gt; QuillSQLResult&lt;Arc&lt;dyn TableHandle&gt;&gt;;
+    fn indexes(&amp;self, catalog: &amp;Catalog, table: &amp;TableReference)
+        -&gt; QuillSQLResult&lt;Vec&lt;Arc&lt;dyn IndexHandle&gt;&gt;&gt;;
+}
+<span class="boring">}</span></code></pre></pre>
+<p>The default implementation wraps the row-oriented heap + B+Tree combo, but the trait is
+ready for column stores, remote storage, or async engines.</p>
+<h3 id="tablehandle"><a class="header" href="#tablehandle">TableHandle</a></h3>
+<p>Offers <code>full_scan(ScanOptions)</code>, <code>insert</code>, <code>delete</code>, <code>update</code>, and
+<code>prepare_row_for_write</code>. MVCC, undo, and locking concerns live here so execution operators
+only describe intent.</p>
+<h3 id="tuplestream"><a class="header" href="#tuplestream">TupleStream</a></h3>
+<p>Minimal iterator that returns <code>(RecordId, TupleMeta, Tuple)</code> triples. <code>ScanOptions</code> carry
+streaming hints, projection lists, or batch sizes; index scans use <code>IndexScanRequest</code> to
+describe ranges.</p>
+<hr />
+<h2 id="interactions"><a class="header" href="#interactions">Interactions</a></h2>
+<ul>
+<li><strong>Execution</strong> – <code>ExecutionContext::table_stream</code> / <code>index_stream</code> delegate to handles.</li>
+<li><strong>Transaction</strong> – Handle methods call into <code>TxnContext</code> to acquire locks, record undo,
+and emit WAL.</li>
+<li><strong>Buffer Manager</strong> – <code>TableHeap</code>/<code>BPlusTreeIndex</code> access pages through the shared buffer
+pool.</li>
+<li><strong>Recovery</strong> – Heap/index mutations generate WAL records (<code>HeapInsert</code>, <code>HeapUpdate</code>,
+<code>IndexInsert</code>, …) that ARIES replays.</li>
+<li><strong>Background</strong> – MVCC vacuum and index cleanup obtain handles and iterate tuples via
+the same abstractions as foreground scans.</li>
+</ul>
+<hr />
+<h2 id="teaching-ideas"><a class="header" href="#teaching-ideas">Teaching Ideas</a></h2>
+<ul>
+<li>Implement a toy columnar handle to show how the execution engine can stay agnostic to
+storage layout.</li>
+<li>Use <code>ScanOptions::projection</code> to push down column pruning into <code>TableIterator</code>.</li>
+<li>Enable <code>RUST_LOG=storage::table_heap=trace</code> and trace MVCC version chains as updates
+occur.</li>
+</ul>
+<hr />
+<p>Further reading: <a href="../storage/disk_io.html">Disk I/O</a>,
+<a href="../storage/page_layouts.html">Page &amp; Tuple Layout</a>,
+<a href="../storage/table_heap.html">Table Heap &amp; MVCC</a></p>
 
                     </main>
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
-                            <a rel="prev" href="../buffer/buffer_pool.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                            <a rel="prev" href="../transaction/mvcc_and_2pl.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                                 <i class="fa fa-angle-left"></i>
                             </a>
 
@@ -182,7 +247,7 @@
             </div>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
-                    <a rel="prev" href="../buffer/buffer_pool.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                    <a rel="prev" href="../transaction/mvcc_and_2pl.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                         <i class="fa fa-angle-left"></i>
                     </a>
 

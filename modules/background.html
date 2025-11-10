@@ -3,7 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>Query Plan - QuillSQL Internals</title>
+        <title>Background Services - QuillSQL Internals</title>
 
 
         <!-- Custom HTML head -->
@@ -155,74 +155,59 @@
 
                 <div id="content" class="content">
                     <main>
-                        <h1 id="query-planner-module"><a class="header" href="#query-planner-module">Query Planner Module</a></h1>
-<p><code>src/plan/</code> bridges parsed SQL and executable operators. It converts the AST into a
-logical plan, applies rewrites (via the optimizer), and finally emits a physical plan
-(<code>PhysicalPlan</code>) that the Volcano engine can run.</p>
+                        <h1 id="background-services"><a class="header" href="#background-services">Background Services</a></h1>
+<p><code>src/background/</code> hosts the asynchronous workers that keep a database healthy: WAL
+writers, checkpoints, buffer flushers, and MVCC vacuum. A central registry makes it easy
+to start/stop workers together—ideal for teaching how background maintenance supports
+foreground queries.</p>
 <hr />
 <h2 id="responsibilities"><a class="header" href="#responsibilities">Responsibilities</a></h2>
-<ol>
-<li><strong>LogicalPlanner</strong> – walks the AST, binds table/column names using <code>PlannerContext</code>,
-performs type checking, and builds a <code>LogicalPlan</code> tree.</li>
-<li><strong>PlannerContext</strong> – exposes catalog lookups plus scope information for CTEs, subqueries,
-and aliases.</li>
-<li><strong>PhysicalPlanner</strong> – lowers an optimized <code>LogicalPlan</code> into a tree of Volcano operators.</li>
-</ol>
+<ul>
+<li>Start workers according to configuration (<code>IndexVacuumConfig</code>, <code>MvccVacuumConfig</code>,
+<code>WalOptions</code>, etc.).</li>
+<li>Define lightweight traits (<code>CheckpointWal</code>, <code>BufferMaintenance</code>, <code>TxnSnapshotOps</code>) so
+workers can run without pulling in an async runtime.</li>
+<li>Provide <code>BackgroundWorkers</code>, a registry that tracks <code>WorkerHandle</code>s and shuts them down
+when <code>Database</code> drops.</li>
+</ul>
 <hr />
-<h2 id="directory-layout"><a class="header" href="#directory-layout">Directory Layout</a></h2>
-<div class="table-wrapper"><table><thead><tr><th>Path</th><th>Description</th><th>Key Types</th></tr></thead><tbody>
-<tr><td><code>logical_plan.rs</code></td><td>Logical algebra nodes.</td><td><code>LogicalPlan</code>, <code>LogicalExpr</code>, <code>JoinType</code></td></tr>
-<tr><td><code>logical_planner.rs</code></td><td>AST → logical transformation.</td><td><code>LogicalPlanner</code></td></tr>
-<tr><td><code>physical_plan.rs</code></td><td><code>PhysicalPlan</code> enum definition.</td><td><code>PhysicalPlan</code>, <code>Physical*</code> structs</td></tr>
-<tr><td><code>physical_planner.rs</code></td><td>Logical → physical lowering.</td><td><code>PhysicalPlanner</code></td></tr>
-<tr><td><code>planner_context.rs</code></td><td>Catalog/scope abstraction.</td><td><code>PlannerContext</code></td></tr>
+<h2 id="built-in-workers"><a class="header" href="#built-in-workers">Built-in Workers</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Worker</th><th>Trigger</th><th>Behavior</th></tr></thead><tbody>
+<tr><td>WAL writer</td><td><code>wal_writer_interval_ms</code></td><td>Calls <code>WalManager::background_flush</code> to durably write log buffers.</td></tr>
+<tr><td>Checkpoint</td><td><code>checkpoint_interval_ms</code></td><td>Captures dirty page / active txn tables and emits <code>Checkpoint</code> records to bound recovery.</td></tr>
+<tr><td>Buffer writer</td><td><code>bg_writer_interval</code></td><td>Flushes dirty frames and nudges index vacuum when garbage accumulates.</td></tr>
+<tr><td>MVCC vacuum</td><td><code>MvccVacuumConfig</code></td><td>Removes obsolete tuple versions once <code>safe_xmin</code> advances.</td></tr>
 </tbody></table>
 </div>
-<hr />
-<h2 id="workflow"><a class="header" href="#workflow">Workflow</a></h2>
-<ol>
-<li><strong>Name binding</strong> – <code>LogicalPlanner</code> resolves table + column references, creates
-<code>TableReference</code>s, and validates schemas via the catalog.</li>
-<li><strong>Logical tree</strong> – each SQL clause becomes a logical node (FROM → <code>SeqScan</code>, WHERE →
-<code>Filter</code>, GROUP BY → <code>Aggregate</code>, etc.).</li>
-<li><strong>Physical selection</strong> – <code>PhysicalPlanner</code> picks concrete algorithms (sequential scan,
-index scan, nested-loop join, sort, limit …). Because every physical node implements
-<code>VolcanoExecutor</code>, the execution engine can pull tuples immediately.</li>
-</ol>
+<p>Every worker registers itself with <code>BackgroundWorkers</code>; <code>shutdown_all()</code> ensures threads
+exit cleanly during tests or process teardown.</p>
 <hr />
 <h2 id="interactions"><a class="header" href="#interactions">Interactions</a></h2>
 <ul>
-<li><strong>SQL front-end</strong> – provides the AST; helper traits (<code>NormalizedIdent</code>, etc.) keep name
-resolution consistent.</li>
-<li><strong>Catalog</strong> – <code>PlannerContext</code> relies on it to confirm table/index existence and fetch
-schemas.</li>
-<li><strong>Optimizer</strong> – operates purely on <code>LogicalPlan</code>; the planner must emit clean,
-traversable trees so rules can fire.</li>
-<li><strong>Execution</strong> – physical nodes carry <code>TableReference</code>, <code>SchemaRef</code>, and hints that the
-execution engine passes to the storage layer.</li>
+<li><strong>WalManager</strong> – WAL writer and checkpoint workers operate on <code>Arc&lt;dyn CheckpointWal&gt;</code>.</li>
+<li><strong>BufferManager</strong> – background flushers inspect dirty frames and help checkpoints
+capture consistent snapshots.</li>
+<li><strong>TransactionManager</strong> – MVCC vacuum queries <code>TxnSnapshotOps</code> for <code>safe_xmin</code>.</li>
+<li><strong>Catalog</strong> – index vacuum iterates <code>IndexRegistry</code> to locate candidate indexes.</li>
 </ul>
 <hr />
 <h2 id="teaching-ideas"><a class="header" href="#teaching-ideas">Teaching Ideas</a></h2>
 <ul>
-<li>Implement a new logical operator (e.g., <code>LogicalDistinct</code>) and add the corresponding
-physical operator to trace the full lifecycle.</li>
-<li>Experiment with early projection inside the logical plan and observe its impact on
-downstream operators.</li>
-<li>Use <code>pretty_format_logical_plan</code>/<code>physical_plan</code> dumps to visualise rewrites before and
-after optimizer passes.</li>
+<li>Tune <code>MvccVacuumConfig::batch_limit</code> and chart how quickly old tuple versions disappear.</li>
+<li>Disable a worker in tests to show why unflushed WAL or missing checkpoints lengthen
+recovery.</li>
+<li>Enable <code>RUST_LOG=background=info</code> to trace how these tasks complement foreground load.</li>
 </ul>
-<hr />
-<p>Further reading: <a href="../plan/lifecycle.html">The Lifecycle of a Query</a></p>
 
                     </main>
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
-                            <a rel="prev" href="../modules/expression.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                            <a rel="prev" href="../recovery/aries.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                                 <i class="fa fa-angle-left"></i>
                             </a>
 
-                            <a rel="next prefetch" href="../plan/lifecycle.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                            <a rel="next prefetch" href="../modules/config.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                                 <i class="fa fa-angle-right"></i>
                             </a>
 
@@ -232,11 +217,11 @@ after optimizer passes.</li>
             </div>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
-                    <a rel="prev" href="../modules/expression.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                    <a rel="prev" href="../recovery/aries.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                         <i class="fa fa-angle-left"></i>
                     </a>
 
-                    <a rel="next prefetch" href="../plan/lifecycle.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                    <a rel="next prefetch" href="../modules/config.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                         <i class="fa fa-angle-right"></i>
                     </a>
             </nav>

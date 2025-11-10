@@ -3,7 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>Query Plan - QuillSQL Internals</title>
+        <title>Catalog - QuillSQL Internals</title>
 
 
         <!-- Custom HTML head -->
@@ -155,74 +155,76 @@
 
                 <div id="content" class="content">
                     <main>
-                        <h1 id="query-planner-module"><a class="header" href="#query-planner-module">Query Planner Module</a></h1>
-<p><code>src/plan/</code> bridges parsed SQL and executable operators. It converts the AST into a
-logical plan, applies rewrites (via the optimizer), and finally emits a physical plan
-(<code>PhysicalPlan</code>) that the Volcano engine can run.</p>
+                        <h1 id="catalog-module"><a class="header" href="#catalog-module">Catalog Module</a></h1>
+<p><code>src/catalog/</code> acts as QuillSQL’s data dictionary. It tracks schema/table/index metadata,
+statistics, and the mapping between logical names and physical storage objects such as
+<code>TableHeap</code> and <code>BPlusTreeIndex</code>. Every layer—planner, execution, background workers—uses
+the catalog to discover structure.</p>
 <hr />
 <h2 id="responsibilities"><a class="header" href="#responsibilities">Responsibilities</a></h2>
-<ol>
-<li><strong>LogicalPlanner</strong> – walks the AST, binds table/column names using <code>PlannerContext</code>,
-performs type checking, and builds a <code>LogicalPlan</code> tree.</li>
-<li><strong>PlannerContext</strong> – exposes catalog lookups plus scope information for CTEs, subqueries,
-and aliases.</li>
-<li><strong>PhysicalPlanner</strong> – lowers an optimized <code>LogicalPlan</code> into a tree of Volcano operators.</li>
-</ol>
+<ul>
+<li>Persist definitions for schemas, tables, columns, indexes, and constraints.</li>
+<li>Map logical <code>TableReference</code>s to physical handles (heap files, index roots, file ids).</li>
+<li>Store table statistics (row counts, histograms) that drive ANALYZE and optimization.</li>
+<li>Manage the DDL lifecycle: creation and deletion update the in-memory registry and the
+on-disk metadata pages.</li>
+</ul>
 <hr />
 <h2 id="directory-layout"><a class="header" href="#directory-layout">Directory Layout</a></h2>
 <div class="table-wrapper"><table><thead><tr><th>Path</th><th>Description</th><th>Key Types</th></tr></thead><tbody>
-<tr><td><code>logical_plan.rs</code></td><td>Logical algebra nodes.</td><td><code>LogicalPlan</code>, <code>LogicalExpr</code>, <code>JoinType</code></td></tr>
-<tr><td><code>logical_planner.rs</code></td><td>AST → logical transformation.</td><td><code>LogicalPlanner</code></td></tr>
-<tr><td><code>physical_plan.rs</code></td><td><code>PhysicalPlan</code> enum definition.</td><td><code>PhysicalPlan</code>, <code>Physical*</code> structs</td></tr>
-<tr><td><code>physical_planner.rs</code></td><td>Logical → physical lowering.</td><td><code>PhysicalPlanner</code></td></tr>
-<tr><td><code>planner_context.rs</code></td><td>Catalog/scope abstraction.</td><td><code>PlannerContext</code></td></tr>
+<tr><td><code>mod.rs</code></td><td>Public API surface.</td><td><code>Catalog</code>, <code>TableHandleRef</code></td></tr>
+<tr><td><code>schema.rs</code></td><td>Schema objects and table references.</td><td><code>Schema</code>, <code>Column</code>, <code>TableReference</code></td></tr>
+<tr><td><code>registry/</code></td><td>Thread-safe registries for heaps and indexes.</td><td><code>TableRegistry</code>, <code>IndexRegistry</code></td></tr>
+<tr><td><code>statistics.rs</code></td><td>ANALYZE output and helpers.</td><td><code>TableStatistics</code></td></tr>
+<tr><td><code>loader.rs</code></td><td>Boot-time metadata loader.</td><td><code>load_catalog_data</code></td></tr>
 </tbody></table>
 </div>
 <hr />
-<h2 id="workflow"><a class="header" href="#workflow">Workflow</a></h2>
-<ol>
-<li><strong>Name binding</strong> – <code>LogicalPlanner</code> resolves table + column references, creates
-<code>TableReference</code>s, and validates schemas via the catalog.</li>
-<li><strong>Logical tree</strong> – each SQL clause becomes a logical node (FROM → <code>SeqScan</code>, WHERE →
-<code>Filter</code>, GROUP BY → <code>Aggregate</code>, etc.).</li>
-<li><strong>Physical selection</strong> – <code>PhysicalPlanner</code> picks concrete algorithms (sequential scan,
-index scan, nested-loop join, sort, limit …). Because every physical node implements
-<code>VolcanoExecutor</code>, the execution engine can pull tuples immediately.</li>
-</ol>
+<h2 id="core-concepts"><a class="header" href="#core-concepts">Core Concepts</a></h2>
+<h3 id="tablereference"><a class="header" href="#tablereference">TableReference</a></h3>
+<p>Unified identifier (database, schema, table). Logical planner, execution, and transaction
+code all use it when requesting handles from the catalog.</p>
+<h3 id="registries"><a class="header" href="#registries">Registries</a></h3>
+<p><code>TableRegistry</code>/<code>IndexRegistry</code> map internal IDs to <code>Arc&lt;TableHeap&gt;</code> or
+<code>Arc&lt;BPlusTreeIndex&gt;</code> plus logical names. They are thread-safe so background tasks can
+traverse them without blocking the main thread.</p>
+<h3 id="schema--column"><a class="header" href="#schema--column">Schema &amp; Column</a></h3>
+<p><code>Schema</code> stores column definitions (type, default, nullability). Execution uses it when
+materialising tuples; the planner uses it to check expression types. <code>Schema::project</code>
+helps physical operators build projected outputs.</p>
+<h3 id="tablestatistics"><a class="header" href="#tablestatistics">TableStatistics</a></h3>
+<p><code>ANALYZE</code> writes row counts and histograms into the catalog. Optimizer rules and planner
+heuristics can consult these stats when deciding whether to push filters or pick indexes.</p>
 <hr />
 <h2 id="interactions"><a class="header" href="#interactions">Interactions</a></h2>
 <ul>
-<li><strong>SQL front-end</strong> – provides the AST; helper traits (<code>NormalizedIdent</code>, etc.) keep name
-resolution consistent.</li>
-<li><strong>Catalog</strong> – <code>PlannerContext</code> relies on it to confirm table/index existence and fetch
-schemas.</li>
-<li><strong>Optimizer</strong> – operates purely on <code>LogicalPlan</code>; the planner must emit clean,
-traversable trees so rules can fire.</li>
-<li><strong>Execution</strong> – physical nodes carry <code>TableReference</code>, <code>SchemaRef</code>, and hints that the
-execution engine passes to the storage layer.</li>
+<li><strong>SQL / Planner</strong> – DDL planning calls <code>Catalog::create_table</code> / <code>create_index</code>; name
+binding relies on <code>Schema</code>.</li>
+<li><strong>Execution</strong> – <code>ExecutionContext::table_handle</code> and <code>index_handle</code> fetch physical
+handles through the catalog, so scans never hard-code heap locations.</li>
+<li><strong>Background workers</strong> – MVCC and index vacuum iterate the registries via <code>Arc</code> clones.</li>
+<li><strong>Recovery</strong> – <code>load_catalog_data</code> rebuilds the in-memory catalog from control files and
+metadata pages during startup.</li>
 </ul>
 <hr />
 <h2 id="teaching-ideas"><a class="header" href="#teaching-ideas">Teaching Ideas</a></h2>
 <ul>
-<li>Implement a new logical operator (e.g., <code>LogicalDistinct</code>) and add the corresponding
-physical operator to trace the full lifecycle.</li>
-<li>Experiment with early projection inside the logical plan and observe its impact on
-downstream operators.</li>
-<li>Use <code>pretty_format_logical_plan</code>/<code>physical_plan</code> dumps to visualise rewrites before and
-after optimizer passes.</li>
+<li>Extend the schema system with hidden or computed columns and teach the catalog to store
+the extra metadata.</li>
+<li>Add histogram bins to <code>TableStatistics</code> and demonstrate how a simple cost heuristic can
+choose better plans.</li>
+<li>Turn on <code>RUST_LOG=catalog=debug</code> to observe how DDL mutates the registries.</li>
 </ul>
-<hr />
-<p>Further reading: <a href="../plan/lifecycle.html">The Lifecycle of a Query</a></p>
 
                     </main>
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
-                            <a rel="prev" href="../modules/expression.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                            <a rel="prev" href="../modules/sql.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                                 <i class="fa fa-angle-left"></i>
                             </a>
 
-                            <a rel="next prefetch" href="../plan/lifecycle.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                            <a rel="next prefetch" href="../modules/expression.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                                 <i class="fa fa-angle-right"></i>
                             </a>
 
@@ -232,11 +234,11 @@ after optimizer passes.</li>
             </div>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
-                    <a rel="prev" href="../modules/expression.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                    <a rel="prev" href="../modules/sql.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                         <i class="fa fa-angle-left"></i>
                     </a>
 
-                    <a rel="next prefetch" href="../plan/lifecycle.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                    <a rel="next prefetch" href="../modules/expression.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                         <i class="fa fa-angle-right"></i>
                     </a>
             </nav>

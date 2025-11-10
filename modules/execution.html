@@ -156,23 +156,62 @@
                 <div id="content" class="content">
                     <main>
                         <h1 id="execution-engine"><a class="header" href="#execution-engine">Execution Engine</a></h1>
-<p>Once a query has been parsed, planned, and optimized, the resulting <code>PhysicalPlan</code> is handed to the <strong>Execution Engine</strong>. This component is the workhorse of the database, responsible for actually running the plan and producing the final results.</p>
-<h2 id="core-concepts"><a class="header" href="#core-concepts">Core Concepts</a></h2>
+<p><code>src/execution/</code> drives <code>PhysicalPlan</code> trees using the Volcano (iterator) model. Every
+operator pulls tuples from its children, coordinating closely with transactions,
+storage, and expression evaluation.</p>
+<hr />
+<h2 id="core-components"><a class="header" href="#core-components">Core Components</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Component</th><th>Role</th></tr></thead><tbody>
+<tr><td><code>PhysicalPlan</code></td><td>Enum covering all physical operators; each implements <code>VolcanoExecutor</code>.</td></tr>
+<tr><td><code>ExecutionContext</code></td><td>Shared context carrying the catalog, <code>TxnContext</code>, storage engine, and expression helpers.</td></tr>
+<tr><td><code>TupleStream</code></td><td>Unified scan interface returned by table/index handles.</td></tr>
+</tbody></table>
+</div>
+<hr />
+<h2 id="execution-flow"><a class="header" href="#execution-flow">Execution Flow</a></h2>
+<ol>
+<li><code>ExecutionEngine::execute</code> calls <code>init</code> on the root plan (and recursively on children).</li>
+<li>The engine loops calling <code>next</code>, with parents pulling tuples from children.</li>
+<li><code>ExecutionContext</code> supplies transaction snapshots, lock helpers, and expression
+evaluation per call.</li>
+<li>Once <code>next</code> returns <code>None</code>, the accumulated results are returned to the caller (CLI,
+HTTP API, or tests).</li>
+</ol>
+<hr />
+<h2 id="operator-examples"><a class="header" href="#operator-examples">Operator Examples</a></h2>
 <ul>
-<li>
-<p><strong>Volcano (Iterator) Model</strong>: QuillSQL uses a pull-based execution model. Each operator in the physical plan tree is an "iterator" that provides a <code>next()</code> method. The parent operator calls <code>next()</code> on its children to pull rows upwards through the tree, from the storage layer to the client.</p>
-</li>
-<li>
-<p><strong>Physical Operators</strong>: Each logical operation (like a filter or a join) is mapped to a concrete physical operator that implements a specific algorithm (e.g., <code>PhysicalFilter</code>, <code>PhysicalNestedLoopJoin</code>).</p>
-</li>
-<li>
-<p><strong>Execution Context</strong>: As the plan is executed, a shared <code>ExecutionContext</code> is passed between operators. It contains the current transaction, MVCC snapshot, and a pluggable <code>StorageEngine</code> so operators can call helpers like <code>read_visible_tuple</code>, <code>prepare_row_for_write</code>, <code>insert_tuple_with_indexes</code>, or <code>eval_predicate</code> without knowing anything about TableHeaps or indexes.</p>
-</li>
+<li><strong>PhysicalSeqScan</strong> – acquires a <code>table_stream</code> from the storage engine, uses
+<code>ScanPrefetch</code> for batching, and relies on <code>TxnContext::read_visible_tuple</code> for MVCC.</li>
+<li><strong>PhysicalIndexScan</strong> – uses <code>index_stream</code>, tracks <code>invisible_hits</code>, and notifies the
+catalog when garbage accumulates.</li>
+<li><strong>PhysicalUpdate/PhysicalDelete</strong> – call <code>prepare_row_for_write</code> to re-validate locks
+and the latest tuple before invoking <code>apply_update/delete</code>.</li>
+<li><strong>PhysicalNestedLoopJoin</strong> – showcases the parent/child pull loop and acts as a baseline
+for more advanced joins.</li>
 </ul>
-<p>This section contains:</p>
+<hr />
+<h2 id="interactions"><a class="header" href="#interactions">Interactions</a></h2>
 <ul>
-<li><strong><a href="./../execution/volcano.html">The Volcano Execution Model</a></strong>: A deep dive into the pull-based execution model and the lifecycle of a query.</li>
+<li><strong>StorageEngine</strong> – all data access goes through handles/streams, keeping execution
+storage-agnostic.</li>
+<li><strong>Transaction</strong> – <code>TxnContext</code> enforces locking, snapshots, and undo logging; operators
+never talk to <code>LockManager</code> directly.</li>
+<li><strong>Expression</strong> – <code>ExecutionContext::eval_expr</code> / <code>eval_predicate</code> evaluate expressions
+built by the planner.</li>
+<li><strong>Optimizer/Planner</strong> – execution honours the plan as-is; all structural choices happen
+upstream.</li>
 </ul>
+<hr />
+<h2 id="teaching-ideas"><a class="header" href="#teaching-ideas">Teaching Ideas</a></h2>
+<ul>
+<li>Implement a new operator (e.g., <code>PhysicalMergeJoin</code>) to see how <code>ExecutionContext</code>
+support generalises.</li>
+<li>Add adaptive prefetching inside <code>PhysicalSeqScan</code> to explore iterator hints.</li>
+<li>Enable <code>RUST_LOG=execution=trace</code> to watch the <code>init</code>/<code>next</code> call sequence during a
+query.</li>
+</ul>
+<hr />
+<p>Further reading: <a href="../execution/volcano.html">The Volcano Execution Model</a></p>
 
                     </main>
 
