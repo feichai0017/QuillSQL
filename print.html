@@ -2222,6 +2222,89 @@ c.  Decide what information the <code>HeapReclaim</code> record needs to contain
 d.  Implement the <code>redo</code> logic for this new record in the appropriate <code>ResourceManager</code>. What should happen when you redo a <code>HeapReclaim</code> record?</p>
 </li>
 </ol>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="wal-refactor-plan"><a class="header" href="#wal-refactor-plan">WAL Refactor Plan</a></h1>
+<p>This document captures the incremental plan for modernising QuillSQL’s write-ahead log so it behaves more like the logical+physiological WALs used in PostgreSQL and DuckDB. The goal is to keep the system teaching-friendly while unlocking better performance, portability, and clarity.</p>
+<h2 id="current-state-2024-12"><a class="header" href="#current-state-2024-12">Current State (2024-12)</a></h2>
+<ul>
+<li><strong>Redo relies on page images.</strong> <code>WritePageGuard::apply_page_image</code> emits <code>PageWrite</code> or <code>PageDelta</code> records, and the page <code>ResourceManager</code> replays them. Heap-specific WAL payloads only drive UNDO; <code>HeapResourceManager::redo</code> is a no-op.</li>
+<li><strong>Index changes are implicit.</strong> B+Tree operations mutate pages directly and depend on page-level logging. There is no index-specific WAL, so crash recovery assumes page FPWs cover all structure changes.</li>
+<li><strong>WAL buffer is a Vec.</strong> <code>WalBuffer</code> pushes encoded frames into a growable <code>Vec</code> protected by a mutex. There is no ring-buffer behaviour, no lock-free enqueue path, and no segmentation of pending bytes.</li>
+<li><strong>Single-segment, synchronous bias.</strong> <code>WalStorage</code> appends to one file at a time and calls <code>fsync</code> aggressively when <code>sync_on_flush</code> is on. There is no multi-segment writer or async fsync pipeline.</li>
+<li><strong>Platform coupling.</strong> The default sink goes through <code>DiskScheduler</code>, which uses Linux <code>io_uring</code>. Non-Linux builds require feature gates or fall back to synchronous file writes manually.</li>
+</ul>
+<h2 id="pain-points"><a class="header" href="#pain-points">Pain Points</a></h2>
+<ol>
+<li><strong>Large WAL volume.</strong> Pure page images lead to 4 KiB records for small tuple updates. Teaching scenarios that poke tuple headers end up saturating I/O.</li>
+<li><strong>Redo gaps for heap/index.</strong> ARIES invariants (pageLSN check, idempotent redo) are not enforced per operation, so we cannot safely disable FPWs.</li>
+<li><strong>Difficult to unit test.</strong> Without logical redo, simulating crash/restart flows in Rust tests requires writing real page images, slowing CI.</li>
+<li><strong>Bottlenecked buffer.</strong> The WAL buffer becomes a scaling bottleneck during heavy insert workloads because each writer must lock the Vec and reallocate.</li>
+<li><strong>Portability concerns.</strong> macOS / Windows builds cannot reuse the current scheduler path, so WAL cannot flush reliably there.</li>
+</ol>
+<h2 id="target-architecture"><a class="header" href="#target-architecture">Target Architecture</a></h2>
+<h3 id="logical-heap-wal"><a class="header" href="#logical-heap-wal">Logical Heap WAL</a></h3>
+<ul>
+<li><code>HeapRecordPayload::{Insert,Update,Delete}</code> remain, but redo will decode them and reapply the tuple mutation (insert slot, rewrite bytes, toggle metadata).</li>
+<li>ARIES-style replay: check pageLSN, skip if already applied, otherwise write tuple data and set pageLSN to frame LSN.</li>
+<li>Only emit page images on “first dirty after checkpoint” or when tuple size forces overflow, mirroring PostgreSQL’s FPW policy.</li>
+</ul>
+<h3 id="index-wal--resource-managers"><a class="header" href="#index-wal--resource-managers">Index WAL &amp; Resource Managers</a></h3>
+<ul>
+<li>Introduce <code>IndexWalPayload</code> (Insert/Delete/Split/Merge) and <code>BtreeResourceManager</code>.</li>
+<li>Payload stores logical key bytes plus RecordId so redo can replay structural changes without consulting heap.</li>
+<li>Recovery registers the new RM alongside Heap/Page and routes frames via <code>ResourceManagerId::Index</code>.</li>
+</ul>
+<h3 id="wal-buffer--storage"><a class="header" href="#wal-buffer--storage">WAL Buffer &amp; Storage</a></h3>
+<ul>
+<li>Replace <code>WalBuffer</code>’s <code>Vec</code> with the existing <code>RingBuffer&lt;T&gt;</code> plus an atomic enqueue cursor so appenders never contend on reallocation.</li>
+<li>Support multiple WAL segments under <code>wal_dir/segment_{lsn}.wal</code> and allow concurrent writes + asynchronous fsync of sealed segments.</li>
+<li>Default to lazy flush: <code>sync_on_flush = false</code>, and flush only at checkpoints or explicit <code>flush_until</code>.</li>
+</ul>
+<h3 id="platform-fallback"><a class="header" href="#platform-fallback">Platform Fallback</a></h3>
+<ul>
+<li>Wrap <code>DiskSchedulerWalSink</code> behind a trait and provide a synchronous <code>FileWalSink</code> (using <code>std::fs::File</code>) when <code>disk_scheduler</code> feature is disabled.</li>
+<li>Gate Linux-specific code so macOS users can still run tests with the fallback sink.</li>
+</ul>
+<h2 id="incremental-implementation-plan"><a class="header" href="#incremental-implementation-plan">Incremental Implementation Plan</a></h2>
+<ol>
+<li>
+<p><strong>Heap Redo Enablement</strong></p>
+<ul>
+<li>Extend <code>TableHeap</code> with recovery helpers (insert/update/delete without WAL, accepting <code>lsn</code>).</li>
+<li>Implement <code>HeapResourceManager::redo</code> to call the helpers.</li>
+<li>Update unit tests to cover redo idempotency.</li>
+</ul>
+</li>
+<li>
+<p><strong>B+Tree WAL</strong></p>
+<ul>
+<li>Define index payloads + codec, add <code>ResourceManagerId::Index</code>.</li>
+<li>Teach recovery to register <code>BtreeResourceManager</code>.</li>
+<li>Emit index WAL from <code>BPlusTreeIndex</code> mutations and add tests that crash/recover around splits.</li>
+</ul>
+</li>
+<li>
+<p><strong>WAL Buffer &amp; Storage</strong></p>
+<ul>
+<li>Swap in ring-buffer implementation with lock-free enqueue (using atomics + <code>parking_lot</code> condvar for flushers).</li>
+<li>Update <code>WalStorage</code> to manage multiple active segments and asynchronous fsync tickets.</li>
+</ul>
+</li>
+<li>
+<p><strong>Portability + Config</strong></p>
+<ul>
+<li>Add <code>FileWalSink</code> fallback and expose a <code>wal_io=fallback</code> feature gate.</li>
+<li>Change defaults (<code>sync_on_flush=false</code>, <code>persist_control_file_on_flush=false</code>) and document the durability trade-offs.</li>
+</ul>
+</li>
+<li>
+<p><strong>Docs &amp; Benchmarks</strong></p>
+<ul>
+<li>Update <code>docs/src/recovery/*.md</code> with the new flow.</li>
+<li>Expand <code>benches/storage_bench.rs</code> to measure throughput with lazy flush and logical redo.</li>
+</ul>
+</li>
+</ol>
+<p>Each milestone should land with focused tests (unit + integration) plus at least one crash-recovery scenario using the new WAL semantics.</p>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="background-services"><a class="header" href="#background-services">Background Services</a></h1>
 <p><code>src/background/</code> hosts the asynchronous workers that keep a database healthy: WAL
 writers, checkpoints, buffer flushers, and MVCC vacuum. A central registry makes it easy
