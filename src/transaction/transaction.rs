@@ -116,15 +116,18 @@ impl UndoAction {
         }
     }
 
-    pub fn to_heap_payload(&self) -> QuillSQLResult<HeapRecordPayload> {
+    pub fn to_heap_payload(&self, txn_id: TransactionId) -> QuillSQLResult<HeapRecordPayload> {
         match self {
             UndoAction::Insert { table, rid, .. } => {
                 let (meta, tuple) = table.full_tuple(*rid)?;
+                let mut deleted_meta = meta;
+                deleted_meta.mark_deleted(txn_id, 0);
                 Ok(HeapRecordPayload::Delete(HeapDeletePayload {
                     relation: table.relation_ident(),
                     page_id: rid.page_id,
                     slot_id: rid.slot_num as u16,
                     op_txn_id: meta.insert_txn_id,
+                    new_tuple_meta: TupleMetaRepr::from(deleted_meta),
                     old_tuple_meta: TupleMetaRepr::from(meta),
                     old_tuple_data: Some(TupleCodec::encode(&tuple)),
                 }))

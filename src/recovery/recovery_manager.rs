@@ -110,8 +110,9 @@ mod tests {
     use crate::recovery::undo::{UndoExecutor, UndoOutcome};
     use crate::recovery::wal::page::WAL_PAGE_SIZE;
     use crate::recovery::wal_record::{
-        HeapRecordPayload, HeapUpdatePayload, PageDeltaPayload, PageWritePayload, RelationIdent,
-        TransactionPayload, TransactionRecordKind, TupleMetaRepr, WalRecordPayload,
+        HeapDeletePayload, HeapInsertPayload, HeapRecordPayload, HeapUpdatePayload,
+        PageDeltaPayload, PageWritePayload, RelationIdent, TransactionPayload,
+        TransactionRecordKind, TupleMetaRepr, WalRecordPayload,
     };
     use crate::recovery::WalManager;
     use crate::storage::codec::TablePageHeaderCodec;
@@ -284,6 +285,127 @@ mod tests {
         let rx = scheduler.schedule_read(2).unwrap();
         let data = rx.recv().unwrap().unwrap();
         assert_eq!(data[100..105], [1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn replay_rebuilds_heap_from_logical_records() {
+        let temp = TempDir::new().expect("tempdir");
+        let db_path = temp.path().join("heap_logic.db");
+        let wal_dir = temp.path().join("wal");
+
+        let config = WalConfig {
+            directory: wal_dir.clone(),
+            sync_on_flush: false,
+            ..WalConfig::default()
+        };
+        let (wal, seed_scheduler) = build_wal(config.clone(), &db_path);
+
+        let page_id = 11u32;
+        let base_bytes = vec![7u8; 8];
+        let updated_bytes = vec![8u8; 8];
+        let zero_page = vec![0u8; crate::buffer::PAGE_SIZE];
+        seed_scheduler
+            .schedule_write(page_id, bytes::Bytes::from(zero_page))
+            .unwrap()
+            .recv()
+            .unwrap()
+            .unwrap();
+        wal.append_record_with(|_| {
+            WalRecordPayload::Transaction(TransactionPayload {
+                marker: TransactionRecordKind::Begin,
+                txn_id: 1,
+            })
+        })
+        .unwrap();
+
+        let insert_meta = TupleMetaRepr {
+            insert_txn_id: 1,
+            insert_cid: 0,
+            delete_txn_id: 0,
+            delete_cid: INVALID_COMMAND_ID,
+            is_deleted: false,
+            next_version: None,
+            prev_version: None,
+        };
+        let updated_meta = TupleMetaRepr {
+            insert_txn_id: 1,
+            insert_cid: 1,
+            delete_txn_id: 0,
+            delete_cid: INVALID_COMMAND_ID,
+            is_deleted: false,
+            next_version: None,
+            prev_version: None,
+        };
+        let mut deleted_meta: TupleMeta = updated_meta.into();
+        deleted_meta.mark_deleted(1, 2);
+
+        wal.append_record_with(|_| {
+            WalRecordPayload::Heap(HeapRecordPayload::Insert(HeapInsertPayload {
+                relation: RelationIdent {
+                    root_page_id: page_id,
+                },
+                page_id,
+                slot_id: 0,
+                op_txn_id: 1,
+                tuple_meta: insert_meta,
+                tuple_data: base_bytes.clone(),
+            }))
+        })
+        .unwrap();
+        wal.append_record_with(|_| {
+            WalRecordPayload::Heap(HeapRecordPayload::Update(HeapUpdatePayload {
+                relation: RelationIdent {
+                    root_page_id: page_id,
+                },
+                page_id,
+                slot_id: 0,
+                op_txn_id: 1,
+                new_tuple_meta: updated_meta,
+                new_tuple_data: updated_bytes.clone(),
+                old_tuple_meta: Some(insert_meta),
+                old_tuple_data: Some(base_bytes.clone()),
+            }))
+        })
+        .unwrap();
+        wal.append_record_with(|_| {
+            WalRecordPayload::Heap(HeapRecordPayload::Delete(HeapDeletePayload {
+                relation: RelationIdent {
+                    root_page_id: page_id,
+                },
+                page_id,
+                slot_id: 0,
+                op_txn_id: 1,
+                new_tuple_meta: TupleMetaRepr::from(deleted_meta),
+                old_tuple_meta: updated_meta,
+                old_tuple_data: Some(updated_bytes.clone()),
+            }))
+        })
+        .unwrap();
+        wal.append_record_with(|_| {
+            WalRecordPayload::Transaction(TransactionPayload {
+                marker: TransactionRecordKind::Commit,
+                txn_id: 1,
+            })
+        })
+        .unwrap();
+        wal.flush(None).unwrap();
+        drop(wal);
+        drop(seed_scheduler);
+
+        let (wal, scheduler) = build_wal(config.clone(), &db_path);
+        let recovery = RecoveryManager::new(wal.clone(), scheduler.clone());
+        let summary = recovery.replay().unwrap();
+        assert_eq!(summary.redo_count, 3);
+
+        let rx = scheduler.schedule_read(page_id).unwrap();
+        let data = rx.recv().unwrap().unwrap();
+        let (header, _) = TablePageHeaderCodec::decode(&data).unwrap();
+        assert_eq!(header.num_tuples, 1);
+        assert_eq!(header.tuple_infos[0].meta.is_deleted, true);
+        let off = header.tuple_infos[0].offset as usize;
+        let size = header.tuple_infos[0].size as usize;
+        assert_eq!(&data[off..off + size], &updated_bytes[..]);
+        drop(wal);
     }
 
     #[test]
@@ -599,6 +721,8 @@ mod tests {
             })
         })
         .unwrap();
+        let mut deleted_meta = old_meta;
+        deleted_meta.mark_deleted(6, 0);
         wal.append_record_with(|_| {
             WalRecordPayload::Heap(crate::recovery::wal_record::HeapRecordPayload::Delete(
                 crate::recovery::wal_record::HeapDeletePayload {
@@ -606,6 +730,7 @@ mod tests {
                     page_id,
                     slot_id: 0,
                     op_txn_id: 6,
+                    new_tuple_meta: crate::recovery::wal_record::TupleMetaRepr::from(deleted_meta),
                     old_tuple_meta: crate::recovery::wal_record::TupleMetaRepr::from(old_meta),
                     old_tuple_data: Some(old_bytes.clone()),
                 },
@@ -1116,6 +1241,17 @@ mod tests {
             ))
         })
         .unwrap();
+        let insert_meta = TupleMeta {
+            insert_txn_id: 5,
+            insert_cid: 0,
+            delete_txn_id: 0,
+            delete_cid: INVALID_COMMAND_ID,
+            is_deleted: false,
+            next_version: None,
+            prev_version: None,
+        };
+        let mut deleted_meta = insert_meta;
+        deleted_meta.mark_deleted(99, 0);
         wal.append_record_with(|_| {
             WalRecordPayload::Heap(crate::recovery::wal_record::HeapRecordPayload::Delete(
                 crate::recovery::wal_record::HeapDeletePayload {
@@ -1123,15 +1259,8 @@ mod tests {
                     page_id: pid_a,
                     slot_id: 0,
                     op_txn_id: 99,
-                    old_tuple_meta: crate::recovery::wal_record::TupleMetaRepr::from(TupleMeta {
-                        insert_txn_id: 5,
-                        insert_cid: 0,
-                        delete_txn_id: 0,
-                        delete_cid: INVALID_COMMAND_ID,
-                        is_deleted: false,
-                        next_version: None,
-                        prev_version: None,
-                    }),
+                    new_tuple_meta: crate::recovery::wal_record::TupleMetaRepr::from(deleted_meta),
+                    old_tuple_meta: crate::recovery::wal_record::TupleMetaRepr::from(insert_meta),
                     old_tuple_data: Some(vec![1u8; 8]),
                 },
             ))

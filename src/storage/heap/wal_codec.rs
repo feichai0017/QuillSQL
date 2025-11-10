@@ -81,6 +81,7 @@ pub struct HeapDeletePayload {
     pub slot_id: u16,
     /// transaction id that produced this heap operation
     pub op_txn_id: TransactionId,
+    pub new_tuple_meta: TupleMetaRepr,
     pub old_tuple_meta: TupleMetaRepr,
     pub old_tuple_data: Option<Vec<u8>>,
 }
@@ -391,12 +392,13 @@ fn decode_heap_update(bytes: &[u8]) -> QuillSQLResult<HeapUpdatePayload> {
 
 fn encode_heap_delete(body: &HeapDeletePayload) -> Vec<u8> {
     // Heap/Delete (rmid=Heap, info=3)
-    // body: relation + page_id + slot_id + op_txn_id + old_meta(17B) + has_old_data+len+data
+    // body: relation + page_id + slot_id + op_txn_id + new_meta + old_meta + has_old_data+len+data
     let mut buf = Vec::new();
     encode_relation_ident(&body.relation, &mut buf);
     buf.extend_from_slice(&body.page_id.to_le_bytes());
     buf.extend_from_slice(&body.slot_id.to_le_bytes());
     buf.extend_from_slice(&body.op_txn_id.to_le_bytes());
+    encode_tuple_meta(&body.new_tuple_meta, &mut buf);
     encode_tuple_meta(&body.old_tuple_meta, &mut buf);
     encode_optional_bytes(&body.old_tuple_data, &mut buf);
     buf
@@ -421,6 +423,8 @@ fn decode_heap_delete(bytes: &[u8]) -> QuillSQLResult<HeapDeletePayload> {
     let op_txn_id =
         u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap()) as TransactionId;
     offset += 8;
+    let (new_tuple_meta, consumed_new) = decode_tuple_meta(&bytes[offset..])?;
+    offset += consumed_new;
     let (old_tuple_meta, consumed) = decode_tuple_meta(&bytes[offset..])?;
     offset += consumed;
     let (old_tuple_data, _consumed) = decode_optional_bytes(&bytes[offset..])?;
@@ -429,6 +433,7 @@ fn decode_heap_delete(bytes: &[u8]) -> QuillSQLResult<HeapDeletePayload> {
         page_id,
         slot_id,
         op_txn_id,
+        new_tuple_meta,
         old_tuple_meta,
         old_tuple_data,
     })

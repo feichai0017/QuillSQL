@@ -203,7 +203,7 @@ impl TransactionManager {
         let txn_id = txn.id();
         let mut undo_next: Option<Lsn> = None;
         while let Some(action) = txn.pop_undo_action() {
-            let payload = action.to_heap_payload()?;
+            let payload = action.to_heap_payload(txn_id)?;
             let clr_result = self.wal.append_record_with(|ctx| {
                 txn.record_lsn(ctx.end_lsn);
                 WalRecordPayload::Clr(ClrPayload {

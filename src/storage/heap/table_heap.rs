@@ -197,6 +197,7 @@ impl TableHeap {
             page_id: rid.page_id,
             slot_id: slot,
             op_txn_id: delete_txn_id,
+            new_tuple_meta: TupleMetaRepr::from(new_meta),
             old_tuple_meta: TupleMetaRepr::from(old_meta),
             old_tuple_data: Some(tuple_bytes),
         });

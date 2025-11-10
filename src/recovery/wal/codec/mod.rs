@@ -448,6 +448,15 @@ mod tests {
             page_id: 3,
             slot_id: 1,
             op_txn_id: 4,
+            new_tuple_meta: TupleMetaRepr {
+                insert_txn_id: 2,
+                insert_cid: 0,
+                delete_txn_id: 4,
+                delete_cid: 0,
+                is_deleted: true,
+                next_version: None,
+                prev_version: None,
+            },
             old_tuple_meta: TupleMetaRepr {
                 insert_txn_id: 2,
                 insert_cid: 0,
@@ -468,6 +477,7 @@ mod tests {
         match decoded {
             WalRecordPayload::Heap(HeapRecordPayload::Delete(body)) => {
                 assert_eq!(body.relation.root_page_id, 7);
+                assert!(body.new_tuple_meta.is_deleted);
                 assert!(body.old_tuple_meta.is_deleted);
                 assert!(body.old_tuple_data.is_none());
             }
