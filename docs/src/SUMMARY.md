@@ -32,6 +32,7 @@
     - [B+Tree](./index/btree_index.md)
 - [Recovery Manager (WAL)](./modules/recovery.md)
     - [The ARIES Protocol](./recovery/aries.md)
+    - [WAL Refactor Plan](./recovery/wal_refactor.md)
 - [Background Services](./modules/background.md)
 - [Configuration](./modules/config.md)
 - [Front-Ends (CLI / HTTP)](./modules/bin.md)

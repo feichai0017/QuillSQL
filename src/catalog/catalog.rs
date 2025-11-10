@@ -782,7 +782,7 @@ impl Catalog {
         let mut iterator = TableIterator::new(heap.clone(), ..);
         while let Some((rid, _meta, tuple)) = iterator.next()? {
             if predicate(&tuple)? {
-                heap.delete_tuple(rid, SYSTEM_TXN_ID, SYSTEM_COMMAND_ID)?;
+                heap.delete_tuple(rid, SYSTEM_TXN_ID, SYSTEM_COMMAND_ID, None)?;
             }
         }
         Ok(())

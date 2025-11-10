@@ -1,6 +1,6 @@
 use crate::error::QuillSQLResult;
+use crate::storage::heap::table_heap::TableHeap;
 use crate::storage::page::{RecordId, TupleMeta};
-use crate::storage::table_heap::TableHeap;
 use crate::storage::tuple::Tuple;
 use crate::transaction::{CommandId, TransactionId};
 use std::sync::Arc;
@@ -59,10 +59,9 @@ impl MvccHeap {
         let (new_rid, mut new_meta) =
             self.insert_version(&new_tuple, txn_id, cid, Some(current_rid))?;
         new_meta.set_prev_version(Some(current_rid));
-        let mut updated_meta = current_meta;
-        updated_meta.mark_deleted(txn_id, cid);
-        updated_meta.set_next_version(Some(new_rid));
-        self.heap.update_tuple_meta(updated_meta, current_rid)?;
+
+        self.heap
+            .delete_tuple(current_rid, txn_id, cid, Some(new_rid))?;
         Ok((new_rid, prev_meta))
     }
 
@@ -72,13 +71,12 @@ impl MvccHeap {
         txn_id: TransactionId,
         cid: CommandId,
     ) -> QuillSQLResult<TupleMeta> {
-        let (mut current_meta, _) = self.heap.full_tuple(rid)?;
+        let (current_meta, _) = self.heap.full_tuple(rid)?;
         if current_meta.is_deleted {
             return Ok(current_meta);
         }
         let prev_meta = current_meta;
-        current_meta.mark_deleted(txn_id, cid);
-        self.heap.update_tuple_meta(current_meta, rid)?;
+        self.heap.delete_tuple(rid, txn_id, cid, None)?;
         Ok(prev_meta)
     }
 

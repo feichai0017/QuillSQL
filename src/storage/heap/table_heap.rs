@@ -82,19 +82,8 @@ impl TableHeap {
         Ok(())
     }
 
-    /// Inserts a tuple into the table.
-    ///
-    /// This function inserts the given tuple into the table. If the last page in the table
-    /// has enough space for the tuple, it is inserted there. Otherwise, a new page is allocated
-    /// and the tuple is inserted there.
-    ///
-    /// Parameters:
-    /// - `meta`: The metadata associated with the tuple.
-    /// - `tuple`: The tuple to be inserted.
-    ///
-    /// Returns:
-    /// An `Option` containing the `Rid` of the inserted tuple if successful, otherwise `None`.
-    /// Inserts a tuple into the table.
+    /// Inserts `tuple` with MVCC metadata `meta`, allocating a new page if the
+    /// current tail page runs out of capacity.
     pub fn insert_tuple(&self, meta: &TupleMeta, tuple: &Tuple) -> QuillSQLResult<RecordId> {
         let mut current_page_id = self.last_page_id.load(Ordering::SeqCst);
 
@@ -136,39 +125,33 @@ impl TableHeap {
         }
     }
 
-    pub fn update_tuple_meta(&self, meta: TupleMeta, rid: RecordId) -> QuillSQLResult<()> {
+    /// Updates the metadata associated with the tuple stored at `rid`.
+    pub fn update_tuple(&self, meta: TupleMeta, rid: RecordId) -> QuillSQLResult<()> {
         let mut page_guard = self.buffer_pool.fetch_page_write(rid.page_id)?;
         let mut table_page = TablePageCodec::decode(page_guard.data(), self.schema.clone())?.0;
         table_page.set_lsn(page_guard.lsn());
 
         let slot = rid.slot_num as u16;
         let (old_meta, old_tuple) = table_page.tuple(slot)?;
+        if meta.is_deleted && !old_meta.is_deleted {
+            drop(page_guard);
+            return self.delete_tuple(rid, meta.delete_txn_id, meta.delete_cid, None);
+        }
         let old_tuple_bytes = TupleCodec::encode(&old_tuple);
         table_page.update_tuple_meta(meta, slot)?;
         let relation = self.relation_ident();
-        let payload = if meta.is_deleted && !old_meta.is_deleted {
-            HeapRecordPayload::Delete(HeapDeletePayload {
-                relation,
-                page_id: rid.page_id,
-                slot_id: slot,
-                op_txn_id: meta.delete_txn_id,
-                old_tuple_meta: TupleMetaRepr::from(old_meta),
-                old_tuple_data: Some(old_tuple_bytes),
-            })
-        } else {
-            let (_, current_tuple) = table_page.tuple(slot)?;
-            let new_tuple_bytes = TupleCodec::encode(&current_tuple);
-            HeapRecordPayload::Update(HeapUpdatePayload {
-                relation,
-                page_id: rid.page_id,
-                slot_id: slot,
-                op_txn_id: meta.insert_txn_id,
-                new_tuple_meta: TupleMetaRepr::from(meta),
-                new_tuple_data: new_tuple_bytes,
-                old_tuple_meta: Some(TupleMetaRepr::from(old_meta)),
-                old_tuple_data: Some(old_tuple_bytes),
-            })
-        };
+        let (_, current_tuple) = table_page.tuple(slot)?;
+        let new_tuple_bytes = TupleCodec::encode(&current_tuple);
+        let payload = HeapRecordPayload::Update(HeapUpdatePayload {
+            relation,
+            page_id: rid.page_id,
+            slot_id: slot,
+            op_txn_id: meta.insert_txn_id,
+            new_tuple_meta: TupleMetaRepr::from(meta),
+            new_tuple_data: new_tuple_bytes,
+            old_tuple_meta: Some(TupleMetaRepr::from(old_meta)),
+            old_tuple_data: Some(old_tuple_bytes),
+        });
         self.append_heap_record(payload)?;
         self.write_back_page(&mut page_guard, &mut table_page)
     }
@@ -179,6 +162,46 @@ impl TableHeap {
             .fetch_table_page(rid.page_id, self.schema.clone())?;
         let result = table_page.tuple(rid.slot_num as u16)?;
         Ok(result)
+    }
+
+    /// Marks the tuple at `rid` as deleted with the provided transaction / command
+    /// identifiers, optionally wiring it to `next_version` for MVCC chains.
+    pub fn delete_tuple(
+        &self,
+        rid: RecordId,
+        delete_txn_id: TransactionId,
+        delete_cid: CommandId,
+        next_version: Option<RecordId>,
+    ) -> QuillSQLResult<()> {
+        let mut page_guard = self.buffer_pool.fetch_page_write(rid.page_id)?;
+        let mut table_page = TablePageCodec::decode(page_guard.data(), self.schema.clone())?.0;
+        table_page.set_lsn(page_guard.lsn());
+
+        let slot = rid.slot_num as u16;
+        let (old_meta, tuple) = table_page.tuple(slot)?;
+        if old_meta.is_deleted {
+            return Ok(());
+        }
+
+        let tuple_bytes = TupleCodec::encode(&tuple);
+        let mut new_meta = old_meta;
+        if let Some(next) = next_version {
+            new_meta.set_next_version(Some(next));
+        }
+        new_meta.mark_deleted(delete_txn_id, delete_cid);
+        table_page.update_tuple_meta(new_meta, slot)?;
+
+        let relation = self.relation_ident();
+        let payload = HeapRecordPayload::Delete(HeapDeletePayload {
+            relation,
+            page_id: rid.page_id,
+            slot_id: slot,
+            op_txn_id: delete_txn_id,
+            old_tuple_meta: TupleMetaRepr::from(old_meta),
+            old_tuple_data: Some(tuple_bytes),
+        });
+        self.append_heap_record(payload)?;
+        self.write_back_page(&mut page_guard, &mut table_page)
     }
 
     pub fn tuple(&self, rid: RecordId) -> QuillSQLResult<Tuple> {
@@ -340,20 +363,6 @@ impl TableHeap {
         }
         meta.mark_deleted(txn_id, cid);
         self.recover_set_tuple_meta(rid, meta)
-    }
-
-    pub fn delete_tuple(
-        &self,
-        rid: RecordId,
-        txn_id: TransactionId,
-        cid: CommandId,
-    ) -> QuillSQLResult<()> {
-        let mut meta = self.tuple_meta(rid)?;
-        if meta.is_deleted {
-            return Ok(());
-        }
-        meta.mark_deleted(txn_id, cid);
-        self.update_tuple_meta(meta, rid)
     }
 
     /// Attempt to reclaim the tuple at `rid` if `predicate` returns true for the current metadata.
@@ -789,9 +798,9 @@ mod tests {
 
         let mut meta = table_heap.tuple_meta(rid2).unwrap();
         meta.insert_txn_id = 1;
-        meta.mark_deleted(2, 0);
-        meta.is_deleted = true;
-        table_heap.update_tuple_meta(meta, rid2).unwrap();
+        table_heap.update_tuple(meta, rid2).unwrap();
+
+        table_heap.delete_tuple(rid2, 2, 0, None).unwrap();
 
         let meta = table_heap.tuple_meta(rid2).unwrap();
         assert_eq!(meta.insert_txn_id, 1);
