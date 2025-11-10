@@ -19,6 +19,7 @@ const RANGE_WINDOW: i64 = 200;
 const INDEX_RANGE_WIDTH: usize = 4;
 
 const QUILL_TABLE: &str = "bench";
+const FLUSH_TABLE: &str = "flush_bench";
 const SQLITE_TABLE: &str = "bench";
 const PG_INSERT_TABLE: &str = "bench_insert";
 const PG_SCAN_TABLE: &str = "bench_scan";
@@ -84,15 +85,21 @@ fn prepare_dataset() -> Database {
         QUILL_TABLE, QUILL_TABLE
     ))
     .expect("create index");
-    bulk_insert(&mut db, 0, ROWS, INSERT_BATCH).expect("bulk insert");
+    bulk_insert(&mut db, QUILL_TABLE, 0, ROWS, INSERT_BATCH).expect("bulk insert");
     db.flush().expect("flush");
     db
 }
 
-fn bulk_insert(db: &mut Database, start: i64, total: i64, batch: i64) -> QuillSQLResult<()> {
+fn bulk_insert(
+    db: &mut Database,
+    table: &str,
+    start: i64,
+    total: i64,
+    batch: i64,
+) -> QuillSQLResult<()> {
     let mut session = SessionContext::new(db.default_isolation());
     db.run_with_session(&mut session, "BEGIN")?;
-    let result = insert_batches(QUILL_TABLE, start, total, batch, |sql| {
+    let result = insert_batches(table, start, total, batch, |sql| {
         db.run_with_session(&mut session, sql)?;
         Ok(())
     });
@@ -259,7 +266,7 @@ fn bench_insert(c: &mut Criterion) {
         b.iter(|| {
             let mut db = db.borrow_mut();
             db.run(&clear_sql).expect("clear table");
-            bulk_insert(&mut db, 0, 10_000, INSERT_BATCH).unwrap();
+            bulk_insert(&mut db, QUILL_TABLE, 0, 10_000, INSERT_BATCH).unwrap();
             black_box(());
         });
     });
@@ -518,10 +525,74 @@ fn bench_index_scan(c: &mut Criterion) {
     group.finish();
 }
 
+fn flush_bench_options(sync_commit: bool, sync_on_flush: bool) -> DatabaseOptions {
+    DatabaseOptions {
+        wal: WalOptions {
+            writer_interval_ms: Some(None),
+            synchronous_commit: Some(sync_commit),
+            sync_on_flush: Some(sync_on_flush),
+            persist_control_file_on_flush: Some(sync_on_flush),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+fn bench_wal_flush_modes(c: &mut Criterion) {
+    let mut group = c.benchmark_group("wal_flush_modes");
+    group.throughput(Throughput::Elements(5_000));
+
+    let lazy_opts = flush_bench_options(false, false);
+    let sync_opts = flush_bench_options(true, true);
+
+    let lazy_db = RefCell::new({
+        let mut db = Database::new_temp_with_options(lazy_opts.clone()).expect("lazy db");
+        db.run(&format!(
+            "CREATE TABLE {}(id BIGINT NOT NULL, val BIGINT)",
+            FLUSH_TABLE
+        ))
+        .expect("create flush table");
+        db
+    });
+    group.bench_function("lazy_flush", |b| {
+        b.iter(|| {
+            let mut db = lazy_db.borrow_mut();
+            db.run(&format!("DELETE FROM {}", FLUSH_TABLE))
+                .expect("truncate");
+            bulk_insert(&mut db, FLUSH_TABLE, 0, 5_000, INSERT_BATCH).unwrap();
+            db.flush().unwrap();
+            black_box(());
+        });
+    });
+
+    let sync_db = RefCell::new({
+        let mut db = Database::new_temp_with_options(sync_opts.clone()).expect("sync db");
+        db.run(&format!(
+            "CREATE TABLE {}(id BIGINT NOT NULL, val BIGINT)",
+            FLUSH_TABLE
+        ))
+        .expect("create flush table");
+        db
+    });
+    group.bench_function("force_flush", |b| {
+        b.iter(|| {
+            let mut db = sync_db.borrow_mut();
+            db.run(&format!("DELETE FROM {}", FLUSH_TABLE))
+                .expect("truncate");
+            bulk_insert(&mut db, FLUSH_TABLE, 0, 5_000, INSERT_BATCH).unwrap();
+            db.flush().unwrap();
+            black_box(());
+        });
+    });
+
+    group.finish();
+}
+
 fn bench_main(c: &mut Criterion) {
     bench_insert(c);
     bench_seq_scan(c);
     bench_index_scan(c);
+    bench_wal_flush_modes(c);
 }
 
 criterion_group!(

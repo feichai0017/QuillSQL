@@ -342,7 +342,8 @@ impl Database {
     }
 
     pub fn flush(&self) -> QuillSQLResult<()> {
-        let _ = self.wal_manager.flush(None)?;
+        let target = self.wal_manager.max_assigned_lsn();
+        let _ = self.wal_manager.flush_until(target)?;
         self.wal_manager.persist_control_file()?;
         self.buffer_pool.flush_all_pages()
     }
