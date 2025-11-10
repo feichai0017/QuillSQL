@@ -6,6 +6,7 @@ use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::recovery::wal_record::WalRecordPayload;
 use crate::recovery::Lsn;
 use crate::storage::heap::wal_codec::{decode_heap_record, encode_heap_record, HeapRecordKind};
+use crate::storage::index::wal_codec::{decode_index_record, encode_index_record};
 
 pub mod checkpoint;
 pub mod clr;
@@ -34,6 +35,7 @@ pub enum ResourceManagerId {
     Heap = 3,
     Checkpoint = 4,
     Clr = 5,
+    Index = 6,
 }
 
 impl TryFrom<u8> for ResourceManagerId {
@@ -46,6 +48,7 @@ impl TryFrom<u8> for ResourceManagerId {
             3 => Ok(ResourceManagerId::Heap),
             4 => Ok(ResourceManagerId::Checkpoint),
             5 => Ok(ResourceManagerId::Clr),
+            6 => Ok(ResourceManagerId::Index),
             other => Err(QuillSQLError::Internal(format!(
                 "Unknown WAL resource manager id: {}",
                 other
@@ -103,6 +106,10 @@ pub(crate) fn encode_body(payload: &WalRecordPayload) -> (ResourceManagerId, u8,
         WalRecordPayload::Heap(body) => {
             let (info, buf) = encode_heap_record(body);
             (ResourceManagerId::Heap, info, buf)
+        }
+        WalRecordPayload::Index(body) => {
+            let (info, buf) = encode_index_record(body);
+            (ResourceManagerId::Index, info, buf)
         }
         WalRecordPayload::Checkpoint(body) => {
             (ResourceManagerId::Checkpoint, 0, encode_checkpoint(body))
@@ -231,6 +238,14 @@ fn decode_frame_v1(bytes: &[u8]) -> QuillSQLResult<(WalFrame, usize)> {
             }
             body[0]
         }
+        ResourceManagerId::Index => {
+            if body.is_empty() {
+                return Err(QuillSQLError::Internal(
+                    "Legacy index payload missing kind byte".to_string(),
+                ));
+            }
+            body[0]
+        }
         ResourceManagerId::Checkpoint | ResourceManagerId::Clr => 0,
     };
 
@@ -246,6 +261,7 @@ fn decode_frame_v1(bytes: &[u8]) -> QuillSQLResult<(WalFrame, usize)> {
                 | ResourceManagerId::Clr => body.to_vec(),
                 ResourceManagerId::Transaction => body[..8].to_vec(),
                 ResourceManagerId::Heap => body[1..].to_vec(),
+                ResourceManagerId::Index => body[1..].to_vec(),
             },
         },
         total_len,
@@ -267,6 +283,10 @@ pub fn decode_payload(frame: &WalFrame) -> QuillSQLResult<WalRecordPayload> {
             frame.info,
         )?)),
         ResourceManagerId::Heap => Ok(WalRecordPayload::Heap(decode_heap_record(
+            &frame.body,
+            frame.info,
+        )?)),
+        ResourceManagerId::Index => Ok(WalRecordPayload::Index(decode_index_record(
             &frame.body,
             frame.info,
         )?)),

@@ -12,7 +12,7 @@ buffering, or vacuum behavior changes under different settings.
 | ---- | ----------- |
 | `DatabaseOptions` | Top-level options when constructing a database (WAL config, default isolation, etc.). |
 | `WalOptions` | WAL directory, segment size, flush strategy, writer interval, sync mode. |
-| `IndexVacuumConfig` / `MvccVacuumConfig` | Frequency/batch settings for background cleanup tasks. |
+| `IndexVacuumConfig` / `MvccVacuumConfig` | Background worker intervals (buffer writer, MVCC vacuum). |
 | `BufferPoolConfig` | Optional overrides for pool size, TinyLFU, and replacement policy details. |
 
 ---

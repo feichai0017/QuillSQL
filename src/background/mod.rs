@@ -7,9 +7,8 @@ use std::time::Duration;
 use log::{debug, warn};
 
 use crate::buffer::{BufferManager, PageId};
-use crate::catalog::registry::{IndexRegistry, TableRegistry};
+use crate::catalog::registry::TableRegistry;
 use crate::catalog::INFORMATION_SCHEMA_NAME;
-use crate::config::IndexVacuumConfig;
 use crate::error::QuillSQLResult;
 use crate::recovery::wal::codec::CheckpointPayload;
 use crate::recovery::{Lsn, WalManager, WalWriterHandle};
@@ -228,15 +227,12 @@ pub fn spawn_checkpoint_worker(
 pub fn spawn_bg_writer(
     buffer_pool: Arc<dyn BufferMaintenance>,
     interval: Option<Duration>,
-    vacuum_cfg: IndexVacuumConfig,
-    index_registry: Arc<IndexRegistry>,
 ) -> Option<WorkerHandle> {
     let interval = interval?;
     if interval.is_zero() {
         return None;
     }
     let bp = buffer_pool.clone();
-    let registry = index_registry.clone();
     spawn_periodic_worker(
         "bg-writer",
         WorkerKind::BufferPoolWriter,
@@ -245,15 +241,6 @@ pub fn spawn_bg_writer(
             let dirty_ids = bp.dirty_page_ids();
             for page_id in dirty_ids.into_iter().take(16) {
                 let _ = bp.flush_page(page_id);
-            }
-            for (idx, heap) in registry.iter().take(16) {
-                let pending = idx.take_pending_garbage();
-                if pending >= vacuum_cfg.trigger_threshold {
-                    let _ = idx.lazy_cleanup_with(
-                        |rid| heap.tuple_meta(*rid).map(|m| m.is_deleted).unwrap_or(false),
-                        Some(vacuum_cfg.batch_limit),
-                    );
-                }
             }
         },
     )

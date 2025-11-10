@@ -125,7 +125,7 @@ sequenceDiagram
 | ------ | ----------- | ------- |
 | WAL writer | Coalesces buffered WAL into durable segments | `WalManager::start_background_flush` |
 | Checkpoint | Flushes LSNs, records ATT + DPT snapshots, resets FPW epoch | Configurable interval (`WalOptions::checkpoint_interval_ms`) |
-| Buffer writer | Flushes dirty frames, runs index lazy cleanup based on pending garbage counters | `IndexVacuumConfig` |
+| Buffer writer | Flushes dirty frames to keep checkpoints short | `bg_writer_interval` |
 | MVCC vacuum | Iterates table heaps, removing committed-deleted or aborted-inserted tuples older than `safe_xmin` | `MvccVacuumConfig` (interval + batch limit) |
 
 All workers are registered with `background::BackgroundWorkers`, which stops and joins them on database shutdown.

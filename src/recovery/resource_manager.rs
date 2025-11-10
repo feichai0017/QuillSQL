@@ -168,5 +168,6 @@ pub fn ensure_default_resource_managers_registered() {
             Arc::new(PageResourceManager::default()),
         );
         crate::storage::heap_recovery::ensure_heap_resource_manager_registered();
+        crate::storage::index::index_recovery::ensure_index_resource_manager_registered();
     });
 }

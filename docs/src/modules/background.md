@@ -9,8 +9,7 @@ foreground queries.
 
 ## Responsibilities
 
-- Start workers according to configuration (`IndexVacuumConfig`, `MvccVacuumConfig`,
-  `WalOptions`, etc.).
+- Start workers according to configuration (`WalOptions`, `MvccVacuumConfig`, etc.).
 - Define lightweight traits (`CheckpointWal`, `BufferMaintenance`, `TxnSnapshotOps`) so
   workers can run without pulling in an async runtime.
 - Provide `BackgroundWorkers`, a registry that tracks `WorkerHandle`s and shuts them down
@@ -24,7 +23,7 @@ foreground queries.
 | ------ | ------- | -------- |
 | WAL writer | `wal_writer_interval_ms` | Calls `WalManager::background_flush` to durably write log buffers. |
 | Checkpoint | `checkpoint_interval_ms` | Captures dirty page / active txn tables and emits `Checkpoint` records to bound recovery. |
-| Buffer writer | `bg_writer_interval` | Flushes dirty frames and nudges index vacuum when garbage accumulates. |
+| Buffer writer | `bg_writer_interval` | Flushes dirty frames to reduce checkpoint pressure. |
 | MVCC vacuum | `MvccVacuumConfig` | Removes obsolete tuple versions once `safe_xmin` advances. |
 
 Every worker registers itself with `BackgroundWorkers`; `shutdown_all()` ensures threads
@@ -38,7 +37,6 @@ exit cleanly during tests or process teardown.
 - **BufferManager** – background flushers inspect dirty frames and help checkpoints
   capture consistent snapshots.
 - **TransactionManager** – MVCC vacuum queries `TxnSnapshotOps` for `safe_xmin`.
-- **Catalog** – index vacuum iterates `IndexRegistry` to locate candidate indexes.
 
 ---
 

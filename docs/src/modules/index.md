@@ -42,16 +42,17 @@ necessary (e.g., right before splitting), reducing contention.
 `IndexHandle::range_scan` wraps `TreeIndexIterator` and automatically fetches heap tuples,
 returning `(rid, meta, tuple)` triples. Execution remains storage-agnostic.
 
-### Garbage Signals
-`BPlusTreeIndex::note_potential_garbage` counts invisible keys; background index vacuum
-consults the counter plus `IndexVacuumConfig` before pruning.
+### Inline Maintenance
+Index inserts/updates/deletes modify the tree immediately and emit logical WAL for redo.
+There is no deferred “index vacuum”; once a heap tuple is deleted its index entry is
+removed in the same transaction.
 
 ---
 
 ## Interactions
 
-- **Catalog** – `Catalog::create_index` registers the index with `IndexRegistry`; execution
-  fetches `Arc<dyn IndexHandle>` via the registry.
+- **Catalog** – stores `Arc<BPlusTreeIndex>` instances alongside table metadata so
+  execution can fetch handles directly.
 - **Execution** – `PhysicalIndexScan` uses `ExecutionContext::index_stream`; DML operators
   call `insert_tuple_with_indexes` so heap writes and index maintenance stay in sync.
 - **Transaction/MVCC** – heaps store transaction metadata; indexes just reference RIDs, so

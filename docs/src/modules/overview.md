@@ -180,7 +180,7 @@ Teaching hook:
 | ------ | ------------ |
 | WAL writer | Flushes WAL buffer at configured cadence. |
 | Checkpoint | Captures the Dirty Page Table + Active Transaction Table. |
-| Buffer writer | Flushes dirty frames and kicks lazy index cleanup. |
+| Buffer writer | Flushes dirty frames to keep checkpoints short. |
 | MVCC vacuum | Reclaims tuple versions older than `safe_xmin`. |
 
 More context:

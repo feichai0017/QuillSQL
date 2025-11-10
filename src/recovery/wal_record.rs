@@ -14,6 +14,11 @@ pub use crate::storage::heap::wal_codec::{
     HeapInsertPayload, HeapRecordKind, HeapRecordPayload, HeapUpdatePayload, RelationIdent,
     TupleMetaRepr,
 };
+pub use crate::storage::index::wal_codec::{
+    decode_index_record as decode_index, encode_index_record as encode_index,
+    IndexLeafDeletePayload, IndexLeafInsertPayload, IndexLeafUpdatePayload, IndexRecordPayload,
+    IndexRelationIdent,
+};
 
 #[derive(Debug, Clone)]
 pub enum WalRecordPayload {
@@ -22,6 +27,7 @@ pub enum WalRecordPayload {
     PageDelta(PageDeltaPayload),
     Transaction(TransactionPayload),
     Heap(HeapRecordPayload),
+    Index(IndexRecordPayload),
     Checkpoint(CheckpointPayload),
     /// Compensation log record: documents an UNDO action; redo is a no-op.
     Clr(ClrPayload),

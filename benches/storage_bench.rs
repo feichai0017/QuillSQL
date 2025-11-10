@@ -1,9 +1,9 @@
 use std::cell::{Cell, RefCell};
 use std::fmt::Write as _; // for INSERT statement construction
-use std::fs;
-use std::path::Path;
 
-use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion, Throughput};
+use criterion::{
+    black_box, criterion_group, criterion_main, BatchSize, Criterion, Throughput,
+};
 use postgres::{Client, NoTls};
 use pprof::criterion::{Output, PProfProfiler};
 use quill_sql::database::{Database, DatabaseOptions, WalOptions};
@@ -13,14 +13,12 @@ use rand::seq::SliceRandom;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use rusqlite::Connection;
-
+use std::time::Duration;
 const ROWS: i64 = 50_000;
 const INSERT_BATCH: i64 = 200;
 const POINT_SAMPLES: usize = 5_000;
 const RANGE_WINDOW: i64 = 200;
 const INDEX_RANGE_WIDTH: usize = 4;
-
-const DB_DIR_NAME: &str = "quill_bench_data";
 
 const QUILL_TABLE: &str = "bench";
 const SQLITE_TABLE: &str = "bench";
@@ -76,10 +74,8 @@ where
     Ok(())
 }
 
-fn prepare_dataset(db_path: &Path) -> Database {
-    let mut db =
-        Database::new_on_disk_with_options(db_path.to_str().unwrap(), quill_bench_options())
-            .expect("on-disk db");
+fn prepare_dataset() -> Database {
+    let mut db = Database::new_temp_with_options(quill_bench_options()).expect("temp db");
     db.run(&format!(
         "CREATE TABLE {}(id BIGINT NOT NULL, val BIGINT)",
         QUILL_TABLE
@@ -244,9 +240,7 @@ fn build_index_range_queries(table: &str) -> Vec<String> {
     ranges
 }
 
-fn bench_insert(c: &mut Criterion, db_dir: &Path) {
-    let db_path = db_dir.join("insert.db");
-
+fn bench_insert(c: &mut Criterion) {
     let mut group = c.benchmark_group("insert_10k");
     group.throughput(Throughput::Elements((INSERT_BATCH * 50) as u64));
     let insert_opts = quill_bench_options();
@@ -259,8 +253,7 @@ fn bench_insert(c: &mut Criterion, db_dir: &Path) {
         let clear_sql = format!("DELETE FROM {}", QUILL_TABLE);
         let db = RefCell::new({
             let mut db =
-                Database::new_on_disk_with_options(db_path.to_str().unwrap(), insert_opts.clone())
-                    .expect("on-disk db");
+                Database::new_temp_with_options(insert_opts.clone()).expect("temp bench db");
             db.run(&drop_sql).expect("drop table if exists");
             db.run(&create_sql).expect("create table");
             db
@@ -310,13 +303,11 @@ fn bench_insert(c: &mut Criterion, db_dir: &Path) {
     group.finish();
 }
 
-fn bench_seq_scan(c: &mut Criterion, db_dir: &Path) {
-    let db_path = db_dir.join("scan.db");
-
+fn bench_seq_scan(c: &mut Criterion) {
     let mut group = c.benchmark_group("scan_seq");
     group.throughput(Throughput::Elements(ROWS as u64));
 
-    let mut quill_db = prepare_dataset(&db_path);
+    let mut quill_db = prepare_dataset();
     let quill_full_sql = format!("SELECT COUNT(*) FROM {}", QUILL_TABLE);
     group.bench_function("quill_full", |b| {
         b.iter(|| {
@@ -415,9 +406,8 @@ fn bench_seq_scan(c: &mut Criterion, db_dir: &Path) {
     group.finish();
 }
 
-fn bench_index_scan(c: &mut Criterion, db_dir: &Path) {
-    let db_path = db_dir.join("index.db");
-    let mut db = prepare_dataset(&db_path);
+fn bench_index_scan(c: &mut Criterion) {
+    let mut db = prepare_dataset();
     let mut group = c.benchmark_group("index_scan");
     group.throughput(Throughput::Elements(POINT_SAMPLES as u64));
 
@@ -531,24 +521,16 @@ fn bench_index_scan(c: &mut Criterion, db_dir: &Path) {
 }
 
 fn bench_main(c: &mut Criterion) {
-    let bench_dir = std::env::current_dir().unwrap().join(DB_DIR_NAME);
-
-    // Global setup
-    fs::remove_dir_all(&bench_dir).ok();
-    fs::create_dir_all(&bench_dir).expect("create bench dir");
-
-    bench_insert(c, &bench_dir);
-    bench_seq_scan(c, &bench_dir);
-    bench_index_scan(c, &bench_dir);
-
-    // Global teardown
-    fs::remove_dir_all(&bench_dir).ok();
+    bench_insert(c);
+    bench_seq_scan(c);
+    bench_index_scan(c);
 }
 
 criterion_group!(
     name = benches;
     config = Criterion::default()
         .sample_size(10)
+        .profile_time(Some(Duration::from_secs(5)))
         .with_profiler(PProfProfiler::new(100, Output::Flamegraph(None)));
     targets = bench_main
 );

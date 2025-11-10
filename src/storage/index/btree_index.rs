@@ -10,18 +10,22 @@ use crate::catalog::SchemaRef;
 use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::storage::codec::{
     BPlusTreeHeaderPageCodec, BPlusTreeInternalPageCodec, BPlusTreeLeafPageCodec,
-    BPlusTreePageCodec,
+    BPlusTreePageCodec, TupleCodec,
 };
 use crate::storage::page::{BPlusTreeHeaderPage, BPlusTreeInternalPage};
 use crate::storage::page::{BPlusTreeLeafPage, BPlusTreePage, RecordId};
 
 use crate::config::BTreeConfig;
+use crate::recovery::wal_record::WalRecordPayload;
 use crate::storage::codec::BPlusTreePageTypeCodec;
 pub use crate::storage::index::btree_iterator::TreeIndexIterator;
+use crate::storage::index::wal_codec::{
+    IndexLeafDeletePayload, IndexLeafInsertPayload, IndexLeafUpdatePayload, IndexRecordPayload,
+    IndexRelationIdent, SchemaRepr,
+};
 use crate::storage::page::BPlusTreePageType;
 use crate::storage::tuple::Tuple;
-use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
-
+use crate::transaction::TransactionId;
 // OLC bounded restart and backoff configuration
 const MAX_OLC_RESTARTS: usize = 64;
 const OLC_BACKOFF_BASE_US: u64 = 50;
@@ -77,8 +81,6 @@ pub struct BPlusTreeIndex {
     pub header_page_id: PageId,
     pub header_page_lock: Arc<RwLock<()>>,
     pub config: BTreeConfig,
-    /// Best-effort counter of potentially dead index entries observed by readers.
-    pub pending_garbage: AtomicUsize,
 }
 
 impl BPlusTreeIndex {
@@ -92,6 +94,24 @@ impl BPlusTreeIndex {
         debug_assert_eq!(new_image.len(), PAGE_SIZE);
         guard.apply_page_image(&new_image)?;
         Ok(())
+    }
+
+    fn relation_ident(&self) -> IndexRelationIdent {
+        IndexRelationIdent {
+            header_page_id: self.header_page_id,
+            schema: SchemaRepr::from(self.key_schema.clone()),
+        }
+    }
+
+    fn append_index_record(&self, payload: IndexRecordPayload) -> QuillSQLResult<()> {
+        if let Some(wal) = self.buffer_pool.wal_manager() {
+            let _ = wal.append_record_with(|_| WalRecordPayload::Index(payload.clone()))?;
+        }
+        Ok(())
+    }
+
+    fn wal_txn_id(&self) -> TransactionId {
+        0
     }
     pub fn new(
         key_schema: SchemaRef,
@@ -121,7 +141,6 @@ impl BPlusTreeIndex {
             header_page_id,
             header_page_lock: Arc::new(RwLock::new(())),
             config: BTreeConfig::default(),
-            pending_garbage: AtomicUsize::new(0),
         }
     }
 
@@ -153,7 +172,6 @@ impl BPlusTreeIndex {
             header_page_id,
             header_page_lock: Arc::new(RwLock::new(())),
             config: BTreeConfig::default(),
-            pending_garbage: AtomicUsize::new(0),
         }
     }
 
@@ -465,8 +483,18 @@ impl BPlusTreeIndex {
                         rid
                     );
                 }
+                let old_rid = *existing_rid;
                 *existing_rid = rid;
                 leaf_page.header.version += 1;
+                let payload = IndexRecordPayload::LeafUpdate(IndexLeafUpdatePayload {
+                    relation: self.relation_ident(),
+                    page_id: leaf_guard.page_id(),
+                    op_txn_id: self.wal_txn_id(),
+                    key_data: TupleCodec::encode(key),
+                    old_rid,
+                    new_rid: rid,
+                });
+                self.append_index_record(payload)?;
                 let encoded = BPlusTreeLeafPageCodec::encode(&leaf_page);
                 self.wal_overwrite_page(&mut leaf_guard, encoded)?;
                 local_ctx.release_all_write_locks();
@@ -514,6 +542,14 @@ impl BPlusTreeIndex {
             }
             leaf_page.insert(key.clone(), rid);
             leaf_page.header.version += 1;
+            let payload = IndexRecordPayload::LeafInsert(IndexLeafInsertPayload {
+                relation: self.relation_ident(),
+                page_id: leaf_guard.page_id(),
+                op_txn_id: self.wal_txn_id(),
+                key_data: TupleCodec::encode(key),
+                rid,
+            });
+            self.append_index_record(payload)?;
             let encoded = BPlusTreeLeafPageCodec::encode(&leaf_page);
             self.wal_overwrite_page(&mut leaf_guard, encoded)?;
             local_ctx.release_all_write_locks();
@@ -607,13 +643,25 @@ impl BPlusTreeIndex {
             } else {
                 false
             };
-            if leaf_page.look_up(key).is_none() {
-                local_ctx.release_all_write_locks();
-                return Ok(());
-            }
+            let target_rid = match leaf_page.look_up(key) {
+                Some(rid) => rid,
+                None => {
+                    local_ctx.release_all_write_locks();
+                    return Ok(());
+                }
+            };
+            let key_bytes = TupleCodec::encode(key);
 
             leaf_page.delete(key);
             leaf_page.header.version += 1;
+            let payload = IndexRecordPayload::LeafDelete(IndexLeafDeletePayload {
+                relation: self.relation_ident(),
+                page_id: leaf_guard.page_id(),
+                op_txn_id: self.wal_txn_id(),
+                key_data: key_bytes,
+                old_rid: target_rid,
+            });
+            self.append_index_record(payload)?;
             let encoded = BPlusTreeLeafPageCodec::encode(&leaf_page);
             self.wal_overwrite_page(&mut leaf_guard, encoded)?;
 
@@ -1149,56 +1197,6 @@ impl BPlusTreeIndex {
         Ok(())
     }
 
-    /// Best-effort lazy cleanup: iterate across leaves and delete keys whose RIDs
-    /// satisfy the `is_globally_dead` predicate. This is REDO-safe and uses the
-    /// existing delete() path to maintain separators and handle underflow properly.
-    /// Notes:
-    /// - Callers should pass a predicate that only returns true for tuples that are
-    ///   globally invisible (e.g., deleted and the deleting txn committed).
-    /// - This method is conservative and may revisit pages as structure changes; it
-    ///   favors correctness over speed.
-    pub fn lazy_cleanup_with<F>(
-        &self,
-        mut is_globally_dead: F,
-        limit: Option<usize>,
-    ) -> QuillSQLResult<usize>
-    where
-        F: FnMut(&RecordId) -> bool,
-    {
-        let mut cleaned = 0usize;
-        let mut guard = self.find_first_leaf_page()?;
-        loop {
-            let (leaf, _) = BPlusTreeLeafPageCodec::decode(guard.data(), self.key_schema.clone())?;
-            // Snapshot next pid before releasing read guard
-            let next_pid = leaf.header.next_page_id;
-            // Collect keys to delete
-            let mut to_delete: Vec<Tuple> = Vec::new();
-            for i in 0..(leaf.header.current_size as usize) {
-                let kv = leaf.kv_at(i).clone();
-                if is_globally_dead(&kv.1) {
-                    to_delete.push(kv.0);
-                }
-            }
-            drop(guard);
-
-            for k in to_delete.into_iter() {
-                self.delete(&k)?;
-                cleaned += 1;
-                if let Some(maxn) = limit {
-                    if cleaned >= maxn {
-                        return Ok(cleaned);
-                    }
-                }
-            }
-
-            if next_pid == INVALID_PAGE_ID {
-                break;
-            }
-            guard = self.buffer_pool.fetch_page_read(next_pid)?;
-        }
-        Ok(cleaned)
-    }
-
     fn find_leaf_page_optimistic(&self, key: &Tuple) -> QuillSQLResult<ReadPageGuard> {
         // OLC + B-link: version-check each step; if changed, restart with bounded backoff.
         let mut restarts = 0usize;
@@ -1533,17 +1531,6 @@ impl BPlusTreeIndex {
                 return Ok(());
             }
         }
-    }
-
-    /// Hint that a reader observed a globally invisible RID through this index.
-    /// This increments a best-effort counter to help background cleanup scheduling.
-    pub fn note_potential_garbage(&self, n: usize) {
-        self.pending_garbage.fetch_add(n, AtomicOrdering::Relaxed);
-    }
-
-    /// Returns and resets the pending garbage counter.
-    pub fn take_pending_garbage(&self) -> usize {
-        self.pending_garbage.swap(0, AtomicOrdering::Relaxed)
     }
 }
 

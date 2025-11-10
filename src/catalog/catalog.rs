@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use super::registry::{IndexRegistry, TableRegistry};
+use super::registry::TableRegistry;
 use crate::catalog::{
     key_schema_to_varchar, SchemaRef, TableStatistics, COLUMNS_SCHEMA, INDEXES_SCHEMA,
     INFORMATION_SCHEMA_COLUMNS, INFORMATION_SCHEMA_INDEXES, INFORMATION_SCHEMA_NAME,
@@ -32,7 +32,6 @@ pub struct Catalog {
     pub buffer_pool: Arc<BufferManager>,
     pub disk_manager: Arc<DiskManager>,
     table_registry: Arc<TableRegistry>,
-    index_registry: Arc<IndexRegistry>,
 }
 
 #[derive(Debug)]
@@ -77,23 +76,17 @@ impl Catalog {
         buffer_pool: Arc<BufferManager>,
         disk_manager: Arc<DiskManager>,
         table_registry: Arc<TableRegistry>,
-        index_registry: Arc<IndexRegistry>,
     ) -> Self {
         Self {
             schemas: HashMap::new(),
             buffer_pool,
             disk_manager,
             table_registry,
-            index_registry,
         }
     }
 
     pub fn table_registry(&self) -> Arc<TableRegistry> {
         self.table_registry.clone()
-    }
-
-    pub fn index_registry(&self) -> Arc<IndexRegistry> {
-        self.index_registry.clone()
     }
 
     pub fn create_schema(&mut self, schema_name: impl Into<String>) -> QuillSQLResult<()> {
@@ -258,13 +251,7 @@ impl Catalog {
         self.table_registry.unregister(table_ref);
 
         for index_name in catalog_table.indexes.keys() {
-            self.unregister_index_variants(
-                &catalog_name,
-                &schema_name,
-                &table_name,
-                table_ref,
-                index_name,
-            );
+            self.remove_index_metadata(&catalog_name, &schema_name, &table_name, index_name)?;
         }
 
         self.remove_table_metadata(&catalog_name, &schema_name, &table_name)?;
@@ -412,14 +399,6 @@ impl Catalog {
         catalog_table
             .indexes
             .insert(index_name.clone(), b_plus_tree_index.clone());
-        // register for background maintenance
-        let table_heap = catalog_table.table.clone();
-        self.index_registry.register(
-            table_ref.clone(),
-            index_name.clone(),
-            b_plus_tree_index.clone(),
-            table_heap,
-        );
 
         // update system table
         let Some(information_schema) = self.schemas.get_mut(INFORMATION_SCHEMA_NAME) else {
@@ -487,14 +466,6 @@ impl Catalog {
         if table.indexes.remove(index_name).is_none() {
             return Ok(false);
         }
-
-        self.unregister_index_variants(
-            &catalog_name,
-            &schema_name,
-            &table_name,
-            table_ref,
-            index_name,
-        );
 
         self.remove_index_metadata(&catalog_name, &schema_name, &table_name, index_name)?;
 
@@ -597,12 +568,6 @@ impl Catalog {
         };
         let idx_name: String = index_name.into();
         catalog_table.indexes.insert(idx_name.clone(), index);
-        // register as well
-        if let Some(idx) = catalog_table.indexes.get(&idx_name) {
-            let table_heap = catalog_table.table.clone();
-            self.index_registry
-                .register(table_ref.clone(), idx_name, idx.clone(), table_heap);
-        }
         Ok(())
     }
 
@@ -786,38 +751,6 @@ impl Catalog {
             }
         }
         Ok(())
-    }
-
-    fn unregister_index_variants(
-        &self,
-        catalog_name: &str,
-        schema_name: &str,
-        table_name: &str,
-        original_ref: &TableReference,
-        index_name: &str,
-    ) {
-        self.index_registry.unregister(original_ref, index_name);
-        self.index_registry.unregister(
-            &TableReference::Bare {
-                table: table_name.to_string(),
-            },
-            index_name,
-        );
-        self.index_registry.unregister(
-            &TableReference::Partial {
-                schema: schema_name.to_string(),
-                table: table_name.to_string(),
-            },
-            index_name,
-        );
-        self.index_registry.unregister(
-            &TableReference::Full {
-                catalog: catalog_name.to_string(),
-                schema: schema_name.to_string(),
-                table: table_name.to_string(),
-            },
-            index_name,
-        );
     }
 }
 

@@ -14,8 +14,6 @@ use crate::utils::table_ref::TableReference;
 use crate::{error::QuillSQLResult, storage::tuple::Tuple};
 
 const INDEX_PREFETCH_BATCH: usize = 64;
-const INVISIBLE_THRESHOLD: usize = 2048;
-
 pub struct PhysicalIndexScan {
     table_ref: TableReference,
     index_name: String,
@@ -24,7 +22,6 @@ pub struct PhysicalIndexScan {
     end_bound: Bound<Tuple>,
     stream: Mutex<Option<Box<dyn TupleStream>>>,
     prefetch: ScanPrefetch,
-    invisible_hits: Mutex<usize>,
 }
 
 impl PhysicalIndexScan {
@@ -42,7 +39,6 @@ impl PhysicalIndexScan {
             end_bound: range.end_bound().cloned(),
             stream: Mutex::new(None),
             prefetch: ScanPrefetch::new(INDEX_PREFETCH_BATCH),
-            invisible_hits: Mutex::new(0),
         }
     }
 
@@ -60,18 +56,6 @@ impl PhysicalIndexScan {
             }
             Ok(())
         })
-    }
-
-    fn handle_invisible(&self, context: &mut ExecutionContext) -> QuillSQLResult<()> {
-        let mut cnt = self.invisible_hits.lock();
-        *cnt += 1;
-        if *cnt >= INVISIBLE_THRESHOLD {
-            *cnt = 0;
-            if let Some(index_arc) = context.catalog.index(&self.table_ref, &self.index_name)? {
-                index_arc.note_potential_garbage(INVISIBLE_THRESHOLD);
-            }
-        }
-        Ok(())
     }
 
     fn consume_row(
@@ -105,7 +89,6 @@ impl VolcanoExecutor for PhysicalIndexScan {
             Some(context.index_stream(&self.table_ref, &self.index_name, request)?);
 
         self.prefetch.clear();
-        *self.invisible_hits.lock() = 0;
 
         Ok(())
     }
@@ -114,7 +97,6 @@ impl VolcanoExecutor for PhysicalIndexScan {
         loop {
             if let Some((rid, meta, tuple)) = self.prefetch.pop_front() {
                 if meta.is_deleted {
-                    self.handle_invisible(context)?;
                     continue;
                 }
                 if let Some(result) = self.consume_row(context, rid, meta, tuple)? {
@@ -149,7 +131,6 @@ impl std::fmt::Debug for PhysicalIndexScan {
             .field("start_bound", &self.start_bound)
             .field("end_bound", &self.end_bound)
             .field("prefetch", &self.prefetch)
-            .field("invisible_hits", &self.invisible_hits)
             .finish()
     }
 }

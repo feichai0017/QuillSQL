@@ -23,7 +23,7 @@ the catalog to discover structure.
 | ---- | ----------- | --------- |
 | `mod.rs` | Public API surface. | `Catalog`, `TableHandleRef` |
 | `schema.rs` | Schema objects and table references. | `Schema`, `Column`, `TableReference` |
-| `registry/` | Thread-safe registries for heaps and indexes. | `TableRegistry`, `IndexRegistry` |
+| `registry/` | Thread-safe registry for heaps (MVCC vacuum). | `TableRegistry` |
 | `statistics.rs` | ANALYZE output and helpers. | `TableStatistics` |
 | `loader.rs` | Boot-time metadata loader. | `load_catalog_data` |
 
@@ -36,9 +36,8 @@ Unified identifier (database, schema, table). Logical planner, execution, and tr
 code all use it when requesting handles from the catalog.
 
 ### Registries
-`TableRegistry`/`IndexRegistry` map internal IDs to `Arc<TableHeap>` or
-`Arc<BPlusTreeIndex>` plus logical names. They are thread-safe so background tasks can
-traverse them without blocking the main thread.
+`TableRegistry` maps internal IDs to `Arc<TableHeap>` plus logical names. It is used by
+the MVCC vacuum worker to iterate user tables without poking directly into catalog data.
 
 ### Schema & Column
 `Schema` stores column definitions (type, default, nullability). Execution uses it when

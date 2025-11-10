@@ -104,6 +104,7 @@ impl RecoveryManager {
 mod tests {
     use super::RecoveryManager;
     use crate::buffer::{BufferManager, INVALID_PAGE_ID};
+    use crate::catalog::{Column, DataType, Schema};
     use crate::config::{IOSchedulerConfig, WalConfig};
     use crate::recovery::analysis::{AnalysisPass, AnalysisResult};
     use crate::recovery::redo::RedoExecutor;
@@ -118,8 +119,11 @@ mod tests {
     use crate::storage::codec::TablePageHeaderCodec;
     use crate::storage::disk_manager::DiskManager;
     use crate::storage::disk_scheduler::DiskScheduler;
-    use crate::storage::page::{TablePageHeader, TupleInfo, TupleMeta};
+    use crate::storage::index::btree_index::BPlusTreeIndex;
+    use crate::storage::page::{RecordId, TablePageHeader, TupleInfo, TupleMeta};
+    use crate::storage::tuple::Tuple;
     use crate::transaction::INVALID_COMMAND_ID;
+    use crate::utils::scalar::ScalarValue;
     use std::path::Path;
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -406,6 +410,58 @@ mod tests {
         let size = header.tuple_infos[0].size as usize;
         assert_eq!(&data[off..off + size], &updated_bytes[..]);
         drop(wal);
+    }
+
+    #[test]
+    fn replay_rebuilds_index_from_logical_records() {
+        let temp = TempDir::new().expect("tempdir");
+        let db_path = temp.path().join("index_logic.db");
+        let wal_dir = temp.path().join("wal");
+
+        let config = WalConfig {
+            directory: wal_dir.clone(),
+            sync_on_flush: false,
+            ..WalConfig::default()
+        };
+        let (wal, scheduler) = build_wal(config.clone(), &db_path);
+        let bpm = Arc::new(BufferManager::new(64, scheduler.clone()));
+        bpm.set_wal_manager(wal.clone());
+
+        let schema = Arc::new(Schema::new(vec![Column::new("k", DataType::Int32, false)]));
+        let index = BPlusTreeIndex::new(schema.clone(), bpm.clone(), 4, 4);
+        let header_page_id = index.header_page_id;
+
+        for k in 0..3 {
+            let tuple = Tuple::new(schema.clone(), vec![ScalarValue::Int32(Some(k))]);
+            let rid = RecordId::new(1, k as u32);
+            index.insert(&tuple, rid).unwrap();
+        }
+        let delete_key = Tuple::new(schema.clone(), vec![ScalarValue::Int32(Some(1))]);
+        index.delete(&delete_key).unwrap();
+
+        wal.flush(None).unwrap();
+        bpm.flush_all_pages().unwrap();
+        drop(index);
+        drop(bpm);
+        drop(wal);
+        drop(scheduler);
+
+        let (wal_r, scheduler_r) = build_wal(config.clone(), &db_path);
+        let bpm_r = Arc::new(BufferManager::new(64, scheduler_r.clone()));
+        bpm_r.set_wal_manager(wal_r.clone());
+        let recovery = RecoveryManager::new(wal_r.clone(), scheduler_r.clone())
+            .with_buffer_pool(bpm_r.clone());
+        let summary = recovery.replay().unwrap();
+        assert!(summary.redo_count >= 3);
+
+        let reopened = BPlusTreeIndex::open(schema.clone(), bpm_r.clone(), 4, 4, header_page_id);
+        for k in [0, 2] {
+            let tuple = Tuple::new(schema.clone(), vec![ScalarValue::Int32(Some(k))]);
+            let rid = RecordId::new(1, k as u32);
+            assert_eq!(reopened.get(&tuple).unwrap(), Some(rid));
+        }
+        let deleted = Tuple::new(schema.clone(), vec![ScalarValue::Int32(Some(1))]);
+        assert!(reopened.get(&deleted).unwrap().is_none());
     }
 
     #[test]
