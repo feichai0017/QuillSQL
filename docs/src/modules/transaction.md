@@ -1,17 +1,80 @@
-# Transaction Manager
+# Transaction Module
 
-The Transaction Manager is responsible for one of the most critical aspects of a database: guaranteeing the **ACID** properties, specifically **Isolation** and **Atomicity**.
+`src/transaction/` enforces the Atomicity and Isolation parts of ACID. It combines MVCC
+with strict two-phase locking so reads and writes can proceed concurrently without
+violating correctness.
 
-It allows multiple clients to access the database concurrently without interfering with each other, and it ensures that transactions are treated as single, indivisible operations (all or nothing).
+---
 
-## Core Concepts
+## Main Components
 
-- **Concurrency Control**: To handle simultaneous operations, QuillSQL uses a hybrid approach that combines two powerful techniques:
-    1.  **Multi-Version Concurrency Control (MVCC)**: Instead of overwriting data, writers create new *versions* of rows. Readers are given a consistent *snapshot* of the database, which allows them to proceed without being blocked by writers.
-    2.  **Two-Phase Locking (2PL)**: To prevent two writers from modifying the same row at the same time, a strict two-phase locking protocol is used. Transactions must acquire locks on data before modifying it and hold those locks until the transaction ends.
+| Type | Role |
+| ---- | ---- |
+| `TransactionManager` | Creates/commits/aborts transactions, assigns txn & command ids, coordinates WAL. |
+| `Transaction` | Stores state, held locks, undo chain, and cached snapshot. |
+| `TxnContext` / `TxnRuntime` | Execution-time wrapper exposing MVCC + locking helpers. |
+| `LockManager` | Multi-granularity locking (IS/IX/S/SIX/X) with deadlock detection. |
+| `TransactionSnapshot` | Tracks `xmin/xmax/active_txns` for visibility checks. |
 
-- **Atomicity**: The transaction manager records all actions performed by a transaction. If the transaction needs to be aborted, it can use this record to perform the necessary undo operations, rolling the database back to its state before the transaction began.
+---
 
-This section contains:
+## Workflow
 
-- **[MVCC and 2PL](./../transaction/mvcc_and_2pl.md)**: A deep dive into QuillSQL's hybrid concurrency control model.
+1. `SessionContext` calls `TransactionManager::begin` to create a transaction.
+2. Each SQL statement builds a `TxnRuntime`, yielding a fresh command id and snapshot.
+3. Operators call `TxnContext::lock_table/lock_row` to obey strict 2PL.
+4. `TableHandle::insert/delete/update` records undo, acquires locks, and emits WAL via
+   `TxnContext`.
+5. Commit: write a `Commit` record → flush depending on `synchronous_commit` → release
+   locks.
+6. Abort: walk the undo list, write CLRs, restore heap/index state, release locks.
+
+---
+
+## MVCC Details
+
+- `TupleMeta` stores inserting/deleting txn ids and command ids. `read_visible_tuple`
+  checks snapshots and, if needed, rewinds to the latest visible version.
+- Isolation levels:
+  - **Read Uncommitted** – minimal snapshot caching.
+  - **Read Committed** – refresh snapshot each command to avoid dirty reads.
+  - **Repeatable Read / Serializable** – capture the snapshot once; RR releases shared
+    locks at statement end, Serializable holds them to commit to avoid phantoms.
+- UPDATE skips versions created by the same `(txn_id, command_id)` to avoid looping back
+  over freshly inserted tuples.
+
+---
+
+## Locking
+
+- Multi-granularity hierarchy: table-level IS/IX/S/SIX/X plus row-level S/X.
+- Deadlock detection: `LockManager` maintains a wait-for graph and periodically chooses a
+  victim (usually the longest waiter).
+- Release policy: exclusive/intent locks stay until commit; RR drops shared row locks at
+  statement end, Serializable waits until commit.
+
+---
+
+## Interactions
+
+- **ExecutionContext** – all helpers (lock acquisition, visibility checks, undo logging)
+  are exposed here, so physical operators never touch `LockManager` directly.
+- **StorageEngine** – handles call `TxnContext` before mutating heaps/indexes; MVCC metadata
+  lives in `TupleMeta`.
+- **Recovery** – Begin/Commit/Abort records emitted here drive ARIES undo/redo.
+- **Background** – MVCC vacuum reads `TransactionManager::oldest_active_txn()` to compute
+  `safe_xmin`.
+
+---
+
+## Teaching Ideas
+
+- Change `DatabaseOptions::default_isolation_level` and compare SELECT behaviour under
+  RC vs RR.
+- Write a unit test that deadlocks two transactions and watch `LockManager` pick a victim.
+- Implement statement-level snapshot refresh or Serializable Snapshot Isolation (SSI) as
+  an advanced exercise.
+
+---
+
+Further reading: [MVCC and 2PL](../transaction/mvcc_and_2pl.md)
