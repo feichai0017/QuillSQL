@@ -48,6 +48,8 @@ helps physical operators build projected outputs.
 ### TableStatistics
 `ANALYZE` writes row counts and histograms into the catalog. Optimizer rules and planner
 heuristics can consult these stats when deciding whether to push filters or pick indexes.
+Each column tracks null/non-null counts, min/max values, and a sample-based distinct
+estimate, enabling DuckDB-style selectivity heuristics (`1/distinct`, uniform ranges).
 
 ---
 

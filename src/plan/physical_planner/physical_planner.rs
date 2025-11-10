@@ -231,13 +231,13 @@ impl<'a> PhysicalPlanner<'a> {
     }
 
     fn choose_scan_operator(&self, scan: &TableScan, index_name: String) -> PhysicalPlan {
+        let base_rows = self.cost.estimate_table_scan_rows(scan);
+        let selectivity = self.cost.estimate_filter_selectivity(scan);
+        let filtered_rows = selectivity
+            .map(|sel| (base_rows * sel).max(1.0))
+            .unwrap_or(base_rows);
         let seq_cost = self.cost.seq_scan_cost(scan);
-        let selectivity = scan.filters.first().and_then(|_| {
-            self.cost
-                .table_statistics(&scan.table_ref)
-                .map(|stats| 1.0 / (stats.row_count.max(1) as f64))
-        });
-        let index_cost = self.cost.index_scan_cost(scan, selectivity);
+        let index_cost = self.cost.index_scan_cost(filtered_rows);
 
         if index_cost < seq_cost {
             PhysicalPlan::IndexScan(PhysicalIndexScan::new(

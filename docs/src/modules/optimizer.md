@@ -37,6 +37,18 @@ Examples:
 - **PushDownLimit** applies LIMIT before expensive joins/sorts when safe.
 - **PruneProjection** removes unused columns so execution/storage decode less data.
 
+### Cost Guidance (DuckDB-inspired)
+
+Although the rule engine itself stays heuristics-only, the physical planner now taps into
+`CostEstimator`, which borrows the same intuition as DuckDB’s simple cardinality model:
+- equality selectivity ≈ `1 / distinct_count`
+- range selectivity derived from min/max assuming uniform distribution
+
+The estimator multiplies per-predicate selectivities (clamped to `>= 1%`), producing an
+estimated filtered row count. Physical planner decisions (e.g., sequential scan vs B+Tree
+index) are then based on these cost numbers, so students can see how statistics influence
+operator choice without implementing a full-blown CBO.
+
 ---
 
 ## Interactions

@@ -1,5 +1,7 @@
 use crate::catalog::{Catalog, TableStatistics};
+use crate::expression::{BinaryExpr, BinaryOp, ColumnExpr, Expr};
 use crate::plan::logical_plan::TableScan;
+use crate::utils::scalar::ScalarValue;
 use crate::utils::table_ref::TableReference;
 
 /// Lightweight cost model shared by planner components.
@@ -37,12 +39,77 @@ impl<'a> CostEstimator<'a> {
         self.estimate_table_scan_rows(scan) * self.seq_scan_per_row_cost
     }
 
-    pub fn index_scan_cost(&self, scan: &TableScan, filtered_rows: Option<f64>) -> f64 {
-        let rows = filtered_rows.unwrap_or_else(|| self.estimate_table_scan_rows(scan));
-        rows * self.index_probe_per_row_cost
+    pub fn estimate_filter_selectivity(&self, scan: &TableScan) -> Option<f64> {
+        let stats = self
+            .catalog
+            .table_statistics(&scan.table_ref)
+            .filter(|stats| stats.row_count > 0)?;
+
+        let mut combined = 1.0;
+        let mut any = false;
+        for expr in &scan.filters {
+            if let Some(sel) = self.estimate_expr_selectivity(stats, expr) {
+                combined *= sel;
+                any = true;
+            }
+        }
+
+        if any {
+            Some(combined.clamp(MIN_SELECTIVITY, 1.0))
+        } else {
+            None
+        }
+    }
+
+    pub fn index_scan_cost(&self, filtered_rows: f64) -> f64 {
+        filtered_rows.max(1.0) * self.index_probe_per_row_cost
     }
 
     pub fn table_statistics(&self, table: &TableReference) -> Option<&TableStatistics> {
         self.catalog.table_statistics(table)
+    }
+
+    fn estimate_expr_selectivity(&self, stats: &TableStatistics, expr: &Expr) -> Option<f64> {
+        match expr {
+            Expr::Binary(binary) => self.estimate_binary_selectivity(stats, binary),
+            _ => None,
+        }
+    }
+
+    fn estimate_binary_selectivity(
+        &self,
+        stats: &TableStatistics,
+        binary: &BinaryExpr,
+    ) -> Option<f64> {
+        let (column, literal, op) = normalize_column_predicate(binary)?;
+        let column_stats = stats.column_stats.get(&column.name)?;
+        column_stats.selectivity_for_op(op, &literal)
+    }
+}
+
+const MIN_SELECTIVITY: f64 = 0.01;
+
+fn normalize_column_predicate<'a>(
+    binary: &'a BinaryExpr,
+) -> Option<(&'a ColumnExpr, ScalarValue, BinaryOp)> {
+    match (&*binary.left, &*binary.right) {
+        (Expr::Column(column), Expr::Literal(lit)) => Some((column, lit.value.clone(), binary.op)),
+        (Expr::Literal(lit), Expr::Column(column)) => {
+            let flipped = flip_op(binary.op)?;
+            Some((column, lit.value.clone(), flipped))
+        }
+        _ => None,
+    }
+}
+
+fn flip_op(op: BinaryOp) -> Option<BinaryOp> {
+    match op {
+        BinaryOp::Gt => Some(BinaryOp::Lt),
+        BinaryOp::GtEq => Some(BinaryOp::LtEq),
+        BinaryOp::Lt => Some(BinaryOp::Gt),
+        BinaryOp::LtEq => Some(BinaryOp::GtEq),
+        BinaryOp::Eq => Some(BinaryOp::Eq),
+        BinaryOp::NotEq => Some(BinaryOp::NotEq),
+        _ => None,
     }
 }
