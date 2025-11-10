@@ -3,8 +3,10 @@ use parking_lot::Mutex;
 use super::scan::ScanPrefetch;
 use crate::catalog::SchemaRef;
 use crate::error::QuillSQLError;
-use crate::storage::page::{RecordId, TupleMeta};
-use crate::storage::table_heap::TableIterator;
+use crate::storage::{
+    engine::{ScanOptions, TupleStream},
+    page::{RecordId, TupleMeta},
+};
 use crate::transaction::LockMode;
 use crate::utils::table_ref::TableReference;
 use crate::{
@@ -15,13 +17,12 @@ use crate::{
 
 const PREFETCH_BATCH: usize = 64;
 
-#[derive(Debug)]
 pub struct PhysicalSeqScan {
     pub table: TableReference,
     pub table_schema: SchemaRef,
     pub streaming_hint: Option<bool>,
 
-    iterator: Mutex<Option<TableIterator>>,
+    iterator: Mutex<Option<Box<dyn TupleStream>>>,
     prefetch: ScanPrefetch,
 }
 
@@ -54,16 +55,9 @@ impl VolcanoExecutor for PhysicalSeqScan {
         context
             .txn_ctx_mut()
             .lock_table(self.table.clone(), LockMode::IntentionShared)?;
-        let table_heap = context.table_heap(&self.table)?;
-        let iter = if let Some(h) = self.streaming_hint {
-            TableIterator::new_with_hint(table_heap, .., Some(h))
-        } else {
-            TableIterator::new(table_heap, ..)
-        };
-        {
-            let mut guard = self.iterator.lock();
-            *guard = Some(iter);
-        }
+        let options = ScanOptions::default().with_streaming_hint(self.streaming_hint);
+        let stream = context.table_stream(&self.table, options)?;
+        *self.iterator.lock() = Some(stream);
         self.prefetch.clear();
         Ok(())
     }
@@ -79,11 +73,11 @@ impl VolcanoExecutor for PhysicalSeqScan {
 
             if !self.prefetch.refill(|limit, out| {
                 let mut guard = self.iterator.lock();
-                let iterator = guard.as_mut().ok_or_else(|| {
-                    QuillSQLError::Execution("table iterator not created".to_string())
+                let stream = guard.as_mut().ok_or_else(|| {
+                    QuillSQLError::Execution("table stream not created".to_string())
                 })?;
                 for _ in 0..limit {
-                    match iterator.next()? {
+                    match stream.next()? {
                         Some(entry) => out.push_back(entry),
                         None => break,
                     }
@@ -103,5 +97,15 @@ impl VolcanoExecutor for PhysicalSeqScan {
 impl std::fmt::Display for PhysicalSeqScan {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "SeqScan")
+    }
+}
+
+impl std::fmt::Debug for PhysicalSeqScan {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PhysicalSeqScan")
+            .field("table", &self.table)
+            .field("table_schema", &self.table_schema)
+            .field("streaming_hint", &self.streaming_hint)
+            .finish()
     }
 }

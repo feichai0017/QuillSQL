@@ -4,7 +4,7 @@ use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::execution::physical_plan::PhysicalPlan;
 use crate::expression::{Expr, ExprTrait};
 use crate::storage::{
-    engine::{IndexHandle, StorageEngine, TableHandle},
+    engine::{IndexHandle, IndexScanRequest, ScanOptions, StorageEngine, TableHandle, TupleStream},
     page::{RecordId, TupleMeta},
     table_heap::TableHeap,
     tuple::Tuple,
@@ -75,6 +75,14 @@ impl<'a> ExecutionContext<'a> {
         Ok(self.table_handle(table)?.table_heap())
     }
 
+    pub fn table_stream(
+        &self,
+        table: &TableReference,
+        options: ScanOptions,
+    ) -> QuillSQLResult<Box<dyn TupleStream>> {
+        self.table_handle(table)?.full_scan(options)
+    }
+
     /// Fetch all indexes defined on a table.
     pub fn table_indexes(
         &self,
@@ -83,12 +91,28 @@ impl<'a> ExecutionContext<'a> {
         self.storage.indexes(self.catalog, table)
     }
 
-    pub fn txn_ctx(&self) -> &TxnContext<'a> {
-        &self.txn
+    pub fn index_handle(
+        &self,
+        table: &TableReference,
+        name: &str,
+    ) -> QuillSQLResult<Option<Arc<dyn IndexHandle>>> {
+        Ok(self
+            .table_indexes(table)?
+            .into_iter()
+            .find(|handle| handle.name() == name))
     }
 
-    pub fn txn_ctx_mut(&mut self) -> &mut TxnContext<'a> {
-        &mut self.txn
+    pub fn index_stream(
+        &self,
+        table: &TableReference,
+        index_name: &str,
+        request: IndexScanRequest,
+    ) -> QuillSQLResult<Box<dyn TupleStream>> {
+        let handle = self.index_handle(table, index_name)?.ok_or_else(|| {
+            QuillSQLError::Execution(format!("index {} not found on table {}", index_name, table))
+        })?;
+        let table_handle = self.table_handle(table)?;
+        handle.range_scan(table_handle, request)
     }
 
     pub fn insert_tuple_with_indexes(
@@ -140,6 +164,14 @@ impl<'a> ExecutionContext<'a> {
     ) -> QuillSQLResult<Option<(TupleMeta, Tuple)>> {
         let handle = self.table_handle(table)?;
         handle.prepare_row_for_write(self.txn_ctx_mut(), rid, observed_meta)
+    }
+
+    pub fn txn_ctx(&self) -> &TxnContext<'a> {
+        &self.txn
+    }
+
+    pub fn txn_ctx_mut(&mut self) -> &mut TxnContext<'a> {
+        &mut self.txn
     }
 }
 

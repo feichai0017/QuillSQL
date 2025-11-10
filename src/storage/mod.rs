@@ -10,5 +10,8 @@ pub mod mvcc_heap;
 pub mod page;
 pub mod table_heap;
 pub mod tuple;
-pub use engine::{DefaultStorageEngine, IndexHandle, StorageEngine, TableHandle};
+pub use engine::{
+    DefaultStorageEngine, IndexHandle, IndexScanRequest, ScanOptions, StorageEngine, TableHandle,
+    TupleStream,
+};
 pub use mvcc_heap::MvccHeap;

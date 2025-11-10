@@ -4,19 +4,20 @@ use crate::catalog::{SchemaRef, DELETE_OUTPUT_SCHEMA_REF};
 use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::execution::{ExecutionContext, VolcanoExecutor};
 use crate::expression::Expr;
-use crate::storage::table_heap::TableIterator;
-use crate::storage::tuple::Tuple;
+use crate::storage::{
+    engine::{ScanOptions, TupleStream},
+    tuple::Tuple,
+};
 use crate::transaction::LockMode;
 use crate::utils::scalar::ScalarValue;
 use crate::utils::table_ref::TableReference;
 
-#[derive(Debug)]
 pub struct PhysicalDelete {
     pub table: TableReference,
     pub table_schema: SchemaRef,
     pub predicate: Option<Expr>,
     deleted_rows: AtomicU32,
-    iterator: std::sync::Mutex<Option<TableIterator>>,
+    iterator: std::sync::Mutex<Option<Box<dyn TupleStream>>>,
 }
 
 impl PhysicalDelete {
@@ -38,15 +39,15 @@ impl VolcanoExecutor for PhysicalDelete {
         context
             .txn_ctx_mut()
             .lock_table(self.table.clone(), LockMode::IntentionExclusive)?;
-        let table_heap = context.table_heap(&self.table)?;
-        *self.iterator.lock().unwrap() = Some(TableIterator::new(table_heap, ..));
+        let stream = context.table_stream(&self.table, ScanOptions::default())?;
+        *self.iterator.lock().unwrap() = Some(stream);
         Ok(())
     }
 
     fn next(&self, context: &mut ExecutionContext) -> QuillSQLResult<Option<Tuple>> {
         let Some(iterator) = &mut *self.iterator.lock().unwrap() else {
             return Err(QuillSQLError::Execution(
-                "table iterator not created".to_string(),
+                "table stream not created".to_string(),
             ));
         };
 
@@ -86,5 +87,16 @@ impl VolcanoExecutor for PhysicalDelete {
 impl std::fmt::Display for PhysicalDelete {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Delete")
+    }
+}
+
+impl std::fmt::Debug for PhysicalDelete {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PhysicalDelete")
+            .field("table", &self.table)
+            .field("table_schema", &self.table_schema)
+            .field("predicate", &self.predicate)
+            .field("deleted_rows", &self.deleted_rows)
+            .finish()
     }
 }

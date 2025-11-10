@@ -2,8 +2,10 @@ use crate::catalog::{SchemaRef, UPDATE_OUTPUT_SCHEMA_REF};
 use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::execution::{ExecutionContext, VolcanoExecutor};
 use crate::expression::Expr;
-use crate::storage::table_heap::TableIterator;
-use crate::storage::tuple::Tuple;
+use crate::storage::{
+    engine::{ScanOptions, TupleStream},
+    tuple::Tuple,
+};
 use crate::transaction::LockMode;
 use crate::utils::scalar::ScalarValue;
 use crate::utils::table_ref::TableReference;
@@ -11,7 +13,6 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
 
-#[derive(Debug)]
 pub struct PhysicalUpdate {
     pub table: TableReference,
     pub table_schema: SchemaRef,
@@ -19,7 +20,7 @@ pub struct PhysicalUpdate {
     pub selection: Option<Expr>,
 
     update_rows: AtomicU32,
-    table_iterator: Mutex<Option<TableIterator>>,
+    table_iterator: Mutex<Option<Box<dyn TupleStream>>>,
 }
 
 impl PhysicalUpdate {
@@ -44,8 +45,8 @@ impl VolcanoExecutor for PhysicalUpdate {
     fn init(&self, context: &mut ExecutionContext) -> QuillSQLResult<()> {
         self.update_rows.store(0, Ordering::SeqCst);
         context.txn_ctx().ensure_writable(&self.table, "UPDATE")?;
-        let table_heap = context.table_heap(&self.table)?;
-        *self.table_iterator.lock().unwrap() = Some(TableIterator::new(table_heap.clone(), ..));
+        let stream = context.table_stream(&self.table, ScanOptions::default())?;
+        *self.table_iterator.lock().unwrap() = Some(stream);
         context
             .txn_ctx_mut()
             .lock_table(self.table.clone(), LockMode::IntentionExclusive)
@@ -62,7 +63,7 @@ impl VolcanoExecutor for PhysicalUpdate {
         // TODO may scan index
         let Some(table_iterator) = &mut *self.table_iterator.lock().unwrap() else {
             return Err(QuillSQLError::Execution(
-                "table iterator not created".to_string(),
+                "table stream not created".to_string(),
             ));
         };
         loop {
@@ -133,5 +134,17 @@ impl VolcanoExecutor for PhysicalUpdate {
 impl std::fmt::Display for PhysicalUpdate {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Update")
+    }
+}
+
+impl std::fmt::Debug for PhysicalUpdate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PhysicalUpdate")
+            .field("table", &self.table)
+            .field("table_schema", &self.table_schema)
+            .field("assignments", &self.assignments)
+            .field("selection", &self.selection)
+            .field("update_rows", &self.update_rows)
+            .finish()
     }
 }

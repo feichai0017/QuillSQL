@@ -1,15 +1,14 @@
-use std::ops::{Bound, RangeBounds};
-use std::sync::Arc;
-
 use parking_lot::Mutex;
+use std::ops::{Bound, RangeBounds};
 
 use super::scan::ScanPrefetch;
 use crate::catalog::SchemaRef;
 use crate::error::QuillSQLError;
 use crate::execution::{ExecutionContext, VolcanoExecutor};
-use crate::storage::index::btree_index::TreeIndexIterator;
-use crate::storage::page::{RecordId, TupleMeta};
-use crate::storage::table_heap::TableHeap;
+use crate::storage::{
+    engine::{IndexScanRequest, TupleStream},
+    page::{RecordId, TupleMeta},
+};
 use crate::transaction::{IsolationLevel, LockMode};
 use crate::utils::table_ref::TableReference;
 use crate::{error::QuillSQLResult, storage::tuple::Tuple};
@@ -17,15 +16,13 @@ use crate::{error::QuillSQLResult, storage::tuple::Tuple};
 const INDEX_PREFETCH_BATCH: usize = 64;
 const INVISIBLE_THRESHOLD: usize = 2048;
 
-#[derive(Debug)]
 pub struct PhysicalIndexScan {
     table_ref: TableReference,
     index_name: String,
     table_schema: SchemaRef,
     start_bound: Bound<Tuple>,
     end_bound: Bound<Tuple>,
-    iterator: Mutex<Option<TreeIndexIterator>>,
-    table_heap: Mutex<Option<Arc<TableHeap>>>,
+    stream: Mutex<Option<Box<dyn TupleStream>>>,
     prefetch: ScanPrefetch,
     invisible_hits: Mutex<usize>,
 }
@@ -43,32 +40,21 @@ impl PhysicalIndexScan {
             table_schema,
             start_bound: range.start_bound().cloned(),
             end_bound: range.end_bound().cloned(),
-            iterator: Mutex::new(None),
-            table_heap: Mutex::new(None),
+            stream: Mutex::new(None),
             prefetch: ScanPrefetch::new(INDEX_PREFETCH_BATCH),
             invisible_hits: Mutex::new(0),
         }
     }
 
     fn refill_buffer(&self) -> QuillSQLResult<bool> {
-        let table_heap = {
-            let guard = self.table_heap.lock();
-            guard
-                .clone()
-                .ok_or_else(|| QuillSQLError::Execution("table heap not initialized".to_string()))?
-        };
-
         self.prefetch.refill(|limit, out| {
-            let mut iter_guard = self.iterator.lock();
-            let iterator = iter_guard.as_mut().ok_or_else(|| {
-                QuillSQLError::Execution("index iterator not created".to_string())
-            })?;
+            let mut stream_guard = self.stream.lock();
+            let stream = stream_guard
+                .as_mut()
+                .ok_or_else(|| QuillSQLError::Execution("index stream not created".to_string()))?;
             for _ in 0..limit {
-                match iterator.next()? {
-                    Some(rid) => {
-                        let (meta, tuple) = table_heap.full_tuple(rid)?;
-                        out.push_back((rid, meta, tuple));
-                    }
+                match stream.next()? {
+                    Some(entry) => out.push_back(entry),
                     None => break,
                 }
             }
@@ -114,24 +100,9 @@ impl VolcanoExecutor for PhysicalIndexScan {
                 .lock_table(self.table_ref.clone(), LockMode::IntentionShared)?;
         }
 
-        let table_heap = context.table_heap(&self.table_ref)?;
-        let index = context
-            .catalog
-            .index(&self.table_ref, &self.index_name)?
-            .unwrap();
-
-        {
-            let mut iter_guard = self.iterator.lock();
-            *iter_guard = Some(TreeIndexIterator::new(
-                index,
-                (self.start_bound.clone(), self.end_bound.clone()),
-            ));
-        }
-
-        {
-            let mut heap_guard = self.table_heap.lock();
-            *heap_guard = Some(table_heap);
-        }
+        let request = IndexScanRequest::new(self.start_bound.clone(), self.end_bound.clone());
+        *self.stream.lock() =
+            Some(context.index_stream(&self.table_ref, &self.index_name, request)?);
 
         self.prefetch.clear();
         *self.invisible_hits.lock() = 0;
@@ -166,5 +137,19 @@ impl VolcanoExecutor for PhysicalIndexScan {
 impl std::fmt::Display for PhysicalIndexScan {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "IndexScan: {}", self.index_name)
+    }
+}
+
+impl std::fmt::Debug for PhysicalIndexScan {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PhysicalIndexScan")
+            .field("table_ref", &self.table_ref)
+            .field("index_name", &self.index_name)
+            .field("table_schema", &self.table_schema)
+            .field("start_bound", &self.start_bound)
+            .field("end_bound", &self.end_bound)
+            .field("prefetch", &self.prefetch)
+            .field("invisible_hits", &self.invisible_hits)
+            .finish()
     }
 }

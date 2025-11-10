@@ -1,23 +1,80 @@
+use std::ops::Bound;
 use std::sync::Arc;
 
 use crate::{
     catalog::{Catalog, SchemaRef},
     error::QuillSQLResult,
     storage::{
-        index::btree_index::BPlusTreeIndex,
+        index::btree_index::{BPlusTreeIndex, TreeIndexIterator},
         mvcc_heap::MvccHeap,
         page::{RecordId, TupleMeta},
-        table_heap::TableHeap,
+        table_heap::{TableHeap, TableIterator},
         tuple::Tuple,
     },
     transaction::TxnContext,
     utils::table_ref::TableReference,
 };
 
+#[derive(Debug, Clone, Default)]
+pub struct ScanOptions {
+    pub streaming_hint: Option<bool>,
+    pub projection: Option<Vec<usize>>,
+    pub batch_hint: Option<usize>,
+}
+
+impl ScanOptions {
+    pub fn with_streaming_hint(mut self, hint: Option<bool>) -> Self {
+        self.streaming_hint = hint;
+        self
+    }
+
+    pub fn streaming(mut self, hint: bool) -> Self {
+        self.streaming_hint = Some(hint);
+        self
+    }
+
+    pub fn with_projection(mut self, columns: Vec<usize>) -> Self {
+        self.projection = Some(columns);
+        self
+    }
+
+    pub fn with_batch_hint(mut self, batch: usize) -> Self {
+        self.batch_hint = Some(batch);
+        self
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct IndexScanRequest {
+    pub start: Bound<Tuple>,
+    pub end: Bound<Tuple>,
+    pub scan: ScanOptions,
+}
+
+impl IndexScanRequest {
+    pub fn new(start: Bound<Tuple>, end: Bound<Tuple>) -> Self {
+        Self {
+            start,
+            end,
+            scan: ScanOptions::default(),
+        }
+    }
+
+    pub fn with_scan_options(mut self, scan: ScanOptions) -> Self {
+        self.scan = scan;
+        self
+    }
+}
+
+pub trait TupleStream {
+    fn next(&mut self) -> QuillSQLResult<Option<(RecordId, TupleMeta, Tuple)>>;
+}
+
 pub trait TableHandle: Send + Sync {
     fn table_ref(&self) -> &TableReference;
     fn schema(&self) -> SchemaRef;
     fn table_heap(&self) -> Arc<TableHeap>;
+    fn full_scan(&self, options: ScanOptions) -> QuillSQLResult<Box<dyn TupleStream>>;
 
     fn insert(
         &self,
@@ -56,6 +113,11 @@ pub trait IndexHandle: Send + Sync {
     fn name(&self) -> &str;
     fn key_schema(&self) -> SchemaRef;
     fn index(&self) -> Arc<BPlusTreeIndex>;
+    fn range_scan(
+        &self,
+        table: Arc<dyn TableHandle>,
+        request: IndexScanRequest,
+    ) -> QuillSQLResult<Box<dyn TupleStream>>;
 }
 
 pub trait StorageEngine: Send + Sync {
@@ -97,6 +159,15 @@ impl TableHandle for HeapTableHandle {
 
     fn table_heap(&self) -> Arc<TableHeap> {
         self.heap.clone()
+    }
+
+    fn full_scan(&self, options: ScanOptions) -> QuillSQLResult<Box<dyn TupleStream>> {
+        let iterator = if let Some(h) = options.streaming_hint {
+            TableIterator::new_with_hint(self.heap.clone(), .., Some(h))
+        } else {
+            TableIterator::new(self.heap.clone(), ..)
+        };
+        Ok(Box::new(HeapTableStream { iterator }))
     }
 
     fn insert(
@@ -191,6 +262,16 @@ impl TableHandle for HeapTableHandle {
     }
 }
 
+struct HeapTableStream {
+    iterator: TableIterator,
+}
+
+impl TupleStream for HeapTableStream {
+    fn next(&mut self) -> QuillSQLResult<Option<(RecordId, TupleMeta, Tuple)>> {
+        self.iterator.next()
+    }
+}
+
 struct BTreeIndexHandle {
     name: String,
     index: Arc<BPlusTreeIndex>,
@@ -213,6 +294,38 @@ impl IndexHandle for BTreeIndexHandle {
 
     fn index(&self) -> Arc<BPlusTreeIndex> {
         self.index.clone()
+    }
+
+    fn range_scan(
+        &self,
+        table: Arc<dyn TableHandle>,
+        request: IndexScanRequest,
+    ) -> QuillSQLResult<Box<dyn TupleStream>> {
+        let iterator = TreeIndexIterator::new(self.index.clone(), (request.start, request.end));
+        Ok(Box::new(BTreeIndexStream {
+            iterator,
+            table,
+            _scan: request.scan,
+        }))
+    }
+}
+
+struct BTreeIndexStream {
+    iterator: TreeIndexIterator,
+    table: Arc<dyn TableHandle>,
+    _scan: ScanOptions,
+}
+
+impl TupleStream for BTreeIndexStream {
+    fn next(&mut self) -> QuillSQLResult<Option<(RecordId, TupleMeta, Tuple)>> {
+        loop {
+            let Some(rid) = self.iterator.next()? else {
+                return Ok(None);
+            };
+            if let Ok((meta, tuple)) = self.table.table_heap().full_tuple(rid) {
+                return Ok(Some((rid, meta, tuple)));
+            }
+        }
     }
 }
 
