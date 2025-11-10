@@ -18,21 +18,90 @@ ARIES algorithm, QuillSQL can recover to a consistent state after crashes.
 
 | Path | Description | Key Types |
 | ---- | ----------- | --------- |
-| `wal_manager.rs` | Log writer, buffer manager, background thread spawner. | `WalManager`, `WalWriterHandle` |
-| `wal_record.rs` | All record variants. | `WalRecord`, `LogSequenceNumber` |
-| `recovery_manager.rs` | ARIES driver. | `RecoveryManager`, `RecoverySummary` |
-| `control_file.rs` | Persistent metadata (checkpoint info). | `ControlFileManager` |
+| `recovery/wal/` | Log writer, buffer, storage, background writer runtime. | `WalManager`, `WalBuffer`, `WalStorage` |
+| `recovery/wal_record.rs` | Serialized record variants exposed to subsystems. | `WalRecordPayload`, `ResourceManagerId` |
+| `recovery/resource_manager.rs` | Registry that maps payloads to redo/undo handlers. | `ResourceManager`, `RedoContext`, `UndoContext` |
+| `recovery/recovery_manager.rs` | ARIES driver. | `RecoveryManager`, `RecoverySummary` |
+| `recovery/control_file.rs` | Persistent metadata (checkpoint info). | `ControlFileManager` |
 
 ---
 
-## WAL Highlights
+## WalManager & I/O pipeline
 
-- **Write-ahead rule** – before flushing a dirty page, ensure `page_lsn <= flushed_lsn`
-  via `WalManager::flush_until`.
-- **Record types** – logical (`HeapInsert`, `IndexDelete`) for redo/undo and physical
-  (`PageWrite`, `PageDelta`) for large changes.
-- **Segmentation** – WAL files are cut into segments per `WalOptions::segment_size`, and
-  background writers can flush them asynchronously.
+- **Buffering** – `WalManager` uses a lock-free `WalBuffer` ring. `append_record_with`
+  attaches an LSN, encodes the frame, pushes it into the ring, and auto-flushes when
+  either record count or byte thresholds (`max_buffer_records`,
+  `flush_coalesce_bytes`, or a full WAL page) are met. Writers never block on Vec
+  reallocation and thus scale with concurrent transactions.
+- **Physical logging** – `log_page_update` inspects old/new page images using
+  `find_contiguous_diff`. First touches (tracked via `DashSet<PageId>`) or large diffs
+  emit 4 KiB `PageWrite` FPWs; otherwise `PageDelta` keeps logs small. Both payloads
+  carry the previous `page_lsn` so redo can enforce the WAL rule.
+- **Segmentation & flush** – `WalStorage` appends frames to rolling segments under the
+  configured WAL directory, queues async write/fsync tickets via the `DiskScheduler`
+  sink, and recycles sealed segments after checkpoints. `flush()` drains buffered
+  records up to an optional target LSN, waits for outstanding tickets, updates
+  `durable_lsn`, and optionally persists the control file snapshot.
+- **Background writer** – `start_background_flush` spawns `WalWriterRuntime`, which
+  periodically calls `flush(None)`; `WalWriterHandle` lives in the background worker
+  registry so shutdown is coordinated with the db lifecycle.
+- **Checkpoints** – `log_checkpoint` writes a `Checkpoint` frame containing ATT/DPT,
+  forces a flush, clears the “first-touch” set (so new FPWs are generated as needed),
+  and updates `checkpoint_redo_start` in the control file. Recovery uses this redo
+  start to avoid rescanning the whole log.
+- **Readers & durability waits** – `WalManager::reader` iterates frames straight from
+  the WAL directory. `wait_for_durable` is the gate that synchronous commits call
+  after emitting a commit record; it reuses `flush_with_mode` and condition variables
+  to block until `durable_lsn >= target`.
+
+## Record types & resource managers
+
+All log frames share the envelope defined in `wal_record.rs` and are routed by
+`ResourceManagerId`:
+
+- **Page (`ResourceManagerId::Page`)** – purely physical `PageWrite` and `PageDelta`
+  payloads. The default page resource manager checks `page_lsn` through the buffer
+  pool (when available) before rewriting the page on redo. No undo is required
+  because these are low-level physical changes.
+- **Heap (`ResourceManagerId::Heap`)** – logical payloads emitted by
+  `TableHeap::append_heap_record` include relation id, page/slot, tuple metadata, and
+  raw bytes. `HeapResourceManager` decodes them, rebuilds a temporary page image, and
+  replays inserts/updates/deletes by splicing tuples back into the heap. Undo paths
+  rely on the same metadata to restore tuple bytes or clear delete flags.
+- **Index (`ResourceManagerId::Index`)** – `BPlusTreeIndex` writes logical leaf
+  operations (`LeafInsert/Delete/Update`) that store key bytes and the target `RecordId`.
+  `IndexResourceManager` decodes the tuple via `TupleCodec` and mutates the leaf (via
+  the buffer pool if available, otherwise direct disk I/O). Redo is idempotent (missing
+  keys are inserted), while undo mirrors insert/delete/update semantics.
+- **Transaction / CLR / Checkpoint** – `TransactionPayload` (BEGIN/COMMIT/ABORT)
+  enables the undo index to link per-transaction log records. `ClrPayload` documents
+  each undo step so the recovery process can survive crashes mid-undo. Checkpoints
+  snapshot ATT + DPT for the analysis phase.
+
+`ensure_default_resource_managers_registered` wires Page, Heap, and Index resource
+managers together so both redo (`RedoExecutor`) and undo (`UndoExecutor`) can dispatch
+records uniformly.
+
+## Heap / Index WAL design
+
+- **Heap** – Execution operators call `ExecutionContext::insert_tuple_with_indexes`
+  (and friends), which ultimately invoke `TableHeap::append_heap_record`. Each tuple
+  carries `TupleMetaRepr` (insert/delete txn + CID, MVCC chain pointers) plus encoded
+  column bytes. During redo, `HeapResourceManager` reconstructs page images, inserts
+  or overwrites slots, and updates tuple metadata before writing the packed page back
+  via `TableHeap::recovery_view`. Undo leverages the stored “before image” to restore
+  bytes or toggle delete flags; vacuum code can later reclaim dead slots once
+  `safe_xmin` passes them.
+- **Index** – B+Tree leaf operations log the logical key/value change, unaffected by
+  page layout. Redo loads the leaf (buffer pool or disk), checks the leaf version to
+  avoid reapplying newer changes, and performs the requested insert/delete/update.
+  Undo mirrors the inverse operation so loser transactions roll back cleanly without
+  touching the heap. This keeps heap and index WAL independent: heap redo never needs
+  to read index pages, and vice versa.
+- **Page images** – For heap/index structural changes that rewrite large sections (e.g.,
+  new heap page, B+Tree splits), page guards still emit FPWs through
+  `WalManager::log_page_update`. The logical heap/index WAL layers ensure redo can
+  operate even when FPWs are skipped after the first touch.
 
 ---
 
