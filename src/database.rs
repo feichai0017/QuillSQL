@@ -39,6 +39,7 @@ pub struct WalOptions {
     pub directory: Option<PathBuf>,
     pub segment_size: Option<u64>,
     pub sync_on_flush: Option<bool>,
+    pub persist_control_file_on_flush: Option<bool>,
     pub writer_interval_ms: Option<Option<u64>>,
     pub buffer_capacity: Option<usize>,
     pub flush_coalesce_bytes: Option<usize>,
@@ -352,6 +353,7 @@ impl Database {
 
     pub fn flush(&self) -> QuillSQLResult<()> {
         let _ = self.wal_manager.flush(None)?;
+        self.wal_manager.persist_control_file()?;
         self.buffer_pool.flush_all_pages()
     }
 
@@ -386,6 +388,9 @@ fn wal_config_for_path(db_path: &str, overrides: &WalOptions) -> WalConfig {
     }
     if let Some(sync) = overrides.sync_on_flush {
         config.sync_on_flush = sync;
+    }
+    if let Some(flag) = overrides.persist_control_file_on_flush {
+        config.persist_control_file_on_flush = flag;
     }
     if let Some(interval) = overrides.writer_interval_ms {
         config.writer_interval_ms = interval;
@@ -431,6 +436,9 @@ fn wal_config_for_temp(temp_root: &Path, overrides: &WalOptions) -> WalConfig {
     }
     if let Some(sync) = overrides.sync_on_flush {
         config.sync_on_flush = sync;
+    }
+    if let Some(flag) = overrides.persist_control_file_on_flush {
+        config.persist_control_file_on_flush = flag;
     }
     if let Some(interval) = overrides.writer_interval_ms {
         config.writer_interval_ms = interval;

@@ -284,7 +284,7 @@ impl TransactionManager {
     fn finish_commit(&self, txn: &Transaction, lsn: Lsn) -> QuillSQLResult<()> {
         if txn.synchronous_commit() {
             self.wal.wait_for_durable(lsn)?;
-        } else {
+        } else if !self.wal.has_background_writer() {
             let _ = self.wal.flush_until(lsn)?;
         }
         Ok(())

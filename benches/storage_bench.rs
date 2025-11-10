@@ -5,6 +5,7 @@ use std::path::Path;
 
 use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion, Throughput};
 use postgres::{Client, NoTls};
+use pprof::criterion::{Output, PProfProfiler};
 use quill_sql::database::{Database, DatabaseOptions, WalOptions};
 use quill_sql::error::QuillSQLResult;
 use quill_sql::session::SessionContext;
@@ -36,9 +37,10 @@ fn postgres_url() -> Option<String> {
 fn quill_bench_options() -> DatabaseOptions {
     DatabaseOptions {
         wal: WalOptions {
-            writer_interval_ms: Some(None),
+            writer_interval_ms: None,
             synchronous_commit: Some(false),
-            sync_on_flush: Some(true),
+            sync_on_flush: Some(false),
+            persist_control_file_on_flush: Some(false),
             ..Default::default()
         },
         ..Default::default()
@@ -545,7 +547,9 @@ fn bench_main(c: &mut Criterion) {
 
 criterion_group!(
     name = benches;
-    config = Criterion::default().sample_size(10);
+    config = Criterion::default()
+        .sample_size(10)
+        .with_profiler(PProfProfiler::new(100, Output::Flamegraph(None)));
     targets = bench_main
 );
 criterion_main!(benches);

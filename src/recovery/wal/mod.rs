@@ -72,6 +72,7 @@ pub struct WalManager {
     durable_lsn: AtomicU64,
     state: Mutex<WalState>,
     writer: Mutex<Option<WalWriterRuntime>>,
+    persist_control_file_on_flush: bool,
     max_buffer_records: usize,
     flush_coalesce_bytes: usize,
     last_checkpoint: AtomicU64,
@@ -138,6 +139,7 @@ impl WalManager {
             config.flush_coalesce_bytes
         };
         let sink: Arc<dyn WalSink> = Arc::new(DiskSchedulerWalSink::new(scheduler.clone()));
+        let persist_control_file_on_flush = config.persist_control_file_on_flush;
         let mut storage = WalStorage::new(config, sink)?;
         let (durable_ptr, next_ptr, checkpoint_ptr, last_record_start, redo_start) =
             if let Some(state) = init_state {
@@ -160,6 +162,7 @@ impl WalManager {
                 storage,
             }),
             writer: Mutex::new(None),
+            persist_control_file_on_flush,
             max_buffer_records,
             flush_coalesce_bytes: flush_bytes,
             last_checkpoint: AtomicU64::new(checkpoint_ptr),
@@ -331,6 +334,10 @@ impl WalManager {
         Ok(())
     }
 
+    pub fn has_background_writer(&self) -> bool {
+        self.writer.lock().is_some()
+    }
+
     pub fn flush(&self, target: Option<Lsn>) -> QuillSQLResult<Lsn> {
         let recycle_lsn = self.last_checkpoint.load(Ordering::Acquire);
 
@@ -360,7 +367,9 @@ impl WalManager {
 
         self.wait_for_flush_tickets(tickets)?;
         self.durable_lsn.store(desired, Ordering::Release);
-        self.persist_control_file()?;
+        if self.persist_control_file_on_flush {
+            self.persist_control_file()?;
+        }
         self.flush_cond.notify_all();
         Ok(desired)
     }
@@ -392,7 +401,7 @@ impl WalManager {
         Ok(())
     }
 
-    fn persist_control_file(&self) -> QuillSQLResult<()> {
+    pub fn persist_control_file(&self) -> QuillSQLResult<()> {
         if let Some(ctrl) = &self.control_file {
             ctrl.update(
                 self.durable_lsn(),

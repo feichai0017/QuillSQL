@@ -66,6 +66,7 @@ criterion = { version = "0.5", features = ["html_reports"] }
 rand_chacha = "0.9"
 rusqlite = { version = "0.31", features = ["bundled"] }
 postgres = "0.19"
+pprof = { version = "0.15.0", features = ["criterion", "flamegraph"] }
 
 [[bench]]
 name = "storage_bench"

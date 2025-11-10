@@ -54,6 +54,7 @@ fn main() {
         directory: args.wal_dir,
         segment_size: args.wal_segment_size,
         sync_on_flush: args.wal_sync_on_flush,
+        persist_control_file_on_flush: None,
         writer_interval_ms: args.wal_writer_interval_ms.map(|val| {
             if val == 0 {
                 None
