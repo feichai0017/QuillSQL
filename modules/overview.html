@@ -183,7 +183,7 @@ observe how the new AST nodes flow into the planner layer.</li>
 <div class="table-wrapper"><table><thead><tr><th>Component</th><th>Description</th></tr></thead><tbody>
 <tr><td><code>LogicalPlanner</code></td><td>Converts AST nodes into strongly typed <code>LogicalPlan</code> variants. Responsible for type checking, alias resolution, and scope handling.</td></tr>
 <tr><td><code>PlannerContext</code></td><td>Surface for catalog lookups while planning.</td></tr>
-<tr><td><code>PhysicalPlanner</code></td><td>Lowers optimized logical plans into physical Volcano operators (<code>PhysicalPlan</code>).</td></tr>
+<tr><td><code>VecPlanner</code></td><td>Lowers optimized logical plans into vector operators (<code>VecPlan</code>).</td></tr>
 </tbody></table>
 </div>
 <p>Highlights:</p>
@@ -216,30 +216,30 @@ compare plan dumps to see new shapes.</li>
 <hr />
 <h2 id="4-execution-engine-srcexecution"><a class="header" href="#4-execution-engine-srcexecution">4. Execution Engine (<code>src/execution</code>)</a></h2>
 <div class="table-wrapper"><table><thead><tr><th>Element</th><th>Details</th></tr></thead><tbody>
-<tr><td><code>PhysicalPlan</code></td><td>Enum covering all Volcano operators. Each variant implements <code>VolcanoExecutor</code>.</td></tr>
-<tr><td><code>VolcanoExecutor</code></td><td><code>init(&amp;mut ExecutionContext)</code> and <code>next(&amp;mut ExecutionContext)</code> pair define the iterator model.</td></tr>
+<tr><td><code>VecPlan</code></td><td>Enum describing all operator shapes (scan, join, insert…). Variants now hold only metadata that chunk operators consume.</td></tr>
+<tr><td><code>ExecPlan</code> / <code>Operator</code></td><td>Chunk-based runtime that pulls <code>DataChunk</code>s via <code>open/get_chunk/rescan/close</code>, replacing the legacy tuple-at-a-time iterator.</td></tr>
 <tr><td><code>ExecutionContext</code></td><td>Supplies catalog access, expression evaluation, and (most importantly) a pluggable <code>StorageEngine</code>.</td></tr>
 </tbody></table>
 </div>
 <p>Design notes:</p>
 <ul>
 <li>Operators stay declarative. They describe <em>what</em> to scan or modify and delegate the
-<em>how</em> to storage handles. For example, <code>PhysicalSeqScan</code> now requests a <code>TupleStream</code>
+<em>how</em> to storage handles. For example, <code>VecSeqScan</code> requests a <code>TupleStream</code>
 via <code>ExecutionContext::table_stream</code>, so it never touches <code>TableHeap</code> internals.</li>
 <li>Helper methods such as <code>eval_predicate</code>, <code>insert_tuple_with_indexes</code>, or
 <code>prepare_row_for_write</code> encapsulate MVCC/locking rules so physical plans remain short.</li>
-<li>ExecutionContext caches <code>TxnContext</code>, making it straightforward to teach isolation
-semantics: examine <code>TxnContext::lock_table</code> and <code>read_visible_tuple</code> to see when locks
+<li>ExecutionContext caches a <code>TransactionHandle</code>, making it straightforward to teach isolation
+semantics: examine <code>TransactionHandle::lock_table</code> and <code>read_visible_tuple</code> to see when locks
 are taken or released.</li>
-<li>Suggested lab: implement a new physical operator (e.g., hash join) by wiring two child
-<code>PhysicalPlan</code>s without ever touching storage-specific code. This highlights the payoff
+<li>Suggested lab: implement a new vector operator (e.g., hash join) by wiring two child
+<code>VecPlan</code>s without ever touching storage-specific code. This highlights the payoff
 of the handle abstraction.</li>
 </ul>
 <hr />
 <h2 id="5-transaction-runtime-srctransaction"><a class="header" href="#5-transaction-runtime-srctransaction">5. Transaction Runtime (<code>src/transaction</code>)</a></h2>
 <div class="table-wrapper"><table><thead><tr><th>Type</th><th>Purpose</th></tr></thead><tbody>
 <tr><td><code>TransactionManager</code></td><td>Creates/commits/aborts transactions, manages undo chains, and coordinates WAL durability.</td></tr>
-<tr><td><code>TxnContext</code></td><td>Per-command wrapper passed to execution. Provides MVCC snapshot (<code>TransactionSnapshot</code>), lock helpers, and command ids.</td></tr>
+<tr><td><code>TransactionHandle</code> / <code>TxnRuntime</code></td><td>Per-command wrapper passed to execution. Provides MVCC snapshot (<code>TransactionSnapshot</code>), lock helpers, and command ids.</td></tr>
 <tr><td><code>LockManager</code></td><td>Multi-granularity 2PL with deadlock detection.</td></tr>
 </tbody></table>
 </div>
@@ -261,7 +261,7 @@ generates CLRs, demonstrating ARIES-style logical undo.</li>
 <hr />
 <h2 id="6-storage-engine--handles-srcstorage"><a class="header" href="#6-storage-engine--handles-srcstorage">6. Storage Engine &amp; Handles (<code>src/storage</code>)</a></h2>
 <div class="table-wrapper"><table><thead><tr><th>Component</th><th>Highlights</th></tr></thead><tbody>
-<tr><td><code>engine.rs</code></td><td>Defines <code>StorageEngine</code>, <code>TableHandle</code>, <code>IndexHandle</code>, <code>TupleStream</code>, and the new <code>ScanOptions</code> / <code>IndexScanRequest</code>.</td></tr>
+<tr><td><code>engine.rs</code></td><td>Defines <code>StorageEngine</code>, <code>TableAccess</code>, <code>IndexAccess</code>, <code>TupleStream</code>, and the new <code>ScanOptions</code> / <code>IndexScanRequest</code>.</td></tr>
 <tr><td><code>table_heap</code></td><td>Slotted-page heap with MVCC metadata (<code>TupleMeta</code>, forward/back pointers).</td></tr>
 <tr><td><code>index</code></td><td>B+Tree (B-link) implementation with iterators and codecs.</td></tr>
 </tbody></table>
@@ -269,7 +269,7 @@ generates CLRs, demonstrating ARIES-style logical undo.</li>
 <p>Key ideas for teaching:
 Topics to emphasise:</p>
 <ul>
-<li><strong>Handle abstraction</strong>: Execution asks the engine for a <code>TableHandle</code>, then calls
+<li><strong>Access abstraction</strong>: Execution asks the engine for a <code>TableAccess</code>, then calls
 <code>full_scan(ScanOptions)</code> to receive a <code>TupleStream</code>. The default engine simply wraps
 <code>TableHeap</code>/<code>BPlusTreeIndex</code>, but students can plug in their own engines for research.</li>
 <li><strong>TupleStream</strong>: Minimal interface returning <code>(RecordId, TupleMeta, Tuple)</code> triples.

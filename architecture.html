@@ -164,8 +164,8 @@
     API --&gt; Parser[&quot;sql::parser&quot;]
     Parser --&gt; LPlanner[&quot;plan::LogicalPlanner&quot;]
     LPlanner --&gt; Optimizer[&quot;optimizer::LogicalOptimizer&quot;]
-    Optimizer --&gt; PhysPlanner[&quot;plan::PhysicalPlanner&quot;]
-    PhysPlanner --&gt; Exec[&quot;execution::ExecutionEngine (Volcano)&quot;]
+    Optimizer --&gt; VecPlanner[&quot;plan::VecPlanner&quot;]
+    VecPlanner --&gt; Exec[&quot;execution::ExecutionEngine (Volcano)&quot;]
 
     subgraph Txn[&quot;Transaction Layer&quot;]
         Session[&quot;session::SessionContext&quot;]
@@ -197,9 +197,9 @@
 </pre>
 <p><strong>High-level flow</strong></p>
 <ol>
-<li>SQL text is parsed into an AST, planned into a <code>LogicalPlan</code>, optimized by a handful of safe rewrite rules, then lowered into a physical operator tree.</li>
+<li>SQL text is parsed into an AST, planned into a <code>LogicalPlan</code>, optimized by a handful of safe rewrite rules, then lowered into a vectorized operator tree (<code>VecPlan</code>).</li>
 <li><code>SessionContext</code> either reuses or creates a transaction and injects isolation/access modes.</li>
-<li>Each physical operator is driven by the Volcano pull model (<code>init</code>/<code>next</code>). On entry it obtains a <code>TxnRuntime</code> which supplies a command id plus an MVCC snapshot consistent with the transaction’s isolation level.</li>
+<li>Each vector operator is driven by the Volcano pull model (<code>open</code>/<code>get_chunk</code>). On entry it obtains a <code>TxnRuntime</code> which supplies a command id plus an MVCC snapshot consistent with the transaction’s isolation level.</li>
 <li>Operators consult the snapshot for tuple visibility, acquire table/row locks through <code>TxnRuntime</code>, and issue heap/index operations.</li>
 <li>DML operators register undo records and append WAL entries via the transaction manager. When the user commits, the manager emits <code>Commit</code> records, waits for durability as configured, and releases locks.</li>
 </ol>
@@ -250,7 +250,7 @@ Multi-granularity 2PL (IS/IX/S/SIX/X) enforced by <code>LockManager</code>. Repe
 </li>
 <li>
 <p><strong>Executor safeguards</strong><br />
-<code>PhysicalUpdate</code> now skips tuple versions created by the same <code>(txn_id, command_id)</code> during the current command. This prevents re-processing the freshly inserted MVCC version and thereby avoids infinite loops.</p>
+<code>UpdateOperator</code> now skips tuple versions created by the same <code>(txn_id, command_id)</code> during the current command. This prevents re-processing the freshly inserted MVCC version and thereby avoids infinite loops.</p>
 </li>
 </ul>
 <hr />

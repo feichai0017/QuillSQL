@@ -159,7 +159,7 @@
 <p>When you submit a SQL query to a database, it doesn't just magically produce a result. The database undertakes a sophisticated, multi-stage process to translate the declarative SQL statement (which describes <em>what</em> data you want) into an imperative, efficient execution plan (which describes <em>how</em> to get that data). This entire process is the responsibility of the <strong>Query Planner</strong>.</p>
 <p>In QuillSQL, this process follows a classic, compiler-like pipeline, which is a cornerstone of modern database architecture as taught in courses like CMU 15-445.</p>
 <p>The journey from a SQL string to an executable plan involves several transformations:</p>
-<p><strong>SQL String</strong> -&gt; <strong>AST (Abstract Syntax Tree)</strong> -&gt; <strong>Logical Plan</strong> -&gt; <strong>Optimized Logical Plan</strong> -&gt; <strong>Physical Plan</strong></p>
+<p><strong>SQL String</strong> -&gt; <strong>AST (Abstract Syntax Tree)</strong> -&gt; <strong>Logical Plan</strong> -&gt; <strong>Optimized Logical Plan</strong> -&gt; <strong>Vec Plan</strong></p>
 <p>Let's break down each stage.</p>
 <h3 id="stage-1-parsing-sql---ast"><a class="header" href="#stage-1-parsing-sql---ast">Stage 1: Parsing (SQL -&gt; AST)</a></h3>
 <p>The first step is purely syntactic. The raw SQL query string is fed into a parser. QuillSQL uses the excellent <code>sqlparser</code> crate for this. The parser checks if the SQL conforms to valid grammar and, if so, converts it into an <strong>Abstract Syntax Tree (AST)</strong>.</p>
@@ -199,38 +199,38 @@
   └── TableScan(cities)
 </code></pre>
 <p>By filtering early, we dramatically reduce the number of rows that need to be processed by the expensive <code>Join</code> operator. QuillSQL implements similar rules, such as <code>PushDownLimit</code>, which pushes <code>LIMIT</code> clauses down the tree to reduce the amount of data processed.</p>
-<h3 id="stage-4-physical-planning-logical-plan---physical-plan"><a class="header" href="#stage-4-physical-planning-logical-plan---physical-plan">Stage 4: Physical Planning (Logical Plan -&gt; Physical Plan)</a></h3>
-<p>Finally, the <code>PhysicalPlanner</code> (<code>plan/physical_planner.rs</code>) converts the optimized logical plan into a <strong>Physical Plan</strong>.</p>
-<p>A Physical Plan describes exactly <em>how</em> the query will be executed. It maps each logical operator to a concrete algorithm or implementation.</p>
+<h3 id="stage-4-vector-planning-logical-plan---vecplan"><a class="header" href="#stage-4-vector-planning-logical-plan---vecplan">Stage 4: Vector Planning (Logical Plan -&gt; VecPlan)</a></h3>
+<p>Finally, the <code>VecPlanner</code> (<code>plan/vec_planner/</code>) converts the optimized logical plan into a <strong>Vec Plan</strong>.</p>
+<p>A Vec Plan describes exactly <em>how</em> the query will be executed. It maps each logical operator to a concrete algorithm/implementation that the chunked executor understands.</p>
 <ul>
-<li>A <code>LogicalPlan::TableScan</code> becomes a <code>PhysicalSeqScan</code> (a sequential scan of the table heap).</li>
-<li>A <code>LogicalPlan::Filter</code> becomes a <code>PhysicalFilter</code>, which implements the filtering logic.</li>
-<li>A <code>LogicalPlan::Join</code> becomes a <code>PhysicalNestedLoopJoin</code>. This is where the database commits to a specific join algorithm. A more advanced database might have multiple options (e.g., <code>PhysicalHashJoin</code>, <code>PhysicalSortMergeJoin</code>) and would use a cost model to choose the best one. QuillSQL currently implements Nested Loop Join.</li>
+<li>A <code>LogicalPlan::TableScan</code> becomes a <code>VecSeqScan</code> (a sequential scan of the table heap).</li>
+<li>A <code>LogicalPlan::Filter</code> becomes a <code>VecFilter</code>, which captures the predicate to apply.</li>
+<li>A <code>LogicalPlan::Join</code> becomes a <code>VecNestedLoopJoin</code>. This is where the database commits to a specific join algorithm. A more advanced database might have multiple options (e.g., <code>VecHashJoin</code>, <code>VecSortMergeJoin</code>) and would use a cost model to choose the best one. QuillSQL currently implements Nested Loop Join.</li>
 </ul>
-<p>Each node in the physical plan tree is an executor that the <a href="../modules/execution.html">Execution Engine</a> can run. This final plan is what gets executed to produce the query result.</p>
+<p>Each node in the Vec plan tree feeds directly into a chunk operator that the <a href="../modules/execution.html">Execution Engine</a> can run. This final plan is what gets executed to produce the query result.</p>
 <h2 id="conclusion"><a class="header" href="#conclusion">Conclusion</a></h2>
 <p>This layered approach—from syntax to a logical representation, then to an optimized logical representation, and finally to a concrete physical execution plan—is fundamental to database design. It provides a clear separation of concerns and, most importantly, creates a dedicated <strong>optimization stage</strong>, which is the key to achieving high performance on a wide variety of SQL queries.</p>
 <hr />
 <h2 id="for-study--discussion"><a class="header" href="#for-study--discussion">For Study &amp; Discussion</a></h2>
 <ol>
 <li>
-<p><strong>Logical vs. Physical</strong>: Why is the separation between logical and physical plans so important? What would be the disadvantages of a simpler system that converted the AST directly into a physical plan?</p>
+<p><strong>Logical vs. Physical</strong>: Why is the separation between logical and physical (Vec) plans so important? What would be the disadvantages of a simpler system that converted the AST directly into an execution plan?</p>
 </li>
 <li>
 <p><strong>Join Algorithms</strong>: QuillSQL currently only implements <code>NestedLoopJoin</code>. What are two other common join algorithms? Describe how they work and in what scenarios they would be more performant than a nested loop join.</p>
 </li>
 <li>
-<p><strong>Programming Exercise (Advanced)</strong>: Implement a <code>PhysicalHashJoin</code> operator. This is a significant undertaking that involves:
-a.  Creating a <code>PhysicalHashJoin</code> struct that implements the <code>VolcanoExecutor</code> trait.
-b.  In the <code>init()</code> phase, it should consume the entire "build" side (typically the smaller, right-hand table) and build an in-memory hash table from its rows.
-c.  In the <code>next()</code> phase, it should read from the "probe" side (the left-hand table) one row at a time, probe the hash table for matches, and emit the joined tuples.
-d.  Modify the <code>PhysicalPlanner</code> to choose <code>PhysicalHashJoin</code> instead of <code>PhysicalNestedLoopJoin</code> for equi-joins.</p>
+<p><strong>Programming Exercise (Advanced)</strong>: Implement a <code>VecHashJoin</code> operator. This is a significant undertaking that involves:
+a.  Adding a <code>VecHashJoin</code> node that records the join metadata (join keys, equality predicate, child plans).
+b.  Implementing a chunk <code>HashJoinOperator</code> that consumes the entire "build" side (typically the smaller, right-hand table) and builds an in-memory hash table from its rows.
+c.  During <code>get_chunk</code>, read from the "probe" side in batches, probe the hash table for matches, and emit joined tuples in <code>DataChunk</code>s.
+d.  Modify the <code>VecPlanner</code> to choose <code>VecHashJoin</code> instead of <code>VecNestedLoopJoin</code> for equi-joins.</p>
 </li>
 <li>
 <p><strong>Programming Exercise</strong>: Add support for the <code>UNION ALL</code> operator. This would involve:
 a.  Adding a <code>Union</code> variant to the <code>LogicalPlan</code> enum.
 b.  Updating the <code>LogicalPlanner</code> to recognize the <code>UNION</code> syntax in the AST and create a <code>LogicalPlan::Union</code> node.
-c.  Creating a <code>PhysicalUnion</code> executor that pulls tuples from its first child until it's exhausted, and then pulls tuples from its second child.</p>
+c.  Creating a <code>VecUnion</code> node and chunk operator that pulls tuples from its first child until it's exhausted, and then pulls tuples from its second child.</p>
 </li>
 </ol>
 

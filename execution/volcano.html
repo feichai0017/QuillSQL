@@ -155,118 +155,132 @@
 
                 <div id="content" class="content">
                     <main>
-                        <h1 id="the-volcano-execution-model"><a class="header" href="#the-volcano-execution-model">The Volcano Execution Model</a></h1>
-<p>Once the <a href="../modules/plan.html">Query Planner</a> has produced an optimized <code>PhysicalPlan</code>, it's the job of the <strong>Execution Engine</strong> to run it and produce results. The execution engine is the component that brings the plan to life, interacting with the transaction manager and storage layer to process data.</p>
-<p>QuillSQL uses the classic <strong>Volcano Model</strong>, also known as the <strong>Iterator Model</strong>. This is a pull-based execution model where each physical operator in the plan tree acts as an iterator that the parent operator can "pull" rows from.</p>
-<h2 id="1-the-volcanoexecutor-trait"><a class="header" href="#1-the-volcanoexecutor-trait">1. The <code>VolcanoExecutor</code> Trait</a></h2>
-<p>At the heart of the execution model is the <code>VolcanoExecutor</code> trait (<code>execution/mod.rs</code>). Every physical operator implements this simple trait:</p>
+                        <h1 id="updated-volcano-execution-model"><a class="header" href="#updated-volcano-execution-model">Updated Volcano Execution Model</a></h1>
+<p>Once the <a href="../modules/plan.html">Query Planner</a> has produced an optimized vectorized tree,
+the <strong>Execution Engine</strong> consumes that metadata and produces results. We keep the
+traditional <strong>Volcano</strong> terminology for plan shapes, but the actual runtime now relies on
+chunk-oriented operators instead of the legacy tuple-at-a-time iterator.</p>
+<hr />
+<h2 id="1-vecplan-metadata"><a class="header" href="#1-vecplan-metadata">1. VecPlan metadata</a></h2>
+<p><code>VecPlan</code> is now the planner’s output: each variant stores the expressions,
+schemas, table/index references, join properties, etc. that define a particular operator.
+Unlike the original implementation, these structs are now <strong>pure data containers</strong>. They
+do not own scanners, mutexes, or iterators; all runtime state lives in the chunk
+operators that get built on top of them. This keeps the planner/optimizer API stable
+while allowing the executor to evolve independently.</p>
+<hr />
+<h2 id="2-chunk-based-operator-trait"><a class="header" href="#2-chunk-based-operator-trait">2. Chunk-based <code>Operator</code> trait</a></h2>
+<p>Execution now happens through the chunk <code>Operator</code> interface in
+<code>src/execution/operator.rs</code>:</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
-</span>pub trait VolcanoExecutor {
-    fn init(&amp;self, context: &amp;mut ExecutionContext) -&gt; QuillSQLResult&lt;()&gt;;
-    fn next(&amp;self, context: &amp;mut ExecutionContext) -&gt; QuillSQLResult&lt;Option&lt;Tuple&gt;&gt;;
-    fn output_schema(&amp;self) -&gt; SchemaRef;
+</span>pub trait Operator {
+    fn create_state(&amp;self) -&gt; Box&lt;dyn OperatorState&gt;;
+    fn open(&amp;self, ctx: &amp;mut ExecutionContext, state: &amp;mut dyn OperatorState) -&gt; Result&lt;()&gt;;
+    fn get_chunk(
+        &amp;self,
+        ctx: &amp;mut ExecutionContext,
+        state: &amp;mut dyn OperatorState,
+        chunk: &amp;mut DataChunk,
+    ) -&gt; Result&lt;ChunkStatus&gt;;
+    fn rescan(&amp;self, ctx: &amp;mut ExecutionContext, state: &amp;mut dyn OperatorState) -&gt; Result&lt;()&gt;;
+    fn close(&amp;self, ctx: &amp;mut ExecutionContext, state: &amp;mut dyn OperatorState);
 }
 <span class="boring">}</span></code></pre></pre>
 <ul>
-<li><strong><code>init()</code></strong>: This method is called once at the beginning of execution. It allows an operator to set up its initial state (e.g., a <code>SeqScan</code> operator would initialize its table iterator here).</li>
-<li><strong><code>next()</code></strong>: This is the core method. When called, the operator produces its next output tuple. It returns <code>Some(tuple)</code> if it has a row, or <code>None</code> if it has exhausted its data source. The top-level <code>ExecutionEngine</code> simply calls <code>next()</code> on the root of the plan tree in a loop until it receives <code>None</code>.</li>
+<li><strong><code>OperatorState</code></strong> stores per-execution mutable state (cursors, hash tables, pending
+tuples). It is opaque to the engine and downcast by the operator.</li>
+<li><strong><code>DataChunk</code></strong> (default capacity: 1024 rows) is the batch abstraction exchanged
+between operators. It is currently row-based but designed for vectorization.</li>
+<li><strong><code>ChunkStatus::{MoreData, Finished}</code></strong> tells callers whether more chunks may follow.</li>
+<li><strong><code>ExecPlan::from_vec</code></strong> rewrites every node (SeqScan, Filter, Project, Limit, DDL,
+etc.) into concrete chunk operators. Because the Vec structs are metadata-only, no
+legacy iterator code remains to maintain.</li>
 </ul>
-<h2 id="2-the-executioncontext"><a class="header" href="#2-the-executioncontext">2. The <code>ExecutionContext</code></a></h2>
-<p>Notice that both <code>init()</code> and <code>next()</code> take a mutable <code>ExecutionContext</code>. This object is the "context" or "world" in which the query runs. It is passed down the entire operator tree and gives each operator access to crucial services:</p>
+<p><code>ExecutionEngine::stream_exec_plan</code> opens the root operator, hands it a state object, and
+returns a <code>ChunkStream</code> iterator. <code>ExecutionEngine::execute</code> simply drains this stream
+into a <code>Vec&lt;Tuple&gt;</code> for callers that still expect eagerly materialized results.</p>
+<hr />
+<h2 id="3-executioncontext-helpers"><a class="header" href="#3-executioncontext-helpers">3. ExecutionContext Helpers</a></h2>
+<p>Both legacy and chunk operators receive a mutable <code>ExecutionContext</code>, which exposes:</p>
 <ul>
-<li><strong><code>Catalog</code></strong>: To look up tables and indexes.</li>
-<li><strong><code>TransactionManager</code> and <code>Transaction</code></strong>: To interact with the current transaction. This is how operators perform locking and visibility checks.</li>
-<li><strong><code>MvccSnapshot</code></strong>: The specific MVCC snapshot for the current transaction, used to determine which tuple versions are visible.</li>
-<li><strong><code>StorageEngine</code></strong>: A pluggable trait that hides TableHeap/B+Tree specifics.</li>
-<li><strong>Helper APIs</strong>: See below.</li>
+<li><code>Catalog</code> lookups.</li>
+<li><code>TransactionManager</code> / <code>TxnRuntime</code> for lock acquisition, MVCC snapshots, and undo
+logging.</li>
+<li><code>StorageEngine</code> handles (TableAccess, IndexAccess, TupleStream) via <code>table_stream</code>, <code>index_stream</code>, etc.</li>
+<li>Expression helpers (<code>eval_expr</code>, <code>eval_predicate</code>) that return <code>ScalarValue</code>s.</li>
+<li>DML helpers (<code>prepare_row_for_write</code>, <code>apply_update/delete</code>, <code>insert_tuple_with_indexes</code>).</li>
 </ul>
-<h3 id="executioncontext-helper-apis"><a class="header" href="#executioncontext-helper-apis">ExecutionContext helper APIs</a></h3>
-<p>To keep physical operators tiny, QuillSQL exposes a few battle-tested helpers:</p>
+<p>Operators stay small because they delegate MVCC and storage concerns to the context.</p>
+<hr />
+<h2 id="4-operator-anatomy-legacy-vs-chunk"><a class="header" href="#4-operator-anatomy-legacy-vs-chunk">4. Operator Anatomy (Legacy vs Chunk)</a></h2>
+<h3 id="seqscan--indexscan"><a class="header" href="#seqscan--indexscan">SeqScan / IndexScan</a></h3>
 <ul>
-<li><code>read_visible_tuple(table, rid, meta, tuple)</code> performs the MVCC visibility check and acquires the correct shared locks for the current isolation level.</li>
-<li><code>prepare_row_for_write</code> / <code>apply_update</code> / <code>apply_delete</code> take care of X locks, re-reading the latest version, index maintenance, and undo logging for UPDATE/DELETE.</li>
-<li><code>insert_tuple_with_indexes</code> inserts into the heap <strong>and</strong> updates every index in one call.</li>
-<li><code>eval_predicate</code> / <code>eval_expr</code> encapsulate expression evaluation (and boolean coercion), so operators never have to fiddle with <code>ScalarValue</code>.</li>
-<li>DDL helpers (<code>create_table</code>, <code>drop_table</code>, <code>create_index</code>, …) proxy the catalog so CREATE/DROP operators stay declarative.</li>
+<li><em>Legacy</em>: <code>init</code> opens a <code>TableIterator</code>; <code>next</code> pulls <code>(rid, meta, tuple)</code> one at a
+time, performs visibility checks, and returns visible tuples.</li>
+<li><em>Chunk</em>: <code>SeqScanOperator</code> (and <code>IndexScanOperator</code> for secondary indexes) keeps an
+explicit prefetch buffer, batches MVCC visibility checks, and acquires whatever locks
+are required once per batch instead of once per tuple.</li>
 </ul>
-<p>All of these helpers delegate to the storage engine. By default we ship a TableHeap+B+Tree engine, but research exercises can implement their own engine and plug it into the context without modifying operators.</p>
-<p>This design cleanly separates the operator's logic from the transactional context it runs in.</p>
-<h2 id="3-anatomy-of-physical-operators"><a class="header" href="#3-anatomy-of-physical-operators">3. Anatomy of Physical Operators</a></h2>
-<p>Data flows <em>up</em> the tree from the leaves (scans) to the root. Let's see how it works by examining a few key operators.</p>
-<h3 id="leaf-operator-physicalseqscan"><a class="header" href="#leaf-operator-physicalseqscan">Leaf Operator: <code>PhysicalSeqScan</code></a></h3>
-<p>A sequential scan is at the leaf of a plan tree. It's responsible for reading tuples from a table on disk.</p>
+<h3 id="filter"><a class="header" href="#filter">Filter</a></h3>
 <ul>
-<li><strong><code>init()</code></strong>: It acquires an <code>IntentionShared</code> lock on the table and creates a <code>TableIterator</code> for the table heap.</li>
-<li><strong><code>next()</code></strong>: In a loop, it does the following:
+<li><em>Legacy</em>: Loops calling <code>child.next()</code>, evaluates a predicate, returns the tuple when
+the predicate is <code>true</code>.</li>
+<li><em>Chunk</em>: <code>FilterOperator</code> consumes child chunks, evaluates predicates row by row, and
+either places tuples into the current chunk or buffers them if the chunk is full.</li>
+</ul>
+<h3 id="project"><a class="header" href="#project">Project</a></h3>
+<ul>
+<li><em>Legacy</em>: Evaluates projection expressions on each tuple returned by the child.</li>
+<li><em>Chunk</em>: <code>ProjectOperator</code> evaluates expressions across the current chunk, producing a
+new chunk with projected tuples.</li>
+</ul>
+<h3 id="nested-loop-join"><a class="header" href="#nested-loop-join">Nested Loop Join</a></h3>
+<ul>
+<li>The new chunk operator materializes the right input once (reusing existing chunk
+abstractions), then streams left-side chunks. For each left tuple it iterates the cached
+right tuples, merges them, and evaluates the join predicate before appending to the
+output chunk.</li>
+<li>Because the right side is buffered, <code>rescan</code> becomes cheap and downstream operators can
+keep chunk-level scheduling, while the overall behaviour still matches the legacy
+Volcano execution order.</li>
+</ul>
+<h3 id="ddl--analyze"><a class="header" href="#ddl--analyze">DDL / Analyze</a></h3>
+<ul>
+<li><code>CreateTable</code>, <code>CreateIndex</code>, <code>DropTable</code>, <code>DropIndex</code>, and <code>Analyze</code> run as lightweight
+chunk operators. Each operator acquires the relevant locks via
+<code>ExecutionContext::txn()</code>, runs exactly once, and immediately reports
+<code>ChunkStatus::Finished</code>, allowing DDL to coexist with streaming pipelines.</li>
+</ul>
+<hr />
+<h2 id="5-example-select-name-from-users-where-age--30"><a class="header" href="#5-example-select-name-from-users-where-age--30">5. Example: <code>SELECT name FROM users WHERE age &gt; 30</code></a></h2>
+<p>Vec plan: <code>Project -&gt; Filter -&gt; SeqScan</code>.</p>
 <ol>
-<li>Pulls the next raw tuple <code>(rid, meta, tuple)</code> from the <code>TableIterator</code>.</li>
-<li>Calls <code>context.is_visible(&amp;meta)</code> to perform an <strong>MVCC visibility check</strong> using the transaction's snapshot.</li>
-<li>If the tuple version is visible, it acquires the necessary row lock (e.g., <code>Shared</code> lock) and returns the tuple.</li>
-<li>If the tuple is not visible, it ignores it and loops to get the next one.</li>
+<li><code>ExecutionEngine::stream</code> builds an <code>ExecPlan</code>, wraps the SeqScan/Filter/Project nodes
+in chunk operators, and opens the root <code>ProjectOperator</code>.</li>
+<li><code>ProjectOperator::get_chunk</code> requests a chunk from its child (<code>FilterOperator</code>).</li>
+<li><code>FilterOperator::get_chunk</code> requests a chunk from <code>SeqScanOperator</code>.</li>
+<li><code>SeqScanOperator</code> fetches raw rows from the heap, filters by MVCC visibility, and
+fills the chunk.</li>
+<li>The chunk flows back up: Filter evaluates <code>age &gt; 30</code>, Project keeps only <code>name</code>.</li>
+<li>The engine yields the resulting <code>DataChunk</code> to the caller. <code>ChunkStream</code> keeps pulling
+until operators report <code>Finished</code>.</li>
 </ol>
-</li>
-</ul>
-<h3 id="unary-operator-physicalfilter"><a class="header" href="#unary-operator-physicalfilter">Unary Operator: <code>PhysicalFilter</code></a></h3>
-<p>A filter has one child operator (its <code>input</code>). It implements a <code>WHERE</code> clause.</p>
-<ul>
-<li><strong><code>next()</code></strong>: Its logic is a simple, tight loop:
-<ol>
-<li>It calls <code>self.input.next()</code> to get a tuple from its child.</li>
-<li>If the child returns <code>None</code>, the filter is also exhausted and returns <code>None</code>.</li>
-<li>If it receives a tuple, it evaluates its predicate expression (e.g., <code>age &gt; 30</code>) against the tuple.</li>
-<li>If the predicate evaluates to <code>true</code>, it returns the tuple. Otherwise, it loops back to step 1.</li>
-</ol>
-</li>
-</ul>
-<h3 id="binary-operator-physicalnestedloopjoin"><a class="header" href="#binary-operator-physicalnestedloopjoin">Binary Operator: <code>PhysicalNestedLoopJoin</code></a></h3>
-<p>A join has two children: a left (outer) and a right (inner).</p>
-<ul>
-<li><strong><code>next()</code></strong>: It implements the classic nested loop join algorithm:
-<ol>
-<li>Fetch one tuple from the <strong>outer</strong> (left) child and hold onto it.</li>
-<li>Enter a loop: fetch tuples one by one from the <strong>inner</strong> (right) child.</li>
-<li>For each inner tuple, combine it with the held outer tuple and evaluate the join condition. If it matches, return the combined tuple.</li>
-<li>When the inner child is exhausted, <strong>rewind it</strong> by calling <code>self.right_input.init()</code> again.</li>
-<li>Go back to step 1 to fetch the <em>next</em> tuple from the outer child.</li>
-<li>Repeat until the outer child is also exhausted.</li>
-</ol>
-</li>
-</ul>
-<h2 id="4-putting-it-all-together"><a class="header" href="#4-putting-it-all-together">4. Putting It All Together</a></h2>
-<p>Consider the query <code>SELECT name FROM users WHERE age &gt; 30</code>. The physical plan is <code>Projection -&gt; Filter -&gt; SeqScan</code>.</p>
-<ol>
-<li>The <code>ExecutionEngine</code> calls <code>next()</code> on the <code>Projection</code> operator.</li>
-<li>The <code>Projection</code> operator needs a tuple, so it calls <code>next()</code> on its child, <code>Filter</code>.</li>
-<li>The <code>Filter</code> operator needs a tuple, so it calls <code>next()</code> on its child, <code>SeqScan</code>.</li>
-<li>The <code>SeqScan</code> operator fetches a raw tuple from the <code>TableHeap</code>, checks its MVCC visibility, and finds a visible tuple for a user with <code>age = 25</code>.</li>
-<li><code>SeqScan</code> returns this tuple up to <code>Filter</code>.</li>
-<li><code>Filter</code> evaluates <code>age &gt; 30</code> on the tuple. It's false, so it loops, calling <code>SeqScan.next()</code> again.</li>
-<li><code>SeqScan</code> finds another visible tuple, this time for a user with <code>age = 40</code> and <code>name = 'Alice'</code>.</li>
-<li><code>SeqScan</code> returns this tuple up to <code>Filter</code>.</li>
-<li><code>Filter</code> evaluates <code>age &gt; 30</code>. It's true! It returns the tuple for Alice up to <code>Projection</code>.</li>
-<li><code>Projection</code> takes the full tuple for Alice, creates a new tuple containing only the <code>name</code> column (<code>'Alice'</code>), and returns this new tuple as the result.</li>
-</ol>
-<p>This process repeats, with tuples flowing up the tree one at a time, until the <code>SeqScan</code> operator runs out of pages and returns <code>None</code>, which then propagates up the tree, signaling the end of execution.</p>
+<p>The control flow is identical to the tuple-at-a-time model, except we operate on batches
+and the engine can stream results without buffering the entire query.</p>
 <hr />
 <h2 id="for-study--discussion"><a class="header" href="#for-study--discussion">For Study &amp; Discussion</a></h2>
 <ol>
-<li>
-<p><strong>Push vs. Pull Models</strong>: The Volcano model is a "pull-based" model. An alternative is a "push-based" model, where operators push their results to their parents as soon as they are ready. What are the potential advantages and disadvantages of each model, particularly concerning cache efficiency and control flow?</p>
-</li>
-<li>
-<p><strong>Blocking vs. Non-Blocking Operators</strong>: Some operators, like <code>PhysicalFilter</code>, can produce their first output row as soon as they receive their first input row. These are <strong>non-blocking</strong>. Other operators, like <code>PhysicalSort</code>, must consume their <em>entire</em> input before they can produce even a single row of output. These are <strong>blocking</strong>. What is the impact of blocking operators on query latency and memory usage?</p>
-</li>
-<li>
-<p><strong>Programming Exercise</strong>: The current <code>PhysicalNestedLoopJoin</code> is simple but can be inefficient as it re-scans the entire inner table for every outer row. Implement a <code>PhysicalBlockNestedLoopJoin</code> operator. This version would read a <em>block</em> (a small batch) of tuples from the outer table into an in-memory buffer, and then iterate through the inner table once for that entire block. This can significantly reduce the number of times the inner table needs to be scanned.</p>
-</li>
-<li>
-<p><strong>Programming Exercise</strong>: Implement the <code>PhysicalLimit</code> operator. Its <code>next()</code> method should:
-a.  Keep an internal counter.
-b.  If the counter is less than the <code>offset</code>, pull and discard tuples from its child.
-c.  If the counter is between <code>offset</code> and <code>offset + limit</code>, pull a tuple from its child and return it.
-d.  Once the limit is reached, it should stop pulling from its child and return <code>None</code> for all subsequent calls. This is important for efficiency, as it stops the execution of the entire sub-tree below it.</p>
-</li>
+<li><strong>Push vs Pull</strong> – What would it take to convert the chunk API into a push model?
+Which stages benefit most from pipelining?</li>
+<li><strong>Blocking vs Non-Blocking</strong> – Sort/Aggregate must materialize entire inputs, while
+Filter/Project/Limit can stream. How does batching affect latency and memory usage of
+blocking operators?</li>
+<li><strong>Join Improvements</strong> – Sketch a chunk-based block nested loop join: buffer <code>N</code> outer
+rows, scan the inner once, emit matched chunks.</li>
+<li><strong>Vectorization</strong> – <code>DataChunk</code> is intentionally row-based for now. How would you
+extend it to columnar vectors, and what parts of the operator API would change to
+exploit SIMD?</li>
 </ol>
 
                     </main>

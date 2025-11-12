@@ -164,14 +164,14 @@ performance, MVCC, and recovery.</p>
 <ul>
 <li>Manage <code>TableHeap</code> insert/delete/update paths and their MVCC metadata.</li>
 <li>Maintain indexes (see the <a href="./index.html">Index module</a> for details).</li>
-<li>Expose the <code>StorageEngine</code> trait so execution can fetch <code>TableHandle</code> / <code>IndexHandle</code>
+<li>Expose the <code>StorageEngine</code> trait so execution can fetch <code>TableAccess</code> / <code>IndexAccess</code>
 instances per table.</li>
 <li>Provide <code>TupleStream</code> so sequential and index scans share a unified interface.</li>
 </ul>
 <hr />
 <h2 id="directory-layout"><a class="header" href="#directory-layout">Directory Layout</a></h2>
 <div class="table-wrapper"><table><thead><tr><th>Path</th><th>Purpose</th><th>Key Types</th></tr></thead><tbody>
-<tr><td><code>engine.rs</code></td><td>Default engine plus handle definitions.</td><td><code>StorageEngine</code>, <code>TableHandle</code>, <code>TupleStream</code>, <code>ScanOptions</code></td></tr>
+<tr><td><code>engine.rs</code></td><td>Default engine plus access-trait definitions.</td><td><code>StorageEngine</code>, <code>TableAccess</code>, <code>IndexAccess</code>, <code>TupleStream</code>, <code>ScanOptions</code></td></tr>
 <tr><td><code>table_heap/</code></td><td>Heap storage + MVCC logic.</td><td><code>TableHeap</code>, <code>MvccHeap</code></td></tr>
 <tr><td><code>index/</code></td><td>B+Tree implementation.</td><td><code>BPlusTreeIndex</code></td></tr>
 <tr><td><code>page/</code></td><td>Page, RID, tuple metadata.</td><td><code>Page</code>, <code>RecordId</code>, <code>TupleMeta</code></td></tr>
@@ -187,26 +187,41 @@ instances per table.</li>
 </span><span class="boring">fn main() {
 </span>pub trait StorageEngine {
     fn table(&amp;self, catalog: &amp;Catalog, table: &amp;TableReference)
-        -&gt; QuillSQLResult&lt;Arc&lt;dyn TableHandle&gt;&gt;;
+        -&gt; QuillSQLResult&lt;Arc&lt;dyn TableAccess&gt;&gt;;
     fn indexes(&amp;self, catalog: &amp;Catalog, table: &amp;TableReference)
-        -&gt; QuillSQLResult&lt;Vec&lt;Arc&lt;dyn IndexHandle&gt;&gt;&gt;;
+        -&gt; QuillSQLResult&lt;Vec&lt;Arc&lt;dyn IndexAccess&gt;&gt;&gt;;
 }
 <span class="boring">}</span></code></pre></pre>
 <p>The default implementation wraps the row-oriented heap + B+Tree combo, but the trait is
 ready for column stores, remote storage, or async engines.</p>
-<h3 id="tablehandle"><a class="header" href="#tablehandle">TableHandle</a></h3>
-<p>Offers <code>full_scan(ScanOptions)</code>, <code>insert</code>, <code>delete</code>, <code>update</code>, and
-<code>prepare_row_for_write</code>. MVCC, undo, and locking concerns live here so execution operators
-only describe intent.</p>
+<h3 id="tableaccess"><a class="header" href="#tableaccess">TableAccess</a></h3>
+<p>Encapsulates the heap/MVCC surface. Key responsibilities:</p>
+<ul>
+<li><code>full_scan(ScanOptions)</code> and <code>full_tuple(RID)</code> keep visibility logic inside the storage
+layer.</li>
+<li><code>insert_chunk(&amp;DataChunk, indexes)</code> batches inserts from the chunk engine so WAL/undo
+bookkeeping happens once per mini-batch instead of per row.</li>
+<li><code>delete_chunk</code> / <code>update_chunk</code> / <code>prepare_row_for_write</code> guard every mutation with the
+right locks, visibility checks, and undo records.</li>
+</ul>
+<h3 id="indexaccess"><a class="header" href="#indexaccess">IndexAccess</a></h3>
+<p>Thin wrapper around <code>BPlusTreeIndex</code> that provides <code>key_schema()</code>, <code>index()</code> for
+specialized operations, and <code>range_scan</code> which binds a table access handle so index scans
+can materialize base tuples without leaking heap internals.</p>
 <h3 id="tuplestream"><a class="header" href="#tuplestream">TupleStream</a></h3>
 <p>Minimal iterator that returns <code>(RecordId, TupleMeta, Tuple)</code> triples. <code>ScanOptions</code> carry
 streaming hints, projection lists, or batch sizes; index scans use <code>IndexScanRequest</code> to
 describe ranges.</p>
+<p>Rather than row-at-a-time iteration, execution asks each <code>TupleStream</code> to fill a
+<code>DataChunk</code> directly and walks those batches with <code>row_iter</code>, preserving optional
+<code>row_id</code>/<code>row_meta</code> columns so scans and DML reuse the same columnar batch format
+throughout the pipeline.</p>
 <hr />
 <h2 id="interactions"><a class="header" href="#interactions">Interactions</a></h2>
 <ul>
-<li><strong>Execution</strong> – <code>ExecutionContext::table_stream</code> / <code>index_stream</code> delegate to handles.</li>
-<li><strong>Transaction</strong> – Handle methods call into <code>TxnContext</code> to acquire locks, record undo,
+<li><strong>Execution</strong> – <code>ExecutionContext::table_stream</code> / <code>index_stream</code> delegate to access
+traits instead of raw heaps.</li>
+<li><strong>Transaction</strong> – Access methods call into <code>TxnRuntime</code> to acquire locks, record undo,
 and emit WAL.</li>
 <li><strong>Buffer Manager</strong> – <code>TableHeap</code>/<code>BPlusTreeIndex</code> access pages through the shared buffer
 pool.</li>
@@ -221,6 +236,8 @@ the same abstractions as foreground scans.</li>
 <li>Implement a toy columnar handle to show how the execution engine can stay agnostic to
 storage layout.</li>
 <li>Use <code>ScanOptions::projection</code> to push down column pruning into <code>TableIterator</code>.</li>
+<li>Experiment with <code>insert_chunk</code> sizes to show how unified row batches amortize WAL/index
+overhead.</li>
 <li>Enable <code>RUST_LOG=storage::table_heap=trace</code> and trace MVCC version chains as updates
 occur.</li>
 </ul>

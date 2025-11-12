@@ -157,7 +157,7 @@
                     <main>
                         <h1 id="index-module"><a class="header" href="#index-module">Index Module</a></h1>
 <p>Indexes live in <code>src/storage/index/</code>. QuillSQL currently ships a B+Tree (B-link variant)
-that is exposed to execution via <code>IndexHandle</code>. Indexes allow point lookups and range
+that is exposed to execution via <code>IndexAccess</code>. Indexes allow point lookups and range
 scans in O(log n), dramatically reducing the need for full table scans.</p>
 <hr />
 <h2 id="responsibilities"><a class="header" href="#responsibilities">Responsibilities</a></h2>
@@ -166,7 +166,7 @@ scans in O(log n), dramatically reducing the need for full table scans.</p>
 <li>Support point probes, range scans, insert/update/delete maintenance.</li>
 <li>Cooperate with MVCC: entries reference heap tuples while visibility checks remain in
 execution/transaction code.</li>
-<li>Provide <code>IndexHandle::range_scan</code>, returning a <code>TupleStream</code> so physical operators don’t
+<li>Provide <code>IndexAccess::range_scan</code>, returning a <code>TupleStream</code> so physical operators don’t
 need to know tree internals.</li>
 </ul>
 <hr />
@@ -187,7 +187,7 @@ range scans.</p>
 <p>Insert/delete operations climb the tree with shared latches and upgrade only when
 necessary (e.g., right before splitting), reducing contention.</p>
 <h3 id="range-scan--tuplestream"><a class="header" href="#range-scan--tuplestream">Range Scan → TupleStream</a></h3>
-<p><code>IndexHandle::range_scan</code> wraps <code>TreeIndexIterator</code> and automatically fetches heap tuples,
+<p><code>IndexAccess::range_scan</code> wraps <code>TreeIndexIterator</code> and automatically fetches heap tuples,
 returning <code>(rid, meta, tuple)</code> triples. Execution remains storage-agnostic.</p>
 <h3 id="inline-maintenance"><a class="header" href="#inline-maintenance">Inline Maintenance</a></h3>
 <p>Index inserts/updates/deletes modify the tree immediately and emit logical WAL for redo.
@@ -198,7 +198,7 @@ removed in the same transaction.</p>
 <ul>
 <li><strong>Catalog</strong> – stores <code>Arc&lt;BPlusTreeIndex&gt;</code> instances alongside table metadata so
 execution can fetch handles directly.</li>
-<li><strong>Execution</strong> – <code>PhysicalIndexScan</code> uses <code>ExecutionContext::index_stream</code>; DML operators
+<li><strong>Execution</strong> – <code>VecIndexScan</code> uses <code>ExecutionContext::index_stream</code>; DML operators
 call <code>insert_tuple_with_indexes</code> so heap writes and index maintenance stay in sync.</li>
 <li><strong>Transaction/MVCC</strong> – heaps store transaction metadata; indexes just reference RIDs, so
 MVCC visibility is enforced when tuples are materialised.</li>

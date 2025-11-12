@@ -164,7 +164,7 @@ violating correctness.</p>
 <div class="table-wrapper"><table><thead><tr><th>Type</th><th>Role</th></tr></thead><tbody>
 <tr><td><code>TransactionManager</code></td><td>Creates/commits/aborts transactions, assigns txn &amp; command ids, coordinates WAL.</td></tr>
 <tr><td><code>Transaction</code></td><td>Stores state, held locks, undo chain, and cached snapshot.</td></tr>
-<tr><td><code>TxnContext</code> / <code>TxnRuntime</code></td><td>Execution-time wrapper exposing MVCC + locking helpers.</td></tr>
+<tr><td><code>TransactionHandle</code> / <code>TxnRuntime</code></td><td>Execution-time wrapper exposing MVCC + locking helpers.</td></tr>
 <tr><td><code>LockManager</code></td><td>Multi-granularity locking (IS/IX/S/SIX/X) with deadlock detection.</td></tr>
 <tr><td><code>TransactionSnapshot</code></td><td>Tracks <code>xmin/xmax/active_txns</code> for visibility checks.</td></tr>
 </tbody></table>
@@ -174,9 +174,9 @@ violating correctness.</p>
 <ol>
 <li><code>SessionContext</code> calls <code>TransactionManager::begin</code> to create a transaction.</li>
 <li>Each SQL statement builds a <code>TxnRuntime</code>, yielding a fresh command id and snapshot.</li>
-<li>Operators call <code>TxnContext::lock_table/lock_row</code> to obey strict 2PL.</li>
-<li><code>TableHandle::insert/delete/update</code> records undo, acquires locks, and emits WAL via
-<code>TxnContext</code>.</li>
+<li>Operators call <code>TransactionHandle::lock_table/lock_row</code> to obey strict 2PL.</li>
+<li><code>TableAccess::insert_chunk/delete_chunk/update_chunk</code> records undo, acquires locks, and
+emits WAL via <code>TxnRuntime</code>.</li>
 <li>Commit: write a <code>Commit</code> record → flush depending on <code>synchronous_commit</code> → release
 locks.</li>
 <li>Abort: walk the undo list, write CLRs, restore heap/index state, release locks.</li>
@@ -211,7 +211,7 @@ statement end, Serializable waits until commit.</li>
 <ul>
 <li><strong>ExecutionContext</strong> – all helpers (lock acquisition, visibility checks, undo logging)
 are exposed here, so physical operators never touch <code>LockManager</code> directly.</li>
-<li><strong>StorageEngine</strong> – handles call <code>TxnContext</code> before mutating heaps/indexes; MVCC metadata
+<li><strong>StorageEngine</strong> – access traits call <code>TxnRuntime</code> before mutating heaps/indexes; MVCC metadata
 lives in <code>TupleMeta</code>.</li>
 <li><strong>Recovery</strong> – Begin/Commit/Abort records emitted here drive ARIES undo/redo.</li>
 <li><strong>Background</strong> – MVCC vacuum reads <code>TransactionManager::oldest_active_txn()</code> to compute
