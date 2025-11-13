@@ -102,7 +102,7 @@ Transaction/CLR/Checkpoint → interpreted by the analysis/undo phases.
   the control file, and clears the “touched pages” set so new FPWs fire only once per
   checkpoint interval.
 - **Background writer** – `WalWriterRuntime` runs when `WalOptions::writer_interval_ms`
-  is non-zero, smoothing out flush pressure even when foregound transactions are light.
+  is non-zero, smoothing out flush pressure even when foreground transactions are light.
 
 ---
 
