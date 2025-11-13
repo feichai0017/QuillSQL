@@ -2448,7 +2448,7 @@ asks <code>WalStorage::append_records</code> to write them, then waits on all <c
 the control file, and clears the “touched pages” set so new FPWs fire only once per
 checkpoint interval.</li>
 <li><strong>Background writer</strong> – <code>WalWriterRuntime</code> runs when <code>WalOptions::writer_interval_ms</code>
-is non-zero, smoothing out flush pressure even when foregound transactions are light.</li>
+is non-zero, smoothing out flush pressure even when foreground transactions are light.</li>
 </ul>
 <hr />
 <h2 id="6-relation-to-aries"><a class="header" href="#6-relation-to-aries">6. Relation to ARIES</a></h2>
