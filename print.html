@@ -198,162 +198,216 @@
 </li>
 </ul>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="quillsql-architecture"><a class="header" href="#quillsql-architecture">QuillSQL Architecture</a></h1>
-<p>This document explains how a SQL request flows through QuillSQL, how transactional MVCC and background services plug in, and how the main modules collaborate. All diagrams use Mermaid so you can paste them into any compatible renderer for a richer view.</p>
+<p>This chapter gives a tour of the major subsystems, the flow of a SQL statement, and the contract between execution, transactions, and storage. It uses Mermaid diagrams so you can render the visuals directly inside mdBook or any compatible viewer.</p>
 <hr />
-<h2 id="1-end-to-end-request-pipeline"><a class="header" href="#1-end-to-end-request-pipeline">1. End-to-End Request Pipeline</a></h2>
-<pre class="mermaid">flowchart TD
-    Client[&quot;CLI / HTTP client&quot;] --&gt; API[&quot;bin/client / bin/server&quot;]
-    API --&gt; Parser[&quot;sql::parser&quot;]
-    Parser --&gt; LPlanner[&quot;plan::LogicalPlanner&quot;]
-    LPlanner --&gt; Optimizer[&quot;optimizer::LogicalOptimizer&quot;]
-    Optimizer --&gt; VecPlanner[&quot;plan::VecPlanner&quot;]
-    VecPlanner --&gt; Exec[&quot;execution::ExecutionEngine (Volcano)&quot;]
+<h2 id="1-end-to-end-pipeline"><a class="header" href="#1-end-to-end-pipeline">1. End-to-End Pipeline</a></h2>
+<pre class="mermaid">flowchart LR
+    subgraph Frontend
+        CLI[&quot;bin/client&quot;] --&gt; Parser[&quot;sql::parser&quot;]
+        HTTP[&quot;bin/server&quot;] --&gt; Parser
+    end
+    Parser --&gt; LPlan[&quot;plan::LogicalPlanner&quot;]
+    LPlan --&gt; Optimizer[&quot;optimizer::LogicalOptimizer&quot;]
+    Optimizer --&gt; PPlan[&quot;plan::PhysicalPlanner&quot;]
+    PPlan --&gt; Exec[&quot;execution::ExecutionEngine (Volcano)&quot;]
 
-    subgraph Txn[&quot;Transaction Layer&quot;]
+    subgraph Txn[&quot;transaction::*&quot;]
         Session[&quot;session::SessionContext&quot;]
-        TM[&quot;transaction::TransactionManager&quot;]
-        LM[&quot;transaction::LockManager&quot;]
+        TM[&quot;TransactionManager&quot;]
+        LM[&quot;LockManager&quot;]
         Session --&gt; TM --&gt; LM
     end
 
-    Exec --&gt;|Tuple meta &amp; locks| Txn
-    Exec --&gt; Storage
+    Exec &lt;--&gt;|snapshot, locks| Txn
+    Exec --&gt; Binding
 
-    subgraph Storage[&quot;Storage &amp; I/O&quot;]
-        TableHeap[&quot;storage::table_heap::TableHeap&quot;]
-        Index[&quot;storage::index::B+Tree&quot;]
+    subgraph Storage[&quot;storage::* &amp; buffer::*&quot;]
+        Binding[&quot;storage::engine::TableBinding&quot;]
+        Heap[&quot;storage::table_heap::TableHeap&quot;]
+        MVCC[&quot;storage::heap::MvccHeap&quot;]
+        Index[&quot;storage::index::BPlusTree&quot;]
         Buffer[&quot;buffer::BufferManager&quot;]
-        Scheduler[&quot;storage::disk_scheduler (io_uring)&quot;]
+        Disk[&quot;storage::disk_scheduler (io_uring)&quot;]
         WAL[&quot;recovery::WalManager&quot;]
-        TableHeap &lt;--&gt; Buffer
+        Binding --&gt; Heap
+        Binding --&gt; Index
+        Heap &lt;--&gt; Buffer
         Index &lt;--&gt; Buffer
-        Buffer &lt;--&gt; Scheduler
-        WAL --&gt; Scheduler
+        Buffer &lt;--&gt; Disk
+        WAL --&gt; Disk
     end
 
-    Txn --&gt;|WAL payloads| WAL
-
-    Background[&quot;background::workers\n(checkpoint, bg writer, MVCC vacuum)&quot;] --&gt; Buffer
-    Background --&gt; WAL
-    Background --&gt; TM
+    Background[&quot;background::workers\n(checkpoint, WAL writer, MVCC vacuum)&quot;] --&gt; {Buffer, WAL, TM}
 </pre>
-<p><strong>High-level flow</strong></p>
-<ol>
-<li>SQL text is parsed into an AST, planned into a <code>LogicalPlan</code>, optimized by a handful of safe rewrite rules, then lowered into a vectorized operator tree (<code>VecPlan</code>).</li>
-<li><code>SessionContext</code> either reuses or creates a transaction and injects isolation/access modes.</li>
-<li>Each vector operator is driven by the Volcano pull model (<code>open</code>/<code>get_chunk</code>). On entry it obtains a <code>TxnRuntime</code> which supplies a command id plus an MVCC snapshot consistent with the transaction’s isolation level.</li>
-<li>Operators consult the snapshot for tuple visibility, acquire table/row locks through <code>TxnRuntime</code>, and issue heap/index operations.</li>
-<li>DML operators register undo records and append WAL entries via the transaction manager. When the user commits, the manager emits <code>Commit</code> records, waits for durability as configured, and releases locks.</li>
-</ol>
+<p><strong>Key takeaways</strong></p>
+<ul>
+<li>The frontend (CLI/HTTP) only knows how to parse SQL and drive the planning stages; all shared state lives below.</li>
+<li>The <code>ExecutionEngine</code> drives a Volcano iterator. Each physical operator calls into the transaction runtime for visibility checks and locking, but touches storage exclusively through a <code>TableBinding</code>. This makes the executor easy to reason about in a classroom setting.</li>
+<li>Buffering, WAL, and disk I/O are centralized so that durability/ordering guarantees stay in one module.</li>
+</ul>
 <hr />
-<h2 id="2-transaction--mvcc-mechanics"><a class="header" href="#2-transaction--mvcc-mechanics">2. Transaction &amp; MVCC Mechanics</a></h2>
+<h2 id="2-transactions-mvcc-and-the-executor"><a class="header" href="#2-transactions-mvcc-and-the-executor">2. Transactions, MVCC, and the Executor</a></h2>
 <pre class="mermaid">sequenceDiagram
+    autonumber
     participant Session
     participant TM as TransactionManager
     participant Runtime as TxnRuntime
-    participant Exec as Operator
+    participant Exec
+    participant Binding
     participant Heap as TableHeap
 
-    Session-&gt;&gt;TM: begin(isolation, access_mode)
+    Session-&gt;&gt;TM: begin_txn(isolation, access_mode)
     TM--&gt;&gt;Session: Transaction handle
     Exec-&gt;&gt;Runtime: TxnRuntime::new(&amp;TM, &amp;mut txn)
     Runtime--&gt;&gt;Exec: {snapshot, command_id}
+
     loop per tuple
-        Exec-&gt;&gt;Heap: next()
-        Heap--&gt;&gt;Exec: (rid, meta, tuple)
+        Exec-&gt;&gt;Binding: scan.next()
+        Binding-&gt;&gt;Heap: TableIterator::next()
+        Heap--&gt;&gt;Binding: (rid, meta, tuple)
+        Binding--&gt;&gt;Exec: (rid, meta, tuple)
         Exec-&gt;&gt;Runtime: is_visible(meta)?
-        Runtime--&gt;&gt;Exec: yes/no (uses cached snapshot)
-        alt Visible
-            Exec-&gt;&gt;Runtime: lock_row(...)
-            Exec-&gt;&gt;TM: record undo + WAL
+        Runtime--&gt;&gt;Exec: yes/no
+        alt visible &amp; needs lock
+            Exec-&gt;&gt;Runtime: lock_row(table, rid, mode)
+            Runtime--&gt;&gt;Exec: guard
+        end
+        alt mutation
+            Exec-&gt;&gt;Binding: prepare_row_for_write(...)
+            Binding-&gt;&gt;Heap: mvcc.full_tuple(...)
+            Heap--&gt;&gt;Binding: (current_meta, tuple)
+            Binding-&gt;&gt;TM: push_undo + append WAL(HeapRecord)
         end
     end
+
     Session-&gt;&gt;TM: commit(txn)
-    TM-&gt;&gt;WAL: Transaction(Commit)
-    TM-&gt;&gt;TM: wait_for_durable / flush_until
+    TM-&gt;&gt;WAL: Transaction{Commit}
+    TM-&gt;&gt;TM: flush_until(lsn) if synchronous
     TM--&gt;&gt;Session: release locks, clear snapshot
 </pre>
+<p><strong>Snapshot policy</strong></p>
 <ul>
-<li>
-<p><strong>Snapshots</strong></p>
-<ul>
-<li><em>Read Committed / Read Uncommitted:</em> Every command refreshes its snapshot and clears any cached value on the transaction handle.</li>
-<li><em>Repeatable Read / Serializable:</em> The first command captures a snapshot (<code>xmin</code>, <code>xmax</code>, <code>active_txns</code>) and stores it inside <code>Transaction</code>. Subsequent commands reuse it, ensuring consistent reads.</li>
-<li>Background MVCC vacuum consults <code>TransactionManager::oldest_active_txn()</code> to compute <code>safe_xmin</code> and prunes tuple versions whose inserting/deleting transactions precede that boundary.</li>
+<li><code>Read Uncommitted / Read Committed</code>: every command obtains a fresh snapshot, so repeated statements can see committed updates.</li>
+<li><code>Repeatable Read / Serializable</code>: cache the first snapshot on the <code>Transaction</code> handle; subsequent commands reuse it for consistent reads. The lock manager releases S-locks at the end of each command for RR, but Serializable keeps them until commit.</li>
 </ul>
-</li>
-<li>
-<p><strong>Locking</strong><br />
-Multi-granularity 2PL (IS/IX/S/SIX/X) enforced by <code>LockManager</code>. Repeatable Read releases shared locks at the end of each command (after verifying visibility). Serializable keeps shared locks through commit. Deadlocks are detected via a wait-for graph; a victim simply fails its lock request.</p>
-</li>
-<li>
-<p><strong>Undo &amp; WAL</strong><br />
-<code>Transaction</code> maintains logical undo entries. On abort, the manager emits CLR records and performs the inverse heap operations. Commit waits depend on <code>synchronous_commit</code>. Buffer frames retain their <code>page_lsn</code> so WAL-before-data holds.</p>
-</li>
-<li>
-<p><strong>Executor safeguards</strong><br />
-<code>UpdateOperator</code> now skips tuple versions created by the same <code>(txn_id, command_id)</code> during the current command. This prevents re-processing the freshly inserted MVCC version and thereby avoids infinite loops.</p>
-</li>
+<p><strong>Undo &amp; WAL</strong></p>
+<ul>
+<li>Each mutation produces a logical <code>HeapRecordPayload</code> or <code>IndexRecordPayload</code>. The heap payload already carries redo (new bytes) and undo (old bytes), so recovery can replay forward or backward without re-reading heap pages.</li>
+<li>On abort, the manager walks the undo stack, emits CLRs, and re-applies the inverse heap/index operations.</li>
 </ul>
 <hr />
-<h2 id="3-storage--buffering"><a class="header" href="#3-storage--buffering">3. Storage &amp; Buffering</a></h2>
-<div class="table-wrapper"><table><thead><tr><th>Component</th><th>Highlights</th></tr></thead><tbody>
-<tr><td><code>TableHeap</code></td><td>Tuple metadata (<code>TupleMeta</code>) stores inserting/deleting txn ids, command ids, and forward/back pointers for version chains. Helpers like <code>mvcc_update</code> stitch new versions while marking old ones deleted.</td></tr>
-<tr><td><code>B+Tree</code></td><td>B-link tree implementation with separate codecs for header/internal/leaf pages. Index maintenance occurs in DML operators after the heap change succeeds.</td></tr>
-<tr><td><code>BufferManager</code></td><td>Combines a page table, LRU-K replacer (with TinyLFU admission option), and per-frame guards. Dirty pages record their first-dirty LSN, feeding checkpoints. The background writer periodically flushes dirty frames and drives lazy index cleanup.</td></tr>
-<tr><td><code>DiskScheduler</code></td><td>Uses io_uring worker threads. Foreground tasks push <code>ReadPage</code>, <code>WritePage</code>, <code>WriteWal</code>, and <code>FsyncWal</code> commands through lock-free queues and receive completion on dedicated channels.</td></tr>
+<h2 id="3-storage-layering"><a class="header" href="#3-storage-layering">3. Storage Layering</a></h2>
+<pre class="mermaid">graph TD
+    subgraph Planner View
+        Catalog
+    end
+    Catalog --&gt;|Arc&lt;TableHeap&gt;| TableBinding
+    TableBinding --&gt; Heap[&quot;TableHeap&quot;]
+    TableBinding --&gt; Mvcc[&quot;MvccHeap&quot;]
+    TableBinding --&gt; Index[&quot;BPlusTreeIndex&quot;]
+    Heap --&gt;|pages| BufferMgr
+    Index --&gt;|pages| BufferMgr
+    BufferMgr --&gt; DiskMgr
+    BufferMgr --&gt; WalMgr
+</pre>
+<div class="table-wrapper"><table><thead><tr><th>Layer</th><th>Responsibility</th><th>Notes</th></tr></thead><tbody>
+<tr><td><code>TableHeap</code></td><td>Physical slotted pages, tuple encoding, WAL page image helpers</td><td>Exposes insert/update/delete that emit heap-specific WAL payloads before dirtying frames.</td></tr>
+<tr><td><code>MvccHeap</code></td><td>Version chain management, delete-marking, undo metadata</td><td>Creates new versions, rewires forward/back pointers, and delegates actual I/O to <code>TableHeap</code>.</td></tr>
+<tr><td><code>TableBinding</code></td><td>Safe façade for the executor</td><td>Provides <code>scan</code>, <code>index_scan</code>, <code>insert</code>, <code>delete</code>, <code>update</code>, and <code>prepare_row_for_write</code>, always pairing heap/index changes so operators stay small.</td></tr>
+<tr><td><code>BufferManager</code> + <code>DiskScheduler</code></td><td>Unified cache + async I/O</td><td>Uses LRU-K (+ optional TinyLFU admission) and io_uring to keep the hot set resident.</td></tr>
+<tr><td><code>WalManager</code></td><td>ARIES-compatible log</td><td>Supports logical heap/index records, page write/delta fallback, CLRs, checkpoints, and background flush threads.</td></tr>
 </tbody></table>
 </div>
 <hr />
-<h2 id="4-write-ahead-logging--recovery"><a class="header" href="#4-write-ahead-logging--recovery">4. Write-Ahead Logging &amp; Recovery</a></h2>
+<h2 id="4-tablebinding-contract"><a class="header" href="#4-tablebinding-contract">4. <code>TableBinding</code> Contract</a></h2>
+<pre class="mermaid">classDiagram
+    class TableBinding {
+        +scan(ScanOptions) -&gt; TupleStream
+        +index_scan(name, IndexScanRequest) -&gt; TupleStream
+        +insert(&amp;mut TxnContext, &amp;Tuple)
+        +delete(&amp;mut TxnContext, RecordId, TupleMeta, Tuple)
+        +update(&amp;mut TxnContext, RecordId, Tuple, TupleMeta, Tuple) -&gt; RecordId
+        +prepare_row_for_write(&amp;mut TxnContext, RecordId, &amp;TupleMeta)
+        +table_heap() -&gt; Arc&lt;TableHeap&gt;
+    }
+
+    class PhysicalOperator {
+        +init(&amp;mut ExecutionContext)
+        +next(&amp;mut ExecutionContext) -&gt; Option&lt;Tuple&gt;
+    }
+
+    PhysicalOperator --&gt; TableBinding : uses
+</pre>
+<p>This binding hides every MVCC/WAL detail from the operators:</p>
 <ul>
-<li><code>WalManager</code> manages log sequence numbers, buffers frames, writes physical (<code>PageWrite</code>, <code>PageDelta</code>) and logical (<code>HeapInsert/Update/Delete</code>) records, and coordinates flushes. First-page-writes guard against torn pages.</li>
-<li><code>background::spawn_checkpoint_worker</code> emits <code>Checkpoint</code> records capturing the dirty page table and active transactions so recovery can cut replay short.</li>
-<li><code>RecoveryManager</code> executes ARIES-style <strong>analysis → redo → undo</strong> on restart, leveraging CLRs to keep undo idempotent.</li>
-<li>WAL and data I/O both use the <code>DiskScheduler</code>, keeping durability guarantees in one place.</li>
+<li>No more ad-hoc <code>catalog.table_indexes()</code> calls.</li>
+<li>No direct references to <code>MvccHeap</code> or <code>TableHeap</code>.</li>
+<li>Executor code reads like pseudo SQL: “lock table”, “scan binding”, “update tuple”.</li>
 </ul>
 <hr />
-<h2 id="5-background-services"><a class="header" href="#5-background-services">5. Background Services</a></h2>
-<div class="table-wrapper"><table><thead><tr><th>Worker</th><th>Description</th><th>Trigger</th></tr></thead><tbody>
-<tr><td>WAL writer</td><td>Coalesces buffered WAL into durable segments</td><td><code>WalManager::start_background_flush</code></td></tr>
-<tr><td>Checkpoint</td><td>Flushes LSNs, records ATT + DPT snapshots, resets FPW epoch</td><td>Configurable interval (<code>WalOptions::checkpoint_interval_ms</code>)</td></tr>
-<tr><td>Buffer writer</td><td>Flushes dirty frames to keep checkpoints short</td><td><code>bg_writer_interval</code></td></tr>
-<tr><td>MVCC vacuum</td><td>Iterates table heaps, removing committed-deleted or aborted-inserted tuples older than <code>safe_xmin</code></td><td><code>MvccVacuumConfig</code> (interval + batch limit)</td></tr>
+<h2 id="5-wal--recovery-details"><a class="header" href="#5-wal--recovery-details">5. WAL &amp; Recovery Details</a></h2>
+<pre class="mermaid">flowchart LR
+    subgraph WAL Record Types
+        HI[&quot;HeapInsert&quot;] --&gt; redo
+        HU[&quot;HeapUpdate&quot;] --&gt; redo &amp; undo
+        HD[&quot;HeapDelete&quot;] --&gt; redo &amp; undo
+        PI[&quot;PageImage&quot;]
+        PD[&quot;PageDelta&quot;]
+        CI[&quot;Checkpoint&quot;]
+        CL[&quot;CLR&quot;]
+    end
+    Exec --&gt;|Heap/Index payloads| WalMgr
+    BufferMgr --&gt;|needs FPW| WalMgr
+    WalMgr --&gt; DiskScheduler --&gt; log files
+    Recovery --&gt;|analysis/redone/undo| BufferMgr
+</pre>
+<ul>
+<li><strong>Logical logging first</strong>: heap/index mutations emit redo + undo at the logical level. This keeps the WAL stream compact and human-readable for teaching.</li>
+<li><strong>Physical fallbacks</strong>: metadata-heavy pages (meta, freelist, header) still leverage PageWrite/PageDelta to guarantee a consistent base image, especially on the first page flush after a crash.</li>
+<li><strong>Restart</strong>: <code>RecoveryManager</code> performs the classical ARIES sequence. It uses the <code>dirty_page_table</code> and <code>active_txn_table</code> captured by checkpoints to limit redo and undo work.</li>
+</ul>
+<hr />
+<h2 id="6-background-workers"><a class="header" href="#6-background-workers">6. Background Workers</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Worker</th><th>Purpose</th><th>Configuration</th></tr></thead><tbody>
+<tr><td>WAL writer</td><td>Periodically flushes WAL buffers, coalesces adjacent writes</td><td><code>WalOptions::writer_interval_ms</code>, <code>buffer_capacity</code></td></tr>
+<tr><td>Checkpoint</td><td>Records ATT + DPT, gently pushes dirty buffers</td><td><code>WalOptions::checkpoint_interval_ms</code></td></tr>
+<tr><td>Buffer writer</td><td>Flushes frames when the dirty set grows too large</td><td><code>background::BufferWriterConfig</code></td></tr>
+<tr><td>MVCC vacuum</td><td>Reclaims obsolete tuple versions based on <code>safe_xmin</code></td><td><code>MvccVacuumConfig</code></td></tr>
+<tr><td>Index vacuum</td><td>Cleans up deleted index entries using B-link traversal</td><td><code>IndexVacuumConfig</code></td></tr>
 </tbody></table>
 </div>
-<p>All workers are registered with <code>background::BackgroundWorkers</code>, which stops and joins them on database shutdown.</p>
+<p>Workers register with <code>background::BackgroundWorkers</code>, so the database can stop and join them cleanly on shutdown. Each worker publishes metrics (intervals, batches processed) for observability.</p>
 <hr />
-<h2 id="6-example-timeline-repeatable-read-update"><a class="header" href="#6-example-timeline-repeatable-read-update">6. Example Timeline: Repeatable Read UPDATE</a></h2>
-<pre><code>T1 (RR)                               T2 (RC)
------------                           -----------
-BEGIN;                                BEGIN;
-SELECT ... (snapshot S0)              UPDATE row -&gt; new version V1
-                                      COMMIT (WAL + flush)
-SELECT again -&gt; sees original value
-COMMIT
--- background vacuum later reclaims deleted version when safe_xmin &gt; delete_txn
-</code></pre>
+<h2 id="7-example-repeatable-read-update"><a class="header" href="#7-example-repeatable-read-update">7. Example: Repeatable Read UPDATE</a></h2>
+<pre class="mermaid">sequenceDiagram
+    participant T1 as Txn 1 (RR)
+    participant T2 as Txn 2 (RC)
+    participant Heap as TableHeap
+
+    T1-&gt;&gt;Heap: SELECT (snapshot S0)
+    Heap--&gt;&gt;T1: version V0
+    T2-&gt;&gt;Heap: UPDATE -&gt; insert V1, delete V0
+    Heap--&gt;&gt;T2: ack
+    T2-&gt;&gt;T2: COMMIT (WAL + locks release)
+    T1-&gt;&gt;Heap: SELECT again
+    Heap--&gt;&gt;T1: V0 still visible via snapshot S0
+    T1-&gt;&gt;T1: COMMIT
+    Note over T1,Heap: Vacuum later removes V0 when safe_xmin advances
+</pre>
+<p>This timeline demonstrates:</p>
 <ul>
-<li>T1’s <code>TxnRuntime</code> caches snapshot S0 on its first command and reuses it, so the second <code>SELECT</code> filters out V1 even though T2 committed.</li>
-<li>Row-level shared locks acquired during the read are released at the end of the command, while the MVCC snapshot keeps the view consistent.</li>
-<li>When T1 commits, locks are dropped, snapshot cache is cleared, and WAL commit record becomes durable. Vacuum eventually removes T1’s deleted predecessor when all transactions with <code>txn_id &lt; safe_xmin</code> have finished.</li>
+<li>Snapshots shield Repeatable Read statements from concurrent writers even if row-level locks are released early.</li>
+<li>The MVCC chain (<code>V1.prev_version = V0</code>, <code>V0.next_version = V1</code>) lets future readers reach the newest committed version while the vacuum worker reclaims obsolete ones lazily.</li>
 </ul>
 <hr />
-<h2 id="7-observability--configuration"><a class="header" href="#7-observability--configuration">7. Observability &amp; Configuration</a></h2>
+<h2 id="8-observability--configuration-cheat-sheet"><a class="header" href="#8-observability--configuration-cheat-sheet">8. Observability &amp; Configuration Cheat Sheet</a></h2>
 <ul>
-<li>Enable tracing via <code>RUST_LOG=trace</code> to inspect lock grant/queue events and MVCC vacuum activity.</li>
-<li>Key knobs exposed through CLI/environment: WAL segment size, background intervals, default isolation level, MVCC vacuum batch size.</li>
-<li><code>background::BackgroundWorkers::snapshot()</code> reports active worker metadata; you can surface it for debugging endpoints.</li>
+<li><strong>Logging</strong>: <code>RUST_LOG=trace</code> surfaces lock acquisitions, MVCC vacuums, and io_uring completions.</li>
+<li><strong>Runtime knobs</strong>: <code>WalOptions</code> (segment size, sync policy), <code>BufferPoolConfig</code> (capacity, TinyLFU toggle), <code>MvccVacuumConfig</code>, and <code>IndexVacuumConfig</code> can all be adjusted via <code>DatabaseOptions</code>.</li>
+<li><strong>Metrics</strong>: <code>background::BackgroundWorkers::snapshot()</code> reports worker health; WAL exposes current LSN and flush LSN; the buffer manager can dump the dirty page table for diagnostics.</li>
 </ul>
 <hr />
-<h2 id="8-roadmap"><a class="header" href="#8-roadmap">8. Roadmap</a></h2>
-<ul>
-<li>Predicate locking / SSI to upgrade Serializable beyond strict 2PL.</li>
-<li>Cost-based optimization with catalog statistics.</li>
-<li>Smarter vacuum pacing tied to storage pressure and tuple churn.</li>
-<li>Parallel execution and adaptive readahead hints based on operator feedback.</li>
-</ul>
-<p>Even with these future items, the current layering mirrors production databases (e.g., PostgreSQL): MVCC + 2PL, ARIES-style WAL, asynchronous maintenance, and a modular Volcano executor—all while keeping the codebase approachable for teaching and experimentation.</p>
+<p>With these layers in place, QuillSQL remains faithful to production-grade engines (MVCC + WAL + buffer pool) while keeping its code and documentation approachable for coursework and research prototypes.</p>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="module-overview"><a class="header" href="#module-overview">Module Overview</a></h1>
 <p>This page gives a teaching-friendly tour of every QuillSQL subsystem. Each section
 explains where the code lives (<code>src/&lt;module&gt;</code>), the most important types, and the
@@ -382,7 +436,7 @@ observe how the new AST nodes flow into the planner layer.</li>
 <div class="table-wrapper"><table><thead><tr><th>Component</th><th>Description</th></tr></thead><tbody>
 <tr><td><code>LogicalPlanner</code></td><td>Converts AST nodes into strongly typed <code>LogicalPlan</code> variants. Responsible for type checking, alias resolution, and scope handling.</td></tr>
 <tr><td><code>PlannerContext</code></td><td>Surface for catalog lookups while planning.</td></tr>
-<tr><td><code>VecPlanner</code></td><td>Lowers optimized logical plans into vector operators (<code>VecPlan</code>).</td></tr>
+<tr><td><code>PhysicalPlanner</code></td><td>Lowers optimized logical plans into physical Volcano operators (<code>PhysicalPlan</code>).</td></tr>
 </tbody></table>
 </div>
 <p>Highlights:</p>
@@ -415,30 +469,30 @@ compare plan dumps to see new shapes.</li>
 <hr />
 <h2 id="4-execution-engine-srcexecution"><a class="header" href="#4-execution-engine-srcexecution">4. Execution Engine (<code>src/execution</code>)</a></h2>
 <div class="table-wrapper"><table><thead><tr><th>Element</th><th>Details</th></tr></thead><tbody>
-<tr><td><code>VecPlan</code></td><td>Enum describing all operator shapes (scan, join, insert…). Variants now hold only metadata that chunk operators consume.</td></tr>
-<tr><td><code>ExecPlan</code> / <code>Operator</code></td><td>Chunk-based runtime that pulls <code>DataChunk</code>s via <code>open/get_chunk/rescan/close</code>, replacing the legacy tuple-at-a-time iterator.</td></tr>
+<tr><td><code>PhysicalPlan</code></td><td>Enum covering all Volcano operators. Each variant implements <code>VolcanoExecutor</code>.</td></tr>
+<tr><td><code>VolcanoExecutor</code></td><td><code>init(&amp;mut ExecutionContext)</code> and <code>next(&amp;mut ExecutionContext)</code> pair define the iterator model.</td></tr>
 <tr><td><code>ExecutionContext</code></td><td>Supplies catalog access, expression evaluation, and (most importantly) a pluggable <code>StorageEngine</code>.</td></tr>
 </tbody></table>
 </div>
 <p>Design notes:</p>
 <ul>
 <li>Operators stay declarative. They describe <em>what</em> to scan or modify and delegate the
-<em>how</em> to storage handles. For example, <code>VecSeqScan</code> requests a <code>TupleStream</code>
+<em>how</em> to storage handles. For example, <code>PhysicalSeqScan</code> now requests a <code>TupleStream</code>
 via <code>ExecutionContext::table_stream</code>, so it never touches <code>TableHeap</code> internals.</li>
 <li>Helper methods such as <code>eval_predicate</code>, <code>insert_tuple_with_indexes</code>, or
 <code>prepare_row_for_write</code> encapsulate MVCC/locking rules so physical plans remain short.</li>
-<li>ExecutionContext caches a <code>TransactionHandle</code>, making it straightforward to teach isolation
-semantics: examine <code>TransactionHandle::lock_table</code> and <code>read_visible_tuple</code> to see when locks
+<li>ExecutionContext caches <code>TxnContext</code>, making it straightforward to teach isolation
+semantics: examine <code>TxnContext::lock_table</code> and <code>read_visible_tuple</code> to see when locks
 are taken or released.</li>
-<li>Suggested lab: implement a new vector operator (e.g., hash join) by wiring two child
-<code>VecPlan</code>s without ever touching storage-specific code. This highlights the payoff
+<li>Suggested lab: implement a new physical operator (e.g., hash join) by wiring two child
+<code>PhysicalPlan</code>s without ever touching storage-specific code. This highlights the payoff
 of the handle abstraction.</li>
 </ul>
 <hr />
 <h2 id="5-transaction-runtime-srctransaction"><a class="header" href="#5-transaction-runtime-srctransaction">5. Transaction Runtime (<code>src/transaction</code>)</a></h2>
 <div class="table-wrapper"><table><thead><tr><th>Type</th><th>Purpose</th></tr></thead><tbody>
 <tr><td><code>TransactionManager</code></td><td>Creates/commits/aborts transactions, manages undo chains, and coordinates WAL durability.</td></tr>
-<tr><td><code>TransactionHandle</code> / <code>TxnRuntime</code></td><td>Per-command wrapper passed to execution. Provides MVCC snapshot (<code>TransactionSnapshot</code>), lock helpers, and command ids.</td></tr>
+<tr><td><code>TxnContext</code></td><td>Per-command wrapper passed to execution. Provides MVCC snapshot (<code>TransactionSnapshot</code>), lock helpers, and command ids.</td></tr>
 <tr><td><code>LockManager</code></td><td>Multi-granularity 2PL with deadlock detection.</td></tr>
 </tbody></table>
 </div>
@@ -460,7 +514,7 @@ generates CLRs, demonstrating ARIES-style logical undo.</li>
 <hr />
 <h2 id="6-storage-engine--handles-srcstorage"><a class="header" href="#6-storage-engine--handles-srcstorage">6. Storage Engine &amp; Handles (<code>src/storage</code>)</a></h2>
 <div class="table-wrapper"><table><thead><tr><th>Component</th><th>Highlights</th></tr></thead><tbody>
-<tr><td><code>engine.rs</code></td><td>Defines <code>StorageEngine</code>, <code>TableAccess</code>, <code>IndexAccess</code>, <code>TupleStream</code>, and the new <code>ScanOptions</code> / <code>IndexScanRequest</code>.</td></tr>
+<tr><td><code>engine.rs</code></td><td>Defines <code>StorageEngine</code>, <code>TableHandle</code>, <code>IndexHandle</code>, <code>TupleStream</code>, and the new <code>ScanOptions</code> / <code>IndexScanRequest</code>.</td></tr>
 <tr><td><code>table_heap</code></td><td>Slotted-page heap with MVCC metadata (<code>TupleMeta</code>, forward/back pointers).</td></tr>
 <tr><td><code>index</code></td><td>B+Tree (B-link) implementation with iterators and codecs.</td></tr>
 </tbody></table>
@@ -468,7 +522,7 @@ generates CLRs, demonstrating ARIES-style logical undo.</li>
 <p>Key ideas for teaching:
 Topics to emphasise:</p>
 <ul>
-<li><strong>Access abstraction</strong>: Execution asks the engine for a <code>TableAccess</code>, then calls
+<li><strong>Handle abstraction</strong>: Execution asks the engine for a <code>TableHandle</code>, then calls
 <code>full_scan(ScanOptions)</code> to receive a <code>TupleStream</code>. The default engine simply wraps
 <code>TableHeap</code>/<code>BPlusTreeIndex</code>, but students can plug in their own engines for research.</li>
 <li><strong>TupleStream</strong>: Minimal interface returning <code>(RecordId, TupleMeta, Tuple)</code> triples.
@@ -768,9 +822,9 @@ on-disk metadata pages.</li>
 <hr />
 <h2 id="directory-layout-1"><a class="header" href="#directory-layout-1">Directory Layout</a></h2>
 <div class="table-wrapper"><table><thead><tr><th>Path</th><th>Description</th><th>Key Types</th></tr></thead><tbody>
-<tr><td><code>mod.rs</code></td><td>Public API surface.</td><td><code>Catalog</code>, <code>TableRegistry</code></td></tr>
+<tr><td><code>mod.rs</code></td><td>Public API surface.</td><td><code>Catalog</code>, <code>TableHandleRef</code></td></tr>
 <tr><td><code>schema.rs</code></td><td>Schema objects and table references.</td><td><code>Schema</code>, <code>Column</code>, <code>TableReference</code></td></tr>
-<tr><td><code>registry/</code></td><td>Thread-safe registry for heaps (MVCC vacuum).</td><td><code>TableRegistry</code>, <code>RegisteredTable</code></td></tr>
+<tr><td><code>registry/</code></td><td>Thread-safe registry for heaps (MVCC vacuum).</td><td><code>TableRegistry</code></td></tr>
 <tr><td><code>statistics.rs</code></td><td>ANALYZE output and helpers.</td><td><code>TableStatistics</code></td></tr>
 <tr><td><code>loader.rs</code></td><td>Boot-time metadata loader.</td><td><code>load_catalog_data</code></td></tr>
 </tbody></table>
@@ -797,9 +851,9 @@ estimate, enabling DuckDB-style selectivity heuristics (<code>1/distinct</code>,
 <ul>
 <li><strong>SQL / Planner</strong> – DDL planning calls <code>Catalog::create_table</code> / <code>create_index</code>; name
 binding relies on <code>Schema</code>.</li>
-<li><strong>Execution</strong> – <code>ExecutionContext::table_access</code> and <code>index_access</code> fetch physical
+<li><strong>Execution</strong> – <code>ExecutionContext::table_handle</code> and <code>index_handle</code> fetch physical
 handles through the catalog, so scans never hard-code heap locations.</li>
-<li><strong>Background workers</strong> – MVCC and index vacuum iterate <code>RegisteredTable</code> handles from the registry, so maintenance code never touches raw <code>TableHeap</code>s directly.</li>
+<li><strong>Background workers</strong> – MVCC and index vacuum iterate the registries via <code>Arc</code> clones.</li>
 <li><strong>Recovery</strong> – <code>load_catalog_data</code> rebuilds the in-memory catalog from control files and
 metadata pages during startup.</li>
 </ul>
@@ -865,8 +919,8 @@ physical operators.</li>
 </ul>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="query-planner-module"><a class="header" href="#query-planner-module">Query Planner Module</a></h1>
 <p><code>src/plan/</code> bridges parsed SQL and executable operators. It converts the AST into a
-logical plan, applies rewrites (via the optimizer), and finally emits a vectorized plan
-(<code>VecPlan</code>) that the Volcano engine can run.</p>
+logical plan, applies rewrites (via the optimizer), and finally emits a physical plan
+(<code>PhysicalPlan</code>) that the Volcano engine can run.</p>
 <hr />
 <h2 id="responsibilities-3"><a class="header" href="#responsibilities-3">Responsibilities</a></h2>
 <ol>
@@ -874,15 +928,15 @@ logical plan, applies rewrites (via the optimizer), and finally emits a vectoriz
 performs type checking, and builds a <code>LogicalPlan</code> tree.</li>
 <li><strong>PlannerContext</strong> – exposes catalog lookups plus scope information for CTEs, subqueries,
 and aliases.</li>
-<li><strong>VecPlanner</strong> – lowers an optimized <code>LogicalPlan</code> into a tree of Volcano-style metadata (<code>VecPlan</code>).</li>
+<li><strong>PhysicalPlanner</strong> – lowers an optimized <code>LogicalPlan</code> into a tree of Volcano operators.</li>
 </ol>
 <hr />
 <h2 id="directory-layout-3"><a class="header" href="#directory-layout-3">Directory Layout</a></h2>
 <div class="table-wrapper"><table><thead><tr><th>Path</th><th>Description</th><th>Key Types</th></tr></thead><tbody>
 <tr><td><code>logical_plan.rs</code></td><td>Logical algebra nodes.</td><td><code>LogicalPlan</code>, <code>LogicalExpr</code>, <code>JoinType</code></td></tr>
 <tr><td><code>logical_planner.rs</code></td><td>AST → logical transformation.</td><td><code>LogicalPlanner</code></td></tr>
-<tr><td><code>vec_plan.rs</code></td><td><code>VecPlan</code> enum definition plus helper structs.</td><td><code>VecPlan</code>, <code>Vec*</code> structs</td></tr>
-<tr><td><code>vec_planner/</code></td><td>Logical → vector plan lowering.</td><td><code>VecPlanner</code></td></tr>
+<tr><td><code>physical_plan.rs</code></td><td><code>PhysicalPlan</code> enum definition.</td><td><code>PhysicalPlan</code>, <code>Physical*</code> structs</td></tr>
+<tr><td><code>physical_planner.rs</code></td><td>Logical → physical lowering.</td><td><code>PhysicalPlanner</code></td></tr>
 <tr><td><code>planner_context.rs</code></td><td>Catalog/scope abstraction.</td><td><code>PlannerContext</code></td></tr>
 </tbody></table>
 </div>
@@ -893,9 +947,9 @@ and aliases.</li>
 <code>TableReference</code>s, and validates schemas via the catalog.</li>
 <li><strong>Logical tree</strong> – each SQL clause becomes a logical node (FROM → <code>SeqScan</code>, WHERE →
 <code>Filter</code>, GROUP BY → <code>Aggregate</code>, etc.).</li>
-<li><strong>Vector selection</strong> – <code>VecPlanner</code> picks concrete algorithms (sequential scan,
-index scan, nested-loop join, sort, limit …). Because every Vec node feeds directly
-into chunk operators, the execution engine can pull <code>DataChunk</code>s immediately.</li>
+<li><strong>Physical selection</strong> – <code>PhysicalPlanner</code> picks concrete algorithms (sequential scan,
+index scan, nested-loop join, sort, limit …). Because every physical node implements
+<code>VolcanoExecutor</code>, the execution engine can pull tuples immediately.</li>
 </ol>
 <hr />
 <h2 id="interactions-3"><a class="header" href="#interactions-3">Interactions</a></h2>
@@ -906,17 +960,17 @@ resolution consistent.</li>
 schemas.</li>
 <li><strong>Optimizer</strong> – operates purely on <code>LogicalPlan</code>; the planner must emit clean,
 traversable trees so rules can fire.</li>
-<li><strong>Execution</strong> – Vec nodes carry <code>TableReference</code>, <code>SchemaRef</code>, and hints that the
+<li><strong>Execution</strong> – physical nodes carry <code>TableReference</code>, <code>SchemaRef</code>, and hints that the
 execution engine passes to the storage layer.</li>
 </ul>
 <hr />
 <h2 id="teaching-ideas-3"><a class="header" href="#teaching-ideas-3">Teaching Ideas</a></h2>
 <ul>
-<li>Implement a new logical operator (e.g., <code>LogicalDistinct</code>) and extend the <code>VecPlanner</code>
-to emit the corresponding vector operator to trace the full lifecycle.</li>
+<li>Implement a new logical operator (e.g., <code>LogicalDistinct</code>) and add the corresponding
+physical operator to trace the full lifecycle.</li>
 <li>Experiment with early projection inside the logical plan and observe its impact on
 downstream operators.</li>
-<li>Use <code>pretty_format_logical_plan</code>/<code>pretty_format_vec_plan</code> dumps to visualise rewrites before and
+<li>Use <code>pretty_format_logical_plan</code>/<code>physical_plan</code> dumps to visualise rewrites before and
 after optimizer passes.</li>
 </ul>
 <hr />
@@ -925,7 +979,7 @@ after optimizer passes.</li>
 <p>When you submit a SQL query to a database, it doesn't just magically produce a result. The database undertakes a sophisticated, multi-stage process to translate the declarative SQL statement (which describes <em>what</em> data you want) into an imperative, efficient execution plan (which describes <em>how</em> to get that data). This entire process is the responsibility of the <strong>Query Planner</strong>.</p>
 <p>In QuillSQL, this process follows a classic, compiler-like pipeline, which is a cornerstone of modern database architecture as taught in courses like CMU 15-445.</p>
 <p>The journey from a SQL string to an executable plan involves several transformations:</p>
-<p><strong>SQL String</strong> -&gt; <strong>AST (Abstract Syntax Tree)</strong> -&gt; <strong>Logical Plan</strong> -&gt; <strong>Optimized Logical Plan</strong> -&gt; <strong>Vec Plan</strong></p>
+<p><strong>SQL String</strong> -&gt; <strong>AST (Abstract Syntax Tree)</strong> -&gt; <strong>Logical Plan</strong> -&gt; <strong>Optimized Logical Plan</strong> -&gt; <strong>Physical Plan</strong></p>
 <p>Let's break down each stage.</p>
 <h3 id="stage-1-parsing-sql---ast"><a class="header" href="#stage-1-parsing-sql---ast">Stage 1: Parsing (SQL -&gt; AST)</a></h3>
 <p>The first step is purely syntactic. The raw SQL query string is fed into a parser. QuillSQL uses the excellent <code>sqlparser</code> crate for this. The parser checks if the SQL conforms to valid grammar and, if so, converts it into an <strong>Abstract Syntax Tree (AST)</strong>.</p>
@@ -965,38 +1019,38 @@ after optimizer passes.</li>
   └── TableScan(cities)
 </code></pre>
 <p>By filtering early, we dramatically reduce the number of rows that need to be processed by the expensive <code>Join</code> operator. QuillSQL implements similar rules, such as <code>PushDownLimit</code>, which pushes <code>LIMIT</code> clauses down the tree to reduce the amount of data processed.</p>
-<h3 id="stage-4-vector-planning-logical-plan---vecplan"><a class="header" href="#stage-4-vector-planning-logical-plan---vecplan">Stage 4: Vector Planning (Logical Plan -&gt; VecPlan)</a></h3>
-<p>Finally, the <code>VecPlanner</code> (<code>plan/vec_planner/</code>) converts the optimized logical plan into a <strong>Vec Plan</strong>.</p>
-<p>A Vec Plan describes exactly <em>how</em> the query will be executed. It maps each logical operator to a concrete algorithm/implementation that the chunked executor understands.</p>
+<h3 id="stage-4-physical-planning-logical-plan---physical-plan"><a class="header" href="#stage-4-physical-planning-logical-plan---physical-plan">Stage 4: Physical Planning (Logical Plan -&gt; Physical Plan)</a></h3>
+<p>Finally, the <code>PhysicalPlanner</code> (<code>plan/physical_planner.rs</code>) converts the optimized logical plan into a <strong>Physical Plan</strong>.</p>
+<p>A Physical Plan describes exactly <em>how</em> the query will be executed. It maps each logical operator to a concrete algorithm or implementation.</p>
 <ul>
-<li>A <code>LogicalPlan::TableScan</code> becomes a <code>VecSeqScan</code> (a sequential scan of the table heap).</li>
-<li>A <code>LogicalPlan::Filter</code> becomes a <code>VecFilter</code>, which captures the predicate to apply.</li>
-<li>A <code>LogicalPlan::Join</code> becomes a <code>VecNestedLoopJoin</code>. This is where the database commits to a specific join algorithm. A more advanced database might have multiple options (e.g., <code>VecHashJoin</code>, <code>VecSortMergeJoin</code>) and would use a cost model to choose the best one. QuillSQL currently implements Nested Loop Join.</li>
+<li>A <code>LogicalPlan::TableScan</code> becomes a <code>PhysicalSeqScan</code> (a sequential scan of the table heap).</li>
+<li>A <code>LogicalPlan::Filter</code> becomes a <code>PhysicalFilter</code>, which implements the filtering logic.</li>
+<li>A <code>LogicalPlan::Join</code> becomes a <code>PhysicalNestedLoopJoin</code>. This is where the database commits to a specific join algorithm. A more advanced database might have multiple options (e.g., <code>PhysicalHashJoin</code>, <code>PhysicalSortMergeJoin</code>) and would use a cost model to choose the best one. QuillSQL currently implements Nested Loop Join.</li>
 </ul>
-<p>Each node in the Vec plan tree feeds directly into a chunk operator that the <a href="plan/../modules/execution.html">Execution Engine</a> can run. This final plan is what gets executed to produce the query result.</p>
+<p>Each node in the physical plan tree is an executor that the <a href="plan/../modules/execution.html">Execution Engine</a> can run. This final plan is what gets executed to produce the query result.</p>
 <h2 id="conclusion"><a class="header" href="#conclusion">Conclusion</a></h2>
 <p>This layered approach—from syntax to a logical representation, then to an optimized logical representation, and finally to a concrete physical execution plan—is fundamental to database design. It provides a clear separation of concerns and, most importantly, creates a dedicated <strong>optimization stage</strong>, which is the key to achieving high performance on a wide variety of SQL queries.</p>
 <hr />
 <h2 id="for-study--discussion"><a class="header" href="#for-study--discussion">For Study &amp; Discussion</a></h2>
 <ol>
 <li>
-<p><strong>Logical vs. Physical</strong>: Why is the separation between logical and physical (Vec) plans so important? What would be the disadvantages of a simpler system that converted the AST directly into an execution plan?</p>
+<p><strong>Logical vs. Physical</strong>: Why is the separation between logical and physical plans so important? What would be the disadvantages of a simpler system that converted the AST directly into a physical plan?</p>
 </li>
 <li>
 <p><strong>Join Algorithms</strong>: QuillSQL currently only implements <code>NestedLoopJoin</code>. What are two other common join algorithms? Describe how they work and in what scenarios they would be more performant than a nested loop join.</p>
 </li>
 <li>
-<p><strong>Programming Exercise (Advanced)</strong>: Implement a <code>VecHashJoin</code> operator. This is a significant undertaking that involves:
-a.  Adding a <code>VecHashJoin</code> node that records the join metadata (join keys, equality predicate, child plans).
-b.  Implementing a chunk <code>HashJoinOperator</code> that consumes the entire "build" side (typically the smaller, right-hand table) and builds an in-memory hash table from its rows.
-c.  During <code>get_chunk</code>, read from the "probe" side in batches, probe the hash table for matches, and emit joined tuples in <code>DataChunk</code>s.
-d.  Modify the <code>VecPlanner</code> to choose <code>VecHashJoin</code> instead of <code>VecNestedLoopJoin</code> for equi-joins.</p>
+<p><strong>Programming Exercise (Advanced)</strong>: Implement a <code>PhysicalHashJoin</code> operator. This is a significant undertaking that involves:
+a.  Creating a <code>PhysicalHashJoin</code> struct that implements the <code>VolcanoExecutor</code> trait.
+b.  In the <code>init()</code> phase, it should consume the entire "build" side (typically the smaller, right-hand table) and build an in-memory hash table from its rows.
+c.  In the <code>next()</code> phase, it should read from the "probe" side (the left-hand table) one row at a time, probe the hash table for matches, and emit the joined tuples.
+d.  Modify the <code>PhysicalPlanner</code> to choose <code>PhysicalHashJoin</code> instead of <code>PhysicalNestedLoopJoin</code> for equi-joins.</p>
 </li>
 <li>
 <p><strong>Programming Exercise</strong>: Add support for the <code>UNION ALL</code> operator. This would involve:
 a.  Adding a <code>Union</code> variant to the <code>LogicalPlan</code> enum.
 b.  Updating the <code>LogicalPlanner</code> to recognize the <code>UNION</code> syntax in the AST and create a <code>LogicalPlan::Union</code> node.
-c.  Creating a <code>VecUnion</code> node and chunk operator that pulls tuples from its first child until it's exhausted, and then pulls tuples from its second child.</p>
+c.  Creating a <code>PhysicalUnion</code> executor that pulls tuples from its first child until it's exhausted, and then pulls tuples from its second child.</p>
 </li>
 </ol>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="optimizer-module"><a class="header" href="#optimizer-module">Optimizer Module</a></h1>
@@ -1034,14 +1088,14 @@ means the rule fired; the pipeline restarts to reach a fixpoint.</li>
 <li><strong>PruneProjection</strong> removes unused columns so execution/storage decode less data.</li>
 </ul>
 <h3 id="cost-guidance-duckdb-inspired"><a class="header" href="#cost-guidance-duckdb-inspired">Cost Guidance (DuckDB-inspired)</a></h3>
-<p>Although the rule engine itself stays heuristics-only, the vector planner now taps into
+<p>Although the rule engine itself stays heuristics-only, the physical planner now taps into
 <code>CostEstimator</code>, which borrows the same intuition as DuckDB’s simple cardinality model:</p>
 <ul>
 <li>equality selectivity ≈ <code>1 / distinct_count</code></li>
 <li>range selectivity derived from min/max assuming uniform distribution</li>
 </ul>
 <p>The estimator multiplies per-predicate selectivities (clamped to <code>&gt;= 1%</code>), producing an
-estimated filtered row count. Vec planner decisions (e.g., sequential scan vs B+Tree
+estimated filtered row count. Physical planner decisions (e.g., sequential scan vs B+Tree
 index) are then based on these cost numbers, so students can see how statistics influence
 operator choice without implementing a full-blown CBO.</p>
 <hr />
@@ -1052,8 +1106,8 @@ untouched.</li>
 <li><strong>Catalog / Statistics</strong> – current rules are heuristic, but <code>TableStatistics</code> is
 available for students to experiment with cost-based decisions (e.g., choose index scan
 when selectivity is low).</li>
-<li><strong>Execution</strong> – leaner logical plans translate into simpler vector plans (e.g.,
-predicate pushdown allows <code>VecSeqScan</code> to discard rows earlier).</li>
+<li><strong>Execution</strong> – leaner logical plans translate into simpler physical plans (e.g.,
+predicate pushdown allows <code>PhysicalSeqScan</code> to discard rows earlier).</li>
 </ul>
 <hr />
 <h2 id="teaching-ideas-4"><a class="header" href="#teaching-ideas-4">Teaching Ideas</a></h2>
@@ -1102,7 +1156,7 @@ index scans vs sequential scans.</li>
   └── Sort(by: signup_date, limit: 10)
         └── TableScan(users)
 </code></pre>
-<p>Notice the new <code>limit: 10</code> property on the <code>Sort</code> node. This seemingly small change has a huge performance impact. When the vectorized <code>Sort</code> operator is created from this logical node, it now knows that it only needs to find the top 10 rows. Instead of performing a full sort, it can use a much more efficient algorithm, like a <strong>heap sort (using a min-heap of size 10)</strong>, to find the top 10 rows in a single pass over the data.</p>
+<p>Notice the new <code>limit: 10</code> property on the <code>Sort</code> node. This seemingly small change has a huge performance impact. When the <code>PhysicalSort</code> operator is created from this logical node, it now knows that it only needs to find the top 10 rows. Instead of performing a full sort, it can use a much more efficient algorithm, like a <strong>heap sort (using a min-heap of size 10)</strong>, to find the top 10 rows in a single pass over the data.</p>
 <p>This optimization avoids sorting the entire table, dramatically reducing both CPU and memory consumption.</p>
 <h2 id="other-rules"><a class="header" href="#other-rules">Other Rules</a></h2>
 <p>QuillSQL implements other simple but effective rules:</p>
@@ -1133,72 +1187,45 @@ index scans vs sequential scans.</li>
 </li>
 </ol>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="execution-engine"><a class="header" href="#execution-engine">Execution Engine</a></h1>
-<p><code>src/execution/</code> runs vectorized plans using a Volcano-style iterator model. The new
-architecture layers chunk-based operators on top of the planner’s <code>VecPlan</code> IR so we can
-incrementally adopt batch execution without leaking storage details into the planner.</p>
+<p><code>src/execution/</code> drives <code>PhysicalPlan</code> trees using the Volcano (iterator) model. Every
+operator pulls tuples from its children, coordinating closely with transactions,
+storage, and expression evaluation.</p>
 <hr />
 <h2 id="core-components"><a class="header" href="#core-components">Core Components</a></h2>
 <div class="table-wrapper"><table><thead><tr><th>Component</th><th>Role</th></tr></thead><tbody>
-<tr><td><code>VecPlan</code></td><td>Planner-facing IR that stores metadata (schemas, expressions, table refs) for each operator variant.</td></tr>
-<tr><td><code>ExecPlan</code></td><td>Immutable tree of chunk-based operators built from a <code>VecPlan</code>.</td></tr>
-<tr><td><code>Operator</code> trait</td><td>New interface (<code>open/get_chunk/rescan/close</code>) that produces <code>DataChunk</code>s. Implemented by rewritten operators (SeqScan, IndexScan, Filter, Project, Limit, Sort, Aggregate, DML, and DDL/utility nodes such as Create/Drop Table/Index and Analyze).</td></tr>
-<tr><td><code>OperatorState</code></td><td>Per-execution mutable state owned by an operator (cursor positions, buffers, etc.).</td></tr>
-<tr><td><code>DataChunk</code></td><td>Row-oriented batch abstraction (default 1024 rows) exchanged between operators.</td></tr>
-<tr><td><code>ExecutionContext</code></td><td>Shared context carrying the catalog, <code>TxnRuntime</code>, storage engine, and expression helpers.</td></tr>
-<tr><td><code>TupleStream</code></td><td>Storage-layer scan API (unchanged) used by logical scan operators.</td></tr>
+<tr><td><code>PhysicalPlan</code></td><td>Enum covering all physical operators; each implements <code>VolcanoExecutor</code>.</td></tr>
+<tr><td><code>ExecutionContext</code></td><td>Shared context carrying the catalog, <code>TxnContext</code>, storage engine, and expression helpers.</td></tr>
+<tr><td><code>TupleStream</code></td><td>Unified scan interface returned by table/index handles.</td></tr>
 </tbody></table>
 </div>
 <hr />
 <h2 id="execution-flow"><a class="header" href="#execution-flow">Execution Flow</a></h2>
 <ol>
-<li>Planner produces a <code>VecPlan</code>.</li>
-<li><code>ExecPlan::from_vec</code> rewrites every node into its chunk operator counterpart. Each
-Vec node holds only metadata; all runtime state lives inside operators.</li>
-<li><code>ExecutionEngine::stream_exec_plan</code> opens the root operator, hands it an
-<code>OperatorState</code>, and returns a <code>ChunkStream</code> iterator. Each call to <code>next()</code> pulls one
-<code>DataChunk</code>.</li>
-<li><code>ExecutionEngine::execute</code> simply drains the stream into a <code>Vec&lt;Tuple&gt;</code> for callers
-that still expect materialized results.</li>
+<li><code>ExecutionEngine::execute</code> calls <code>init</code> on the root plan (and recursively on children).</li>
+<li>The engine loops calling <code>next</code>, with parents pulling tuples from children.</li>
 <li><code>ExecutionContext</code> supplies transaction snapshots, lock helpers, and expression
-evaluation to every operator call.</li>
+evaluation per call.</li>
+<li>Once <code>next</code> returns <code>None</code>, the accumulated results are returned to the caller (CLI,
+HTTP API, or tests).</li>
 </ol>
 <hr />
 <h2 id="operator-examples"><a class="header" href="#operator-examples">Operator Examples</a></h2>
 <ul>
-<li><strong>SeqScanOperator</strong> – opens a <code>TableAccess</code> stream, fetches tuples in batches, and
-hands visible rows downstream without the mutex overhead in the legacy executor.</li>
-<li><strong>IndexScanOperator</strong> – pulls ranges from secondary indexes using <code>IndexScanRequest</code>
-and applies MVCC visibility checks in batches, honouring table locks for stricter
-isolation levels.</li>
-<li><strong>FilterOperator</strong> – pulls chunks from its child and evaluates predicate expressions in
-batch, buffering overflow tuples when the parent chunk is full.</li>
-<li><strong>ProjectOperator</strong> – materializes new tuples by evaluating projection expressions over
-each chunk.</li>
-<li><strong>LimitOperator</strong> – tracks offset/limit over chunk boundaries before signalling
-<code>ChunkStatus::Finished</code>.</li>
-<li><strong>SortOperator</strong> – materializes all child chunks once, sorts by <code>OrderByExpr</code>, then
-streams the sorted tuples in batches (acting as a blocking pipeline boundary).</li>
-<li><strong>AggregateOperator</strong> – consumes all child chunks, updates per-group accumulators, and
-emits aggregated results chunk-by-chunk (another blocking operator).</li>
-<li><strong>ValuesOperator / EmptyOperator</strong> – source operators that synthesise tuples without
-reading storage; they now emit batches directly instead of per-row locking.</li>
-<li><strong>Insert/Update/Delete Operators</strong> – run DML in chunk mode, counting affected rows and
-returning the standard one-row status output without relying on legacy mutex-heavy
-implementations.</li>
-<li><strong>DDL &amp; Analyze operators</strong> – chunk-friendly wrappers around Create/Drop Table, Create/Drop
-Index, and Analyze. They execute once, rely on <code>ExecutionContext</code> for catalog and lock
-helpers, and immediately report <code>ChunkStatus::Finished</code>, keeping transactional semantics
-identical to the legacy path.</li>
-<li><strong>NestedLoopJoinOperator</strong> – materializes the right input once, then walks left tuples
-chunk-by-chunk, evaluating the join predicate before emitting merged tuples. The operator
-keeps Volcano semantics while integrating with chunk scheduling and buffer management.</li>
+<li><strong>PhysicalSeqScan</strong> – acquires a <code>table_stream</code> from the storage engine, uses
+<code>ScanPrefetch</code> for batching, and relies on <code>TxnContext::read_visible_tuple</code> for MVCC.</li>
+<li><strong>PhysicalIndexScan</strong> – uses <code>index_stream</code>, tracks <code>invisible_hits</code>, and notifies the
+catalog when garbage accumulates.</li>
+<li><strong>PhysicalUpdate/PhysicalDelete</strong> – call <code>prepare_row_for_write</code> to re-validate locks
+and the latest tuple before invoking <code>apply_update/delete</code>.</li>
+<li><strong>PhysicalNestedLoopJoin</strong> – showcases the parent/child pull loop and acts as a baseline
+for more advanced joins.</li>
 </ul>
 <hr />
 <h2 id="interactions-5"><a class="header" href="#interactions-5">Interactions</a></h2>
 <ul>
 <li><strong>StorageEngine</strong> – all data access goes through handles/streams, keeping execution
 storage-agnostic.</li>
-<li><strong>Transaction</strong> – <code>TransactionHandle</code>/<code>TxnRuntime</code> enforce locking, snapshots, and undo logging; operators
+<li><strong>Transaction</strong> – <code>TxnContext</code> enforces locking, snapshots, and undo logging; operators
 never talk to <code>LockManager</code> directly.</li>
 <li><strong>Expression</strong> – <code>ExecutionContext::eval_expr</code> / <code>eval_predicate</code> evaluate expressions
 built by the planner.</li>
@@ -1208,141 +1235,118 @@ upstream.</li>
 <hr />
 <h2 id="teaching-ideas-5"><a class="header" href="#teaching-ideas-5">Teaching Ideas</a></h2>
 <ul>
-<li>Implement a new chunk operator (e.g., <code>SortOperator</code> or <code>HashAggregate</code>) to exercise
-<code>OperatorState</code> and chunk-based APIs.</li>
-<li>Extend <code>ChunkStream</code> to feed HTTP streaming responses without buffering entire result
-sets.</li>
-<li>Instrument the operator pipeline (<code>RUST_LOG=execution=trace</code>) to observe chunk flow and
-rescan behaviour.</li>
+<li>Implement a new operator (e.g., <code>PhysicalMergeJoin</code>) to see how <code>ExecutionContext</code>
+support generalises.</li>
+<li>Add adaptive prefetching inside <code>PhysicalSeqScan</code> to explore iterator hints.</li>
+<li>Enable <code>RUST_LOG=execution=trace</code> to watch the <code>init</code>/<code>next</code> call sequence during a
+query.</li>
 </ul>
 <hr />
 <p>Further reading: <a href="modules/../execution/volcano.html">The Volcano Execution Model</a></p>
-<div style="break-before: page; page-break-before: always;"></div><h1 id="updated-volcano-execution-model"><a class="header" href="#updated-volcano-execution-model">Updated Volcano Execution Model</a></h1>
-<p>Once the <a href="execution/../modules/plan.html">Query Planner</a> has produced an optimized vectorized tree,
-the <strong>Execution Engine</strong> consumes that metadata and produces results. We keep the
-traditional <strong>Volcano</strong> terminology for plan shapes, but the actual runtime now relies on
-chunk-oriented operators instead of the legacy tuple-at-a-time iterator.</p>
-<hr />
-<h2 id="1-vecplan-metadata"><a class="header" href="#1-vecplan-metadata">1. VecPlan metadata</a></h2>
-<p><code>VecPlan</code> is now the planner’s output: each variant stores the expressions,
-schemas, table/index references, join properties, etc. that define a particular operator.
-Unlike the original implementation, these structs are now <strong>pure data containers</strong>. They
-do not own scanners, mutexes, or iterators; all runtime state lives in the chunk
-operators that get built on top of them. This keeps the planner/optimizer API stable
-while allowing the executor to evolve independently.</p>
-<hr />
-<h2 id="2-chunk-based-operator-trait"><a class="header" href="#2-chunk-based-operator-trait">2. Chunk-based <code>Operator</code> trait</a></h2>
-<p>Execution now happens through the chunk <code>Operator</code> interface in
-<code>src/execution/operator.rs</code>:</p>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="the-volcano-execution-model"><a class="header" href="#the-volcano-execution-model">The Volcano Execution Model</a></h1>
+<p>Once the <a href="execution/../modules/plan.html">Query Planner</a> has produced an optimized <code>PhysicalPlan</code>, it's the job of the <strong>Execution Engine</strong> to run it and produce results. The execution engine is the component that brings the plan to life, interacting with the transaction manager and storage layer to process data.</p>
+<p>QuillSQL uses the classic <strong>Volcano Model</strong>, also known as the <strong>Iterator Model</strong>. This is a pull-based execution model where each physical operator in the plan tree acts as an iterator that the parent operator can "pull" rows from.</p>
+<h2 id="1-the-volcanoexecutor-trait"><a class="header" href="#1-the-volcanoexecutor-trait">1. The <code>VolcanoExecutor</code> Trait</a></h2>
+<p>At the heart of the execution model is the <code>VolcanoExecutor</code> trait (<code>execution/mod.rs</code>). Every physical operator implements this simple trait:</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
-</span>pub trait Operator {
-    fn create_state(&amp;self) -&gt; Box&lt;dyn OperatorState&gt;;
-    fn open(&amp;self, ctx: &amp;mut ExecutionContext, state: &amp;mut dyn OperatorState) -&gt; Result&lt;()&gt;;
-    fn get_chunk(
-        &amp;self,
-        ctx: &amp;mut ExecutionContext,
-        state: &amp;mut dyn OperatorState,
-        chunk: &amp;mut DataChunk,
-    ) -&gt; Result&lt;ChunkStatus&gt;;
-    fn rescan(&amp;self, ctx: &amp;mut ExecutionContext, state: &amp;mut dyn OperatorState) -&gt; Result&lt;()&gt;;
-    fn close(&amp;self, ctx: &amp;mut ExecutionContext, state: &amp;mut dyn OperatorState);
+</span>pub trait VolcanoExecutor {
+    fn init(&amp;self, context: &amp;mut ExecutionContext) -&gt; QuillSQLResult&lt;()&gt;;
+    fn next(&amp;self, context: &amp;mut ExecutionContext) -&gt; QuillSQLResult&lt;Option&lt;Tuple&gt;&gt;;
+    fn output_schema(&amp;self) -&gt; SchemaRef;
 }
 <span class="boring">}</span></code></pre></pre>
 <ul>
-<li><strong><code>OperatorState</code></strong> stores per-execution mutable state (cursors, hash tables, pending
-tuples). It is opaque to the engine and downcast by the operator.</li>
-<li><strong><code>DataChunk</code></strong> (default capacity: 1024 rows) is the batch abstraction exchanged
-between operators. It is currently row-based but designed for vectorization.</li>
-<li><strong><code>ChunkStatus::{MoreData, Finished}</code></strong> tells callers whether more chunks may follow.</li>
-<li><strong><code>ExecPlan::from_vec</code></strong> rewrites every node (SeqScan, Filter, Project, Limit, DDL,
-etc.) into concrete chunk operators. Because the Vec structs are metadata-only, no
-legacy iterator code remains to maintain.</li>
+<li><strong><code>init()</code></strong>: This method is called once at the beginning of execution. It allows an operator to set up its initial state (e.g., a <code>SeqScan</code> operator would initialize its table iterator here).</li>
+<li><strong><code>next()</code></strong>: This is the core method. When called, the operator produces its next output tuple. It returns <code>Some(tuple)</code> if it has a row, or <code>None</code> if it has exhausted its data source. The top-level <code>ExecutionEngine</code> simply calls <code>next()</code> on the root of the plan tree in a loop until it receives <code>None</code>.</li>
 </ul>
-<p><code>ExecutionEngine::stream_exec_plan</code> opens the root operator, hands it a state object, and
-returns a <code>ChunkStream</code> iterator. <code>ExecutionEngine::execute</code> simply drains this stream
-into a <code>Vec&lt;Tuple&gt;</code> for callers that still expect eagerly materialized results.</p>
-<hr />
-<h2 id="3-executioncontext-helpers"><a class="header" href="#3-executioncontext-helpers">3. ExecutionContext Helpers</a></h2>
-<p>Both legacy and chunk operators receive a mutable <code>ExecutionContext</code>, which exposes:</p>
+<h2 id="2-the-executioncontext"><a class="header" href="#2-the-executioncontext">2. The <code>ExecutionContext</code></a></h2>
+<p>Notice that both <code>init()</code> and <code>next()</code> take a mutable <code>ExecutionContext</code>. This object is the “world” in which the query runs. It is passed down the operator tree and exposes:</p>
 <ul>
-<li><code>Catalog</code> lookups.</li>
-<li><code>TransactionManager</code> / <code>TxnRuntime</code> for lock acquisition, MVCC snapshots, and undo
-logging.</li>
-<li><code>StorageEngine</code> handles (TableAccess, IndexAccess, TupleStream) via <code>table_stream</code>, <code>index_stream</code>, etc.</li>
-<li>Expression helpers (<code>eval_expr</code>, <code>eval_predicate</code>) that return <code>ScalarValue</code>s.</li>
-<li>DML helpers (<code>prepare_row_for_write</code>, <code>apply_update/delete</code>, <code>insert_tuple_with_indexes</code>).</li>
+<li><strong><code>Catalog</code> + <code>StorageEngine</code></strong>: Operators call <code>context.table(&amp;table_ref)</code> to obtain a <code>TableBinding</code>. The binding encapsulates heap/index access (scan, insert, delete, update, prepare-row-for-write) so operators never touch <code>TableHeap</code> or <code>MvccHeap</code> directly.</li>
+<li><strong><code>TxnContext</code></strong>: Provides the current transaction, MVCC snapshot, and helper methods for row/table locks and visibility checks.</li>
+<li><strong>Expression helpers</strong>: <code>eval_expr</code> / <code>eval_predicate</code> evaluate AST expressions against a tuple without leaking <code>ScalarValue</code> plumbing into operators.</li>
 </ul>
-<p>Operators stay small because they delegate MVCC and storage concerns to the context.</p>
-<hr />
-<h2 id="4-operator-anatomy-legacy-vs-chunk"><a class="header" href="#4-operator-anatomy-legacy-vs-chunk">4. Operator Anatomy (Legacy vs Chunk)</a></h2>
-<h3 id="seqscan--indexscan"><a class="header" href="#seqscan--indexscan">SeqScan / IndexScan</a></h3>
+<p>Thanks to the binding abstraction, the operator code only expresses “what” should happen (scan/update/delete) while the binding implements “how” (MVCC chain navigation, undo logging, index maintenance).</p>
+<h2 id="3-anatomy-of-physical-operators"><a class="header" href="#3-anatomy-of-physical-operators">3. Anatomy of Physical Operators</a></h2>
+<p>Data flows <em>up</em> the tree from the leaves (scans) to the root. Let's see how it works by examining a few key operators.</p>
+<h3 id="leaf-operator-physicalseqscan"><a class="header" href="#leaf-operator-physicalseqscan">Leaf Operator: <code>PhysicalSeqScan</code></a></h3>
+<p>A sequential scan sits at the leaf of a plan tree and streams tuples from a table binding.</p>
 <ul>
-<li><em>Legacy</em>: <code>init</code> opens a <code>TableIterator</code>; <code>next</code> pulls <code>(rid, meta, tuple)</code> one at a
-time, performs visibility checks, and returns visible tuples.</li>
-<li><em>Chunk</em>: <code>SeqScanOperator</code> (and <code>IndexScanOperator</code> for secondary indexes) keeps an
-explicit prefetch buffer, batches MVCC visibility checks, and acquires whatever locks
-are required once per batch instead of once per tuple.</li>
-</ul>
-<h3 id="filter"><a class="header" href="#filter">Filter</a></h3>
-<ul>
-<li><em>Legacy</em>: Loops calling <code>child.next()</code>, evaluates a predicate, returns the tuple when
-the predicate is <code>true</code>.</li>
-<li><em>Chunk</em>: <code>FilterOperator</code> consumes child chunks, evaluates predicates row by row, and
-either places tuples into the current chunk or buffers them if the chunk is full.</li>
-</ul>
-<h3 id="project"><a class="header" href="#project">Project</a></h3>
-<ul>
-<li><em>Legacy</em>: Evaluates projection expressions on each tuple returned by the child.</li>
-<li><em>Chunk</em>: <code>ProjectOperator</code> evaluates expressions across the current chunk, producing a
-new chunk with projected tuples.</li>
-</ul>
-<h3 id="nested-loop-join"><a class="header" href="#nested-loop-join">Nested Loop Join</a></h3>
-<ul>
-<li>The new chunk operator materializes the right input once (reusing existing chunk
-abstractions), then streams left-side chunks. For each left tuple it iterates the cached
-right tuples, merges them, and evaluates the join predicate before appending to the
-output chunk.</li>
-<li>Because the right side is buffered, <code>rescan</code> becomes cheap and downstream operators can
-keep chunk-level scheduling, while the overall behaviour still matches the legacy
-Volcano execution order.</li>
-</ul>
-<h3 id="ddl--analyze"><a class="header" href="#ddl--analyze">DDL / Analyze</a></h3>
-<ul>
-<li><code>CreateTable</code>, <code>CreateIndex</code>, <code>DropTable</code>, <code>DropIndex</code>, and <code>Analyze</code> run as lightweight
-chunk operators. Each operator acquires the relevant locks via
-<code>ExecutionContext::txn()</code>, runs exactly once, and immediately reports
-<code>ChunkStatus::Finished</code>, allowing DDL to coexist with streaming pipelines.</li>
-</ul>
-<hr />
-<h2 id="5-example-select-name-from-users-where-age--30"><a class="header" href="#5-example-select-name-from-users-where-age--30">5. Example: <code>SELECT name FROM users WHERE age &gt; 30</code></a></h2>
-<p>Vec plan: <code>Project -&gt; Filter -&gt; SeqScan</code>.</p>
+<li><strong><code>init()</code></strong>:
 <ol>
-<li><code>ExecutionEngine::stream</code> builds an <code>ExecPlan</code>, wraps the SeqScan/Filter/Project nodes
-in chunk operators, and opens the root <code>ProjectOperator</code>.</li>
-<li><code>ProjectOperator::get_chunk</code> requests a chunk from its child (<code>FilterOperator</code>).</li>
-<li><code>FilterOperator::get_chunk</code> requests a chunk from <code>SeqScanOperator</code>.</li>
-<li><code>SeqScanOperator</code> fetches raw rows from the heap, filters by MVCC visibility, and
-fills the chunk.</li>
-<li>The chunk flows back up: Filter evaluates <code>age &gt; 30</code>, Project keeps only <code>name</code>.</li>
-<li>The engine yields the resulting <code>DataChunk</code> to the caller. <code>ChunkStream</code> keeps pulling
-until operators report <code>Finished</code>.</li>
+<li>Acquires an <code>IntentionShared</code> lock on the table via <code>TxnContext</code>.</li>
+<li>Requests a <code>TableBinding</code> (<code>context.table(&amp;table_ref)</code>) and calls <code>binding.scan(...)</code> to obtain a <code>TupleStream</code>. The binding hides the actual <code>TableIterator</code> implementation and any MVCC plumbing.</li>
 </ol>
-<p>The control flow is identical to the tuple-at-a-time model, except we operate on batches
-and the engine can stream results without buffering the entire query.</p>
+</li>
+<li><strong><code>next()</code></strong>:
+<ol>
+<li>Pops the next <code>(rid, meta, tuple)</code> from its prefetch buffer (which in turn pulls from the binding’s stream).</li>
+<li>Calls <code>TxnContext::read_visible_tuple</code> to perform the MVCC visibility check and acquire the required shared row lock.</li>
+<li>Returns the tuple if visible; otherwise, keep looping.</li>
+</ol>
+</li>
+</ul>
+<h3 id="unary-operator-physicalfilter"><a class="header" href="#unary-operator-physicalfilter">Unary Operator: <code>PhysicalFilter</code></a></h3>
+<p>A filter has one child operator (its <code>input</code>). It implements a <code>WHERE</code> clause.</p>
+<ul>
+<li><strong><code>next()</code></strong>: Its logic is a simple, tight loop:
+<ol>
+<li>It calls <code>self.input.next()</code> to get a tuple from its child.</li>
+<li>If the child returns <code>None</code>, the filter is also exhausted and returns <code>None</code>.</li>
+<li>If it receives a tuple, it evaluates its predicate expression (e.g., <code>age &gt; 30</code>) against the tuple.</li>
+<li>If the predicate evaluates to <code>true</code>, it returns the tuple. Otherwise, it loops back to step 1.</li>
+</ol>
+</li>
+</ul>
+<h3 id="binary-operator-physicalnestedloopjoin"><a class="header" href="#binary-operator-physicalnestedloopjoin">Binary Operator: <code>PhysicalNestedLoopJoin</code></a></h3>
+<p>A join has two children: a left (outer) and a right (inner).</p>
+<ul>
+<li><strong><code>next()</code></strong>: It implements the classic nested loop join algorithm:
+<ol>
+<li>Fetch one tuple from the <strong>outer</strong> (left) child and hold onto it.</li>
+<li>Enter a loop: fetch tuples one by one from the <strong>inner</strong> (right) child.</li>
+<li>For each inner tuple, combine it with the held outer tuple and evaluate the join condition. If it matches, return the combined tuple.</li>
+<li>When the inner child is exhausted, <strong>rewind it</strong> by calling <code>self.right_input.init()</code> again.</li>
+<li>Go back to step 1 to fetch the <em>next</em> tuple from the outer child.</li>
+<li>Repeat until the outer child is also exhausted.</li>
+</ol>
+</li>
+</ul>
+<h2 id="4-putting-it-all-together"><a class="header" href="#4-putting-it-all-together">4. Putting It All Together</a></h2>
+<p>Consider the query <code>SELECT name FROM users WHERE age &gt; 30</code>. The physical plan is <code>Projection -&gt; Filter -&gt; SeqScan</code>.</p>
+<ol>
+<li>The <code>ExecutionEngine</code> calls <code>next()</code> on the <code>Projection</code> operator.</li>
+<li>The <code>Projection</code> operator needs a tuple, so it calls <code>next()</code> on its child, <code>Filter</code>.</li>
+<li>The <code>Filter</code> operator needs a tuple, so it calls <code>next()</code> on its child, <code>SeqScan</code>.</li>
+<li>The <code>SeqScan</code> operator asks its <code>TableBinding</code> for the next tuple, and after the MVCC check finds a visible tuple for a user with <code>age = 25</code>.</li>
+<li><code>SeqScan</code> returns this tuple up to <code>Filter</code>.</li>
+<li><code>Filter</code> evaluates <code>age &gt; 30</code> on the tuple. It's false, so it loops, calling <code>SeqScan.next()</code> again.</li>
+<li><code>SeqScan</code> pulls another visible tuple (this time <code>age = 40</code>, <code>name = 'Alice'</code>) through the binding.</li>
+<li><code>SeqScan</code> returns this tuple up to <code>Filter</code>.</li>
+<li><code>Filter</code> evaluates <code>age &gt; 30</code>. It's true! It returns the tuple for Alice up to <code>Projection</code>.</li>
+<li><code>Projection</code> takes the full tuple for Alice, creates a new tuple containing only the <code>name</code> column (<code>'Alice'</code>), and returns this new tuple as the result.</li>
+</ol>
+<p>This process repeats, with tuples flowing up the tree one at a time, until the <code>SeqScan</code> operator runs out of pages and returns <code>None</code>, which then propagates up the tree, signaling the end of execution.</p>
 <hr />
 <h2 id="for-study--discussion-2"><a class="header" href="#for-study--discussion-2">For Study &amp; Discussion</a></h2>
 <ol>
-<li><strong>Push vs Pull</strong> – What would it take to convert the chunk API into a push model?
-Which stages benefit most from pipelining?</li>
-<li><strong>Blocking vs Non-Blocking</strong> – Sort/Aggregate must materialize entire inputs, while
-Filter/Project/Limit can stream. How does batching affect latency and memory usage of
-blocking operators?</li>
-<li><strong>Join Improvements</strong> – Sketch a chunk-based block nested loop join: buffer <code>N</code> outer
-rows, scan the inner once, emit matched chunks.</li>
-<li><strong>Vectorization</strong> – <code>DataChunk</code> is intentionally row-based for now. How would you
-extend it to columnar vectors, and what parts of the operator API would change to
-exploit SIMD?</li>
+<li>
+<p><strong>Push vs. Pull Models</strong>: The Volcano model is a "pull-based" model. An alternative is a "push-based" model, where operators push their results to their parents as soon as they are ready. What are the potential advantages and disadvantages of each model, particularly concerning cache efficiency and control flow?</p>
+</li>
+<li>
+<p><strong>Blocking vs. Non-Blocking Operators</strong>: Some operators, like <code>PhysicalFilter</code>, can produce their first output row as soon as they receive their first input row. These are <strong>non-blocking</strong>. Other operators, like <code>PhysicalSort</code>, must consume their <em>entire</em> input before they can produce even a single row of output. These are <strong>blocking</strong>. What is the impact of blocking operators on query latency and memory usage?</p>
+</li>
+<li>
+<p><strong>Programming Exercise</strong>: The current <code>PhysicalNestedLoopJoin</code> is simple but can be inefficient as it re-scans the entire inner table for every outer row. Implement a <code>PhysicalBlockNestedLoopJoin</code> operator. This version would read a <em>block</em> (a small batch) of tuples from the outer table into an in-memory buffer, and then iterate through the inner table once for that entire block. This can significantly reduce the number of times the inner table needs to be scanned.</p>
+</li>
+<li>
+<p><strong>Programming Exercise</strong>: Implement the <code>PhysicalLimit</code> operator. Its <code>next()</code> method should:
+a.  Keep an internal counter.
+b.  If the counter is less than the <code>offset</code>, pull and discard tuples from its child.
+c.  If the counter is between <code>offset</code> and <code>offset + limit</code>, pull a tuple from its child and return it.
+d.  Once the limit is reached, it should stop pulling from its child and return <code>None</code> for all subsequent calls. This is important for efficiency, as it stops the execution of the entire sub-tree below it.</p>
+</li>
 </ol>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="transaction-module"><a class="header" href="#transaction-module">Transaction Module</a></h1>
 <p><code>src/transaction/</code> enforces the Atomicity and Isolation parts of ACID. It combines MVCC
@@ -1353,7 +1357,7 @@ violating correctness.</p>
 <div class="table-wrapper"><table><thead><tr><th>Type</th><th>Role</th></tr></thead><tbody>
 <tr><td><code>TransactionManager</code></td><td>Creates/commits/aborts transactions, assigns txn &amp; command ids, coordinates WAL.</td></tr>
 <tr><td><code>Transaction</code></td><td>Stores state, held locks, undo chain, and cached snapshot.</td></tr>
-<tr><td><code>TransactionHandle</code> / <code>TxnRuntime</code></td><td>Execution-time wrapper exposing MVCC + locking helpers.</td></tr>
+<tr><td><code>TxnContext</code> / <code>TxnRuntime</code></td><td>Execution-time wrapper exposing MVCC + locking helpers.</td></tr>
 <tr><td><code>LockManager</code></td><td>Multi-granularity locking (IS/IX/S/SIX/X) with deadlock detection.</td></tr>
 <tr><td><code>TransactionSnapshot</code></td><td>Tracks <code>xmin/xmax/active_txns</code> for visibility checks.</td></tr>
 </tbody></table>
@@ -1363,9 +1367,9 @@ violating correctness.</p>
 <ol>
 <li><code>SessionContext</code> calls <code>TransactionManager::begin</code> to create a transaction.</li>
 <li>Each SQL statement builds a <code>TxnRuntime</code>, yielding a fresh command id and snapshot.</li>
-<li>Operators call <code>TransactionHandle::lock_table/lock_row</code> to obey strict 2PL.</li>
-<li><code>TableAccess::insert_chunk/delete_chunk/update_chunk</code> records undo, acquires locks, and
-emits WAL via <code>TxnRuntime</code>.</li>
+<li>Operators call <code>TxnContext::lock_table/lock_row</code> to obey strict 2PL.</li>
+<li><code>TableHandle::insert/delete/update</code> records undo, acquires locks, and emits WAL via
+<code>TxnContext</code>.</li>
 <li>Commit: write a <code>Commit</code> record → flush depending on <code>synchronous_commit</code> → release
 locks.</li>
 <li>Abort: walk the undo list, write CLRs, restore heap/index state, release locks.</li>
@@ -1400,7 +1404,7 @@ statement end, Serializable waits until commit.</li>
 <ul>
 <li><strong>ExecutionContext</strong> – all helpers (lock acquisition, visibility checks, undo logging)
 are exposed here, so physical operators never touch <code>LockManager</code> directly.</li>
-<li><strong>StorageEngine</strong> – access traits call <code>TxnRuntime</code> before mutating heaps/indexes; MVCC metadata
+<li><strong>StorageEngine</strong> – handles call <code>TxnContext</code> before mutating heaps/indexes; MVCC metadata
 lives in <code>TupleMeta</code>.</li>
 <li><strong>Recovery</strong> – Begin/Commit/Abort records emitted here drive ARIES undo/redo.</li>
 <li><strong>Background</strong> – MVCC vacuum reads <code>TransactionManager::oldest_active_txn()</code> to compute
@@ -1502,14 +1506,14 @@ performance, MVCC, and recovery.</p>
 <ul>
 <li>Manage <code>TableHeap</code> insert/delete/update paths and their MVCC metadata.</li>
 <li>Maintain indexes (see the <a href="modules/./index.html">Index module</a> for details).</li>
-<li>Expose the <code>StorageEngine</code> trait so execution can fetch <code>TableAccess</code> / <code>IndexAccess</code>
+<li>Expose the <code>StorageEngine</code> trait so execution can fetch <code>TableHandle</code> / <code>IndexHandle</code>
 instances per table.</li>
 <li>Provide <code>TupleStream</code> so sequential and index scans share a unified interface.</li>
 </ul>
 <hr />
 <h2 id="directory-layout-5"><a class="header" href="#directory-layout-5">Directory Layout</a></h2>
 <div class="table-wrapper"><table><thead><tr><th>Path</th><th>Purpose</th><th>Key Types</th></tr></thead><tbody>
-<tr><td><code>engine.rs</code></td><td>Default engine plus access-trait definitions.</td><td><code>StorageEngine</code>, <code>TableAccess</code>, <code>IndexAccess</code>, <code>TupleStream</code>, <code>ScanOptions</code></td></tr>
+<tr><td><code>engine.rs</code></td><td>Default engine plus handle definitions.</td><td><code>StorageEngine</code>, <code>TableHandle</code>, <code>TupleStream</code>, <code>ScanOptions</code></td></tr>
 <tr><td><code>table_heap/</code></td><td>Heap storage + MVCC logic.</td><td><code>TableHeap</code>, <code>MvccHeap</code></td></tr>
 <tr><td><code>index/</code></td><td>B+Tree implementation.</td><td><code>BPlusTreeIndex</code></td></tr>
 <tr><td><code>page/</code></td><td>Page, RID, tuple metadata.</td><td><code>Page</code>, <code>RecordId</code>, <code>TupleMeta</code></td></tr>
@@ -1525,41 +1529,26 @@ instances per table.</li>
 </span><span class="boring">fn main() {
 </span>pub trait StorageEngine {
     fn table(&amp;self, catalog: &amp;Catalog, table: &amp;TableReference)
-        -&gt; QuillSQLResult&lt;Arc&lt;dyn TableAccess&gt;&gt;;
+        -&gt; QuillSQLResult&lt;Arc&lt;dyn TableHandle&gt;&gt;;
     fn indexes(&amp;self, catalog: &amp;Catalog, table: &amp;TableReference)
-        -&gt; QuillSQLResult&lt;Vec&lt;Arc&lt;dyn IndexAccess&gt;&gt;&gt;;
+        -&gt; QuillSQLResult&lt;Vec&lt;Arc&lt;dyn IndexHandle&gt;&gt;&gt;;
 }
 <span class="boring">}</span></code></pre></pre>
 <p>The default implementation wraps the row-oriented heap + B+Tree combo, but the trait is
 ready for column stores, remote storage, or async engines.</p>
-<h3 id="tableaccess"><a class="header" href="#tableaccess">TableAccess</a></h3>
-<p>Encapsulates the heap/MVCC surface. Key responsibilities:</p>
-<ul>
-<li><code>full_scan(ScanOptions)</code> and <code>full_tuple(RID)</code> keep visibility logic inside the storage
-layer.</li>
-<li><code>insert_chunk(&amp;DataChunk, indexes)</code> batches inserts from the chunk engine so WAL/undo
-bookkeeping happens once per mini-batch instead of per row.</li>
-<li><code>delete_chunk</code> / <code>update_chunk</code> / <code>prepare_row_for_write</code> guard every mutation with the
-right locks, visibility checks, and undo records.</li>
-</ul>
-<h3 id="indexaccess"><a class="header" href="#indexaccess">IndexAccess</a></h3>
-<p>Thin wrapper around <code>BPlusTreeIndex</code> that provides <code>key_schema()</code>, <code>index()</code> for
-specialized operations, and <code>range_scan</code> which binds a table access handle so index scans
-can materialize base tuples without leaking heap internals.</p>
+<h3 id="tablehandle"><a class="header" href="#tablehandle">TableHandle</a></h3>
+<p>Offers <code>full_scan(ScanOptions)</code>, <code>insert</code>, <code>delete</code>, <code>update</code>, and
+<code>prepare_row_for_write</code>. MVCC, undo, and locking concerns live here so execution operators
+only describe intent.</p>
 <h3 id="tuplestream"><a class="header" href="#tuplestream">TupleStream</a></h3>
 <p>Minimal iterator that returns <code>(RecordId, TupleMeta, Tuple)</code> triples. <code>ScanOptions</code> carry
 streaming hints, projection lists, or batch sizes; index scans use <code>IndexScanRequest</code> to
 describe ranges.</p>
-<p>Rather than row-at-a-time iteration, execution asks each <code>TupleStream</code> to fill a
-<code>DataChunk</code> directly and walks those batches with <code>row_iter</code>, preserving optional
-<code>row_id</code>/<code>row_meta</code> columns so scans and DML reuse the same columnar batch format
-throughout the pipeline.</p>
 <hr />
 <h2 id="interactions-7"><a class="header" href="#interactions-7">Interactions</a></h2>
 <ul>
-<li><strong>Execution</strong> – <code>ExecutionContext::table_stream</code> / <code>index_stream</code> delegate to access
-traits instead of raw heaps.</li>
-<li><strong>Transaction</strong> – Access methods call into <code>TxnRuntime</code> to acquire locks, record undo,
+<li><strong>Execution</strong> – <code>ExecutionContext::table_stream</code> / <code>index_stream</code> delegate to handles.</li>
+<li><strong>Transaction</strong> – Handle methods call into <code>TxnContext</code> to acquire locks, record undo,
 and emit WAL.</li>
 <li><strong>Buffer Manager</strong> – <code>TableHeap</code>/<code>BPlusTreeIndex</code> access pages through the shared buffer
 pool.</li>
@@ -1574,8 +1563,6 @@ the same abstractions as foreground scans.</li>
 <li>Implement a toy columnar handle to show how the execution engine can stay agnostic to
 storage layout.</li>
 <li>Use <code>ScanOptions::projection</code> to push down column pruning into <code>TableIterator</code>.</li>
-<li>Experiment with <code>insert_chunk</code> sizes to show how unified row batches amortize WAL/index
-overhead.</li>
 <li>Enable <code>RUST_LOG=storage::table_heap=trace</code> and trace MVCC version chains as updates
 occur.</li>
 </ul>
@@ -1706,6 +1693,14 @@ occur.</li>
 </ol>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="table-heap-and-mvcc"><a class="header" href="#table-heap-and-mvcc">Table Heap and MVCC</a></h1>
 <p>The <code>TableHeap</code> (<code>storage/table_heap.rs</code>) is the component responsible for managing the collection of pages that belong to a single table. While the <code>TablePage</code> defines the <em>layout</em> within a single page, the <code>TableHeap</code> provides the high-level API for inserting, updating, and deleting tuples, making it central to the implementation of MVCC.</p>
+<h2 id="tablebinding--storageengine"><a class="header" href="#tablebinding--storageengine">TableBinding &amp; StorageEngine</a></h2>
+<p>From the executor’s perspective, heap access is routed through <code>storage::engine::TableBinding</code>. A binding is produced by the <code>StorageEngine</code> (consulting the catalog) and carries:</p>
+<ul>
+<li>An <code>Arc&lt;TableHeap&gt;</code> for physical page access.</li>
+<li>An <code>MvccHeap</code> wrapper that maintains version chains.</li>
+<li>All indexes defined on the table.</li>
+</ul>
+<p>The binding exposes ergonomic methods such as <code>scan</code>, <code>index_scan</code>, <code>insert</code>, <code>update</code>, <code>delete</code>, and <code>prepare_row_for_write</code>. Each method internally uses the <code>TableHeap</code> + <code>MvccHeap</code> pair, appends the appropriate logical WAL record (HeapInsert/Update/Delete), and keeps indexes in sync. This keeps physical operators extremely small and makes it easy to swap out the storage engine for experiments.</p>
 <h2 id="tuple-serialization"><a class="header" href="#tuple-serialization"><code>Tuple</code> Serialization</a></h2>
 <p>A logical <code>Tuple</code> struct in memory must be converted into a byte array to be stored on a page. This process is handled by <code>storage/codec/tuple.rs</code>.</p>
 <p>The serialized format of a tuple consists of two parts:</p>
@@ -1730,6 +1725,15 @@ occur.</li>
 <li>Sets the <code>delete_txn_id</code> on the old version to mark it as "dead".</li>
 </ol>
 <p>A transaction can then traverse this chain and use the transaction IDs in the <code>TupleMeta</code> to determine which version of a row is visible to it based on its own transaction ID and isolation level, thus achieving transaction isolation without long-held read locks.</p>
+<h2 id="logical-logging-redo--undo"><a class="header" href="#logical-logging-redo--undo">Logical Logging (Redo + Undo)</a></h2>
+<p>Every heap mutation emits a logical WAL record before the page frame is dirtied:</p>
+<div class="table-wrapper"><table><thead><tr><th>Operation</th><th>Payload</th><th>Redo</th><th>Undo</th></tr></thead><tbody>
+<tr><td>Insert</td><td><code>HeapInsertPayload</code></td><td>Re-insert tuple bytes into the slot</td><td>Remove the tuple (implicit via delete logic)</td></tr>
+<tr><td>Update</td><td><code>HeapUpdatePayload</code> (new + old meta/data)</td><td>Reapply new meta/bytes</td><td>Restore old meta/bytes</td></tr>
+<tr><td>Delete</td><td><code>HeapDeletePayload</code> (new tombstone + old tuple)</td><td>Mark slot deleted and update version chain</td><td>Recreate the prior tuple image</td></tr>
+</tbody></table>
+</div>
+<p>This makes crash recovery straightforward: redo simply replays the payload, and undo uses the “old” portion of the payload even if the page is currently inconsistent. Physical <code>PageWrite</code>/<code>PageDelta</code> records are still used for metadata-heavy pages (meta, freelist, etc.) to guarantee a consistent starting point, but ordinary table DML lives entirely in these logical heap records.</p>
 <hr />
 <h2 id="for-study--discussion-5"><a class="header" href="#for-study--discussion-5">For Study &amp; Discussion</a></h2>
 <ol>
@@ -1926,7 +1930,7 @@ background.</li>
 </ol>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="index-module"><a class="header" href="#index-module">Index Module</a></h1>
 <p>Indexes live in <code>src/storage/index/</code>. QuillSQL currently ships a B+Tree (B-link variant)
-that is exposed to execution via <code>IndexAccess</code>. Indexes allow point lookups and range
+that is exposed to execution via <code>IndexHandle</code>. Indexes allow point lookups and range
 scans in O(log n), dramatically reducing the need for full table scans.</p>
 <hr />
 <h2 id="responsibilities-7"><a class="header" href="#responsibilities-7">Responsibilities</a></h2>
@@ -1935,7 +1939,7 @@ scans in O(log n), dramatically reducing the need for full table scans.</p>
 <li>Support point probes, range scans, insert/update/delete maintenance.</li>
 <li>Cooperate with MVCC: entries reference heap tuples while visibility checks remain in
 execution/transaction code.</li>
-<li>Provide <code>IndexAccess::range_scan</code>, returning a <code>TupleStream</code> so physical operators don’t
+<li>Provide <code>IndexHandle::range_scan</code>, returning a <code>TupleStream</code> so physical operators don’t
 need to know tree internals.</li>
 </ul>
 <hr />
@@ -1956,7 +1960,7 @@ range scans.</p>
 <p>Insert/delete operations climb the tree with shared latches and upgrade only when
 necessary (e.g., right before splitting), reducing contention.</p>
 <h3 id="range-scan--tuplestream"><a class="header" href="#range-scan--tuplestream">Range Scan → TupleStream</a></h3>
-<p><code>IndexAccess::range_scan</code> wraps <code>TreeIndexIterator</code> and automatically fetches heap tuples,
+<p><code>IndexHandle::range_scan</code> wraps <code>TreeIndexIterator</code> and automatically fetches heap tuples,
 returning <code>(rid, meta, tuple)</code> triples. Execution remains storage-agnostic.</p>
 <h3 id="inline-maintenance"><a class="header" href="#inline-maintenance">Inline Maintenance</a></h3>
 <p>Index inserts/updates/deletes modify the tree immediately and emit logical WAL for redo.
@@ -1967,7 +1971,7 @@ removed in the same transaction.</p>
 <ul>
 <li><strong>Catalog</strong> – stores <code>Arc&lt;BPlusTreeIndex&gt;</code> instances alongside table metadata so
 execution can fetch handles directly.</li>
-<li><strong>Execution</strong> – <code>VecIndexScan</code> uses <code>ExecutionContext::index_stream</code>; DML operators
+<li><strong>Execution</strong> – <code>PhysicalIndexScan</code> uses <code>ExecutionContext::index_stream</code>; DML operators
 call <code>insert_tuple_with_indexes</code> so heap writes and index maintenance stay in sync.</li>
 <li><strong>Transaction/MVCC</strong> – heaps store transaction metadata; indexes just reference RIDs, so
 MVCC visibility is enforced when tuples are materialised.</li>
@@ -2400,19 +2404,6 @@ and before/after tuple bytes.</li>
 <li><strong>Encoding</strong> – <code>src/storage/heap/wal_codec.rs</code> serializes <code>TupleMeta</code> (insert/delete
 txn id, command id, MVCC chain pointers) plus optional previous tuple bytes in a
 compact layout.</li>
-<li><strong>Payload layout</strong> – every payload starts with a <code>RelationIdent</code> (root heap page id),
-the <code>(page_id, slot_id)</code> being modified, and the transaction that issued the change.
-<code>TupleMetaRepr</code> stores MVCC headers (insert/delete ids, command ids, version links),
-followed by the tuple bytes themselves. Updates append optional “before” metadata and
-value bytes so undo can restore the previous version if needed.</li>
-</ul>
-<div class="table-wrapper"><table><thead><tr><th>Operation</th><th>Persisted fields</th><th>Notes</th></tr></thead><tbody>
-<tr><td>Insert</td><td><code>relation</code>, <code>page_id</code>, <code>slot_id</code>, <code>op_txn_id</code>, <code>TupleMetaRepr</code>, tuple bytes</td><td>Redo replays the tuple as-is and restores its MVCC header; no FPW needed.</td></tr>
-<tr><td>Update</td><td>Insert fields + <code>old_tuple_meta</code>, optional <code>old_tuple_data</code></td><td>Provides both versions so undo can resurrect the old tuple and redo can overwrite safely.</td></tr>
-<tr><td>Delete</td><td><code>relation</code>, <code>page_id</code>, <code>slot_id</code>, <code>op_txn_id</code>, new+old metadata, optional old bytes</td><td>Records how the tuple became invisible plus the bytes that should be restored if the delete rolls back.</td></tr>
-</tbody></table>
-</div>
-<ul>
 <li><strong>Redo</strong> – <code>HeapResourceManager</code> (<code>src/storage/heap/heap_recovery.rs</code>) decodes the
 payload, reconstructs a <code>PageImage</code>, applies insert / overwrite / delete to the target
 slot, and writes the rebuilt page back, updating the page LSN. If the buffer pool is
@@ -2430,11 +2421,6 @@ scenarios, but small updates remain lightweight.</li>
 <code>append_index_record</code> (<code>src/storage/index/btree_index.rs:86-145</code>), using
 <code>src/storage/index/wal_codec.rs</code> to encode key schema, key bytes, target page, and
 transaction id.</li>
-<li><strong>Payload layout</strong> – every record starts with an <code>IndexRelationIdent</code> that embeds the
-header page id plus a compact <code>SchemaRepr</code> for the key columns. The payload then stores
-the leaf <code>page_id</code>, the transaction that issued the change, and the key bytes encoded
-with <code>TupleCodec</code>. Inserts also log the <code>RecordId</code> that the key points to; deletes
-carry the last RID so undo can reinsert it; updates carry both the old and new RID.</li>
 <li><strong>Redo</strong> (<code>src/storage/index/index_recovery.rs</code>) steps:
 <ol>
 <li>Decode the key with <code>TupleCodec</code> using the stored schema.</li>
@@ -2450,12 +2436,6 @@ update→restore old RID) only for loser transactions.</li>
 and logical leaf updates avoid writing full-page images for small key/value changes.
 Structural operations (splits/merges) still rely on page-level logging.</li>
 </ul>
-<div class="table-wrapper"><table><thead><tr><th>Operation</th><th>Payload contents</th><th>Purpose</th></tr></thead><tbody>
-<tr><td>Leaf insert</td><td><code>IndexRelationIdent</code>, <code>page_id</code>, <code>op_txn_id</code>, encoded key bytes, <code>rid</code></td><td>Adds a new <code>(key, rid)</code> pair to the leaf.</td></tr>
-<tr><td>Leaf delete</td><td>Same header fields + <code>old_rid</code></td><td>Removes a key and remembers which RID previously occupied it.</td></tr>
-<tr><td>Leaf update</td><td>Header fields + <code>old_rid</code> + <code>new_rid</code></td><td>Updates the RID a key points at, e.g., after heap updates move tuples.</td></tr>
-</tbody></table>
-</div>
 <hr />
 <h2 id="5-buffering--flush-strategy"><a class="header" href="#5-buffering--flush-strategy">5. Buffering &amp; flush strategy</a></h2>
 <ul>

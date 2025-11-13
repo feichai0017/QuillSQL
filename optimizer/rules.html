@@ -191,7 +191,7 @@
   └── Sort(by: signup_date, limit: 10)
         └── TableScan(users)
 </code></pre>
-<p>Notice the new <code>limit: 10</code> property on the <code>Sort</code> node. This seemingly small change has a huge performance impact. When the vectorized <code>Sort</code> operator is created from this logical node, it now knows that it only needs to find the top 10 rows. Instead of performing a full sort, it can use a much more efficient algorithm, like a <strong>heap sort (using a min-heap of size 10)</strong>, to find the top 10 rows in a single pass over the data.</p>
+<p>Notice the new <code>limit: 10</code> property on the <code>Sort</code> node. This seemingly small change has a huge performance impact. When the <code>PhysicalSort</code> operator is created from this logical node, it now knows that it only needs to find the top 10 rows. Instead of performing a full sort, it can use a much more efficient algorithm, like a <strong>heap sort (using a min-heap of size 10)</strong>, to find the top 10 rows in a single pass over the data.</p>
 <p>This optimization avoids sorting the entire table, dramatically reducing both CPU and memory consumption.</p>
 <h2 id="other-rules"><a class="header" href="#other-rules">Other Rules</a></h2>
 <p>QuillSQL implements other simple but effective rules:</p>

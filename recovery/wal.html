@@ -207,19 +207,6 @@ and before/after tuple bytes.</li>
 <li><strong>Encoding</strong> – <code>src/storage/heap/wal_codec.rs</code> serializes <code>TupleMeta</code> (insert/delete
 txn id, command id, MVCC chain pointers) plus optional previous tuple bytes in a
 compact layout.</li>
-<li><strong>Payload layout</strong> – every payload starts with a <code>RelationIdent</code> (root heap page id),
-the <code>(page_id, slot_id)</code> being modified, and the transaction that issued the change.
-<code>TupleMetaRepr</code> stores MVCC headers (insert/delete ids, command ids, version links),
-followed by the tuple bytes themselves. Updates append optional “before” metadata and
-value bytes so undo can restore the previous version if needed.</li>
-</ul>
-<div class="table-wrapper"><table><thead><tr><th>Operation</th><th>Persisted fields</th><th>Notes</th></tr></thead><tbody>
-<tr><td>Insert</td><td><code>relation</code>, <code>page_id</code>, <code>slot_id</code>, <code>op_txn_id</code>, <code>TupleMetaRepr</code>, tuple bytes</td><td>Redo replays the tuple as-is and restores its MVCC header; no FPW needed.</td></tr>
-<tr><td>Update</td><td>Insert fields + <code>old_tuple_meta</code>, optional <code>old_tuple_data</code></td><td>Provides both versions so undo can resurrect the old tuple and redo can overwrite safely.</td></tr>
-<tr><td>Delete</td><td><code>relation</code>, <code>page_id</code>, <code>slot_id</code>, <code>op_txn_id</code>, new+old metadata, optional old bytes</td><td>Records how the tuple became invisible plus the bytes that should be restored if the delete rolls back.</td></tr>
-</tbody></table>
-</div>
-<ul>
 <li><strong>Redo</strong> – <code>HeapResourceManager</code> (<code>src/storage/heap/heap_recovery.rs</code>) decodes the
 payload, reconstructs a <code>PageImage</code>, applies insert / overwrite / delete to the target
 slot, and writes the rebuilt page back, updating the page LSN. If the buffer pool is
@@ -237,11 +224,6 @@ scenarios, but small updates remain lightweight.</li>
 <code>append_index_record</code> (<code>src/storage/index/btree_index.rs:86-145</code>), using
 <code>src/storage/index/wal_codec.rs</code> to encode key schema, key bytes, target page, and
 transaction id.</li>
-<li><strong>Payload layout</strong> – every record starts with an <code>IndexRelationIdent</code> that embeds the
-header page id plus a compact <code>SchemaRepr</code> for the key columns. The payload then stores
-the leaf <code>page_id</code>, the transaction that issued the change, and the key bytes encoded
-with <code>TupleCodec</code>. Inserts also log the <code>RecordId</code> that the key points to; deletes
-carry the last RID so undo can reinsert it; updates carry both the old and new RID.</li>
 <li><strong>Redo</strong> (<code>src/storage/index/index_recovery.rs</code>) steps:
 <ol>
 <li>Decode the key with <code>TupleCodec</code> using the stored schema.</li>
@@ -257,12 +239,6 @@ update→restore old RID) only for loser transactions.</li>
 and logical leaf updates avoid writing full-page images for small key/value changes.
 Structural operations (splits/merges) still rely on page-level logging.</li>
 </ul>
-<div class="table-wrapper"><table><thead><tr><th>Operation</th><th>Payload contents</th><th>Purpose</th></tr></thead><tbody>
-<tr><td>Leaf insert</td><td><code>IndexRelationIdent</code>, <code>page_id</code>, <code>op_txn_id</code>, encoded key bytes, <code>rid</code></td><td>Adds a new <code>(key, rid)</code> pair to the leaf.</td></tr>
-<tr><td>Leaf delete</td><td>Same header fields + <code>old_rid</code></td><td>Removes a key and remembers which RID previously occupied it.</td></tr>
-<tr><td>Leaf update</td><td>Header fields + <code>old_rid</code> + <code>new_rid</code></td><td>Updates the RID a key points at, e.g., after heap updates move tuples.</td></tr>
-</tbody></table>
-</div>
 <hr />
 <h2 id="5-buffering--flush-strategy"><a class="header" href="#5-buffering--flush-strategy">5. Buffering &amp; flush strategy</a></h2>
 <ul>

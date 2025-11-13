@@ -157,6 +157,14 @@
                     <main>
                         <h1 id="table-heap-and-mvcc"><a class="header" href="#table-heap-and-mvcc">Table Heap and MVCC</a></h1>
 <p>The <code>TableHeap</code> (<code>storage/table_heap.rs</code>) is the component responsible for managing the collection of pages that belong to a single table. While the <code>TablePage</code> defines the <em>layout</em> within a single page, the <code>TableHeap</code> provides the high-level API for inserting, updating, and deleting tuples, making it central to the implementation of MVCC.</p>
+<h2 id="tablebinding--storageengine"><a class="header" href="#tablebinding--storageengine">TableBinding &amp; StorageEngine</a></h2>
+<p>From the executor’s perspective, heap access is routed through <code>storage::engine::TableBinding</code>. A binding is produced by the <code>StorageEngine</code> (consulting the catalog) and carries:</p>
+<ul>
+<li>An <code>Arc&lt;TableHeap&gt;</code> for physical page access.</li>
+<li>An <code>MvccHeap</code> wrapper that maintains version chains.</li>
+<li>All indexes defined on the table.</li>
+</ul>
+<p>The binding exposes ergonomic methods such as <code>scan</code>, <code>index_scan</code>, <code>insert</code>, <code>update</code>, <code>delete</code>, and <code>prepare_row_for_write</code>. Each method internally uses the <code>TableHeap</code> + <code>MvccHeap</code> pair, appends the appropriate logical WAL record (HeapInsert/Update/Delete), and keeps indexes in sync. This keeps physical operators extremely small and makes it easy to swap out the storage engine for experiments.</p>
 <h2 id="tuple-serialization"><a class="header" href="#tuple-serialization"><code>Tuple</code> Serialization</a></h2>
 <p>A logical <code>Tuple</code> struct in memory must be converted into a byte array to be stored on a page. This process is handled by <code>storage/codec/tuple.rs</code>.</p>
 <p>The serialized format of a tuple consists of two parts:</p>
@@ -181,6 +189,15 @@
 <li>Sets the <code>delete_txn_id</code> on the old version to mark it as "dead".</li>
 </ol>
 <p>A transaction can then traverse this chain and use the transaction IDs in the <code>TupleMeta</code> to determine which version of a row is visible to it based on its own transaction ID and isolation level, thus achieving transaction isolation without long-held read locks.</p>
+<h2 id="logical-logging-redo--undo"><a class="header" href="#logical-logging-redo--undo">Logical Logging (Redo + Undo)</a></h2>
+<p>Every heap mutation emits a logical WAL record before the page frame is dirtied:</p>
+<div class="table-wrapper"><table><thead><tr><th>Operation</th><th>Payload</th><th>Redo</th><th>Undo</th></tr></thead><tbody>
+<tr><td>Insert</td><td><code>HeapInsertPayload</code></td><td>Re-insert tuple bytes into the slot</td><td>Remove the tuple (implicit via delete logic)</td></tr>
+<tr><td>Update</td><td><code>HeapUpdatePayload</code> (new + old meta/data)</td><td>Reapply new meta/bytes</td><td>Restore old meta/bytes</td></tr>
+<tr><td>Delete</td><td><code>HeapDeletePayload</code> (new tombstone + old tuple)</td><td>Mark slot deleted and update version chain</td><td>Recreate the prior tuple image</td></tr>
+</tbody></table>
+</div>
+<p>This makes crash recovery straightforward: redo simply replays the payload, and undo uses the “old” portion of the payload even if the page is currently inconsistent. Physical <code>PageWrite</code>/<code>PageDelta</code> records are still used for metadata-heavy pages (meta, freelist, etc.) to guarantee a consistent starting point, but ordinary table DML lives entirely in these logical heap records.</p>
 <hr />
 <h2 id="for-study--discussion"><a class="header" href="#for-study--discussion">For Study &amp; Discussion</a></h2>
 <ol>

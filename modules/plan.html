@@ -157,8 +157,8 @@
                     <main>
                         <h1 id="query-planner-module"><a class="header" href="#query-planner-module">Query Planner Module</a></h1>
 <p><code>src/plan/</code> bridges parsed SQL and executable operators. It converts the AST into a
-logical plan, applies rewrites (via the optimizer), and finally emits a vectorized plan
-(<code>VecPlan</code>) that the Volcano engine can run.</p>
+logical plan, applies rewrites (via the optimizer), and finally emits a physical plan
+(<code>PhysicalPlan</code>) that the Volcano engine can run.</p>
 <hr />
 <h2 id="responsibilities"><a class="header" href="#responsibilities">Responsibilities</a></h2>
 <ol>
@@ -166,15 +166,15 @@ logical plan, applies rewrites (via the optimizer), and finally emits a vectoriz
 performs type checking, and builds a <code>LogicalPlan</code> tree.</li>
 <li><strong>PlannerContext</strong> – exposes catalog lookups plus scope information for CTEs, subqueries,
 and aliases.</li>
-<li><strong>VecPlanner</strong> – lowers an optimized <code>LogicalPlan</code> into a tree of Volcano-style metadata (<code>VecPlan</code>).</li>
+<li><strong>PhysicalPlanner</strong> – lowers an optimized <code>LogicalPlan</code> into a tree of Volcano operators.</li>
 </ol>
 <hr />
 <h2 id="directory-layout"><a class="header" href="#directory-layout">Directory Layout</a></h2>
 <div class="table-wrapper"><table><thead><tr><th>Path</th><th>Description</th><th>Key Types</th></tr></thead><tbody>
 <tr><td><code>logical_plan.rs</code></td><td>Logical algebra nodes.</td><td><code>LogicalPlan</code>, <code>LogicalExpr</code>, <code>JoinType</code></td></tr>
 <tr><td><code>logical_planner.rs</code></td><td>AST → logical transformation.</td><td><code>LogicalPlanner</code></td></tr>
-<tr><td><code>vec_plan.rs</code></td><td><code>VecPlan</code> enum definition plus helper structs.</td><td><code>VecPlan</code>, <code>Vec*</code> structs</td></tr>
-<tr><td><code>vec_planner/</code></td><td>Logical → vector plan lowering.</td><td><code>VecPlanner</code></td></tr>
+<tr><td><code>physical_plan.rs</code></td><td><code>PhysicalPlan</code> enum definition.</td><td><code>PhysicalPlan</code>, <code>Physical*</code> structs</td></tr>
+<tr><td><code>physical_planner.rs</code></td><td>Logical → physical lowering.</td><td><code>PhysicalPlanner</code></td></tr>
 <tr><td><code>planner_context.rs</code></td><td>Catalog/scope abstraction.</td><td><code>PlannerContext</code></td></tr>
 </tbody></table>
 </div>
@@ -185,9 +185,9 @@ and aliases.</li>
 <code>TableReference</code>s, and validates schemas via the catalog.</li>
 <li><strong>Logical tree</strong> – each SQL clause becomes a logical node (FROM → <code>SeqScan</code>, WHERE →
 <code>Filter</code>, GROUP BY → <code>Aggregate</code>, etc.).</li>
-<li><strong>Vector selection</strong> – <code>VecPlanner</code> picks concrete algorithms (sequential scan,
-index scan, nested-loop join, sort, limit …). Because every Vec node feeds directly
-into chunk operators, the execution engine can pull <code>DataChunk</code>s immediately.</li>
+<li><strong>Physical selection</strong> – <code>PhysicalPlanner</code> picks concrete algorithms (sequential scan,
+index scan, nested-loop join, sort, limit …). Because every physical node implements
+<code>VolcanoExecutor</code>, the execution engine can pull tuples immediately.</li>
 </ol>
 <hr />
 <h2 id="interactions"><a class="header" href="#interactions">Interactions</a></h2>
@@ -198,17 +198,17 @@ resolution consistent.</li>
 schemas.</li>
 <li><strong>Optimizer</strong> – operates purely on <code>LogicalPlan</code>; the planner must emit clean,
 traversable trees so rules can fire.</li>
-<li><strong>Execution</strong> – Vec nodes carry <code>TableReference</code>, <code>SchemaRef</code>, and hints that the
+<li><strong>Execution</strong> – physical nodes carry <code>TableReference</code>, <code>SchemaRef</code>, and hints that the
 execution engine passes to the storage layer.</li>
 </ul>
 <hr />
 <h2 id="teaching-ideas"><a class="header" href="#teaching-ideas">Teaching Ideas</a></h2>
 <ul>
-<li>Implement a new logical operator (e.g., <code>LogicalDistinct</code>) and extend the <code>VecPlanner</code>
-to emit the corresponding vector operator to trace the full lifecycle.</li>
+<li>Implement a new logical operator (e.g., <code>LogicalDistinct</code>) and add the corresponding
+physical operator to trace the full lifecycle.</li>
 <li>Experiment with early projection inside the logical plan and observe its impact on
 downstream operators.</li>
-<li>Use <code>pretty_format_logical_plan</code>/<code>pretty_format_vec_plan</code> dumps to visualise rewrites before and
+<li>Use <code>pretty_format_logical_plan</code>/<code>physical_plan</code> dumps to visualise rewrites before and
 after optimizer passes.</li>
 </ul>
 <hr />

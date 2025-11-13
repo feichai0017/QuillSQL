@@ -172,9 +172,9 @@ on-disk metadata pages.</li>
 <hr />
 <h2 id="directory-layout"><a class="header" href="#directory-layout">Directory Layout</a></h2>
 <div class="table-wrapper"><table><thead><tr><th>Path</th><th>Description</th><th>Key Types</th></tr></thead><tbody>
-<tr><td><code>mod.rs</code></td><td>Public API surface.</td><td><code>Catalog</code>, <code>TableRegistry</code></td></tr>
+<tr><td><code>mod.rs</code></td><td>Public API surface.</td><td><code>Catalog</code>, <code>TableHandleRef</code></td></tr>
 <tr><td><code>schema.rs</code></td><td>Schema objects and table references.</td><td><code>Schema</code>, <code>Column</code>, <code>TableReference</code></td></tr>
-<tr><td><code>registry/</code></td><td>Thread-safe registry for heaps (MVCC vacuum).</td><td><code>TableRegistry</code>, <code>RegisteredTable</code></td></tr>
+<tr><td><code>registry/</code></td><td>Thread-safe registry for heaps (MVCC vacuum).</td><td><code>TableRegistry</code></td></tr>
 <tr><td><code>statistics.rs</code></td><td>ANALYZE output and helpers.</td><td><code>TableStatistics</code></td></tr>
 <tr><td><code>loader.rs</code></td><td>Boot-time metadata loader.</td><td><code>load_catalog_data</code></td></tr>
 </tbody></table>
@@ -201,9 +201,9 @@ estimate, enabling DuckDB-style selectivity heuristics (<code>1/distinct</code>,
 <ul>
 <li><strong>SQL / Planner</strong> – DDL planning calls <code>Catalog::create_table</code> / <code>create_index</code>; name
 binding relies on <code>Schema</code>.</li>
-<li><strong>Execution</strong> – <code>ExecutionContext::table_access</code> and <code>index_access</code> fetch physical
+<li><strong>Execution</strong> – <code>ExecutionContext::table_handle</code> and <code>index_handle</code> fetch physical
 handles through the catalog, so scans never hard-code heap locations.</li>
-<li><strong>Background workers</strong> – MVCC and index vacuum iterate <code>RegisteredTable</code> handles from the registry, so maintenance code never touches raw <code>TableHeap</code>s directly.</li>
+<li><strong>Background workers</strong> – MVCC and index vacuum iterate the registries via <code>Arc</code> clones.</li>
 <li><strong>Recovery</strong> – <code>load_catalog_data</code> rebuilds the in-memory catalog from control files and
 metadata pages during startup.</li>
 </ul>
