@@ -21,27 +21,13 @@ pub trait VolcanoExecutor {
 
 ## 2. The `ExecutionContext`
 
-Notice that both `init()` and `next()` take a mutable `ExecutionContext`. This object is the "context" or "world" in which the query runs. It is passed down the entire operator tree and gives each operator access to crucial services:
+Notice that both `init()` and `next()` take a mutable `ExecutionContext`. This object is the “world” in which the query runs. It is passed down the operator tree and exposes:
 
-- **`Catalog`**: To look up tables and indexes.
-- **`TransactionManager` and `Transaction`**: To interact with the current transaction. This is how operators perform locking and visibility checks.
-- **`MvccSnapshot`**: The specific MVCC snapshot for the current transaction, used to determine which tuple versions are visible.
-- **`StorageEngine`**: A pluggable trait that hides TableHeap/B+Tree specifics.
-- **Helper APIs**: See below.
+- **`Catalog` + `StorageEngine`**: Operators call `context.table(&table_ref)` to obtain a `TableBinding`. The binding encapsulates heap/index access (scan, insert, delete, update, prepare-row-for-write) so operators never touch `TableHeap` or `MvccHeap` directly.
+- **`TxnContext`**: Provides the current transaction, MVCC snapshot, and helper methods for row/table locks and visibility checks.
+- **Expression helpers**: `eval_expr` / `eval_predicate` evaluate AST expressions against a tuple without leaking `ScalarValue` plumbing into operators.
 
-### ExecutionContext helper APIs
-
-To keep physical operators tiny, QuillSQL exposes a few battle-tested helpers:
-
-- `read_visible_tuple(table, rid, meta, tuple)` performs the MVCC visibility check and acquires the correct shared locks for the current isolation level.
-- `prepare_row_for_write` / `apply_update` / `apply_delete` take care of X locks, re-reading the latest version, index maintenance, and undo logging for UPDATE/DELETE.
-- `insert_tuple_with_indexes` inserts into the heap **and** updates every index in one call.
-- `eval_predicate` / `eval_expr` encapsulate expression evaluation (and boolean coercion), so operators never have to fiddle with `ScalarValue`.
-- DDL helpers (`create_table`, `drop_table`, `create_index`, …) proxy the catalog so CREATE/DROP operators stay declarative.
-
-All of these helpers delegate to the storage engine. By default we ship a TableHeap+B+Tree engine, but research exercises can implement their own engine and plug it into the context without modifying operators.
-
-This design cleanly separates the operator's logic from the transactional context it runs in.
+Thanks to the binding abstraction, the operator code only expresses “what” should happen (scan/update/delete) while the binding implements “how” (MVCC chain navigation, undo logging, index maintenance).
 
 ## 3. Anatomy of Physical Operators
 
@@ -49,14 +35,15 @@ Data flows *up* the tree from the leaves (scans) to the root. Let's see how it w
 
 ### Leaf Operator: `PhysicalSeqScan`
 
-A sequential scan is at the leaf of a plan tree. It's responsible for reading tuples from a table on disk.
+A sequential scan sits at the leaf of a plan tree and streams tuples from a table binding.
 
-- **`init()`**: It acquires an `IntentionShared` lock on the table and creates a `TableIterator` for the table heap.
-- **`next()`**: In a loop, it does the following:
-    1.  Pulls the next raw tuple `(rid, meta, tuple)` from the `TableIterator`.
-    2.  Calls `context.is_visible(&meta)` to perform an **MVCC visibility check** using the transaction's snapshot.
-    3.  If the tuple version is visible, it acquires the necessary row lock (e.g., `Shared` lock) and returns the tuple.
-    4.  If the tuple is not visible, it ignores it and loops to get the next one.
+- **`init()`**:
+    1.  Acquires an `IntentionShared` lock on the table via `TxnContext`.
+    2.  Requests a `TableBinding` (`context.table(&table_ref)`) and calls `binding.scan(...)` to obtain a `TupleStream`. The binding hides the actual `TableIterator` implementation and any MVCC plumbing.
+- **`next()`**:
+    1.  Pops the next `(rid, meta, tuple)` from its prefetch buffer (which in turn pulls from the binding’s stream).
+    2.  Calls `TxnContext::read_visible_tuple` to perform the MVCC visibility check and acquire the required shared row lock.
+    3.  Returns the tuple if visible; otherwise, keep looping.
 
 ### Unary Operator: `PhysicalFilter`
 
@@ -87,10 +74,10 @@ Consider the query `SELECT name FROM users WHERE age > 30`. The physical plan is
 1.  The `ExecutionEngine` calls `next()` on the `Projection` operator.
 2.  The `Projection` operator needs a tuple, so it calls `next()` on its child, `Filter`.
 3.  The `Filter` operator needs a tuple, so it calls `next()` on its child, `SeqScan`.
-4.  The `SeqScan` operator fetches a raw tuple from the `TableHeap`, checks its MVCC visibility, and finds a visible tuple for a user with `age = 25`.
+4.  The `SeqScan` operator asks its `TableBinding` for the next tuple, and after the MVCC check finds a visible tuple for a user with `age = 25`.
 5.  `SeqScan` returns this tuple up to `Filter`.
 6.  `Filter` evaluates `age > 30` on the tuple. It's false, so it loops, calling `SeqScan.next()` again.
-7.  `SeqScan` finds another visible tuple, this time for a user with `age = 40` and `name = 'Alice'`.
+7.  `SeqScan` pulls another visible tuple (this time `age = 40`, `name = 'Alice'`) through the binding.
 8.  `SeqScan` returns this tuple up to `Filter`.
 9.  `Filter` evaluates `age > 30`. It's true! It returns the tuple for Alice up to `Projection`.
 10. `Projection` takes the full tuple for Alice, creates a new tuple containing only the `name` column (`'Alice'`), and returns this new tuple as the result.

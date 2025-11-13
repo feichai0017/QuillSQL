@@ -9,9 +9,8 @@ use crate::catalog::{
     INFORMATION_SCHEMA_SCHEMAS, INFORMATION_SCHEMA_TABLES, SCHEMAS_SCHEMA, TABLES_SCHEMA,
 };
 use crate::storage::disk_manager::DiskManager;
-use crate::storage::page::{
-    BPLUS_INTERNAL_PAGE_MAX_SIZE, BPLUS_LEAF_PAGE_MAX_SIZE, EMPTY_TUPLE_META,
-};
+use crate::storage::heap::MvccHeap;
+use crate::storage::page::{BPLUS_INTERNAL_PAGE_MAX_SIZE, BPLUS_LEAF_PAGE_MAX_SIZE};
 use crate::storage::table_heap::{TableHeap, TableIterator};
 use crate::storage::tuple::Tuple;
 use crate::transaction::{CommandId, TransactionId};
@@ -121,9 +120,11 @@ impl Catalog {
                 schema_name.clone().into(),
             ],
         );
-        schemas_table
-            .table
-            .insert_tuple(&EMPTY_TUPLE_META, &tuple)?;
+        let _ = MvccHeap::new(schemas_table.table.clone()).insert(
+            &tuple,
+            SYSTEM_TXN_ID,
+            SYSTEM_COMMAND_ID,
+        )?;
         Ok(())
     }
 
@@ -191,7 +192,11 @@ impl Catalog {
                 (table_heap.first_page_id.load(Ordering::SeqCst)).into(),
             ],
         );
-        tables_table.table.insert_tuple(&EMPTY_TUPLE_META, &tuple)?;
+        let _ = MvccHeap::new(tables_table.table.clone()).insert(
+            &tuple,
+            SYSTEM_TXN_ID,
+            SYSTEM_COMMAND_ID,
+        )?;
 
         let Some(columns_table) = information_schema
             .tables
@@ -201,6 +206,7 @@ impl Catalog {
                 "table information_schema.columns not created yet".to_string(),
             ));
         };
+        let columns_mvcc = MvccHeap::new(columns_table.table.clone());
         for col in schema.columns.iter() {
             let sql_type: sqlparser::ast::DataType = (&col.data_type).into();
             let tuple = Tuple::new(
@@ -215,9 +221,7 @@ impl Catalog {
                     format!("{}", col.default).into(),
                 ],
             );
-            columns_table
-                .table
-                .insert_tuple(&EMPTY_TUPLE_META, &tuple)?;
+            let _ = columns_mvcc.insert(&tuple, SYSTEM_TXN_ID, SYSTEM_COMMAND_ID)?;
         }
 
         Ok(table_heap)
@@ -428,9 +432,11 @@ impl Catalog {
                 b_plus_tree_index.header_page_id.into(),
             ],
         );
-        indexes_table
-            .table
-            .insert_tuple(&EMPTY_TUPLE_META, &tuple)?;
+        let _ = MvccHeap::new(indexes_table.table.clone()).insert(
+            &tuple,
+            SYSTEM_TXN_ID,
+            SYSTEM_COMMAND_ID,
+        )?;
 
         Ok(b_plus_tree_index)
     }
@@ -744,10 +750,11 @@ impl Catalog {
     where
         F: FnMut(&Tuple) -> QuillSQLResult<bool>,
     {
+        let mvcc = MvccHeap::new(heap.clone());
         let mut iterator = TableIterator::new(heap.clone(), ..);
         while let Some((rid, _meta, tuple)) = iterator.next()? {
             if predicate(&tuple)? {
-                heap.delete_tuple(rid, SYSTEM_TXN_ID, SYSTEM_COMMAND_ID, None)?;
+                let _ = mvcc.mark_deleted(rid, SYSTEM_TXN_ID, SYSTEM_COMMAND_ID)?;
             }
         }
         Ok(())

@@ -1,10 +1,10 @@
 use log::debug;
 use std::sync::atomic::Ordering;
-use std::sync::{atomic::AtomicU32, Arc};
+use std::sync::{atomic::AtomicU32, Arc, OnceLock};
 
 use crate::catalog::{SchemaRef, INSERT_OUTPUT_SCHEMA_REF};
 use crate::error::QuillSQLError;
-use crate::storage::tuple::Tuple;
+use crate::storage::{engine::TableBinding, tuple::Tuple};
 use crate::transaction::LockMode;
 use crate::utils::scalar::ScalarValue;
 use crate::utils::table_ref::TableReference;
@@ -23,6 +23,7 @@ pub struct PhysicalInsert {
     pub input: Arc<PhysicalPlan>,
 
     insert_rows: AtomicU32,
+    table_binding: OnceLock<TableBinding>,
 }
 impl PhysicalInsert {
     pub fn new(
@@ -37,6 +38,7 @@ impl PhysicalInsert {
             projected_schema,
             input,
             insert_rows: AtomicU32::new(0),
+            table_binding: OnceLock::new(),
         }
     }
 }
@@ -55,6 +57,10 @@ impl VolcanoExecutor for PhysicalInsert {
                 "failed to acquire IX lock on table {}",
                 self.table
             )));
+        }
+        if self.table_binding.get().is_none() {
+            let binding = context.table(&self.table)?;
+            let _ = self.table_binding.set(binding);
         }
         Ok(())
     }
@@ -97,7 +103,11 @@ impl VolcanoExecutor for PhysicalInsert {
 
             let tuple = Tuple::new(self.table_schema.clone(), full_data);
 
-            context.insert_tuple_with_indexes(&self.table, &tuple)?;
+            let binding = self
+                .table_binding
+                .get()
+                .expect("table binding not initialized");
+            binding.insert(context.txn_ctx_mut(), &tuple)?;
 
             self.insert_rows.fetch_add(1, Ordering::SeqCst);
         }

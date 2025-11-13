@@ -1,12 +1,13 @@
 use parking_lot::Mutex;
 use std::ops::{Bound, RangeBounds};
+use std::sync::OnceLock;
 
 use super::scan::ScanPrefetch;
 use crate::catalog::SchemaRef;
 use crate::error::QuillSQLError;
 use crate::execution::{ExecutionContext, VolcanoExecutor};
 use crate::storage::{
-    engine::{IndexScanRequest, TupleStream},
+    engine::{IndexScanRequest, TableBinding, TupleStream},
     page::{RecordId, TupleMeta},
 };
 use crate::transaction::{IsolationLevel, LockMode};
@@ -22,6 +23,7 @@ pub struct PhysicalIndexScan {
     end_bound: Bound<Tuple>,
     stream: Mutex<Option<Box<dyn TupleStream>>>,
     prefetch: ScanPrefetch,
+    table_binding: OnceLock<TableBinding>,
 }
 
 impl PhysicalIndexScan {
@@ -39,6 +41,7 @@ impl PhysicalIndexScan {
             end_bound: range.end_bound().cloned(),
             stream: Mutex::new(None),
             prefetch: ScanPrefetch::new(INDEX_PREFETCH_BATCH),
+            table_binding: OnceLock::new(),
         }
     }
 
@@ -84,9 +87,16 @@ impl VolcanoExecutor for PhysicalIndexScan {
                 .lock_table(self.table_ref.clone(), LockMode::IntentionShared)?;
         }
 
+        if self.table_binding.get().is_none() {
+            let binding = context.table(&self.table_ref)?;
+            let _ = self.table_binding.set(binding);
+        }
+        let binding = self
+            .table_binding
+            .get()
+            .expect("table binding not initialized");
         let request = IndexScanRequest::new(self.start_bound.clone(), self.end_bound.clone());
-        *self.stream.lock() =
-            Some(context.index_stream(&self.table_ref, &self.index_name, request)?);
+        *self.stream.lock() = Some(binding.index_scan(&self.index_name, request)?);
 
         self.prefetch.clear();
 

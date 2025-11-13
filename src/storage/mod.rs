@@ -9,8 +9,8 @@ pub mod page;
 pub mod tuple;
 
 pub use engine::{
-    DefaultStorageEngine, IndexHandle, IndexScanRequest, ScanOptions, StorageEngine, TableHandle,
-    TupleStream,
+    DefaultStorageEngine, IndexHandle, IndexScanRequest, ScanOptions, StorageEngine, TableBinding,
+    TableHandle, TupleStream,
 };
 
 pub use heap::heap_recovery;

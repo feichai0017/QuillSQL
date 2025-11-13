@@ -3,7 +3,7 @@ use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::execution::{ExecutionContext, VolcanoExecutor};
 use crate::expression::Expr;
 use crate::storage::{
-    engine::{ScanOptions, TupleStream},
+    engine::{ScanOptions, TableBinding, TupleStream},
     tuple::Tuple,
 };
 use crate::transaction::LockMode;
@@ -12,6 +12,7 @@ use crate::utils::table_ref::TableReference;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
+use std::sync::OnceLock;
 
 pub struct PhysicalUpdate {
     pub table: TableReference,
@@ -21,6 +22,7 @@ pub struct PhysicalUpdate {
 
     update_rows: AtomicU32,
     table_iterator: Mutex<Option<Box<dyn TupleStream>>>,
+    table_binding: OnceLock<TableBinding>,
 }
 
 impl PhysicalUpdate {
@@ -37,6 +39,7 @@ impl PhysicalUpdate {
             selection,
             update_rows: AtomicU32::new(0),
             table_iterator: Mutex::new(None),
+            table_binding: OnceLock::new(),
         }
     }
 }
@@ -45,7 +48,15 @@ impl VolcanoExecutor for PhysicalUpdate {
     fn init(&self, context: &mut ExecutionContext) -> QuillSQLResult<()> {
         self.update_rows.store(0, Ordering::SeqCst);
         context.txn_ctx().ensure_writable(&self.table, "UPDATE")?;
-        let stream = context.table_stream(&self.table, ScanOptions::default())?;
+        if self.table_binding.get().is_none() {
+            let binding = context.table(&self.table)?;
+            let _ = self.table_binding.set(binding);
+        }
+        let binding = self
+            .table_binding
+            .get()
+            .expect("table binding not initialized");
+        let stream = binding.scan(ScanOptions::default())?;
         *self.table_iterator.lock().unwrap() = Some(stream);
         context
             .txn_ctx_mut()
@@ -82,8 +93,12 @@ impl VolcanoExecutor for PhysicalUpdate {
                     }
                 }
 
+                let binding = self
+                    .table_binding
+                    .get()
+                    .expect("table binding not initialized");
                 let Some((prev_meta, mut current_tuple)) =
-                    context.prepare_row_for_write(&self.table, rid, &meta)?
+                    binding.prepare_row_for_write(context.txn_ctx_mut(), rid, &meta)?
                 else {
                     continue;
                 };
@@ -103,8 +118,8 @@ impl VolcanoExecutor for PhysicalUpdate {
                     current_tuple.data[index] = new_value.clone();
                     eval_tuple.data[index] = new_value;
                 }
-                let _ = context.apply_update(
-                    &self.table,
+                binding.update(
+                    context.txn_ctx_mut(),
                     rid,
                     current_tuple.clone(),
                     prev_meta,

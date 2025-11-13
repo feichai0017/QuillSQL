@@ -1,169 +1,236 @@
 # QuillSQL Architecture
 
-This document explains how a SQL request flows through QuillSQL, how transactional MVCC and background services plug in, and how the main modules collaborate. All diagrams use Mermaid so you can paste them into any compatible renderer for a richer view.
+This chapter gives a tour of the major subsystems, the flow of a SQL statement, and the contract between execution, transactions, and storage. It uses Mermaid diagrams so you can render the visuals directly inside mdBook or any compatible viewer.
 
 ---
 
-## 1. End-to-End Request Pipeline
+## 1. End-to-End Pipeline
 
 ```mermaid
-flowchart TD
-    Client["CLI / HTTP client"] --> API["bin/client / bin/server"]
-    API --> Parser["sql::parser"]
-    Parser --> LPlanner["plan::LogicalPlanner"]
-    LPlanner --> Optimizer["optimizer::LogicalOptimizer"]
-    Optimizer --> PhysPlanner["plan::PhysicalPlanner"]
-    PhysPlanner --> Exec["execution::ExecutionEngine (Volcano)"]
+flowchart LR
+    subgraph Frontend
+        CLI["bin/client"] --> Parser["sql::parser"]
+        HTTP["bin/server"] --> Parser
+    end
+    Parser --> LPlan["plan::LogicalPlanner"]
+    LPlan --> Optimizer["optimizer::LogicalOptimizer"]
+    Optimizer --> PPlan["plan::PhysicalPlanner"]
+    PPlan --> Exec["execution::ExecutionEngine (Volcano)"]
 
-    subgraph Txn["Transaction Layer"]
+    subgraph Txn["transaction::*"]
         Session["session::SessionContext"]
-        TM["transaction::TransactionManager"]
-        LM["transaction::LockManager"]
+        TM["TransactionManager"]
+        LM["LockManager"]
         Session --> TM --> LM
     end
 
-    Exec -->|Tuple meta & locks| Txn
-    Exec --> Storage
+    Exec <-->|snapshot, locks| Txn
+    Exec --> Binding
 
-    subgraph Storage["Storage & I/O"]
-        TableHeap["storage::table_heap::TableHeap"]
-        Index["storage::index::B+Tree"]
+    subgraph Storage["storage::* & buffer::*"]
+        Binding["storage::engine::TableBinding"]
+        Heap["storage::table_heap::TableHeap"]
+        MVCC["storage::heap::MvccHeap"]
+        Index["storage::index::BPlusTree"]
         Buffer["buffer::BufferManager"]
-        Scheduler["storage::disk_scheduler (io_uring)"]
+        Disk["storage::disk_scheduler (io_uring)"]
         WAL["recovery::WalManager"]
-        TableHeap <--> Buffer
+        Binding --> Heap
+        Binding --> Index
+        Heap <--> Buffer
         Index <--> Buffer
-        Buffer <--> Scheduler
-        WAL --> Scheduler
+        Buffer <--> Disk
+        WAL --> Disk
     end
 
-    Txn -->|WAL payloads| WAL
-
-    Background["background::workers\n(checkpoint, bg writer, MVCC vacuum)"] --> Buffer
-    Background --> WAL
-    Background --> TM
+    Background["background::workers\n(checkpoint, WAL writer, MVCC vacuum)"] --> {Buffer, WAL, TM}
 ```
 
-**High-level flow**
-1. SQL text is parsed into an AST, planned into a `LogicalPlan`, optimized by a handful of safe rewrite rules, then lowered into a physical operator tree.
-2. `SessionContext` either reuses or creates a transaction and injects isolation/access modes.
-3. Each physical operator is driven by the Volcano pull model (`init`/`next`). On entry it obtains a `TxnRuntime` which supplies a command id plus an MVCC snapshot consistent with the transaction’s isolation level.
-4. Operators consult the snapshot for tuple visibility, acquire table/row locks through `TxnRuntime`, and issue heap/index operations.
-5. DML operators register undo records and append WAL entries via the transaction manager. When the user commits, the manager emits `Commit` records, waits for durability as configured, and releases locks.
+**Key takeaways**
+- The frontend (CLI/HTTP) only knows how to parse SQL and drive the planning stages; all shared state lives below.
+- The `ExecutionEngine` drives a Volcano iterator. Each physical operator calls into the transaction runtime for visibility checks and locking, but touches storage exclusively through a `TableBinding`. This makes the executor easy to reason about in a classroom setting.
+- Buffering, WAL, and disk I/O are centralized so that durability/ordering guarantees stay in one module.
 
 ---
 
-## 2. Transaction & MVCC Mechanics
+## 2. Transactions, MVCC, and the Executor
 
 ```mermaid
 sequenceDiagram
+    autonumber
     participant Session
     participant TM as TransactionManager
     participant Runtime as TxnRuntime
-    participant Exec as Operator
+    participant Exec
+    participant Binding
     participant Heap as TableHeap
 
-    Session->>TM: begin(isolation, access_mode)
+    Session->>TM: begin_txn(isolation, access_mode)
     TM-->>Session: Transaction handle
     Exec->>Runtime: TxnRuntime::new(&TM, &mut txn)
     Runtime-->>Exec: {snapshot, command_id}
+
     loop per tuple
-        Exec->>Heap: next()
-        Heap-->>Exec: (rid, meta, tuple)
+        Exec->>Binding: scan.next()
+        Binding->>Heap: TableIterator::next()
+        Heap-->>Binding: (rid, meta, tuple)
+        Binding-->>Exec: (rid, meta, tuple)
         Exec->>Runtime: is_visible(meta)?
-        Runtime-->>Exec: yes/no (uses cached snapshot)
-        alt Visible
-            Exec->>Runtime: lock_row(...)
-            Exec->>TM: record undo + WAL
+        Runtime-->>Exec: yes/no
+        alt visible & needs lock
+            Exec->>Runtime: lock_row(table, rid, mode)
+            Runtime-->>Exec: guard
+        end
+        alt mutation
+            Exec->>Binding: prepare_row_for_write(...)
+            Binding->>Heap: mvcc.full_tuple(...)
+            Heap-->>Binding: (current_meta, tuple)
+            Binding->>TM: push_undo + append WAL(HeapRecord)
         end
     end
+
     Session->>TM: commit(txn)
-    TM->>WAL: Transaction(Commit)
-    TM->>TM: wait_for_durable / flush_until
+    TM->>WAL: Transaction{Commit}
+    TM->>TM: flush_until(lsn) if synchronous
     TM-->>Session: release locks, clear snapshot
 ```
 
-- **Snapshots**  
-  - *Read Committed / Read Uncommitted:* Every command refreshes its snapshot and clears any cached value on the transaction handle.  
-  - *Repeatable Read / Serializable:* The first command captures a snapshot (`xmin`, `xmax`, `active_txns`) and stores it inside `Transaction`. Subsequent commands reuse it, ensuring consistent reads.  
-  - Background MVCC vacuum consults `TransactionManager::oldest_active_txn()` to compute `safe_xmin` and prunes tuple versions whose inserting/deleting transactions precede that boundary.
+**Snapshot policy**
+- `Read Uncommitted / Read Committed`: every command obtains a fresh snapshot, so repeated statements can see committed updates.
+- `Repeatable Read / Serializable`: cache the first snapshot on the `Transaction` handle; subsequent commands reuse it for consistent reads. The lock manager releases S-locks at the end of each command for RR, but Serializable keeps them until commit.
 
-- **Locking**  
-  Multi-granularity 2PL (IS/IX/S/SIX/X) enforced by `LockManager`. Repeatable Read releases shared locks at the end of each command (after verifying visibility). Serializable keeps shared locks through commit. Deadlocks are detected via a wait-for graph; a victim simply fails its lock request.
-
-- **Undo & WAL**  
-  `Transaction` maintains logical undo entries. On abort, the manager emits CLR records and performs the inverse heap operations. Commit waits depend on `synchronous_commit`. Buffer frames retain their `page_lsn` so WAL-before-data holds.
-
-- **Executor safeguards**  
-  `PhysicalUpdate` now skips tuple versions created by the same `(txn_id, command_id)` during the current command. This prevents re-processing the freshly inserted MVCC version and thereby avoids infinite loops.
+**Undo & WAL**
+- Each mutation produces a logical `HeapRecordPayload` or `IndexRecordPayload`. The heap payload already carries redo (new bytes) and undo (old bytes), so recovery can replay forward or backward without re-reading heap pages.
+- On abort, the manager walks the undo stack, emits CLRs, and re-applies the inverse heap/index operations.
 
 ---
 
-## 3. Storage & Buffering
+## 3. Storage Layering
 
-| Component | Highlights |
-| --------- | ---------- |
-| `TableHeap` | Tuple metadata (`TupleMeta`) stores inserting/deleting txn ids, command ids, and forward/back pointers for version chains. Helpers like `mvcc_update` stitch new versions while marking old ones deleted. |
-| `B+Tree` | B-link tree implementation with separate codecs for header/internal/leaf pages. Index maintenance occurs in DML operators after the heap change succeeds. |
-| `BufferManager` | Combines a page table, LRU-K replacer (with TinyLFU admission option), and per-frame guards. Dirty pages record their first-dirty LSN, feeding checkpoints. The background writer periodically flushes dirty frames and drives lazy index cleanup. |
-| `DiskScheduler` | Uses io_uring worker threads. Foreground tasks push `ReadPage`, `WritePage`, `WriteWal`, and `FsyncWal` commands through lock-free queues and receive completion on dedicated channels. |
-
----
-
-## 4. Write-Ahead Logging & Recovery
-
-- `WalManager` manages log sequence numbers, buffers frames, writes physical (`PageWrite`, `PageDelta`) and logical (`HeapInsert/Update/Delete`) records, and coordinates flushes. First-page-writes guard against torn pages.
-- `background::spawn_checkpoint_worker` emits `Checkpoint` records capturing the dirty page table and active transactions so recovery can cut replay short.
-- `RecoveryManager` executes ARIES-style **analysis → redo → undo** on restart, leveraging CLRs to keep undo idempotent.
-- WAL and data I/O both use the `DiskScheduler`, keeping durability guarantees in one place.
-
----
-
-## 5. Background Services
-
-| Worker | Description | Trigger |
-| ------ | ----------- | ------- |
-| WAL writer | Coalesces buffered WAL into durable segments | `WalManager::start_background_flush` |
-| Checkpoint | Flushes LSNs, records ATT + DPT snapshots, resets FPW epoch | Configurable interval (`WalOptions::checkpoint_interval_ms`) |
-| Buffer writer | Flushes dirty frames to keep checkpoints short | `bg_writer_interval` |
-| MVCC vacuum | Iterates table heaps, removing committed-deleted or aborted-inserted tuples older than `safe_xmin` | `MvccVacuumConfig` (interval + batch limit) |
-
-All workers are registered with `background::BackgroundWorkers`, which stops and joins them on database shutdown.
-
----
-
-## 6. Example Timeline: Repeatable Read UPDATE
-
-```
-T1 (RR)                               T2 (RC)
------------                           -----------
-BEGIN;                                BEGIN;
-SELECT ... (snapshot S0)              UPDATE row -> new version V1
-                                      COMMIT (WAL + flush)
-SELECT again -> sees original value
-COMMIT
--- background vacuum later reclaims deleted version when safe_xmin > delete_txn
+```mermaid
+graph TD
+    subgraph Planner View
+        Catalog
+    end
+    Catalog -->|Arc<TableHeap>| TableBinding
+    TableBinding --> Heap["TableHeap"]
+    TableBinding --> Mvcc["MvccHeap"]
+    TableBinding --> Index["BPlusTreeIndex"]
+    Heap -->|pages| BufferMgr
+    Index -->|pages| BufferMgr
+    BufferMgr --> DiskMgr
+    BufferMgr --> WalMgr
 ```
 
-- T1’s `TxnRuntime` caches snapshot S0 on its first command and reuses it, so the second `SELECT` filters out V1 even though T2 committed.  
-- Row-level shared locks acquired during the read are released at the end of the command, while the MVCC snapshot keeps the view consistent.  
-- When T1 commits, locks are dropped, snapshot cache is cleared, and WAL commit record becomes durable. Vacuum eventually removes T1’s deleted predecessor when all transactions with `txn_id < safe_xmin` have finished.
+| Layer | Responsibility | Notes |
+| ----- | -------------- | ----- |
+| `TableHeap` | Physical slotted pages, tuple encoding, WAL page image helpers | Exposes insert/update/delete that emit heap-specific WAL payloads before dirtying frames. |
+| `MvccHeap` | Version chain management, delete-marking, undo metadata | Creates new versions, rewires forward/back pointers, and delegates actual I/O to `TableHeap`. |
+| `TableBinding` | Safe façade for the executor | Provides `scan`, `index_scan`, `insert`, `delete`, `update`, and `prepare_row_for_write`, always pairing heap/index changes so operators stay small. |
+| `BufferManager` + `DiskScheduler` | Unified cache + async I/O | Uses LRU-K (+ optional TinyLFU admission) and io_uring to keep the hot set resident. |
+| `WalManager` | ARIES-compatible log | Supports logical heap/index records, page write/delta fallback, CLRs, checkpoints, and background flush threads. |
 
 ---
 
-## 7. Observability & Configuration
+## 4. `TableBinding` Contract
 
-- Enable tracing via `RUST_LOG=trace` to inspect lock grant/queue events and MVCC vacuum activity.
-- Key knobs exposed through CLI/environment: WAL segment size, background intervals, default isolation level, MVCC vacuum batch size.
-- `background::BackgroundWorkers::snapshot()` reports active worker metadata; you can surface it for debugging endpoints.
+```mermaid
+classDiagram
+    class TableBinding {
+        +scan(ScanOptions) -> TupleStream
+        +index_scan(name, IndexScanRequest) -> TupleStream
+        +insert(&mut TxnContext, &Tuple)
+        +delete(&mut TxnContext, RecordId, TupleMeta, Tuple)
+        +update(&mut TxnContext, RecordId, Tuple, TupleMeta, Tuple) -> RecordId
+        +prepare_row_for_write(&mut TxnContext, RecordId, &TupleMeta)
+        +table_heap() -> Arc<TableHeap>
+    }
+
+    class PhysicalOperator {
+        +init(&mut ExecutionContext)
+        +next(&mut ExecutionContext) -> Option<Tuple>
+    }
+
+    PhysicalOperator --> TableBinding : uses
+```
+
+This binding hides every MVCC/WAL detail from the operators:
+- No more ad-hoc `catalog.table_indexes()` calls.
+- No direct references to `MvccHeap` or `TableHeap`.
+- Executor code reads like pseudo SQL: “lock table”, “scan binding”, “update tuple”.
 
 ---
 
-## 8. Roadmap
+## 5. WAL & Recovery Details
 
-- Predicate locking / SSI to upgrade Serializable beyond strict 2PL.
-- Cost-based optimization with catalog statistics.
-- Smarter vacuum pacing tied to storage pressure and tuple churn.
-- Parallel execution and adaptive readahead hints based on operator feedback.
+```mermaid
+flowchart LR
+    subgraph WAL Record Types
+        HI["HeapInsert"] --> redo
+        HU["HeapUpdate"] --> redo & undo
+        HD["HeapDelete"] --> redo & undo
+        PI["PageImage"]
+        PD["PageDelta"]
+        CI["Checkpoint"]
+        CL["CLR"]
+    end
+    Exec -->|Heap/Index payloads| WalMgr
+    BufferMgr -->|needs FPW| WalMgr
+    WalMgr --> DiskScheduler --> log files
+    Recovery -->|analysis/redone/undo| BufferMgr
+```
 
-Even with these future items, the current layering mirrors production databases (e.g., PostgreSQL): MVCC + 2PL, ARIES-style WAL, asynchronous maintenance, and a modular Volcano executor—all while keeping the codebase approachable for teaching and experimentation.
+- **Logical logging first**: heap/index mutations emit redo + undo at the logical level. This keeps the WAL stream compact and human-readable for teaching.
+- **Physical fallbacks**: metadata-heavy pages (meta, freelist, header) still leverage PageWrite/PageDelta to guarantee a consistent base image, especially on the first page flush after a crash.
+- **Restart**: `RecoveryManager` performs the classical ARIES sequence. It uses the `dirty_page_table` and `active_txn_table` captured by checkpoints to limit redo and undo work.
+
+---
+
+## 6. Background Workers
+
+| Worker | Purpose | Configuration |
+| ------ | ------- | ------------- |
+| WAL writer | Periodically flushes WAL buffers, coalesces adjacent writes | `WalOptions::writer_interval_ms`, `buffer_capacity` |
+| Checkpoint | Records ATT + DPT, gently pushes dirty buffers | `WalOptions::checkpoint_interval_ms` |
+| Buffer writer | Flushes frames when the dirty set grows too large | `background::BufferWriterConfig` |
+| MVCC vacuum | Reclaims obsolete tuple versions based on `safe_xmin` | `MvccVacuumConfig` |
+| Index vacuum | Cleans up deleted index entries using B-link traversal | `IndexVacuumConfig` |
+
+Workers register with `background::BackgroundWorkers`, so the database can stop and join them cleanly on shutdown. Each worker publishes metrics (intervals, batches processed) for observability.
+
+---
+
+## 7. Example: Repeatable Read UPDATE
+
+```mermaid
+sequenceDiagram
+    participant T1 as Txn 1 (RR)
+    participant T2 as Txn 2 (RC)
+    participant Heap as TableHeap
+
+    T1->>Heap: SELECT (snapshot S0)
+    Heap-->>T1: version V0
+    T2->>Heap: UPDATE -> insert V1, delete V0
+    Heap-->>T2: ack
+    T2->>T2: COMMIT (WAL + locks release)
+    T1->>Heap: SELECT again
+    Heap-->>T1: V0 still visible via snapshot S0
+    T1->>T1: COMMIT
+    Note over T1,Heap: Vacuum later removes V0 when safe_xmin advances
+```
+
+This timeline demonstrates:
+- Snapshots shield Repeatable Read statements from concurrent writers even if row-level locks are released early.
+- The MVCC chain (`V1.prev_version = V0`, `V0.next_version = V1`) lets future readers reach the newest committed version while the vacuum worker reclaims obsolete ones lazily.
+
+---
+
+## 8. Observability & Configuration Cheat Sheet
+
+- **Logging**: `RUST_LOG=trace` surfaces lock acquisitions, MVCC vacuums, and io_uring completions.
+- **Runtime knobs**: `WalOptions` (segment size, sync policy), `BufferPoolConfig` (capacity, TinyLFU toggle), `MvccVacuumConfig`, and `IndexVacuumConfig` can all be adjusted via `DatabaseOptions`.
+- **Metrics**: `background::BackgroundWorkers::snapshot()` reports worker health; WAL exposes current LSN and flush LSN; the buffer manager can dump the dirty page table for diagnostics.
+
+---
+
+With these layers in place, QuillSQL remains faithful to production-grade engines (MVCC + WAL + buffer pool) while keeping its code and documentation approachable for coursework and research prototypes.

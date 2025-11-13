@@ -7,32 +7,57 @@ use crate::storage::{
 };
 use crate::transaction::{
     CommandId, IsolationLevel, LockManager, LockMode, RowLockGuard, Transaction, TransactionId,
-    TransactionManager, TransactionSnapshot, TxnReadGuard, TxnRuntime,
+    TransactionManager, TransactionSnapshot, TxnReadGuard,
 };
 use crate::utils::table_ref::TableReference;
 use log::warn;
 use sqlparser::ast::TransactionAccessMode;
 
 pub struct TxnContext<'a> {
-    runtime: TxnRuntime<'a>,
+    txn: &'a mut Transaction,
+    manager: Arc<TransactionManager>,
+    snapshot: TransactionSnapshot,
+    command_id: CommandId,
     lock_manager: Arc<LockManager>,
 }
 
 impl<'a> TxnContext<'a> {
     pub fn new(manager: Arc<TransactionManager>, txn: &'a mut Transaction) -> Self {
         let lock_manager = manager.lock_manager_arc();
+        let command_id = txn.begin_command();
+        let snapshot = match txn.isolation_level() {
+            IsolationLevel::RepeatableRead | IsolationLevel::Serializable => {
+                if let Some(existing) = txn.snapshot().cloned() {
+                    existing
+                } else {
+                    let snap = manager.snapshot(txn.id());
+                    txn.set_snapshot(snap.clone());
+                    snap
+                }
+            }
+            IsolationLevel::ReadCommitted | IsolationLevel::ReadUncommitted => {
+                let snap = manager.snapshot(txn.id());
+                txn.clear_snapshot();
+                snap
+            }
+        };
         Self {
-            runtime: TxnRuntime::new(manager, txn),
+            txn,
+            manager,
+            snapshot,
+            command_id,
             lock_manager,
         }
     }
 
     pub fn snapshot(&self) -> &TransactionSnapshot {
-        self.runtime.snapshot()
+        &self.snapshot
     }
 
     pub fn is_visible(&self, meta: &TupleMeta) -> bool {
-        self.runtime.is_visible(meta)
+        self.snapshot.is_visible(meta, self.command_id, |txn_id| {
+            self.manager.transaction_status(txn_id)
+        })
     }
 
     pub fn read_visible_tuple(
@@ -90,8 +115,8 @@ impl<'a> TxnContext<'a> {
         rid: RecordId,
     ) -> crate::error::QuillSQLResult<()> {
         if !self
-            .runtime_mut()
-            .try_lock_row(table.clone(), rid, LockMode::Exclusive)?
+            .manager
+            .try_acquire_row_lock(self.txn, table.clone(), rid, LockMode::Exclusive)?
         {
             return Err(QuillSQLError::Execution(
                 "failed to acquire row exclusive lock".to_string(),
@@ -105,7 +130,9 @@ impl<'a> TxnContext<'a> {
         table: TableReference,
         mode: LockMode,
     ) -> crate::error::QuillSQLResult<()> {
-        self.runtime_mut().lock_table(table, mode)
+        self.manager
+            .acquire_table_lock(self.txn, table.clone(), mode)
+            .map_err(|e| QuillSQLError::Execution(format!("lock error: {}", e)))
     }
 
     pub fn ensure_writable(
@@ -119,7 +146,7 @@ impl<'a> TxnContext<'a> {
         ) {
             warn!(
                 "read-only txn {} attempted '{}' on {}",
-                self.runtime.id(),
+                self.txn.id(),
                 operation,
                 table.to_log_string()
             );
@@ -133,38 +160,30 @@ impl<'a> TxnContext<'a> {
     }
 
     pub fn isolation_level(&self) -> IsolationLevel {
-        self.transaction().isolation_level()
+        self.txn.isolation_level()
     }
 
     pub fn transaction(&self) -> &Transaction {
-        self.runtime.transaction()
+        self.txn
     }
 
     pub fn transaction_mut(&mut self) -> &mut Transaction {
-        self.runtime.transaction_mut()
+        self.txn
     }
 
     pub fn manager(&self) -> &TransactionManager {
-        self.runtime.manager()
-    }
-
-    pub fn txn_runtime(&self) -> &TxnRuntime<'a> {
-        &self.runtime
+        self.manager.as_ref()
     }
 
     pub fn txn_id(&self) -> TransactionId {
-        self.runtime.id()
+        self.txn.id()
     }
 
     pub fn unlock_row(&self, table: &TableReference, rid: RecordId) {
-        self.runtime.unlock_row(table, rid);
+        self.manager.unlock_row(self.txn.id(), table, rid);
     }
 
     pub fn command_id(&self) -> CommandId {
-        self.runtime.command_id()
-    }
-
-    fn runtime_mut(&mut self) -> &mut TxnRuntime<'a> {
-        &mut self.runtime
+        self.command_id
     }
 }

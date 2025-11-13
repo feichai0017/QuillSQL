@@ -14,7 +14,7 @@ use crate::recovery::{RecoveryManager, WalManager};
 use crate::storage::disk_manager::DiskManager;
 use crate::storage::disk_scheduler::DiskScheduler;
 use crate::storage::heap::table_heap::TableHeap;
-use crate::storage::page::TupleMeta;
+use crate::storage::heap::MvccHeap;
 use crate::storage::tuple::Tuple;
 use crate::transaction::{CommandId, TransactionId};
 use crate::utils::scalar::ScalarValue;
@@ -58,7 +58,8 @@ fn build_runtime(
     (buffer_pool, wal_manager, disk_scheduler)
 }
 
-fn insert_rows(heap: &TableHeap, schema: &SchemaRef, rows: usize) {
+fn insert_rows(heap: Arc<TableHeap>, schema: &SchemaRef, rows: usize) {
+    let mvcc = MvccHeap::new(heap.clone());
     for i in 0..rows {
         let tuple = Tuple::new(
             schema.clone(),
@@ -67,11 +68,9 @@ fn insert_rows(heap: &TableHeap, schema: &SchemaRef, rows: usize) {
                 ScalarValue::Int32(Some((i * 2) as i32)),
             ],
         );
-        heap.insert_tuple(
-            &TupleMeta::new(TransactionId::default(), CommandId::default()),
-            &tuple,
-        )
-        .expect("insert tuple");
+        let _ = mvcc
+            .insert(&tuple, TransactionId::default(), CommandId::default())
+            .expect("insert tuple");
     }
 }
 
@@ -99,8 +98,8 @@ fn wal_force_flush_recovers_heap() {
 
     let (first_page, last_page) = {
         let (buffer, wal_manager, _scheduler) = build_runtime(&db_path, &cfg);
-        let heap = TableHeap::try_new(schema.clone(), buffer.clone()).expect("heap");
-        insert_rows(&heap, &schema, 128);
+        let heap = Arc::new(TableHeap::try_new(schema.clone(), buffer.clone()).expect("heap"));
+        insert_rows(heap.clone(), &schema, 128);
         buffer.flush_all_pages().expect("flush heap pages");
         let target = wal_manager.max_assigned_lsn();
         wal_manager.flush_until(target).expect("force wal flush");
@@ -141,8 +140,8 @@ fn wal_redo_handles_segment_rotation() {
 
     let (first_page, last_page) = {
         let (buffer, wal_manager, _scheduler) = build_runtime(&db_path, &cfg);
-        let heap = TableHeap::try_new(schema.clone(), buffer.clone()).expect("heap");
-        insert_rows(&heap, &schema, 512);
+        let heap = Arc::new(TableHeap::try_new(schema.clone(), buffer.clone()).expect("heap"));
+        insert_rows(heap.clone(), &schema, 512);
         buffer.flush_all_pages().expect("flush heap pages");
         let target = wal_manager.max_assigned_lsn();
         wal_manager.flush_until(target).expect("wal flush");

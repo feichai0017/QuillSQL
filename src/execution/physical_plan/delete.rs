@@ -1,11 +1,12 @@
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::OnceLock;
 
 use crate::catalog::{SchemaRef, DELETE_OUTPUT_SCHEMA_REF};
 use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::execution::{ExecutionContext, VolcanoExecutor};
 use crate::expression::Expr;
 use crate::storage::{
-    engine::{ScanOptions, TupleStream},
+    engine::{ScanOptions, TableBinding, TupleStream},
     tuple::Tuple,
 };
 use crate::transaction::LockMode;
@@ -18,6 +19,7 @@ pub struct PhysicalDelete {
     pub predicate: Option<Expr>,
     deleted_rows: AtomicU32,
     iterator: std::sync::Mutex<Option<Box<dyn TupleStream>>>,
+    table_binding: OnceLock<TableBinding>,
 }
 
 impl PhysicalDelete {
@@ -28,6 +30,7 @@ impl PhysicalDelete {
             predicate,
             deleted_rows: AtomicU32::new(0),
             iterator: std::sync::Mutex::new(None),
+            table_binding: OnceLock::new(),
         }
     }
 }
@@ -39,7 +42,15 @@ impl VolcanoExecutor for PhysicalDelete {
         context
             .txn_ctx_mut()
             .lock_table(self.table.clone(), LockMode::IntentionExclusive)?;
-        let stream = context.table_stream(&self.table, ScanOptions::default())?;
+        if self.table_binding.get().is_none() {
+            let binding = context.table(&self.table)?;
+            let _ = self.table_binding.set(binding);
+        }
+        let binding = self
+            .table_binding
+            .get()
+            .expect("table binding not initialized");
+        let stream = binding.scan(ScanOptions::default())?;
         *self.iterator.lock().unwrap() = Some(stream);
         Ok(())
     }
@@ -69,12 +80,16 @@ impl VolcanoExecutor for PhysicalDelete {
                 }
             }
 
+            let binding = self
+                .table_binding
+                .get()
+                .expect("table binding not initialized");
             let Some((current_meta, current_tuple)) =
-                context.prepare_row_for_write(&self.table, rid, &meta)?
+                binding.prepare_row_for_write(context.txn_ctx_mut(), rid, &meta)?
             else {
                 continue;
             };
-            context.apply_delete(&self.table, rid, current_meta, current_tuple)?;
+            binding.delete(context.txn_ctx_mut(), rid, current_meta, current_tuple)?;
             self.deleted_rows.fetch_add(1, Ordering::SeqCst);
         }
     }

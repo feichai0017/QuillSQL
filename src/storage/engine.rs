@@ -1,3 +1,4 @@
+use std::fmt;
 use std::ops::Bound;
 use std::sync::Arc;
 
@@ -121,21 +122,101 @@ pub trait IndexHandle: Send + Sync {
 }
 
 pub trait StorageEngine: Send + Sync {
-    fn table(
-        &self,
-        catalog: &Catalog,
-        table: &TableReference,
-    ) -> QuillSQLResult<Arc<dyn TableHandle>>;
-
-    fn indexes(
-        &self,
-        catalog: &Catalog,
-        table: &TableReference,
-    ) -> QuillSQLResult<Vec<Arc<dyn IndexHandle>>>;
+    fn table(&self, catalog: &Catalog, table: &TableReference) -> QuillSQLResult<TableBinding>;
 }
 
 #[derive(Default)]
 pub struct DefaultStorageEngine;
+
+#[derive(Clone)]
+pub struct TableBinding {
+    table: Arc<dyn TableHandle>,
+    indexes: Arc<Vec<Arc<dyn IndexHandle>>>,
+}
+
+impl TableBinding {
+    fn new(table: Arc<dyn TableHandle>, indexes: Vec<Arc<dyn IndexHandle>>) -> Self {
+        Self {
+            table,
+            indexes: Arc::new(indexes),
+        }
+    }
+
+    pub fn table(&self) -> Arc<dyn TableHandle> {
+        self.table.clone()
+    }
+
+    pub fn table_heap(&self) -> Arc<TableHeap> {
+        self.table.table_heap()
+    }
+
+    pub fn indexes(&self) -> &[Arc<dyn IndexHandle>] {
+        self.indexes.as_ref()
+    }
+
+    pub fn scan(&self, options: ScanOptions) -> QuillSQLResult<Box<dyn TupleStream>> {
+        self.table.full_scan(options)
+    }
+
+    pub fn insert(&self, txn: &mut TxnContext<'_>, tuple: &Tuple) -> QuillSQLResult<()> {
+        self.table.insert(txn, tuple, self.indexes())
+    }
+
+    pub fn delete(
+        &self,
+        txn: &mut TxnContext<'_>,
+        rid: RecordId,
+        prev_meta: TupleMeta,
+        prev_tuple: Tuple,
+    ) -> QuillSQLResult<()> {
+        self.table.delete(txn, rid, prev_meta, prev_tuple)
+    }
+
+    pub fn update(
+        &self,
+        txn: &mut TxnContext<'_>,
+        rid: RecordId,
+        new_tuple: Tuple,
+        prev_meta: TupleMeta,
+        prev_tuple: Tuple,
+    ) -> QuillSQLResult<RecordId> {
+        self.table
+            .update(txn, rid, new_tuple, prev_meta, prev_tuple, self.indexes())
+    }
+
+    pub fn prepare_row_for_write(
+        &self,
+        txn: &mut TxnContext<'_>,
+        rid: RecordId,
+        observed_meta: &TupleMeta,
+    ) -> QuillSQLResult<Option<(TupleMeta, Tuple)>> {
+        self.table.prepare_row_for_write(txn, rid, observed_meta)
+    }
+
+    pub fn index_scan(
+        &self,
+        name: &str,
+        request: IndexScanRequest,
+    ) -> QuillSQLResult<Box<dyn TupleStream>> {
+        let handle = self
+            .indexes()
+            .iter()
+            .find(|idx| idx.name() == name)
+            .ok_or_else(|| {
+                crate::error::QuillSQLError::Execution(format!("index {} not found", name))
+            })?;
+        handle.range_scan(self.table(), request)
+    }
+}
+
+impl fmt::Debug for TableBinding {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TableBinding")
+            .field("table", &self.table.table_ref())
+            .field("index_count", &self.indexes.len())
+            .finish()
+    }
+}
 
 struct HeapTableHandle {
     table_ref: TableReference,
@@ -330,26 +411,16 @@ impl TupleStream for BTreeIndexStream {
 }
 
 impl StorageEngine for DefaultStorageEngine {
-    fn table(
-        &self,
-        catalog: &Catalog,
-        table: &TableReference,
-    ) -> QuillSQLResult<Arc<dyn TableHandle>> {
+    fn table(&self, catalog: &Catalog, table: &TableReference) -> QuillSQLResult<TableBinding> {
         let heap = catalog.table_heap(table)?;
-        Ok(Arc::new(HeapTableHandle::new(table.clone(), heap)))
-    }
-
-    fn indexes(
-        &self,
-        catalog: &Catalog,
-        table: &TableReference,
-    ) -> QuillSQLResult<Vec<Arc<dyn IndexHandle>>> {
+        let handle: Arc<dyn TableHandle> = Arc::new(HeapTableHandle::new(table.clone(), heap));
         let indexes = catalog.table_indexes(table)?;
-        Ok(indexes
+        let index_handles = indexes
             .into_iter()
             .map(|(name, index)| {
                 Arc::new(BTreeIndexHandle::new(name, index)) as Arc<dyn IndexHandle>
             })
-            .collect())
+            .collect();
+        Ok(TableBinding::new(handle, index_handles))
     }
 }

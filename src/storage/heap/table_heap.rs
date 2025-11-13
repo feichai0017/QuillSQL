@@ -76,8 +76,7 @@ impl TableHeap {
 
     fn append_heap_record(&self, payload: HeapRecordPayload) -> QuillSQLResult<()> {
         if let Some(wal) = self.buffer_pool.wal_manager() {
-            let _wal_result =
-                wal.append_record_with(|_| WalRecordPayload::Heap(payload.clone()))?;
+            let _ = wal.append_record_with(|_| WalRecordPayload::Heap(payload.clone()))?;
         }
         Ok(())
     }

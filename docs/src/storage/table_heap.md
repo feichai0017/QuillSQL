@@ -2,6 +2,16 @@
 
 The `TableHeap` (`storage/table_heap.rs`) is the component responsible for managing the collection of pages that belong to a single table. While the `TablePage` defines the *layout* within a single page, the `TableHeap` provides the high-level API for inserting, updating, and deleting tuples, making it central to the implementation of MVCC.
 
+## TableBinding & StorageEngine
+
+From the executor’s perspective, heap access is routed through `storage::engine::TableBinding`. A binding is produced by the `StorageEngine` (consulting the catalog) and carries:
+
+- An `Arc<TableHeap>` for physical page access.
+- An `MvccHeap` wrapper that maintains version chains.
+- All indexes defined on the table.
+
+The binding exposes ergonomic methods such as `scan`, `index_scan`, `insert`, `update`, `delete`, and `prepare_row_for_write`. Each method internally uses the `TableHeap` + `MvccHeap` pair, appends the appropriate logical WAL record (HeapInsert/Update/Delete), and keeps indexes in sync. This keeps physical operators extremely small and makes it easy to swap out the storage engine for experiments.
+
 ## `Tuple` Serialization
 
 A logical `Tuple` struct in memory must be converted into a byte array to be stored on a page. This process is handled by `storage/codec/tuple.rs`.
@@ -29,6 +39,18 @@ These fields allow QuillSQL to maintain a **version chain** for each logical row
 4.  Sets the `delete_txn_id` on the old version to mark it as "dead".
 
 A transaction can then traverse this chain and use the transaction IDs in the `TupleMeta` to determine which version of a row is visible to it based on its own transaction ID and isolation level, thus achieving transaction isolation without long-held read locks.
+
+## Logical Logging (Redo + Undo)
+
+Every heap mutation emits a logical WAL record before the page frame is dirtied:
+
+| Operation | Payload | Redo | Undo |
+| --------- | ------- | ---- | ---- |
+| Insert | `HeapInsertPayload` | Re-insert tuple bytes into the slot | Remove the tuple (implicit via delete logic) |
+| Update | `HeapUpdatePayload` (new + old meta/data) | Reapply new meta/bytes | Restore old meta/bytes |
+| Delete | `HeapDeletePayload` (new tombstone + old tuple) | Mark slot deleted and update version chain | Recreate the prior tuple image |
+
+This makes crash recovery straightforward: redo simply replays the payload, and undo uses the “old” portion of the payload even if the page is currently inconsistent. Physical `PageWrite`/`PageDelta` records are still used for metadata-heavy pages (meta, freelist, etc.) to guarantee a consistent starting point, but ordinary table DML lives entirely in these logical heap records.
 
 ---
 
