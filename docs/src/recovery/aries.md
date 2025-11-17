@@ -21,7 +21,7 @@ QuillSQL uses several types of log records:
 
 - **`Transaction`**: Marks the `BEGIN`, `COMMIT`, or `ABORT` of a transaction.
 - **`PageWrite` / `PageDelta`**: Physical/Physiological records describing a change to a page. `PageWrite` contains a full image of the page (used for the first write after a checkpoint, a technique called First-Page-Write or FPW), while `PageDelta` contains only the changed bytes.
-- **`HeapInsert` / `HeapUpdate` / `HeapDelete`**: Logical records describing a high-level heap operation. These are primarily used for generating precise undo operations.
+- **`HeapInsert` / `HeapDelete`**: Logical records describing a high-level heap operation. These are primarily used for generating precise undo operations.
 - **`Checkpoint`**: A special record that marks a point of partial durability, allowing the log to be truncated.
 - **`CLR` (Compensation Log Record)**: A special record written during recovery to describe an **undo** action. CLRs are redo-only and are never undone themselves.
 
@@ -57,10 +57,9 @@ The final phase (`recovery/undo.rs`) is responsible for rolling back all the "lo
 
 1.  The `UndoExecutor` takes the list of loser transactions.
 2.  For each loser transaction, it scans the WAL **backwards**, following the chain of log records for that transaction.
-3.  For each operation record (like `HeapInsert`, `HeapUpdate`), it performs the logical inverse operation:
+3.  For each operation record (like `HeapInsert`, `HeapDelete`), it performs the logical inverse operation:
     -   To undo an `Insert`, it performs a `Delete`.
     -   To undo a `Delete`, it restores the deleted data.
-    -   To undo an `Update`, it restores the data from before the update.
 4.  **Crucially**, for every undo action it performs, it writes a **Compensation Log Record (CLR)** to the WAL. The CLR contains information about the undo action and, importantly, a pointer to the *next* log record that needs to be undone for that transaction. 
 
 This use of CLRs makes the recovery process itself crash-proof. If the system crashes *during the undo phase*, the next time recovery runs, it will see the CLRs. It will simply continue the undo process from where it left off by following the pointers in the CLRs, without ever having to undo an undo action.

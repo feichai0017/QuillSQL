@@ -306,8 +306,7 @@ mod tests {
     use super::*;
     use crate::recovery::wal_record::WalRecordPayload;
     use crate::storage::heap::wal_codec::{
-        HeapDeletePayload, HeapInsertPayload, HeapRecordPayload, HeapUpdatePayload, RelationIdent,
-        TupleMetaRepr,
+        HeapDeletePayload, HeapInsertPayload, HeapRecordPayload, RelationIdent, TupleMetaRepr,
     };
     use crate::transaction::INVALID_COMMAND_ID;
 
@@ -411,51 +410,6 @@ mod tests {
                 assert_eq!(body.page_id, 12);
                 assert_eq!(body.slot_id, 2);
                 assert_eq!(body.tuple_data, vec![7, 8, 9]);
-            }
-            other => panic!("unexpected payload variant: {:?}", other),
-        }
-    }
-
-    #[test]
-    fn encode_decode_heap_update() {
-        let payload = WalRecordPayload::Heap(HeapRecordPayload::Update(HeapUpdatePayload {
-            relation: RelationIdent { root_page_id: 99 },
-            page_id: 44,
-            slot_id: 5,
-            op_txn_id: 11,
-            new_tuple_meta: TupleMetaRepr {
-                insert_txn_id: 11,
-                insert_cid: 0,
-                delete_txn_id: 0,
-                delete_cid: INVALID_COMMAND_ID,
-                is_deleted: false,
-                next_version: None,
-                prev_version: None,
-            },
-            new_tuple_data: vec![1, 2, 3, 4],
-            old_tuple_meta: Some(TupleMetaRepr {
-                insert_txn_id: 5,
-                insert_cid: 0,
-                delete_txn_id: 7,
-                delete_cid: 0,
-                is_deleted: true,
-                next_version: None,
-                prev_version: None,
-            }),
-            old_tuple_data: Some(vec![9, 9, 9]),
-        }));
-        let bytes = payload.encode(200, 150);
-        let (frame, len) = decode_frame(&bytes).unwrap();
-        assert_eq!(len, bytes.len());
-        assert_eq!(frame.rmid, ResourceManagerId::Heap);
-        assert_eq!(frame.info, HeapRecordKind::Update as u8);
-        let decoded = decode_payload(&frame).unwrap();
-        match decoded {
-            WalRecordPayload::Heap(HeapRecordPayload::Update(body)) => {
-                assert_eq!(body.relation.root_page_id, 99);
-                assert_eq!(body.new_tuple_data, vec![1, 2, 3, 4]);
-                assert!(body.old_tuple_meta.unwrap().is_deleted);
-                assert_eq!(body.old_tuple_data.unwrap(), vec![9, 9, 9]);
             }
             other => panic!("unexpected payload variant: {:?}", other),
         }

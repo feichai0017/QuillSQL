@@ -2,7 +2,7 @@ use crate::error::QuillSQLResult;
 use crate::recovery::Lsn;
 use crate::storage::codec::TupleCodec;
 use crate::storage::heap::wal_codec::{
-    HeapDeletePayload, HeapRecordPayload, HeapUpdatePayload, TupleMetaRepr,
+    HeapDeletePayload, HeapInsertPayload, HeapRecordPayload, TupleMetaRepr,
 };
 use crate::storage::index::btree_index::BPlusTreeIndex;
 use crate::storage::page::{RecordId, TupleMeta};
@@ -67,12 +67,6 @@ pub enum UndoAction {
         rid: RecordId,
         indexes: Vec<(Arc<BPlusTreeIndex>, Tuple)>,
     },
-    Update {
-        table: Arc<TableHeap>,
-        rid: RecordId,
-        prev_meta: TupleMeta,
-        prev_tuple: Tuple,
-    },
     Delete {
         table: Arc<TableHeap>,
         rid: RecordId,
@@ -93,15 +87,6 @@ impl UndoAction {
                     index.delete(&key)?;
                 }
                 table.recover_delete_tuple(rid, txn_id, 0)?;
-                Ok(())
-            }
-            UndoAction::Update {
-                table,
-                rid,
-                prev_meta,
-                prev_tuple,
-            } => {
-                table.recover_restore_tuple(rid, prev_meta, &prev_tuple)?;
                 Ok(())
             }
             UndoAction::Delete {
@@ -132,37 +117,19 @@ impl UndoAction {
                     old_tuple_data: Some(TupleCodec::encode(&tuple)),
                 }))
             }
-            UndoAction::Update {
-                table,
-                rid,
-                prev_meta,
-                prev_tuple,
-                ..
-            } => Ok(HeapRecordPayload::Update(HeapUpdatePayload {
-                relation: table.relation_ident(),
-                page_id: rid.page_id,
-                slot_id: rid.slot_num as u16,
-                op_txn_id: prev_meta.insert_txn_id,
-                new_tuple_meta: TupleMetaRepr::from(*prev_meta),
-                new_tuple_data: TupleCodec::encode(prev_tuple),
-                old_tuple_meta: None,
-                old_tuple_data: None,
-            })),
             UndoAction::Delete {
                 table,
                 rid,
                 prev_meta,
                 prev_tuple,
                 ..
-            } => Ok(HeapRecordPayload::Update(HeapUpdatePayload {
+            } => Ok(HeapRecordPayload::Insert(HeapInsertPayload {
                 relation: table.relation_ident(),
                 page_id: rid.page_id,
                 slot_id: rid.slot_num as u16,
-                op_txn_id: prev_meta.insert_txn_id,
-                new_tuple_meta: TupleMetaRepr::from(*prev_meta),
-                new_tuple_data: TupleCodec::encode(prev_tuple),
-                old_tuple_meta: None,
-                old_tuple_data: None,
+                op_txn_id: txn_id,
+                tuple_meta: TupleMetaRepr::from(*prev_meta),
+                tuple_data: TupleCodec::encode(prev_tuple),
             })),
         }
     }
@@ -302,16 +269,16 @@ impl Transaction {
         prev_tuple: Tuple,
         new_keys: Vec<(Arc<BPlusTreeIndex>, Tuple)>,
     ) {
-        self.undo_actions.push(UndoAction::Update {
+        self.undo_actions.push(UndoAction::Insert {
+            table: table.clone(),
+            rid: new_rid,
+            indexes: new_keys,
+        });
+        self.undo_actions.push(UndoAction::Delete {
             table: table.clone(),
             rid: old_rid,
             prev_meta,
             prev_tuple,
-        });
-        self.undo_actions.push(UndoAction::Insert {
-            table,
-            rid: new_rid,
-            indexes: new_keys,
         });
     }
 

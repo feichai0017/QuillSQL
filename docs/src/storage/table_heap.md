@@ -10,7 +10,7 @@ From the executor’s perspective, heap access is routed through `storage::engin
 - An `MvccHeap` wrapper that maintains version chains.
 - All indexes defined on the table.
 
-The binding exposes ergonomic methods such as `scan`, `index_scan`, `insert`, `update`, `delete`, and `prepare_row_for_write`. Each method internally uses the `TableHeap` + `MvccHeap` pair, appends the appropriate logical WAL record (HeapInsert/Update/Delete), and keeps indexes in sync. This keeps physical operators extremely small and makes it easy to swap out the storage engine for experiments.
+The binding exposes ergonomic methods such as `scan`, `index_scan`, `insert`, `update`, `delete`, and `prepare_row_for_write`. Each method internally uses the `TableHeap` + `MvccHeap` pair, appends the appropriate logical WAL record (HeapInsert/HeapDelete), and keeps indexes in sync. This keeps physical operators extremely small and makes it easy to swap out the storage engine for experiments.
 
 ## `Tuple` Serialization
 
@@ -47,7 +47,6 @@ Every heap mutation emits a logical WAL record before the page frame is dirtied:
 | Operation | Payload | Redo | Undo |
 | --------- | ------- | ---- | ---- |
 | Insert | `HeapInsertPayload` | Re-insert tuple bytes into the slot | Remove the tuple (implicit via delete logic) |
-| Update | `HeapUpdatePayload` (new + old meta/data) | Reapply new meta/bytes | Restore old meta/bytes |
 | Delete | `HeapDeletePayload` (new tombstone + old tuple) | Mark slot deleted and update version chain | Recreate the prior tuple image |
 
 This makes crash recovery straightforward: redo simply replays the payload, and undo uses the “old” portion of the payload even if the page is currently inconsistent. Physical `PageWrite`/`PageDelta` records are still used for metadata-heavy pages (meta, freelist, etc.) to guarantee a consistent starting point, but ordinary table DML lives entirely in these logical heap records.

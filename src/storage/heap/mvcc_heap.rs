@@ -1,5 +1,10 @@
 use crate::error::QuillSQLResult;
+use crate::recovery::wal_record::WalRecordPayload;
+use crate::storage::codec::TupleCodec;
 use crate::storage::heap::table_heap::TableHeap;
+use crate::storage::heap::wal_codec::{
+    HeapDeletePayload, HeapInsertPayload, HeapRecordPayload, RelationIdent, TupleMetaRepr,
+};
 use crate::storage::page::{RecordId, TupleMeta};
 use crate::storage::tuple::Tuple;
 use crate::transaction::{CommandId, TransactionId};
@@ -37,6 +42,7 @@ impl MvccHeap {
         let mut meta = TupleMeta::new(txn_id, cid);
         meta.set_prev_version(prev_version);
         let rid = self.heap.insert_tuple(&meta, tuple)?;
+        self.log_insert(rid, &meta, tuple)?;
         Ok((rid, meta))
     }
 
@@ -60,8 +66,7 @@ impl MvccHeap {
             self.insert_version(&new_tuple, txn_id, cid, Some(current_rid))?;
         new_meta.set_prev_version(Some(current_rid));
 
-        self.heap
-            .delete_tuple(current_rid, txn_id, cid, Some(new_rid))?;
+        self.mark_deleted_version(current_rid, txn_id, cid, Some(new_rid))?;
         Ok((new_rid, prev_meta))
     }
 
@@ -71,17 +76,76 @@ impl MvccHeap {
         txn_id: TransactionId,
         cid: CommandId,
     ) -> QuillSQLResult<TupleMeta> {
-        let (current_meta, _) = self.heap.full_tuple(rid)?;
-        if current_meta.is_deleted {
-            return Ok(current_meta);
-        }
-        let prev_meta = current_meta;
-        self.heap.delete_tuple(rid, txn_id, cid, None)?;
-        Ok(prev_meta)
+        self.mark_deleted_version(rid, txn_id, cid, None)
     }
 
     pub fn full_tuple(&self, rid: RecordId) -> QuillSQLResult<(TupleMeta, Tuple)> {
         self.heap.full_tuple(rid)
+    }
+
+    fn mark_deleted_version(
+        &self,
+        rid: RecordId,
+        txn_id: TransactionId,
+        cid: CommandId,
+        next_version: Option<RecordId>,
+    ) -> QuillSQLResult<TupleMeta> {
+        let (current_meta, tuple) = self.heap.full_tuple(rid)?;
+        if current_meta.is_deleted {
+            return Ok(current_meta);
+        }
+        let prev_meta = current_meta;
+        let mut new_meta = current_meta;
+        if let Some(next) = next_version {
+            new_meta.set_next_version(Some(next));
+        }
+        new_meta.mark_deleted(txn_id, cid);
+        self.heap.write_tuple_meta(rid, new_meta)?;
+        self.log_delete(rid, txn_id, &new_meta, &prev_meta, &tuple)?;
+        Ok(prev_meta)
+    }
+
+    fn log_insert(&self, rid: RecordId, meta: &TupleMeta, tuple: &Tuple) -> QuillSQLResult<()> {
+        let payload = HeapRecordPayload::Insert(HeapInsertPayload {
+            relation: self.relation_ident(),
+            page_id: rid.page_id,
+            slot_id: rid.slot_num as u16,
+            op_txn_id: meta.insert_txn_id,
+            tuple_meta: TupleMetaRepr::from(*meta),
+            tuple_data: TupleCodec::encode(tuple),
+        });
+        self.append_heap_record(payload)
+    }
+
+    fn log_delete(
+        &self,
+        rid: RecordId,
+        txn_id: TransactionId,
+        new_meta: &TupleMeta,
+        old_meta: &TupleMeta,
+        tuple: &Tuple,
+    ) -> QuillSQLResult<()> {
+        let payload = HeapRecordPayload::Delete(HeapDeletePayload {
+            relation: self.relation_ident(),
+            page_id: rid.page_id,
+            slot_id: rid.slot_num as u16,
+            op_txn_id: txn_id,
+            new_tuple_meta: TupleMetaRepr::from(*new_meta),
+            old_tuple_meta: TupleMetaRepr::from(*old_meta),
+            old_tuple_data: Some(TupleCodec::encode(tuple)),
+        });
+        self.append_heap_record(payload)
+    }
+
+    fn append_heap_record(&self, payload: HeapRecordPayload) -> QuillSQLResult<()> {
+        if let Some(wal) = self.heap.buffer_pool.wal_manager() {
+            let _ = wal.append_record_with(|_| WalRecordPayload::Heap(payload.clone()))?;
+        }
+        Ok(())
+    }
+
+    fn relation_ident(&self) -> RelationIdent {
+        self.heap.relation_ident()
     }
 }
 

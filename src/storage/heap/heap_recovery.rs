@@ -1,21 +1,24 @@
+use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
 
-use crate::buffer::{PageId, PAGE_SIZE};
+use crate::buffer::{BufferManager, PageId, PAGE_SIZE};
+use crate::catalog::EMPTY_SCHEMA_REF;
 use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::recovery::resource_manager::{
     register_resource_manager, RedoContext, ResourceManager, UndoContext,
 };
 use crate::recovery::wal::codec::{ResourceManagerId, WalFrame};
 use crate::recovery::Lsn;
-use crate::storage::codec::TablePageHeaderCodec;
+use crate::storage::codec::{TablePageHeaderCodec, TupleCodec};
 use crate::storage::heap::wal_codec::{
-    decode_heap_record, HeapDeletePayload, HeapInsertPayload, HeapRecordPayload, HeapUpdatePayload,
-    TupleMetaRepr,
+    decode_heap_record, HeapDeletePayload, HeapInsertPayload, HeapRecordPayload, TupleMetaRepr,
 };
 use crate::storage::page::{RecordId, TablePageHeader, TupleInfo, TupleMeta};
 use crate::storage::table_heap::TableHeap;
+use crate::storage::tuple::Tuple;
+use crate::transaction::{CommandId, TransactionId};
 use std::sync::OnceLock;
 
 #[derive(Debug)]
@@ -156,7 +159,6 @@ impl HeapResourceManager {
     fn heap_txn_id(payload: &HeapRecordPayload) -> u64 {
         match payload {
             HeapRecordPayload::Insert(p) => p.op_txn_id,
-            HeapRecordPayload::Update(p) => p.op_txn_id,
             HeapRecordPayload::Delete(p) => p.op_txn_id,
         }
     }
@@ -337,29 +339,6 @@ impl HeapResourceManager {
         })
     }
 
-    fn redo_update(
-        &self,
-        frame: &WalFrame,
-        ctx: &RedoContext,
-        body: &HeapUpdatePayload,
-    ) -> QuillSQLResult<bool> {
-        self.apply_with_page(ctx, body.page_id, frame.lsn, |page_bytes, lsn| {
-            let mut image = PageImage::load(page_bytes)?;
-            if lsn != 0 && image.header.lsn >= lsn {
-                return Ok(false);
-            }
-            let slot = body.slot_id as usize;
-            if slot >= image.slots.len() {
-                return Ok(false);
-            }
-            let meta: TupleMeta = body.new_tuple_meta.into();
-            image.overwrite_slot(slot, meta, &body.new_tuple_data)?;
-            image.header.lsn = lsn;
-            image.persist(page_bytes)?;
-            Ok(true)
-        })
-    }
-
     fn redo_delete(
         &self,
         frame: &WalFrame,
@@ -388,7 +367,6 @@ impl ResourceManager for HeapResourceManager {
         let payload = self.decode_payload(frame)?;
         let applied = match &payload {
             HeapRecordPayload::Insert(body) => self.redo_insert(frame, ctx, body)?,
-            HeapRecordPayload::Update(body) => self.redo_update(frame, ctx, body)?,
             HeapRecordPayload::Delete(body) => self.redo_delete(frame, ctx, body)?,
         };
         Ok(applied as usize)
@@ -399,21 +377,6 @@ impl ResourceManager for HeapResourceManager {
         match payload {
             HeapRecordPayload::Insert(body) => {
                 self.apply_tuple_meta_flag(ctx, body.page_id, body.slot_id as usize, true)
-            }
-            HeapRecordPayload::Update(body) => {
-                if let (Some(old_meta), Some(old_bytes)) =
-                    (body.old_tuple_meta, body.old_tuple_data.as_deref())
-                {
-                    self.restore_tuple(
-                        ctx,
-                        body.page_id,
-                        body.slot_id as usize,
-                        old_meta,
-                        old_bytes,
-                    )
-                } else {
-                    Ok(())
-                }
             }
             HeapRecordPayload::Delete(body) => {
                 if let Some(old_bytes) = body.old_tuple_data.as_deref() {
@@ -446,4 +409,120 @@ pub fn ensure_heap_resource_manager_registered() {
             Arc::new(HeapResourceManager::default()),
         );
     });
+}
+
+impl TableHeap {
+    /// Construct a lightweight TableHeap view for recovery operations.
+    /// This instance uses an empty schema and does not rely on first/last page ids.
+    pub fn recovery_view(buffer_pool: Arc<BufferManager>) -> Self {
+        Self {
+            schema: EMPTY_SCHEMA_REF.clone(),
+            buffer_pool,
+            first_page_id: AtomicU32::new(0),
+            last_page_id: AtomicU32::new(0),
+        }
+    }
+
+    /// Recovery-only API: set tuple meta without emitting WAL.
+    /// Only used by RecoveryManager during UNDO.
+    pub fn recover_set_tuple_meta(&self, rid: RecordId, meta: TupleMeta) -> QuillSQLResult<()> {
+        let mut guard = self.buffer_pool.fetch_page_write(rid.page_id)?;
+        let (mut header, hdr_len) = TablePageHeaderCodec::decode(guard.data())?;
+        if (rid.slot_num as usize) >= header.tuple_infos.len() {
+            return Ok(());
+        }
+        let info = &mut header.tuple_infos[rid.slot_num as usize];
+        if info.meta.is_deleted != meta.is_deleted {
+            if meta.is_deleted {
+                header.num_deleted_tuples = header.num_deleted_tuples.saturating_add(1);
+            } else {
+                header.num_deleted_tuples = header.num_deleted_tuples.saturating_sub(1);
+            }
+        }
+        info.meta = meta;
+        let new_header = TablePageHeaderCodec::encode(&header);
+        let copy_len = std::cmp::min(hdr_len, new_header.len());
+        guard.data_mut()[0..copy_len].copy_from_slice(&new_header[..copy_len]);
+        guard.mark_dirty();
+        Ok(())
+    }
+
+    /// Recovery-only API: set tuple raw bytes without emitting WAL.
+    /// If size mismatches, repack tuple area and update offsets.
+    pub fn recover_set_tuple_bytes(&self, rid: RecordId, new_bytes: &[u8]) -> QuillSQLResult<()> {
+        let mut guard = self.buffer_pool.fetch_page_write(rid.page_id)?;
+        let (mut header, _hdr_len) = TablePageHeaderCodec::decode(guard.data())?;
+        if (rid.slot_num as usize) >= header.tuple_infos.len() {
+            return Ok(());
+        }
+        let slot = rid.slot_num as usize;
+        let info = &mut header.tuple_infos[slot];
+        let off = info.offset as usize;
+        let sz = info.size as usize;
+        if new_bytes.len() == sz {
+            if off + sz <= crate::buffer::PAGE_SIZE {
+                guard.data_mut()[off..off + sz].copy_from_slice(new_bytes);
+            }
+            guard.mark_dirty();
+            return Ok(());
+        }
+        let n = header.tuple_infos.len();
+        let mut tuples: Vec<Vec<u8>> = Vec::with_capacity(n);
+        for i in 0..n {
+            let inf = &header.tuple_infos[i];
+            let s = &guard.data()[inf.offset as usize..(inf.offset + inf.size) as usize];
+            if i == slot {
+                tuples.push(new_bytes.to_vec());
+            } else {
+                tuples.push(s.to_vec());
+            }
+        }
+        let mut tail = crate::buffer::PAGE_SIZE;
+        for i in 0..n {
+            let sz = tuples[i].len();
+            tail = tail.saturating_sub(sz);
+            header.tuple_infos[i].offset = tail as u16;
+            header.tuple_infos[i].size = sz as u16;
+        }
+        let new_header = TablePageHeaderCodec::encode(&header);
+        for b in guard.data_mut().iter_mut() {
+            *b = 0;
+        }
+        let hdr_copy = std::cmp::min(new_header.len(), crate::buffer::PAGE_SIZE);
+        guard.data_mut()[0..hdr_copy].copy_from_slice(&new_header[..hdr_copy]);
+        for i in 0..n {
+            let off = header.tuple_infos[i].offset as usize;
+            let sz = header.tuple_infos[i].size as usize;
+            if off + sz <= crate::buffer::PAGE_SIZE {
+                guard.data_mut()[off..off + sz].copy_from_slice(&tuples[i][..sz]);
+            }
+        }
+        guard.mark_dirty();
+        Ok(())
+    }
+
+    pub fn recover_restore_tuple(
+        &self,
+        rid: RecordId,
+        meta: TupleMeta,
+        tuple: &Tuple,
+    ) -> QuillSQLResult<()> {
+        let bytes = TupleCodec::encode(tuple);
+        self.recover_set_tuple_bytes(rid, &bytes)?;
+        self.recover_set_tuple_meta(rid, meta)
+    }
+
+    pub fn recover_delete_tuple(
+        &self,
+        rid: RecordId,
+        txn_id: TransactionId,
+        cid: CommandId,
+    ) -> QuillSQLResult<()> {
+        let mut meta = self.tuple_meta(rid)?;
+        if meta.is_deleted {
+            return Ok(());
+        }
+        meta.mark_deleted(txn_id, cid);
+        self.recover_set_tuple_meta(rid, meta)
+    }
 }

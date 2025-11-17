@@ -167,7 +167,6 @@ This binding hides every MVCC/WAL detail from the operators:
 flowchart LR
     subgraph WAL Record Types
         HI["HeapInsert"] --> redo
-        HU["HeapUpdate"] --> redo & undo
         HD["HeapDelete"] --> redo & undo
         PI["PageImage"]
         PD["PageDelta"]

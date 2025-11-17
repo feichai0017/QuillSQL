@@ -62,7 +62,7 @@ Minimal iterator that returns `(RecordId, TupleMeta, Tuple)` triples. Index scan
   and emit WAL.
 - **Buffer Manager** – `TableHeap`/`BPlusTreeIndex` access pages through the shared buffer
   pool.
-- **Recovery** – Heap/index mutations generate WAL records (`HeapInsert`, `HeapUpdate`,
+- **Recovery** – Heap/index mutations generate WAL records (`HeapInsert`, `HeapDelete`,
   `IndexInsert`, …) that ARIES replays.
 - **Background** – MVCC vacuum and index cleanup obtain handles and iterate tuples via
   the same abstractions as foreground scans.

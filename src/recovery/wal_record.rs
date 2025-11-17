@@ -11,8 +11,7 @@ pub use crate::recovery::wal::codec::{
 
 pub use crate::storage::heap::wal_codec::{
     decode_heap_record as decode_heap, encode_heap_record as encode_heap, HeapDeletePayload,
-    HeapInsertPayload, HeapRecordKind, HeapRecordPayload, HeapUpdatePayload, RelationIdent,
-    TupleMetaRepr,
+    HeapInsertPayload, HeapRecordKind, HeapRecordPayload, RelationIdent, TupleMetaRepr,
 };
 pub use crate::storage::index::wal_codec::{
     decode_index_record as decode_index, encode_index_record as encode_index,
