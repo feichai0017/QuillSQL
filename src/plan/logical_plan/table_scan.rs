@@ -8,8 +8,6 @@ pub struct TableScan {
     pub table_schema: SchemaRef,
     pub filters: Vec<Expr>,
     pub limit: Option<usize>,
-    /// Optional hint: prefer streaming seqscan (bypass buffer pool)
-    pub streaming_hint: Option<bool>,
     /// Row-count estimate attached by the planner (from ANALYZE).
     pub estimated_row_count: Option<u64>,
 }

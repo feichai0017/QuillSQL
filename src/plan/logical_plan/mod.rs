@@ -227,9 +227,7 @@ fn expect_input_at(
         .get(index)
         .cloned()
         .map(Arc::new)
-        .ok_or_else(|| {
-            QuillSQLError::Internal(format!("inputs {:?} {}", inputs, expectation))
-        })
+        .ok_or_else(|| QuillSQLError::Internal(format!("inputs {:?} {}", inputs, expectation)))
 }
 
 impl std::fmt::Display for LogicalPlan {

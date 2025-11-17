@@ -2,7 +2,6 @@ pub mod background;
 pub mod buffer;
 pub mod catalog;
 pub mod config;
-pub mod cost;
 pub mod database;
 pub mod error;
 pub mod execution;

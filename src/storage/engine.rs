@@ -16,54 +16,15 @@ use crate::{
     utils::table_ref::TableReference,
 };
 
-#[derive(Debug, Clone, Default)]
-pub struct ScanOptions {
-    pub streaming_hint: Option<bool>,
-    pub projection: Option<Vec<usize>>,
-    pub batch_hint: Option<usize>,
-}
-
-impl ScanOptions {
-    pub fn with_streaming_hint(mut self, hint: Option<bool>) -> Self {
-        self.streaming_hint = hint;
-        self
-    }
-
-    pub fn streaming(mut self, hint: bool) -> Self {
-        self.streaming_hint = Some(hint);
-        self
-    }
-
-    pub fn with_projection(mut self, columns: Vec<usize>) -> Self {
-        self.projection = Some(columns);
-        self
-    }
-
-    pub fn with_batch_hint(mut self, batch: usize) -> Self {
-        self.batch_hint = Some(batch);
-        self
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct IndexScanRequest {
     pub start: Bound<Tuple>,
     pub end: Bound<Tuple>,
-    pub scan: ScanOptions,
 }
 
 impl IndexScanRequest {
     pub fn new(start: Bound<Tuple>, end: Bound<Tuple>) -> Self {
-        Self {
-            start,
-            end,
-            scan: ScanOptions::default(),
-        }
-    }
-
-    pub fn with_scan_options(mut self, scan: ScanOptions) -> Self {
-        self.scan = scan;
-        self
+        Self { start, end }
     }
 }
 
@@ -75,7 +36,7 @@ pub trait TableHandle: Send + Sync {
     fn table_ref(&self) -> &TableReference;
     fn schema(&self) -> SchemaRef;
     fn table_heap(&self) -> Arc<TableHeap>;
-    fn full_scan(&self, options: ScanOptions) -> QuillSQLResult<Box<dyn TupleStream>>;
+    fn full_scan(&self) -> QuillSQLResult<Box<dyn TupleStream>>;
 
     fn insert(
         &self,
@@ -154,8 +115,8 @@ impl TableBinding {
         self.indexes.as_ref()
     }
 
-    pub fn scan(&self, options: ScanOptions) -> QuillSQLResult<Box<dyn TupleStream>> {
-        self.table.full_scan(options)
+    pub fn scan(&self) -> QuillSQLResult<Box<dyn TupleStream>> {
+        self.table.full_scan()
     }
 
     pub fn insert(&self, txn: &mut TxnContext<'_>, tuple: &Tuple) -> QuillSQLResult<()> {
@@ -242,12 +203,8 @@ impl TableHandle for HeapTableHandle {
         self.heap.clone()
     }
 
-    fn full_scan(&self, options: ScanOptions) -> QuillSQLResult<Box<dyn TupleStream>> {
-        let iterator = if let Some(h) = options.streaming_hint {
-            TableIterator::new_with_hint(self.heap.clone(), .., Some(h))
-        } else {
-            TableIterator::new(self.heap.clone(), ..)
-        };
+    fn full_scan(&self) -> QuillSQLResult<Box<dyn TupleStream>> {
+        let iterator = TableIterator::new(self.heap.clone(), ..);
         Ok(Box::new(HeapTableStream { iterator }))
     }
 
@@ -383,18 +340,13 @@ impl IndexHandle for BTreeIndexHandle {
         request: IndexScanRequest,
     ) -> QuillSQLResult<Box<dyn TupleStream>> {
         let iterator = TreeIndexIterator::new(self.index.clone(), (request.start, request.end));
-        Ok(Box::new(BTreeIndexStream {
-            iterator,
-            table,
-            _scan: request.scan,
-        }))
+        Ok(Box::new(BTreeIndexStream { iterator, table }))
     }
 }
 
 struct BTreeIndexStream {
     iterator: TreeIndexIterator,
     table: Arc<dyn TableHandle>,
-    _scan: ScanOptions,
 }
 
 impl TupleStream for BTreeIndexStream {

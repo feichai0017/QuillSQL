@@ -114,19 +114,19 @@ Deeper dive:
 
 | Component | Highlights |
 | --------- | ---------- |
-| `engine.rs` | Defines `StorageEngine`, `TableHandle`, `IndexHandle`, `TupleStream`, and the new `ScanOptions` / `IndexScanRequest`. |
+| `engine.rs` | Defines `StorageEngine`, `TableHandle`, `IndexHandle`, `TupleStream`, and `IndexScanRequest`. |
 | `table_heap` | Slotted-page heap with MVCC metadata (`TupleMeta`, forward/back pointers). |
 | `index` | B+Tree (B-link) implementation with iterators and codecs. |
 
 Key ideas for teaching:
 Topics to emphasise:
 - **Handle abstraction**: Execution asks the engine for a `TableHandle`, then calls
-  `full_scan(ScanOptions)` to receive a `TupleStream`. The default engine simply wraps
+  `full_scan()` to receive a `TupleStream`. The default engine simply wraps
   `TableHeap`/`BPlusTreeIndex`, but students can plug in their own engines for research.
 - **TupleStream**: Minimal interface returning `(RecordId, TupleMeta, Tuple)` triples.
   Operators layer MVCC visibility on top, while the stream hides buffering details.
-- **ScanOptions**: Carry streaming hints, projection slots, or batch sizes. Even when the
-  default heap ignores some hints, the API teaches how modern engines negotiate capabilities.
+- **Scan extensions**: Consider extending `full_scan()` to accept projection/batch hints—
+  a natural exercise for showing how execution and storage negotiate capabilities.
 - `table_heap` demonstrates MVCC version chains (forward/back pointers) and the slotted
   page layout. Encourage students to trace `MvccHeap::update` alongside WAL entries to
   see how new versions link together.

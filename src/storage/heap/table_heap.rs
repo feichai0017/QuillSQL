@@ -1,17 +1,10 @@
-use crate::buffer::{AtomicPageId, PageId, WritePageGuard, INVALID_PAGE_ID};
+use crate::buffer::{AtomicPageId, WritePageGuard, INVALID_PAGE_ID};
 use crate::catalog::{SchemaRef, EMPTY_SCHEMA_REF};
-use crate::config::TableScanConfig;
 use crate::storage::codec::TablePageCodec;
-use crate::storage::disk_scheduler::{DiskCommandResultReceiver, DiskScheduler};
 use crate::storage::page::{RecordId, TablePage, TupleMeta, INVALID_RID};
 use crate::transaction::{CommandId, TransactionId};
-use crate::{
-    buffer::BufferManager,
-    error::{QuillSQLError, QuillSQLResult},
-};
-use bytes::BytesMut;
+use crate::{buffer::BufferManager, error::QuillSQLResult};
 use std::collections::Bound;
-use std::collections::VecDeque;
 use std::ops::RangeBounds;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
@@ -23,7 +16,6 @@ use crate::storage::heap::wal_codec::{
     TupleMetaRepr,
 };
 use crate::storage::tuple::Tuple;
-use crate::utils::ring_buffer::RingBuffer;
 
 #[derive(Debug)]
 pub struct TableHeap {
@@ -398,169 +390,12 @@ pub struct TableIterator {
     cursor: RecordId,
     started: bool,
     ended: bool,
-    strategy: ScanStrategy,
-}
-
-#[derive(Debug)]
-enum ScanStrategy {
-    /// Existing behavior: go through buffer pool (page_table/LRU-K)
-    Cached,
-    /// Streaming with generic ring buffer holding decoded tuples
-    Streaming(StreamScanState),
-}
-
-#[derive(Debug)]
-struct StreamScanState {
-    ring: RingBuffer<(RecordId, TupleMeta, Tuple)>,
-    first_page: bool,
-    prefetch: StreamPrefetchState,
-}
-
-#[derive(Debug)]
-struct StreamPrefetchState {
-    pending: VecDeque<PageId>,
-    inflight: VecDeque<StreamBatch>,
-    ready: VecDeque<(PageId, BytesMut)>,
-    readahead: usize,
-    exhausted: bool,
-}
-
-#[derive(Debug)]
-struct StreamBatch {
-    page_ids: Vec<PageId>,
-    rx: DiskCommandResultReceiver<Vec<BytesMut>>,
-}
-
-impl StreamPrefetchState {
-    fn ensure_ready(&mut self, scheduler: &Arc<DiskScheduler>) -> QuillSQLResult<()> {
-        while !self.exhausted && self.ready.is_empty() {
-            let capacity = self
-                .readahead
-                .saturating_sub(self.ready.len() + self.inflight.len());
-            if capacity > 0 && !self.pending.is_empty() {
-                self.schedule_batch(scheduler, capacity)?;
-                continue;
-            }
-            if let Some(batch) = self.inflight.pop_front() {
-                let buffers = batch.rx.recv().map_err(|e| {
-                    QuillSQLError::Internal(format!("DiskScheduler channel disconnected: {}", e))
-                })??;
-                for (pid, bytes) in batch.page_ids.into_iter().zip(buffers.into_iter()) {
-                    self.ready.push_back((pid, bytes));
-                }
-            } else {
-                self.exhausted = true;
-            }
-        }
-        Ok(())
-    }
-
-    fn maybe_schedule(&mut self, scheduler: &Arc<DiskScheduler>) -> QuillSQLResult<()> {
-        if self.exhausted {
-            return Ok(());
-        }
-        let capacity = self
-            .readahead
-            .saturating_sub(self.ready.len() + self.inflight.len());
-        if capacity == 0 || self.pending.is_empty() {
-            return Ok(());
-        }
-        self.schedule_batch(scheduler, capacity)
-    }
-
-    fn schedule_batch(
-        &mut self,
-        scheduler: &Arc<DiskScheduler>,
-        limit: usize,
-    ) -> QuillSQLResult<()> {
-        let mut ids = Vec::with_capacity(limit);
-        while ids.len() < limit {
-            if let Some(pid) = self.pending.pop_front() {
-                ids.push(pid);
-            } else {
-                break;
-            }
-        }
-        if ids.is_empty() {
-            return Ok(());
-        }
-        let rx = scheduler.schedule_read_pages(ids.clone())?;
-        self.inflight.push_back(StreamBatch { page_ids: ids, rx });
-        Ok(())
-    }
 }
 
 impl TableIterator {
     pub fn new<R: RangeBounds<RecordId>>(heap: Arc<TableHeap>, range: R) -> Self {
-        Self::new_with_hint(heap, range, None)
-    }
-
-    pub fn new_with_hint<R: RangeBounds<RecordId>>(
-        heap: Arc<TableHeap>,
-        range: R,
-        streaming_hint: Option<bool>,
-    ) -> Self {
         let start = range.start_bound().cloned();
         let end = range.end_bound().cloned();
-
-        // Centralized config (remove env): use TableScanConfig defaults
-        let cfg = TableScanConfig::default();
-        let pool_quarter = (heap.buffer_pool.buffer_pool().capacity().max(1) / 4) as u32;
-        let threshold: u32 = cfg.stream_threshold_pages.unwrap_or(pool_quarter.max(1));
-        let readahead: usize = cfg.readahead_pages;
-
-        let approx_pages = heap
-            .last_page_id
-            .load(Ordering::SeqCst)
-            .saturating_sub(heap.first_page_id.load(Ordering::SeqCst))
-            + 1;
-
-        let is_full_scan = matches!(start, Bound::Unbounded) && matches!(end, Bound::Unbounded);
-
-        // Requested streaming decision
-        let requested_stream = match streaming_hint {
-            Some(true) => true,
-            Some(false) => false,
-            None => cfg.stream_scan_enable || approx_pages >= threshold,
-        };
-        // If explicitly hinted true, allow streaming even for ranged scans. Otherwise only for full scan.
-        let use_streaming = if matches!(streaming_hint, Some(true)) {
-            true
-        } else {
-            is_full_scan && requested_stream
-        };
-
-        let strategy = if use_streaming {
-            let tuple_ring_cap = readahead.max(1).saturating_mul(1024);
-            let ring = RingBuffer::with_capacity(tuple_ring_cap);
-            let default_first = heap.first_page_id.load(Ordering::SeqCst);
-            let start_pid = match &start {
-                Bound::Included(r) | Bound::Excluded(r) => r.page_id,
-                Bound::Unbounded => default_first,
-            };
-            let mut pending = VecDeque::new();
-            let exhausted = if start_pid == INVALID_PAGE_ID {
-                true
-            } else {
-                pending.push_back(start_pid);
-                false
-            };
-            let prefetch = StreamPrefetchState {
-                pending,
-                inflight: VecDeque::new(),
-                ready: VecDeque::new(),
-                readahead: readahead.max(1),
-                exhausted,
-            };
-            ScanStrategy::Streaming(StreamScanState {
-                ring,
-                first_page: true,
-                prefetch,
-            })
-        } else {
-            ScanStrategy::Cached
-        };
-
         Self {
             heap,
             start_bound: start,
@@ -568,7 +403,6 @@ impl TableIterator {
             cursor: INVALID_RID,
             started: false,
             ended: false,
-            strategy,
         }
     }
 
@@ -577,63 +411,6 @@ impl TableIterator {
             return Ok(None);
         }
 
-        // Streaming now supports bounded scans; no unconditional fallback required here.
-
-        // Clone refs needed by streaming helper before borrowing self.strategy mutably
-        let heap_arc = self.heap.clone();
-        let schema = self.heap.schema.clone();
-        let start_bound_cloned = self.start_bound.clone();
-
-        // Streaming strategy (only supports full scan). For other ranges fallback to Cached.
-        if let ScanStrategy::Streaming(state) = &mut self.strategy {
-            // Initialize on first call
-            if !self.started {
-                self.started = true;
-                if state.prefetch.exhausted {
-                    self.ended = true;
-                    return Ok(None);
-                }
-                // Ensure disk visibility for streaming reads
-                self.heap.buffer_pool.flush_all_pages()?;
-                fill_stream_ring(&heap_arc, schema.clone(), &start_bound_cloned, state)?;
-            }
-
-            loop {
-                if let Some((rid, meta, tuple)) = state.ring.pop() {
-                    // Respect end bound
-                    match &self.end_bound {
-                        Bound::Unbounded => return Ok(Some((rid, meta, tuple))),
-                        Bound::Included(end) => {
-                            if rid == *end {
-                                self.ended = true;
-                            }
-                            return Ok(Some((rid, meta, tuple)));
-                        }
-                        Bound::Excluded(end) => {
-                            if rid == *end {
-                                self.ended = true;
-                                return Ok(None);
-                            }
-                            return Ok(Some((rid, meta, tuple)));
-                        }
-                    }
-                } else {
-                    if state.prefetch.exhausted {
-                        self.ended = true;
-                        return Ok(None);
-                    }
-                    fill_stream_ring(&heap_arc, schema.clone(), &start_bound_cloned, state)?;
-                    if state.ring.is_empty() {
-                        if state.prefetch.exhausted {
-                            self.ended = true;
-                        }
-                        return Ok(None);
-                    }
-                }
-            }
-        }
-
-        // Cached strategy (original)
         if self.started {
             match self.end_bound {
                 Bound::Included(rid) => {
@@ -703,48 +480,6 @@ impl TableIterator {
             }
         }
     }
-}
-
-fn fill_stream_ring(
-    heap: &Arc<TableHeap>,
-    schema: SchemaRef,
-    start_bound: &Bound<RecordId>,
-    state: &mut StreamScanState,
-) -> QuillSQLResult<()> {
-    let scheduler = heap.buffer_pool.buffer_pool().disk_scheduler();
-    while state.ring.len() < state.ring.capacity() && !state.prefetch.exhausted {
-        state.prefetch.ensure_ready(&scheduler)?;
-        let Some((pid, bytes)) = state.prefetch.ready.pop_front() else {
-            break;
-        };
-
-        let (page, _) = TablePageCodec::decode(&bytes, schema.clone())?;
-        if page.header.next_page_id != INVALID_PAGE_ID {
-            state.prefetch.pending.push_back(page.header.next_page_id);
-        }
-        state.prefetch.maybe_schedule(&scheduler)?;
-
-        let start_slot = if state.first_page {
-            state.first_page = false;
-            match start_bound {
-                Bound::Included(r) if r.page_id == pid => r.slot_num as usize,
-                Bound::Excluded(r) if r.page_id == pid => r.slot_num as usize + 1,
-                _ => 0,
-            }
-        } else {
-            0
-        };
-
-        for slot in start_slot..page.header.num_tuples as usize {
-            let rid = RecordId::new(pid, slot as u32);
-            let (meta, tuple) = page.tuple(slot as u16)?;
-            state.ring.push((rid, meta, tuple));
-            if state.ring.len() >= state.ring.capacity() {
-                break;
-            }
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -913,102 +648,6 @@ mod tests {
         assert_eq!(tuple.data, vec![3i8.into(), 3i16.into()]);
 
         assert!(iterator.next().unwrap().is_none());
-    }
-
-    #[test]
-    pub fn test_streaming_seq_scan_ring() {
-        // Force streaming mode regardless of table size
-        std::env::set_var("QUILL_STREAM_SCAN", "1");
-        std::env::set_var("QUILL_STREAM_READAHEAD", "2");
-
-        let temp_dir = TempDir::new().unwrap();
-        let temp_path = temp_dir.path().join("test.db");
-
-        let schema = Arc::new(Schema::new(vec![
-            Column::new("a", DataType::Int8, false),
-            Column::new("b", DataType::Int16, false),
-        ]));
-
-        let disk_manager = DiskManager::try_new(temp_path).unwrap();
-        let disk_scheduler = Arc::new(DiskScheduler::new(Arc::new(disk_manager)));
-        let buffer_pool = Arc::new(BufferManager::new(128, disk_scheduler));
-        let table_heap = Arc::new(TableHeap::try_new(schema.clone(), buffer_pool).unwrap());
-
-        // Insert many rows to span multiple pages
-        let rows = 1000;
-        for i in 0..rows {
-            let _rid = table_heap
-                .insert_tuple(
-                    &super::TupleMeta::new(1, 0),
-                    &Tuple::new(schema.clone(), vec![(i as i8).into(), (i as i16).into()]),
-                )
-                .unwrap();
-        }
-
-        // Ensure data is persisted before direct I/O streaming
-        table_heap.buffer_pool.flush_all_pages().unwrap();
-
-        // Iterate full range; should go through streaming ring buffer
-        let mut it = TableIterator::new(table_heap.clone(), ..);
-        let mut cnt = 0usize;
-        while let Some((_rid, _meta, _t)) = it.next().unwrap() {
-            cnt += 1;
-        }
-        assert_eq!(cnt, rows);
-    }
-
-    #[test]
-    pub fn test_streaming_respects_bounds_and_fallbacks() {
-        // Force-enable streaming globally; iterator should still fallback for ranged scans
-        std::env::set_var("QUILL_STREAM_SCAN", "1");
-        std::env::set_var("QUILL_STREAM_READAHEAD", "2");
-
-        let temp_dir = TempDir::new().unwrap();
-        let temp_path = temp_dir.path().join("test.db");
-
-        let schema = Arc::new(Schema::new(vec![
-            Column::new("a", DataType::Int8, false),
-            Column::new("b", DataType::Int16, false),
-        ]));
-
-        let disk_manager = DiskManager::try_new(temp_path).unwrap();
-        let disk_scheduler = Arc::new(DiskScheduler::new(Arc::new(disk_manager)));
-        let buffer_pool = Arc::new(BufferManager::new(128, disk_scheduler));
-        let table_heap = Arc::new(TableHeap::try_new(schema.clone(), buffer_pool).unwrap());
-
-        let rid1 = table_heap
-            .insert_tuple(
-                &super::TupleMeta::new(1, 0),
-                &Tuple::new(schema.clone(), vec![1i8.into(), 1i16.into()]),
-            )
-            .unwrap();
-        let rid2 = table_heap
-            .insert_tuple(
-                &super::TupleMeta::new(2, 0),
-                &Tuple::new(schema.clone(), vec![2i8.into(), 2i16.into()]),
-            )
-            .unwrap();
-        let rid3 = table_heap
-            .insert_tuple(
-                &super::TupleMeta::new(3, 0),
-                &Tuple::new(schema.clone(), vec![3i8.into(), 3i16.into()]),
-            )
-            .unwrap();
-
-        // Create ranged iterator with streaming hint=true; must fallback and only return rid1..=rid2
-        let mut it = TableIterator::new_with_hint(table_heap.clone(), rid1..=rid2, Some(true));
-
-        let got1 = it.next().unwrap().unwrap();
-        let got2 = it.next().unwrap().unwrap();
-        let got3 = it.next().unwrap();
-
-        assert_eq!(got1.0, rid1);
-        assert_eq!(got2.0, rid2);
-        assert!(got3.is_none());
-
-        // Sanity: ensure rid3 exists but not returned in range
-        let (_m, t3) = table_heap.full_tuple(rid3).unwrap();
-        assert_eq!(t3.data, vec![3i8.into(), 3i16.into()]);
     }
 
     #[test]

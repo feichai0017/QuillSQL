@@ -1,7 +1,6 @@
-use crate::catalog::{Catalog, Schema, DEFAULT_SCHEMA_NAME};
+use crate::catalog::Schema;
 use std::sync::Arc;
 
-use crate::cost::CostEstimator;
 use crate::expression::{BinaryExpr, BinaryOp, Expr};
 use crate::plan::logical_plan::{
     Aggregate, CreateIndex, CreateTable, DropIndex, DropTable, EmptyRelation, Filter, Insert, Join,
@@ -10,26 +9,21 @@ use crate::plan::logical_plan::{
 
 use crate::execution::physical_plan::{
     PhysicalAggregate, PhysicalAnalyze, PhysicalCreateIndex, PhysicalCreateTable, PhysicalDelete,
-    PhysicalDropIndex, PhysicalDropTable, PhysicalEmpty, PhysicalFilter, PhysicalIndexScan,
-    PhysicalInsert, PhysicalLimit, PhysicalNestedLoopJoin, PhysicalPlan, PhysicalProject,
-    PhysicalSeqScan, PhysicalSort, PhysicalUpdate, PhysicalValues,
+    PhysicalDropIndex, PhysicalDropTable, PhysicalEmpty, PhysicalFilter, PhysicalInsert,
+    PhysicalLimit, PhysicalNestedLoopJoin, PhysicalPlan, PhysicalProject, PhysicalSeqScan,
+    PhysicalSort, PhysicalUpdate, PhysicalValues,
 };
 
-pub struct PhysicalPlanner<'a> {
-    pub catalog: &'a Catalog,
-    cost: CostEstimator<'a>,
-}
+#[derive(Debug, Default, Clone, Copy)]
+pub struct PhysicalPlanner;
 
-impl<'a> PhysicalPlanner<'a> {
-    pub fn new(catalog: &'a Catalog) -> Self {
-        Self {
-            catalog,
-            cost: CostEstimator::new(catalog),
-        }
+impl PhysicalPlanner {
+    pub fn new() -> Self {
+        Self
     }
 }
 
-impl<'a> PhysicalPlanner<'a> {
+impl PhysicalPlanner {
     pub fn create_physical_plan(&self, logical_plan: LogicalPlan) -> PhysicalPlan {
         let logical_plan = Arc::new(logical_plan);
         self.build_plan(logical_plan)
@@ -195,21 +189,7 @@ impl<'a> PhysicalPlanner<'a> {
     }
 
     fn build_table_scan(&self, scan: &TableScan) -> PhysicalPlan {
-        // Choose the concrete scan operator by consulting the shared CostEstimator.
-        let mut plan = if let Some(catalog_table) = self
-            .catalog
-            .schemas
-            .get(scan.table_ref.schema().unwrap_or(DEFAULT_SCHEMA_NAME))
-            .and_then(|schema| schema.tables.get(scan.table_ref.table()))
-        {
-            if let Some((index_name, _index)) = catalog_table.indexes.iter().next() {
-                self.choose_scan_operator(scan, index_name.clone())
-            } else {
-                self.new_seq_scan(scan)
-            }
-        } else {
-            self.new_seq_scan(scan)
-        };
+        let mut plan = self.new_seq_scan(scan);
 
         if let Some(limit_value) = scan.limit {
             plan = PhysicalPlan::Limit(PhysicalLimit::new(Some(limit_value), 0, Arc::new(plan)));
@@ -223,32 +203,10 @@ impl<'a> PhysicalPlanner<'a> {
     }
 }
 
-impl<'a> PhysicalPlanner<'a> {
+impl PhysicalPlanner {
     fn new_seq_scan(&self, scan: &TableScan) -> PhysicalPlan {
-        let mut op = PhysicalSeqScan::new(scan.table_ref.clone(), scan.table_schema.clone());
-        op.streaming_hint = scan.streaming_hint;
+        let op = PhysicalSeqScan::new(scan.table_ref.clone(), scan.table_schema.clone());
         PhysicalPlan::SeqScan(op)
-    }
-
-    fn choose_scan_operator(&self, scan: &TableScan, index_name: String) -> PhysicalPlan {
-        let base_rows = self.cost.estimate_table_scan_rows(scan);
-        let selectivity = self.cost.estimate_filter_selectivity(scan);
-        let filtered_rows = selectivity
-            .map(|sel| (base_rows * sel).max(1.0))
-            .unwrap_or(base_rows);
-        let seq_cost = self.cost.seq_scan_cost(scan);
-        let index_cost = self.cost.index_scan_cost(filtered_rows);
-
-        if index_cost < seq_cost {
-            PhysicalPlan::IndexScan(PhysicalIndexScan::new(
-                scan.table_ref.clone(),
-                index_name,
-                scan.table_schema.clone(),
-                ..,
-            ))
-        } else {
-            self.new_seq_scan(scan)
-        }
     }
 }
 

@@ -5,7 +5,7 @@ use super::scan::ScanPrefetch;
 use crate::catalog::SchemaRef;
 use crate::error::QuillSQLError;
 use crate::storage::{
-    engine::{ScanOptions, TableBinding, TupleStream},
+    engine::{TableBinding, TupleStream},
     page::{RecordId, TupleMeta},
 };
 use crate::transaction::LockMode;
@@ -21,7 +21,6 @@ const PREFETCH_BATCH: usize = 64;
 pub struct PhysicalSeqScan {
     pub table: TableReference,
     pub table_schema: SchemaRef,
-    pub streaming_hint: Option<bool>,
 
     iterator: Mutex<Option<Box<dyn TupleStream>>>,
     prefetch: ScanPrefetch,
@@ -33,7 +32,6 @@ impl PhysicalSeqScan {
         PhysicalSeqScan {
             table,
             table_schema,
-            streaming_hint: None,
             iterator: Mutex::new(None),
             prefetch: ScanPrefetch::new(PREFETCH_BATCH),
             table_binding: OnceLock::new(),
@@ -66,8 +64,7 @@ impl VolcanoExecutor for PhysicalSeqScan {
             .table_binding
             .get()
             .expect("table binding not initialized");
-        let options = ScanOptions::default().with_streaming_hint(self.streaming_hint);
-        let stream = binding.scan(options)?;
+        let stream = binding.scan()?;
         *self.iterator.lock() = Some(stream);
         self.prefetch.clear();
         Ok(())
@@ -116,7 +113,6 @@ impl std::fmt::Debug for PhysicalSeqScan {
         f.debug_struct("PhysicalSeqScan")
             .field("table", &self.table)
             .field("table_schema", &self.table_schema)
-            .field("streaming_hint", &self.streaming_hint)
             .finish()
     }
 }

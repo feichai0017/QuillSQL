@@ -175,23 +175,6 @@ impl Default for BTreeConfig {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct TableScanConfig {
-    pub stream_scan_enable: bool,
-    pub stream_threshold_pages: Option<u32>,
-    pub readahead_pages: usize,
-}
-
-impl Default for TableScanConfig {
-    fn default() -> Self {
-        TableScanConfig {
-            stream_scan_enable: false,
-            stream_threshold_pages: None, // None => use pool_size/4
-            readahead_pages: 2,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
 pub struct IndexVacuumConfig {
     /// Background vacuum interval in milliseconds
     pub interval_ms: u64,

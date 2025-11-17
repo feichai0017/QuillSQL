@@ -6,7 +6,7 @@ use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::execution::{ExecutionContext, VolcanoExecutor};
 use crate::expression::Expr;
 use crate::storage::{
-    engine::{ScanOptions, TableBinding, TupleStream},
+    engine::{TableBinding, TupleStream},
     tuple::Tuple,
 };
 use crate::transaction::LockMode;
@@ -50,7 +50,7 @@ impl VolcanoExecutor for PhysicalDelete {
             .table_binding
             .get()
             .expect("table binding not initialized");
-        let stream = binding.scan(ScanOptions::default())?;
+        let stream = binding.scan()?;
         *self.iterator.lock().unwrap() = Some(stream);
         Ok(())
     }

@@ -3,7 +3,7 @@ use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::execution::{ExecutionContext, VolcanoExecutor};
 use crate::expression::Expr;
 use crate::storage::{
-    engine::{ScanOptions, TableBinding, TupleStream},
+    engine::{TableBinding, TupleStream},
     tuple::Tuple,
 };
 use crate::transaction::LockMode;
@@ -56,7 +56,7 @@ impl VolcanoExecutor for PhysicalUpdate {
             .table_binding
             .get()
             .expect("table binding not initialized");
-        let stream = binding.scan(ScanOptions::default())?;
+        let stream = binding.scan()?;
         *self.table_iterator.lock().unwrap() = Some(stream);
         context
             .txn_ctx_mut()

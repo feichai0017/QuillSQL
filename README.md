@@ -151,7 +151,7 @@ Minimal environment variables (runtime only)
 - QUILL_DEFAULT_ISOLATION: default session isolation (`read-uncommitted`, `read-committed`, `repeatable-read`, `serializable`)
 - RUST_LOG: log level (e.g., info, debug)
 
-Programmatic options live in `quillsql::config` (see docs) — build `DatabaseOptions` with `WalOptions`, `BufferPoolConfig`, `BTreeConfig`, `TableScanConfig`, etc., and pass into `Database::new_*_with_options`. Examples in the docs remain unchanged.
+Programmatic options live in `quillsql::config` (see docs) — build `DatabaseOptions` with `WalOptions`, `BufferPoolConfig`, `BTreeConfig`, etc., and pass into `Database::new_*_with_options`. Examples in the docs remain unchanged.
 
 ## 📦 Docker
 

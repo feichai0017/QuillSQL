@@ -20,7 +20,7 @@ performance, MVCC, and recovery.
 
 | Path | Purpose | Key Types |
 | ---- | ------- | --------- |
-| `engine.rs` | Default engine plus handle definitions. | `StorageEngine`, `TableHandle`, `TupleStream`, `ScanOptions` |
+| `engine.rs` | Default engine plus handle definitions. | `StorageEngine`, `TableHandle`, `TupleStream` |
 | `table_heap/` | Heap storage + MVCC logic. | `TableHeap`, `MvccHeap` |
 | `index/` | B+Tree implementation. | `BPlusTreeIndex` |
 | `page/` | Page, RID, tuple metadata. | `Page`, `RecordId`, `TupleMeta` |
@@ -45,14 +45,13 @@ The default implementation wraps the row-oriented heap + B+Tree combo, but the t
 ready for column stores, remote storage, or async engines.
 
 ### TableHandle
-Offers `full_scan(ScanOptions)`, `insert`, `delete`, `update`, and
+Offers `full_scan()`, `insert`, `delete`, `update`, and
 `prepare_row_for_write`. MVCC, undo, and locking concerns live here so execution operators
 only describe intent.
 
 ### TupleStream
-Minimal iterator that returns `(RecordId, TupleMeta, Tuple)` triples. `ScanOptions` carry
-streaming hints, projection lists, or batch sizes; index scans use `IndexScanRequest` to
-describe ranges.
+Minimal iterator that returns `(RecordId, TupleMeta, Tuple)` triples. Index scans use
+`IndexScanRequest` to describe ranges.
 
 ---
 
@@ -74,7 +73,8 @@ describe ranges.
 
 - Implement a toy columnar handle to show how the execution engine can stay agnostic to
   storage layout.
-- Use `ScanOptions::projection` to push down column pruning into `TableIterator`.
+- Extend the `TableHandle::full_scan` / `TableIterator` plumbing to accept projection hints
+  so students can experiment with column pruning.
 - Enable `RUST_LOG=storage::table_heap=trace` and trace MVCC version chains as updates
   occur.
 

@@ -237,9 +237,7 @@ impl Database {
             physical_plan,
         } = self.plan_statement(sql)?;
 
-        if let Some(result) =
-            self.execute_transaction_control(session, &optimized_logical_plan)?
-        {
+        if let Some(result) = self.execute_transaction_control(session, &optimized_logical_plan)? {
             return Ok(result);
         }
 
@@ -315,15 +313,12 @@ impl Database {
         })
     }
 
-    fn optimize_logical_plan(
-        &self,
-        logical_plan: &LogicalPlan,
-    ) -> QuillSQLResult<LogicalPlan> {
+    fn optimize_logical_plan(&self, logical_plan: &LogicalPlan) -> QuillSQLResult<LogicalPlan> {
         LogicalOptimizer::new().optimize(logical_plan)
     }
 
     fn build_physical_plan(&self, logical_plan: &LogicalPlan) -> PhysicalPlan {
-        let physical_planner = PhysicalPlanner::new(&self.catalog);
+        let physical_planner = PhysicalPlanner::new();
         physical_planner.create_physical_plan(logical_plan.clone())
     }
 
@@ -431,10 +426,7 @@ fn wal_config_for_temp(temp_root: &Path, overrides: &WalOptions) -> WalConfig {
 
 fn build_wal_config(default_directory: PathBuf, overrides: &WalOptions) -> WalConfig {
     let mut config = WalConfig {
-        directory: overrides
-            .directory
-            .clone()
-            .unwrap_or(default_directory),
+        directory: overrides.directory.clone().unwrap_or(default_directory),
         ..WalConfig::default()
     };
     if let Some(size) = overrides.segment_size {

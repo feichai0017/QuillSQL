@@ -137,7 +137,7 @@ graph TD
 ```mermaid
 classDiagram
     class TableBinding {
-        +scan(ScanOptions) -> TupleStream
+        +scan() -> TupleStream
         +index_scan(name, IndexScanRequest) -> TupleStream
         +insert(&mut TxnContext, &Tuple)
         +delete(&mut TxnContext, RecordId, TupleMeta, Tuple)

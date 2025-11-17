@@ -37,17 +37,12 @@ Examples:
 - **PushDownLimit** applies LIMIT before expensive joins/sorts when safe.
 - **PruneProjection** removes unused columns so execution/storage decode less data.
 
-### Cost Guidance (DuckDB-inspired)
+### Extending With Statistics
 
-Although the rule engine itself stays heuristics-only, the physical planner now taps into
-`CostEstimator`, which borrows the same intuition as DuckDB’s simple cardinality model:
-- equality selectivity ≈ `1 / distinct_count`
-- range selectivity derived from min/max assuming uniform distribution
-
-The estimator multiplies per-predicate selectivities (clamped to `>= 1%`), producing an
-estimated filtered row count. Physical planner decisions (e.g., sequential scan vs B+Tree
-index) are then based on these cost numbers, so students can see how statistics influence
-operator choice without implementing a full-blown CBO.
+The optimizer intentionally remains heuristics-only, and the physical planner sticks to
+simple sequential scans. For coursework, students can still read `TableStatistics` from
+the catalog to prototype their own cardinality estimates or cost heuristics (e.g., to
+experiment with when to prefer an index scan), but no estimator ships in-tree.
 
 ---
 
@@ -55,9 +50,8 @@ operator choice without implementing a full-blown CBO.
 
 - **LogicalPlan** – the optimizer only sees logical nodes; physical/storage layers remain
   untouched.
-- **Catalog / Statistics** – current rules are heuristic, but `TableStatistics` is
-  available for students to experiment with cost-based decisions (e.g., choose index scan
-  when selectivity is low).
+- **Catalog / Statistics** – current rules are heuristic, but `TableStatistics` remains
+  available for students who want to prototype their own cost-based decisions.
 - **Execution** – leaner logical plans translate into simpler physical plans (e.g.,
   predicate pushdown allows `PhysicalSeqScan` to discard rows earlier).
 
