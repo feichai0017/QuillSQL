@@ -399,6 +399,243 @@
 
     const STORAGE_KEY = 'quillsql:apiBase';
     const DEFAULT_API_BASE = '/api/sql';
+    const GITHUB_URL = 'https://github.com/feichai0017/QuillSQL';
+    const PROFILE_URL = 'https://github.com/feichai0017';
+    const commandHistory = [];
+    let historyIndex = 0;
+
+    const getApiBase = () => localStorage.getItem(STORAGE_KEY) || DEFAULT_API_BASE;
+    const setApiBase = (value) => localStorage.setItem(STORAGE_KEY, value);
+
+    function escapeHtml(text = '') {
+      return text.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c] || c));
+    }
+
+    function scrollLogToBottom() {
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    function appendLine(text, variant = '') {
+      const line = document.createElement('div');
+      line.className = `line${variant ? ` ${variant}` : ''}`;
+      line.textContent = text;
+      logEl.appendChild(line);
+      scrollLogToBottom();
+    }
+
+    function appendBlock(text) {
+      const block = document.createElement('pre');
+      block.className = 'block';
+      block.textContent = text;
+      logEl.appendChild(block);
+      scrollLogToBottom();
+    }
+
+    function appendPrompt(cmd) {
+      const line = document.createElement('div');
+      line.className = 'line prompt';
+      line.innerHTML = `<span class="prompt-text">quill@tty:~$</span>${escapeHtml(cmd)}`;
+      logEl.appendChild(line);
+      scrollLogToBottom();
+    }
+
+    function openExternal(url) {
+      const newTab = window.open(url, '_blank', 'noopener');
+      if (!newTab) {
+        appendLine(`Unable to open link automatically. Please open manually: ${url}`, 'error');
+      }
+    }
+
+    function setStatus(state, label) {
+      statusEl.dataset.state = state;
+      statusEl.textContent = label;
+    }
+
+    function printHelp() {
+      appendBlock([
+        'Built-in commands:',
+        '  help           Show this message',
+        '  github         Open the GitHub repository info',
+        '  profile        Maintainer profile + link',
+        '  clear          Clear the terminal log',
+        '  history        Show submitted SQL commands',
+        '  examples       List available `.slt` demos from /api/examples',
+        '  example <name> Load an example into the prompt and run it',
+        '  endpoint <url> Set custom SQL endpoint (persisted in localStorage)',
+        '',
+        'Any other input is sent to the SQL API.',
+      ].join('\n'));
+    }
+
+    function showExamples() {
+      const keys = Object.keys(examples).sort();
+      if (!keys.length) {
+        appendLine('Examples are still loading (or none available).', 'muted');
+        return;
+      }
+      appendBlock(['Available examples:', ...keys.map((k) => `  example ${k}`)].join('\n'));
+    }
+
+    function splitStatements(sqlText) {
+      return sqlText
+        .split(';')
+        .map((s) => s.trim())
+        .filter(Boolean)
+        .slice(0, 100);
+    }
+
+    function ensureStatementTerminated(sql) {
+      if (!sql) return '';
+      return /;\s*$/.test(sql) ? sql : `${sql.trim()};`;
+    }
+
+    function convertExampleScript(raw = '') {
+      const statements = [];
+      const lines = raw.replace(/\r/g, '').split('\n');
+      let i = 0;
+
+      const collectStatement = (sqlLines) => {
+        const sql = sqlLines.join('\n').trim();
+        if (!sql) {
+          return;
+        }
+        statements.push(ensureStatementTerminated(sql));
+      };
+
+      while (i < lines.length) {
+        const current = lines[i].trim();
+        if (!current) {
+          i += 1;
+          continue;
+        }
+
+        if (current.startsWith('statement')) {
+          i += 1;
+          const sqlLines = [];
+          while (i < lines.length && lines[i].trim() !== '') {
+            sqlLines.push(lines[i]);
+            i += 1;
+          }
+          collectStatement(sqlLines);
+          continue;
+        }
+
+        if (current.startsWith('query')) {
+          i += 1;
+          while (i < lines.length && lines[i].trim() === '') {
+            i += 1;
+          }
+          const sqlLines = [];
+          while (i < lines.length) {
+            const text = lines[i].trim();
+            if (!text || text === '----') {
+              break;
+            }
+            sqlLines.push(lines[i]);
+            i += 1;
+          }
+          if (i < lines.length && lines[i].trim() === '----') {
+            i += 1;
+            while (i < lines.length && lines[i].trim() !== '') {
+              i += 1;
+            }
+          }
+          collectStatement(sqlLines);
+          continue;
+        }
+
+        const fallback = [];
+        while (i < lines.length && lines[i].trim() !== '') {
+          fallback.push(lines[i]);
+          i += 1;
+        }
+        collectStatement(fallback);
+      }
+
+      return statements;
+    }
+
+    function formatRows(rows) {
+      if (!rows || rows.length === 0) {
+        return '✓ Query executed successfully (0 rows)';
+      }
+      const widths = [];
+      rows.forEach((row) => {
+        row.forEach((cell, idx) => {
+          const len = String(cell ?? '').length;
+          widths[idx] = Math.max(widths[idx] || 0, len);
+        });
+      });
+      const formatted = rows.map((row) =>
+        row
+          .map((cell, idx) => {
+            const text = String(cell ?? '');
+            return text.padEnd(widths[idx]);
+          })
+          .join(' | ')
+      );
+      return formatted.join('\n');
+    }
+
+    async function runSQL(rawInput) {
+      const sql = rawInput.trim();
+      if (!sql) {
+        appendLine('Nothing to execute.', 'muted');
+        return;
+      }
+      setStatus('busy', 'RUNNING');
+      try {
+        const endpoint = getApiBase();
+        const batchEndpoint = endpoint.endsWith('/sql')
+          ? endpoint.replace(/\/sql$/, '/sql_batch')
+          : `${endpoint}_batch`;
+        const payload = { sql: rawInput };
+        const statements = splitStatements(rawInput);
+
+        let executed = false;
+        try {
+          const batchRes = await fetch(batchEndpoint, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          });
+          if (batchRes.ok) {
+            const data = await batchRes.json();
+            const resultSets = Array.isArray(data.results) ? data.results : [];
+            resultSets.forEach((rows, idx) => {
+              const stmt = statements[idx] || `(statement ${idx + 1})`;
+              appendBlock(`Statement ${idx + 1}: ${stmt}\n${formatRows(rows || [])}`);
+            });
+            appendLine(`Batch executed (${resultSets.length} statement(s)).`, 'success');
+            executed = true;
+          }
+        } catch (_) {
+          // ignore and fallback
+        }
+
+        if (!executed) {
+          const res = await fetch(endpoint, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sql }),
+          });
+          if (!res.ok) {
+            const errText = await res.text();
+            appendLine(`❌ ${errText || `HTTP ${res.status}`}`, 'error');
+            setStatus('error', 'ERROR');
+            return;
+          }
+          const data = await res.json();
+          appendBlock(`${sql}\n${formatRows(data.rows || [])}`);
+          appendLine(`Rows: ${(data.rows || []).length}`, 'muted');
+        }
+        setStatus('ready', 'READY');
+      } catch (err) {
+        console.error('SQL execution failed:', err);
+        appendLine(`❌ Network error: ${err.message}`, 'error');
+        setStatus('error', 'ERROR');
+      }
+    }
 
     const asciiLogo = [
       '   ██████╗ ██╗   ██╗██╗██╗     ██╗     ███████╗ ██████╗ ██╗      ',
@@ -480,10 +717,31 @@
       }
 
       if (trimmed === 'history') {
-        if (history.length === 0) {
+        if (commandHistory.length === 0) {
           appendLine('No history yet.', 'muted');
         } else {
-          appendBlock(history.map((cmd, idx) => `${String(idx + 1).padStart(2, '0')}: ${cmd}`).join('\n'));
+          appendBlock(commandHistory.map((cmd, idx) => `${String(idx + 1).padStart(2, '0')}: ${cmd}`).join('\n'));
+        }
+        return;
+      }
+
+      if (trimmed === 'endpoint') {
+        appendLine(`Current SQL endpoint: ${getApiBase()}`, 'muted');
+        return;
+      }
+
+      if (trimmed.startsWith('endpoint ')) {
+        const target = trimmed.slice('endpoint'.length).trim();
+        if (!target) {
+          appendLine('Usage: endpoint <url|default|reset>', 'error');
+          return;
+        }
+        if (target === 'default' || target === 'reset') {
+          setApiBase(DEFAULT_API_BASE);
+          appendLine(`SQL endpoint reset to default (${DEFAULT_API_BASE})`, 'success');
+        } else {
+          setApiBase(target);
+          appendLine(`SQL endpoint set to ${target}`, 'success');
         }
         return;
       }
@@ -495,15 +753,21 @@
 
       if (trimmed.startsWith('example ')) {
         const key = trimmed.split(/\s+/)[1];
-        if (!examples[key]) {
+        const script = examples[key];
+        if (!script) {
           appendLine(`Unknown example: ${key}`, 'error');
-        } else {
-          const sqlText = examples[key];
-          cmdEl.value = sqlText;
-          cmdEl.dispatchEvent(new Event('input'));
-          appendLine(`Loaded example '${key}' into prompt.`, 'success');
-          runSQL(sqlText);
+          return;
         }
+        const statements = convertExampleScript(script);
+        if (!statements.length) {
+          appendLine(`Example '${key}' has no runnable SQL statements.`, 'error');
+          return;
+        }
+        const sqlText = statements.join('\n\n');
+        cmdEl.value = sqlText;
+        cmdEl.dispatchEvent(new Event('input'));
+        appendLine(`Loaded example '${key}' (${statements.length} statement(s)).`, 'success');
+        runSQL(sqlText);
         return;
       }
 
@@ -516,8 +780,8 @@
       const normalized = value.replace(/\s+$/g, '');
       appendPrompt(normalized || value);
       if (value.trim()) {
-        history.push(value.trim());
-        historyIndex = history.length;
+        commandHistory.push(value.trim());
+        historyIndex = commandHistory.length;
         handleCommand(value);
       } else {
         appendLine('(empty)', 'muted');
@@ -532,15 +796,15 @@
         formEl.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
       } else if (event.key === 'ArrowUp') {
         event.preventDefault();
-        if (history.length === 0) return;
+        if (commandHistory.length === 0) return;
         historyIndex = Math.max(0, historyIndex - 1);
-        cmdEl.value = history[historyIndex] || '';
+        cmdEl.value = commandHistory[historyIndex] || '';
         cmdEl.dispatchEvent(new Event('input'));
       } else if (event.key === 'ArrowDown') {
         event.preventDefault();
-        if (history.length === 0) return;
-        historyIndex = Math.min(history.length, historyIndex + 1);
-        cmdEl.value = history[historyIndex] || '';
+        if (commandHistory.length === 0) return;
+        historyIndex = Math.min(commandHistory.length, historyIndex + 1);
+        cmdEl.value = commandHistory[historyIndex] || '';
         cmdEl.dispatchEvent(new Event('input'));
       }
     });
@@ -551,11 +815,11 @@
     });
 
     openGithubBtn.addEventListener('click', () => {
-      showGithub();
+      openExternal(GITHUB_URL);
     });
 
     openProfileBtn.addEventListener('click', () => {
-      showProfile();
+      openExternal(PROFILE_URL);
     });
 
     appendLine('Welcome to QUILLSQL Terminal. Type `help` to get started.', 'muted');
