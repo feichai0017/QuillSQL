@@ -171,7 +171,7 @@ instances per table.</li>
 <hr />
 <h2 id="directory-layout"><a class="header" href="#directory-layout">Directory Layout</a></h2>
 <div class="table-wrapper"><table><thead><tr><th>Path</th><th>Purpose</th><th>Key Types</th></tr></thead><tbody>
-<tr><td><code>engine.rs</code></td><td>Default engine plus handle definitions.</td><td><code>StorageEngine</code>, <code>TableHandle</code>, <code>TupleStream</code>, <code>ScanOptions</code></td></tr>
+<tr><td><code>engine.rs</code></td><td>Default engine plus handle definitions.</td><td><code>StorageEngine</code>, <code>TableHandle</code>, <code>TupleStream</code></td></tr>
 <tr><td><code>table_heap/</code></td><td>Heap storage + MVCC logic.</td><td><code>TableHeap</code>, <code>MvccHeap</code></td></tr>
 <tr><td><code>index/</code></td><td>B+Tree implementation.</td><td><code>BPlusTreeIndex</code></td></tr>
 <tr><td><code>page/</code></td><td>Page, RID, tuple metadata.</td><td><code>Page</code>, <code>RecordId</code>, <code>TupleMeta</code></td></tr>
@@ -195,13 +195,12 @@ instances per table.</li>
 <p>The default implementation wraps the row-oriented heap + B+Tree combo, but the trait is
 ready for column stores, remote storage, or async engines.</p>
 <h3 id="tablehandle"><a class="header" href="#tablehandle">TableHandle</a></h3>
-<p>Offers <code>full_scan(ScanOptions)</code>, <code>insert</code>, <code>delete</code>, <code>update</code>, and
+<p>Offers <code>full_scan()</code>, <code>insert</code>, <code>delete</code>, <code>update</code>, and
 <code>prepare_row_for_write</code>. MVCC, undo, and locking concerns live here so execution operators
 only describe intent.</p>
 <h3 id="tuplestream"><a class="header" href="#tuplestream">TupleStream</a></h3>
-<p>Minimal iterator that returns <code>(RecordId, TupleMeta, Tuple)</code> triples. <code>ScanOptions</code> carry
-streaming hints, projection lists, or batch sizes; index scans use <code>IndexScanRequest</code> to
-describe ranges.</p>
+<p>Minimal iterator that returns <code>(RecordId, TupleMeta, Tuple)</code> triples. Index scans use
+<code>IndexScanRequest</code> to describe ranges.</p>
 <hr />
 <h2 id="interactions"><a class="header" href="#interactions">Interactions</a></h2>
 <ul>
@@ -220,7 +219,8 @@ the same abstractions as foreground scans.</li>
 <ul>
 <li>Implement a toy columnar handle to show how the execution engine can stay agnostic to
 storage layout.</li>
-<li>Use <code>ScanOptions::projection</code> to push down column pruning into <code>TableIterator</code>.</li>
+<li>Extend the <code>TableHandle::full_scan</code> / <code>TableIterator</code> plumbing to accept projection hints
+so students can experiment with column pruning.</li>
 <li>Enable <code>RUST_LOG=storage::table_heap=trace</code> and trace MVCC version chains as updates
 occur.</li>
 </ul>

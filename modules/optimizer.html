@@ -189,25 +189,18 @@ means the rule fired; the pipeline restarts to reach a fixpoint.</li>
 <li><strong>PushDownLimit</strong> applies LIMIT before expensive joins/sorts when safe.</li>
 <li><strong>PruneProjection</strong> removes unused columns so execution/storage decode less data.</li>
 </ul>
-<h3 id="cost-guidance-duckdb-inspired"><a class="header" href="#cost-guidance-duckdb-inspired">Cost Guidance (DuckDB-inspired)</a></h3>
-<p>Although the rule engine itself stays heuristics-only, the physical planner now taps into
-<code>CostEstimator</code>, which borrows the same intuition as DuckDB’s simple cardinality model:</p>
-<ul>
-<li>equality selectivity ≈ <code>1 / distinct_count</code></li>
-<li>range selectivity derived from min/max assuming uniform distribution</li>
-</ul>
-<p>The estimator multiplies per-predicate selectivities (clamped to <code>&gt;= 1%</code>), producing an
-estimated filtered row count. Physical planner decisions (e.g., sequential scan vs B+Tree
-index) are then based on these cost numbers, so students can see how statistics influence
-operator choice without implementing a full-blown CBO.</p>
+<h3 id="extending-with-statistics"><a class="header" href="#extending-with-statistics">Extending With Statistics</a></h3>
+<p>The optimizer intentionally remains heuristics-only, and the physical planner sticks to
+simple sequential scans. For coursework, students can still read <code>TableStatistics</code> from
+the catalog to prototype their own cardinality estimates or cost heuristics (e.g., to
+experiment with when to prefer an index scan), but no estimator ships in-tree.</p>
 <hr />
 <h2 id="interactions"><a class="header" href="#interactions">Interactions</a></h2>
 <ul>
 <li><strong>LogicalPlan</strong> – the optimizer only sees logical nodes; physical/storage layers remain
 untouched.</li>
-<li><strong>Catalog / Statistics</strong> – current rules are heuristic, but <code>TableStatistics</code> is
-available for students to experiment with cost-based decisions (e.g., choose index scan
-when selectivity is low).</li>
+<li><strong>Catalog / Statistics</strong> – current rules are heuristic, but <code>TableStatistics</code> remains
+available for students who want to prototype their own cost-based decisions.</li>
 <li><strong>Execution</strong> – leaner logical plans translate into simpler physical plans (e.g.,
 predicate pushdown allows <code>PhysicalSeqScan</code> to discard rows earlier).</li>
 </ul>

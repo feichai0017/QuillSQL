@@ -322,7 +322,7 @@
 <h2 id="4-tablebinding-contract"><a class="header" href="#4-tablebinding-contract">4. <code>TableBinding</code> Contract</a></h2>
 <pre class="mermaid">classDiagram
     class TableBinding {
-        +scan(ScanOptions) -&gt; TupleStream
+        +scan() -&gt; TupleStream
         +index_scan(name, IndexScanRequest) -&gt; TupleStream
         +insert(&amp;mut TxnContext, &amp;Tuple)
         +delete(&amp;mut TxnContext, RecordId, TupleMeta, Tuple)
@@ -514,7 +514,7 @@ generates CLRs, demonstrating ARIES-style logical undo.</li>
 <hr />
 <h2 id="6-storage-engine--handles-srcstorage"><a class="header" href="#6-storage-engine--handles-srcstorage">6. Storage Engine &amp; Handles (<code>src/storage</code>)</a></h2>
 <div class="table-wrapper"><table><thead><tr><th>Component</th><th>Highlights</th></tr></thead><tbody>
-<tr><td><code>engine.rs</code></td><td>Defines <code>StorageEngine</code>, <code>TableHandle</code>, <code>IndexHandle</code>, <code>TupleStream</code>, and the new <code>ScanOptions</code> / <code>IndexScanRequest</code>.</td></tr>
+<tr><td><code>engine.rs</code></td><td>Defines <code>StorageEngine</code>, <code>TableHandle</code>, <code>IndexHandle</code>, <code>TupleStream</code>, and <code>IndexScanRequest</code>.</td></tr>
 <tr><td><code>table_heap</code></td><td>Slotted-page heap with MVCC metadata (<code>TupleMeta</code>, forward/back pointers).</td></tr>
 <tr><td><code>index</code></td><td>B+Tree (B-link) implementation with iterators and codecs.</td></tr>
 </tbody></table>
@@ -523,12 +523,12 @@ generates CLRs, demonstrating ARIES-style logical undo.</li>
 Topics to emphasise:</p>
 <ul>
 <li><strong>Handle abstraction</strong>: Execution asks the engine for a <code>TableHandle</code>, then calls
-<code>full_scan(ScanOptions)</code> to receive a <code>TupleStream</code>. The default engine simply wraps
+<code>full_scan()</code> to receive a <code>TupleStream</code>. The default engine simply wraps
 <code>TableHeap</code>/<code>BPlusTreeIndex</code>, but students can plug in their own engines for research.</li>
 <li><strong>TupleStream</strong>: Minimal interface returning <code>(RecordId, TupleMeta, Tuple)</code> triples.
 Operators layer MVCC visibility on top, while the stream hides buffering details.</li>
-<li><strong>ScanOptions</strong>: Carry streaming hints, projection slots, or batch sizes. Even when the
-default heap ignores some hints, the API teaches how modern engines negotiate capabilities.</li>
+<li><strong>Scan extensions</strong>: Consider extending <code>full_scan()</code> to accept projection/batch hints—
+a natural exercise for showing how execution and storage negotiate capabilities.</li>
 <li><code>table_heap</code> demonstrates MVCC version chains (forward/back pointers) and the slotted
 page layout. Encourage students to trace <code>MvccHeap::update</code> alongside WAL entries to
 see how new versions link together.</li>
@@ -1087,25 +1087,18 @@ means the rule fired; the pipeline restarts to reach a fixpoint.</li>
 <li><strong>PushDownLimit</strong> applies LIMIT before expensive joins/sorts when safe.</li>
 <li><strong>PruneProjection</strong> removes unused columns so execution/storage decode less data.</li>
 </ul>
-<h3 id="cost-guidance-duckdb-inspired"><a class="header" href="#cost-guidance-duckdb-inspired">Cost Guidance (DuckDB-inspired)</a></h3>
-<p>Although the rule engine itself stays heuristics-only, the physical planner now taps into
-<code>CostEstimator</code>, which borrows the same intuition as DuckDB’s simple cardinality model:</p>
-<ul>
-<li>equality selectivity ≈ <code>1 / distinct_count</code></li>
-<li>range selectivity derived from min/max assuming uniform distribution</li>
-</ul>
-<p>The estimator multiplies per-predicate selectivities (clamped to <code>&gt;= 1%</code>), producing an
-estimated filtered row count. Physical planner decisions (e.g., sequential scan vs B+Tree
-index) are then based on these cost numbers, so students can see how statistics influence
-operator choice without implementing a full-blown CBO.</p>
+<h3 id="extending-with-statistics"><a class="header" href="#extending-with-statistics">Extending With Statistics</a></h3>
+<p>The optimizer intentionally remains heuristics-only, and the physical planner sticks to
+simple sequential scans. For coursework, students can still read <code>TableStatistics</code> from
+the catalog to prototype their own cardinality estimates or cost heuristics (e.g., to
+experiment with when to prefer an index scan), but no estimator ships in-tree.</p>
 <hr />
 <h2 id="interactions-4"><a class="header" href="#interactions-4">Interactions</a></h2>
 <ul>
 <li><strong>LogicalPlan</strong> – the optimizer only sees logical nodes; physical/storage layers remain
 untouched.</li>
-<li><strong>Catalog / Statistics</strong> – current rules are heuristic, but <code>TableStatistics</code> is
-available for students to experiment with cost-based decisions (e.g., choose index scan
-when selectivity is low).</li>
+<li><strong>Catalog / Statistics</strong> – current rules are heuristic, but <code>TableStatistics</code> remains
+available for students who want to prototype their own cost-based decisions.</li>
 <li><strong>Execution</strong> – leaner logical plans translate into simpler physical plans (e.g.,
 predicate pushdown allows <code>PhysicalSeqScan</code> to discard rows earlier).</li>
 </ul>
@@ -1513,7 +1506,7 @@ instances per table.</li>
 <hr />
 <h2 id="directory-layout-5"><a class="header" href="#directory-layout-5">Directory Layout</a></h2>
 <div class="table-wrapper"><table><thead><tr><th>Path</th><th>Purpose</th><th>Key Types</th></tr></thead><tbody>
-<tr><td><code>engine.rs</code></td><td>Default engine plus handle definitions.</td><td><code>StorageEngine</code>, <code>TableHandle</code>, <code>TupleStream</code>, <code>ScanOptions</code></td></tr>
+<tr><td><code>engine.rs</code></td><td>Default engine plus handle definitions.</td><td><code>StorageEngine</code>, <code>TableHandle</code>, <code>TupleStream</code></td></tr>
 <tr><td><code>table_heap/</code></td><td>Heap storage + MVCC logic.</td><td><code>TableHeap</code>, <code>MvccHeap</code></td></tr>
 <tr><td><code>index/</code></td><td>B+Tree implementation.</td><td><code>BPlusTreeIndex</code></td></tr>
 <tr><td><code>page/</code></td><td>Page, RID, tuple metadata.</td><td><code>Page</code>, <code>RecordId</code>, <code>TupleMeta</code></td></tr>
@@ -1537,13 +1530,12 @@ instances per table.</li>
 <p>The default implementation wraps the row-oriented heap + B+Tree combo, but the trait is
 ready for column stores, remote storage, or async engines.</p>
 <h3 id="tablehandle"><a class="header" href="#tablehandle">TableHandle</a></h3>
-<p>Offers <code>full_scan(ScanOptions)</code>, <code>insert</code>, <code>delete</code>, <code>update</code>, and
+<p>Offers <code>full_scan()</code>, <code>insert</code>, <code>delete</code>, <code>update</code>, and
 <code>prepare_row_for_write</code>. MVCC, undo, and locking concerns live here so execution operators
 only describe intent.</p>
 <h3 id="tuplestream"><a class="header" href="#tuplestream">TupleStream</a></h3>
-<p>Minimal iterator that returns <code>(RecordId, TupleMeta, Tuple)</code> triples. <code>ScanOptions</code> carry
-streaming hints, projection lists, or batch sizes; index scans use <code>IndexScanRequest</code> to
-describe ranges.</p>
+<p>Minimal iterator that returns <code>(RecordId, TupleMeta, Tuple)</code> triples. Index scans use
+<code>IndexScanRequest</code> to describe ranges.</p>
 <hr />
 <h2 id="interactions-7"><a class="header" href="#interactions-7">Interactions</a></h2>
 <ul>
@@ -1562,7 +1554,8 @@ the same abstractions as foreground scans.</li>
 <ul>
 <li>Implement a toy columnar handle to show how the execution engine can stay agnostic to
 storage layout.</li>
-<li>Use <code>ScanOptions::projection</code> to push down column pruning into <code>TableIterator</code>.</li>
+<li>Extend the <code>TableHandle::full_scan</code> / <code>TableIterator</code> plumbing to accept projection hints
+so students can experiment with column pruning.</li>
 <li>Enable <code>RUST_LOG=storage::table_heap=trace</code> and trace MVCC version chains as updates
 occur.</li>
 </ul>
@@ -1605,13 +1598,15 @@ occur.</li>
 <ul>
 <li>Worker-local file descriptors plus positional I/O remove shared mutable state on the hot path. The new per-worker handle cache further reduces syscall overhead.</li>
 <li>Shutdown sequence: enqueue <code>Shutdown</code>, dispatcher forwards it to every worker, each worker drains outstanding SQEs/CQEs, and finally dispatcher + workers are joined.</li>
-<li>BufferPool, TableHeap, and the streaming scan ring buffer still integrate via channels; inflight guards prevent duplicate page fetches.</li>
+<li>BufferPool and TableHeap integrate via the same scheduler channels; inflight guards
+prevent duplicate page fetches even when multiple scans touch adjacent pages.</li>
 </ul>
 <h2 id="6-performance-notes"><a class="header" href="#6-performance-notes">6. Performance Notes</a></h2>
 <ul>
 <li>Random page access benefits from fewer syscalls and deeper outstanding queue depth than the blocking fallback.</li>
 <li>Only the io_uring backend currently ships (Linux x86_64). A portable fallback remains future work.</li>
-<li>For large sequential scans, combine <code>ReadPages</code> with the ring-buffer iterator to minimise buffer-pool churn.</li>
+<li>For large sequential scans, rely on the buffer pool's sequential access pattern or add
+a custom iterator on top of <code>ReadPages</code> if you want to experiment with direct I/O.</li>
 </ul>
 <h2 id="7-future-work"><a class="header" href="#7-future-work">7. Future Work</a></h2>
 <ul>

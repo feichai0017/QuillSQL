@@ -190,13 +190,15 @@
 <ul>
 <li>Worker-local file descriptors plus positional I/O remove shared mutable state on the hot path. The new per-worker handle cache further reduces syscall overhead.</li>
 <li>Shutdown sequence: enqueue <code>Shutdown</code>, dispatcher forwards it to every worker, each worker drains outstanding SQEs/CQEs, and finally dispatcher + workers are joined.</li>
-<li>BufferPool, TableHeap, and the streaming scan ring buffer still integrate via channels; inflight guards prevent duplicate page fetches.</li>
+<li>BufferPool and TableHeap integrate via the same scheduler channels; inflight guards
+prevent duplicate page fetches even when multiple scans touch adjacent pages.</li>
 </ul>
 <h2 id="6-performance-notes"><a class="header" href="#6-performance-notes">6. Performance Notes</a></h2>
 <ul>
 <li>Random page access benefits from fewer syscalls and deeper outstanding queue depth than the blocking fallback.</li>
 <li>Only the io_uring backend currently ships (Linux x86_64). A portable fallback remains future work.</li>
-<li>For large sequential scans, combine <code>ReadPages</code> with the ring-buffer iterator to minimise buffer-pool churn.</li>
+<li>For large sequential scans, rely on the buffer pool's sequential access pattern or add
+a custom iterator on top of <code>ReadPages</code> if you want to experiment with direct I/O.</li>
 </ul>
 <h2 id="7-future-work"><a class="header" href="#7-future-work">7. Future Work</a></h2>
 <ul>

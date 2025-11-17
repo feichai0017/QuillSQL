@@ -280,7 +280,7 @@
 <h2 id="4-tablebinding-contract"><a class="header" href="#4-tablebinding-contract">4. <code>TableBinding</code> Contract</a></h2>
 <pre class="mermaid">classDiagram
     class TableBinding {
-        +scan(ScanOptions) -&gt; TupleStream
+        +scan() -&gt; TupleStream
         +index_scan(name, IndexScanRequest) -&gt; TupleStream
         +insert(&amp;mut TxnContext, &amp;Tuple)
         +delete(&amp;mut TxnContext, RecordId, TupleMeta, Tuple)

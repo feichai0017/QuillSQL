@@ -261,7 +261,7 @@ generates CLRs, demonstrating ARIES-style logical undo.</li>
 <hr />
 <h2 id="6-storage-engine--handles-srcstorage"><a class="header" href="#6-storage-engine--handles-srcstorage">6. Storage Engine &amp; Handles (<code>src/storage</code>)</a></h2>
 <div class="table-wrapper"><table><thead><tr><th>Component</th><th>Highlights</th></tr></thead><tbody>
-<tr><td><code>engine.rs</code></td><td>Defines <code>StorageEngine</code>, <code>TableHandle</code>, <code>IndexHandle</code>, <code>TupleStream</code>, and the new <code>ScanOptions</code> / <code>IndexScanRequest</code>.</td></tr>
+<tr><td><code>engine.rs</code></td><td>Defines <code>StorageEngine</code>, <code>TableHandle</code>, <code>IndexHandle</code>, <code>TupleStream</code>, and <code>IndexScanRequest</code>.</td></tr>
 <tr><td><code>table_heap</code></td><td>Slotted-page heap with MVCC metadata (<code>TupleMeta</code>, forward/back pointers).</td></tr>
 <tr><td><code>index</code></td><td>B+Tree (B-link) implementation with iterators and codecs.</td></tr>
 </tbody></table>
@@ -270,12 +270,12 @@ generates CLRs, demonstrating ARIES-style logical undo.</li>
 Topics to emphasise:</p>
 <ul>
 <li><strong>Handle abstraction</strong>: Execution asks the engine for a <code>TableHandle</code>, then calls
-<code>full_scan(ScanOptions)</code> to receive a <code>TupleStream</code>. The default engine simply wraps
+<code>full_scan()</code> to receive a <code>TupleStream</code>. The default engine simply wraps
 <code>TableHeap</code>/<code>BPlusTreeIndex</code>, but students can plug in their own engines for research.</li>
 <li><strong>TupleStream</strong>: Minimal interface returning <code>(RecordId, TupleMeta, Tuple)</code> triples.
 Operators layer MVCC visibility on top, while the stream hides buffering details.</li>
-<li><strong>ScanOptions</strong>: Carry streaming hints, projection slots, or batch sizes. Even when the
-default heap ignores some hints, the API teaches how modern engines negotiate capabilities.</li>
+<li><strong>Scan extensions</strong>: Consider extending <code>full_scan()</code> to accept projection/batch hints—
+a natural exercise for showing how execution and storage negotiate capabilities.</li>
 <li><code>table_heap</code> demonstrates MVCC version chains (forward/back pointers) and the slotted
 page layout. Encourage students to trace <code>MvccHeap::update</code> alongside WAL entries to
 see how new versions link together.</li>
