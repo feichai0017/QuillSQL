@@ -72,6 +72,7 @@ pub enum UndoAction {
         rid: RecordId,
         prev_meta: TupleMeta,
         prev_tuple: Tuple,
+        indexes: Vec<(Arc<BPlusTreeIndex>, Tuple)>,
     },
 }
 
@@ -94,7 +95,11 @@ impl UndoAction {
                 rid,
                 prev_meta,
                 prev_tuple,
+                indexes,
             } => {
+                for (index, key) in indexes {
+                    index.insert(&key, rid)?;
+                }
                 table.recover_restore_tuple(rid, prev_meta, &prev_tuple)?;
                 Ok(())
             }
@@ -268,6 +273,7 @@ impl Transaction {
         prev_meta: TupleMeta,
         prev_tuple: Tuple,
         new_keys: Vec<(Arc<BPlusTreeIndex>, Tuple)>,
+        old_keys: Vec<(Arc<BPlusTreeIndex>, Tuple)>,
     ) {
         self.undo_actions.push(UndoAction::Insert {
             table: table.clone(),
@@ -279,6 +285,7 @@ impl Transaction {
             rid: old_rid,
             prev_meta,
             prev_tuple,
+            indexes: old_keys,
         });
     }
 
@@ -288,12 +295,14 @@ impl Transaction {
         rid: RecordId,
         prev_meta: TupleMeta,
         prev_tuple: Tuple,
+        indexes: Vec<(Arc<BPlusTreeIndex>, Tuple)>,
     ) {
         self.undo_actions.push(UndoAction::Delete {
             table,
             rid,
             prev_meta,
             prev_tuple,
+            indexes,
         });
     }
 

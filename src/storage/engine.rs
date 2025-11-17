@@ -51,6 +51,7 @@ pub trait TableHandle: Send + Sync {
         rid: RecordId,
         prev_meta: TupleMeta,
         prev_tuple: Tuple,
+        indexes: &[Arc<dyn IndexHandle>],
     ) -> QuillSQLResult<()>;
 
     fn update(
@@ -130,7 +131,8 @@ impl TableBinding {
         prev_meta: TupleMeta,
         prev_tuple: Tuple,
     ) -> QuillSQLResult<()> {
-        self.table.delete(txn, rid, prev_meta, prev_tuple)
+        self.table
+            .delete(txn, rid, prev_meta, prev_tuple, self.indexes())
     }
 
     pub fn update(
@@ -236,14 +238,30 @@ impl TableHandle for HeapTableHandle {
         &self,
         txn: &mut TxnContext<'_>,
         rid: RecordId,
-        prev_meta: TupleMeta,
+        _prev_meta: TupleMeta,
         prev_tuple: Tuple,
+        indexes: &[Arc<dyn IndexHandle>],
     ) -> QuillSQLResult<()> {
         txn.ensure_writable(self.table_ref(), "DELETE")?;
         let mvcc = MvccHeap::new(self.heap.clone());
-        mvcc.mark_deleted(rid, txn.txn_id(), txn.command_id())?;
-        txn.transaction_mut()
-            .push_delete_undo(self.heap.clone(), rid, prev_meta, prev_tuple);
+        let prev_meta = mvcc.mark_deleted(rid, txn.txn_id(), txn.command_id())?;
+
+        let mut index_links = Vec::new();
+        for handle in indexes {
+            if let Ok(key_tuple) = prev_tuple.project_with_schema(handle.key_schema()) {
+                let index = handle.index();
+                index.delete(&key_tuple)?;
+                index_links.push((index, key_tuple));
+            }
+        }
+
+        txn.transaction_mut().push_delete_undo(
+            self.heap.clone(),
+            rid,
+            prev_meta,
+            prev_tuple,
+            index_links,
+        );
         Ok(())
     }
 
@@ -259,6 +277,15 @@ impl TableHandle for HeapTableHandle {
         txn.ensure_writable(self.table_ref(), "UPDATE")?;
         let mvcc = MvccHeap::new(self.heap.clone());
         let (new_rid, _) = mvcc.update(rid, new_tuple.clone(), txn.txn_id(), txn.command_id())?;
+
+        let mut old_keys = Vec::new();
+        for handle in indexes {
+            if let Ok(old_key_tuple) = prev_tuple.project_with_schema(handle.key_schema()) {
+                let index = handle.index();
+                index.delete(&old_key_tuple)?;
+                old_keys.push((index, old_key_tuple));
+            }
+        }
 
         let mut new_keys = Vec::new();
         for handle in indexes {
@@ -276,6 +303,7 @@ impl TableHandle for HeapTableHandle {
             prev_meta,
             prev_tuple,
             new_keys,
+            old_keys,
         );
         Ok(new_rid)
     }
