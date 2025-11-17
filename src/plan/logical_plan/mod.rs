@@ -130,17 +130,7 @@ impl LogicalPlan {
         match self {
             LogicalPlan::Filter(Filter { predicate, .. }) => Ok(LogicalPlan::Filter(Filter {
                 predicate: predicate.clone(),
-                input: Arc::new(
-                    inputs
-                        .first()
-                        .ok_or_else(|| {
-                            QuillSQLError::Internal(format!(
-                                "inputs {:?} should have at least one",
-                                inputs
-                            ))
-                        })?
-                        .clone(),
-                ),
+                input: expect_single_input(inputs)?,
             })),
             LogicalPlan::Insert(Insert {
                 table,
@@ -151,80 +141,33 @@ impl LogicalPlan {
                 table: table.clone(),
                 table_schema: table_schema.clone(),
                 projected_schema: projected_schema.clone(),
-                input: Arc::new(
-                    inputs
-                        .first()
-                        .ok_or_else(|| {
-                            QuillSQLError::Internal(format!(
-                                "inputs {:?} should have at least one",
-                                inputs
-                            ))
-                        })?
-                        .clone(),
-                ),
+                input: expect_single_input(inputs)?,
             })),
             LogicalPlan::Join(Join {
                 join_type,
                 condition,
                 schema,
                 ..
-            }) => Ok(LogicalPlan::Join(Join {
-                left: Arc::new(
-                    inputs
-                        .first()
-                        .ok_or_else(|| {
-                            QuillSQLError::Internal(format!(
-                                "inputs {:?} should have at least two",
-                                inputs
-                            ))
-                        })?
-                        .clone(),
-                ),
-                right: Arc::new(
-                    inputs
-                        .first()
-                        .ok_or_else(|| {
-                            QuillSQLError::Internal(format!(
-                                "inputs {:?} should have at least two",
-                                inputs
-                            ))
-                        })?
-                        .clone(),
-                ),
-                join_type: *join_type,
-                condition: condition.clone(),
-                schema: schema.clone(),
-            })),
+            }) => {
+                let (left, right) = expect_two_inputs(inputs)?;
+                Ok(LogicalPlan::Join(Join {
+                    left,
+                    right,
+                    join_type: *join_type,
+                    condition: condition.clone(),
+                    schema: schema.clone(),
+                }))
+            }
             LogicalPlan::Limit(Limit { limit, offset, .. }) => Ok(LogicalPlan::Limit(Limit {
                 limit: *limit,
                 offset: *offset,
-                input: Arc::new(
-                    inputs
-                        .first()
-                        .ok_or_else(|| {
-                            QuillSQLError::Internal(format!(
-                                "inputs {:?} should have at least one",
-                                inputs
-                            ))
-                        })?
-                        .clone(),
-                ),
+                input: expect_single_input(inputs)?,
             })),
             LogicalPlan::Project(Project { exprs, schema, .. }) => {
                 Ok(LogicalPlan::Project(Project {
                     exprs: exprs.clone(),
                     schema: schema.clone(),
-                    input: Arc::new(
-                        inputs
-                            .first()
-                            .ok_or_else(|| {
-                                QuillSQLError::Internal(format!(
-                                    "inputs {:?} should have at least one",
-                                    inputs
-                                ))
-                            })?
-                            .clone(),
-                    ),
+                    input: expect_single_input(inputs)?,
                 }))
             }
             LogicalPlan::Sort(Sort {
@@ -232,17 +175,7 @@ impl LogicalPlan {
             }) => Ok(LogicalPlan::Sort(Sort {
                 order_by: order_by.clone(),
                 limit: *limit,
-                input: Arc::new(
-                    inputs
-                        .first()
-                        .ok_or_else(|| {
-                            QuillSQLError::Internal(format!(
-                                "inputs {:?} should have at least one",
-                                inputs
-                            ))
-                        })?
-                        .clone(),
-                ),
+                input: expect_single_input(inputs)?,
             })),
             LogicalPlan::Aggregate(Aggregate {
                 group_exprs,
@@ -253,17 +186,7 @@ impl LogicalPlan {
                 group_exprs: group_exprs.clone(),
                 aggr_exprs: aggr_exprs.clone(),
                 schema: schema.clone(),
-                input: Arc::new(
-                    inputs
-                        .first()
-                        .ok_or_else(|| {
-                            QuillSQLError::Internal(format!(
-                                "inputs {:?} should have at least one",
-                                inputs
-                            ))
-                        })?
-                        .clone(),
-                ),
+                input: expect_single_input(inputs)?,
             })),
             LogicalPlan::CreateTable(_)
             | LogicalPlan::CreateIndex(_)
@@ -281,6 +204,32 @@ impl LogicalPlan {
             | LogicalPlan::SetTransaction { .. } => Ok(self.clone()),
         }
     }
+}
+
+fn expect_single_input(inputs: &[LogicalPlan]) -> QuillSQLResult<Arc<LogicalPlan>> {
+    expect_input_at(inputs, 0, "should have at least one input")
+}
+
+fn expect_two_inputs(
+    inputs: &[LogicalPlan],
+) -> QuillSQLResult<(Arc<LogicalPlan>, Arc<LogicalPlan>)> {
+    let left = expect_input_at(inputs, 0, "should have at least two inputs")?;
+    let right = expect_input_at(inputs, 1, "should have at least two inputs")?;
+    Ok((left, right))
+}
+
+fn expect_input_at(
+    inputs: &[LogicalPlan],
+    index: usize,
+    expectation: &str,
+) -> QuillSQLResult<Arc<LogicalPlan>> {
+    inputs
+        .get(index)
+        .cloned()
+        .map(Arc::new)
+        .ok_or_else(|| {
+            QuillSQLError::Internal(format!("inputs {:?} {}", inputs, expectation))
+        })
 }
 
 impl std::fmt::Display for LogicalPlan {

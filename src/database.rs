@@ -9,6 +9,7 @@ use crate::buffer::{BufferManager, BUFFER_POOL_SIZE};
 use crate::catalog::{load_catalog_data, registry::TableRegistry, TableStatistics};
 use crate::config::{background_config, IndexVacuumConfig, MvccVacuumConfig, WalConfig};
 use crate::error::{QuillSQLError, QuillSQLResult};
+use crate::execution::physical_plan::PhysicalPlan;
 use crate::optimizer::LogicalOptimizer;
 use crate::plan::logical_plan::{LogicalPlan, TransactionScope};
 use crate::plan::PhysicalPlanner;
@@ -88,6 +89,11 @@ pub struct Database {
     default_isolation: IsolationLevel,
     storage_engine: Arc<dyn StorageEngine>,
     _table_registry: Arc<TableRegistry>,
+}
+
+struct PreparedStatement {
+    optimized_logical_plan: LogicalPlan,
+    physical_plan: PhysicalPlan,
 }
 impl Database {
     pub fn new_on_disk(db_path: &str) -> QuillSQLResult<Self> {
@@ -226,93 +232,18 @@ impl Database {
         session: &mut SessionContext,
         sql: &str,
     ) -> QuillSQLResult<Vec<Tuple>> {
-        let logical_plan = self.create_logical_plan(sql)?;
-        debug!(
-            "Logical Plan: \n{}",
-            pretty_format_logical_plan(&logical_plan)
-        );
+        let PreparedStatement {
+            optimized_logical_plan,
+            physical_plan,
+        } = self.plan_statement(sql)?;
 
-        let optimized_logical_plan = LogicalOptimizer::new().optimize(&logical_plan)?;
-        debug!(
-            "Optimized Logical Plan: \n{}",
-            pretty_format_logical_plan(&logical_plan)
-        );
-
-        let physical_planner = PhysicalPlanner::new(&self.catalog);
-        let physical_plan = physical_planner.create_physical_plan(optimized_logical_plan.clone());
-        debug!(
-            "Physical Plan: \n{}",
-            pretty_format_physical_plan(&physical_plan)
-        );
-
-        match optimized_logical_plan {
-            LogicalPlan::BeginTransaction(ref modes) => {
-                if session.has_active_transaction() {
-                    return Err(QuillSQLError::Execution(
-                        "transaction already active".to_string(),
-                    ));
-                }
-                let txn = self.transaction_manager.begin(
-                    modes.unwrap_effective_isolation(session.default_isolation()),
-                    modes
-                        .access_mode
-                        .unwrap_or(TransactionAccessMode::ReadWrite),
-                )?;
-                session.set_active_transaction(txn)?;
-                Ok(vec![])
-            }
-            LogicalPlan::CommitTransaction => {
-                let txn_ref = session
-                    .active_txn_mut()
-                    .ok_or_else(|| QuillSQLError::Execution("no active transaction".to_string()))?;
-                self.transaction_manager.commit(txn_ref)?;
-                session.clear_active_transaction();
-                Ok(vec![])
-            }
-            LogicalPlan::RollbackTransaction => {
-                let txn_ref = session
-                    .active_txn_mut()
-                    .ok_or_else(|| QuillSQLError::Execution("no active transaction".to_string()))?;
-                self.transaction_manager.abort(txn_ref)?;
-                session.clear_active_transaction();
-                Ok(vec![])
-            }
-            LogicalPlan::SetTransaction {
-                ref scope,
-                ref modes,
-            } => {
-                match scope {
-                    TransactionScope::Session => session.apply_session_modes(modes),
-                    TransactionScope::Transaction => session.apply_transaction_modes(modes),
-                }
-                Ok(vec![])
-            }
-            _ => {
-                let needs_cleanup = !session.has_active_transaction();
-                let autocommit = session.autocommit();
-
-                let result = {
-                    let txn = session.ensure_active_transaction(&self.transaction_manager)?;
-                    let context = crate::execution::ExecutionContext::new(
-                        &mut self.catalog,
-                        txn,
-                        self.transaction_manager.clone(),
-                        self.storage_engine.clone(),
-                    );
-                    let mut engine = ExecutionEngine { context };
-                    engine.execute(Arc::new(physical_plan))?
-                };
-
-                if autocommit && needs_cleanup {
-                    if let Some(txn) = session.active_txn_mut() {
-                        self.transaction_manager.commit(txn)?;
-                    }
-                    session.clear_active_transaction();
-                }
-
-                Ok(result)
-            }
+        if let Some(result) =
+            self.execute_transaction_control(session, &optimized_logical_plan)?
+        {
+            return Ok(result);
         }
+
+        self.execute_physical_plan(session, physical_plan)
     }
 
     pub fn default_isolation(&self) -> IsolationLevel {
@@ -358,6 +289,120 @@ impl Database {
     pub fn transaction_manager(&self) -> Arc<TransactionManager> {
         self.transaction_manager.clone()
     }
+
+    fn plan_statement(&mut self, sql: &str) -> QuillSQLResult<PreparedStatement> {
+        let logical_plan = self.create_logical_plan(sql)?;
+        debug!(
+            "Logical Plan: \n{}",
+            pretty_format_logical_plan(&logical_plan)
+        );
+
+        let optimized_logical_plan = self.optimize_logical_plan(&logical_plan)?;
+        debug!(
+            "Optimized Logical Plan: \n{}",
+            pretty_format_logical_plan(&optimized_logical_plan)
+        );
+
+        let physical_plan = self.build_physical_plan(&optimized_logical_plan);
+        debug!(
+            "Physical Plan: \n{}",
+            pretty_format_physical_plan(&physical_plan)
+        );
+
+        Ok(PreparedStatement {
+            optimized_logical_plan,
+            physical_plan,
+        })
+    }
+
+    fn optimize_logical_plan(
+        &self,
+        logical_plan: &LogicalPlan,
+    ) -> QuillSQLResult<LogicalPlan> {
+        LogicalOptimizer::new().optimize(logical_plan)
+    }
+
+    fn build_physical_plan(&self, logical_plan: &LogicalPlan) -> PhysicalPlan {
+        let physical_planner = PhysicalPlanner::new(&self.catalog);
+        physical_planner.create_physical_plan(logical_plan.clone())
+    }
+
+    fn execute_transaction_control(
+        &self,
+        session: &mut SessionContext,
+        plan: &LogicalPlan,
+    ) -> QuillSQLResult<Option<Vec<Tuple>>> {
+        match plan {
+            LogicalPlan::BeginTransaction(modes) => {
+                if session.has_active_transaction() {
+                    return Err(QuillSQLError::Execution(
+                        "transaction already active".to_string(),
+                    ));
+                }
+                let txn = self.transaction_manager.begin(
+                    modes.unwrap_effective_isolation(session.default_isolation()),
+                    modes
+                        .access_mode
+                        .unwrap_or(TransactionAccessMode::ReadWrite),
+                )?;
+                session.set_active_transaction(txn)?;
+                Ok(Some(vec![]))
+            }
+            LogicalPlan::CommitTransaction => {
+                let txn_ref = session
+                    .active_txn_mut()
+                    .ok_or_else(|| QuillSQLError::Execution("no active transaction".to_string()))?;
+                self.transaction_manager.commit(txn_ref)?;
+                session.clear_active_transaction();
+                Ok(Some(vec![]))
+            }
+            LogicalPlan::RollbackTransaction => {
+                let txn_ref = session
+                    .active_txn_mut()
+                    .ok_or_else(|| QuillSQLError::Execution("no active transaction".to_string()))?;
+                self.transaction_manager.abort(txn_ref)?;
+                session.clear_active_transaction();
+                Ok(Some(vec![]))
+            }
+            LogicalPlan::SetTransaction { scope, modes } => {
+                match scope {
+                    TransactionScope::Session => session.apply_session_modes(modes),
+                    TransactionScope::Transaction => session.apply_transaction_modes(modes),
+                }
+                Ok(Some(vec![]))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn execute_physical_plan(
+        &mut self,
+        session: &mut SessionContext,
+        physical_plan: PhysicalPlan,
+    ) -> QuillSQLResult<Vec<Tuple>> {
+        let needs_cleanup = !session.has_active_transaction();
+        let autocommit = session.autocommit();
+        let result = {
+            let txn = session.ensure_active_transaction(&self.transaction_manager)?;
+            let context = crate::execution::ExecutionContext::new(
+                &mut self.catalog,
+                txn,
+                self.transaction_manager.clone(),
+                self.storage_engine.clone(),
+            );
+            let mut engine = ExecutionEngine { context };
+            engine.execute(Arc::new(physical_plan))?
+        };
+
+        if autocommit && needs_cleanup {
+            if let Some(txn) = session.active_txn_mut() {
+                self.transaction_manager.commit(txn)?;
+            }
+            session.clear_active_transaction();
+        }
+
+        Ok(result)
+    }
 }
 
 impl Drop for Database {
@@ -367,41 +412,7 @@ impl Drop for Database {
 }
 
 fn wal_config_for_path(db_path: &str, overrides: &WalOptions) -> WalConfig {
-    let mut config = WalConfig {
-        directory: overrides
-            .directory
-            .clone()
-            .unwrap_or_else(|| wal_directory_from_path(db_path)),
-        ..WalConfig::default()
-    };
-    if let Some(size) = overrides.segment_size {
-        config.segment_size = size;
-    }
-    if let Some(sync) = overrides.sync_on_flush {
-        config.sync_on_flush = sync;
-    }
-    if let Some(flag) = overrides.persist_control_file_on_flush {
-        config.persist_control_file_on_flush = flag;
-    }
-    if let Some(interval) = overrides.writer_interval_ms {
-        config.writer_interval_ms = interval;
-    }
-    if let Some(capacity) = overrides.buffer_capacity {
-        config.buffer_capacity = capacity;
-    }
-    if let Some(bytes) = overrides.flush_coalesce_bytes {
-        config.flush_coalesce_bytes = bytes;
-    }
-    if let Some(sync_commit) = overrides.synchronous_commit {
-        config.synchronous_commit = sync_commit;
-    }
-    if let Some(interval) = overrides.checkpoint_interval_ms {
-        config.checkpoint_interval_ms = interval;
-    }
-    if let Some(retain) = overrides.retain_segments {
-        config.retain_segments = retain.max(1);
-    }
-    config
+    build_wal_config(wal_directory_from_path(db_path), overrides)
 }
 
 fn wal_directory_from_path(db_path: &str) -> PathBuf {
@@ -415,11 +426,15 @@ fn wal_directory_from_path(db_path: &str) -> PathBuf {
 }
 
 fn wal_config_for_temp(temp_root: &Path, overrides: &WalOptions) -> WalConfig {
+    build_wal_config(temp_root.join("wal"), overrides)
+}
+
+fn build_wal_config(default_directory: PathBuf, overrides: &WalOptions) -> WalConfig {
     let mut config = WalConfig {
         directory: overrides
             .directory
             .clone()
-            .unwrap_or_else(|| temp_root.join("wal")),
+            .unwrap_or(default_directory),
         ..WalConfig::default()
     };
     if let Some(size) = overrides.segment_size {
