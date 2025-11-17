@@ -307,7 +307,6 @@
 <pre class="mermaid">flowchart LR
     subgraph WAL Record Types
         HI[&quot;HeapInsert&quot;] --&gt; redo
-        HU[&quot;HeapUpdate&quot;] --&gt; redo &amp; undo
         HD[&quot;HeapDelete&quot;] --&gt; redo &amp; undo
         PI[&quot;PageImage&quot;]
         PD[&quot;PageDelta&quot;]

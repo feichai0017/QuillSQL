@@ -174,7 +174,7 @@
 <ul>
 <li><strong><code>Transaction</code></strong>: Marks the <code>BEGIN</code>, <code>COMMIT</code>, or <code>ABORT</code> of a transaction.</li>
 <li><strong><code>PageWrite</code> / <code>PageDelta</code></strong>: Physical/Physiological records describing a change to a page. <code>PageWrite</code> contains a full image of the page (used for the first write after a checkpoint, a technique called First-Page-Write or FPW), while <code>PageDelta</code> contains only the changed bytes.</li>
-<li><strong><code>HeapInsert</code> / <code>HeapUpdate</code> / <code>HeapDelete</code></strong>: Logical records describing a high-level heap operation. These are primarily used for generating precise undo operations.</li>
+<li><strong><code>HeapInsert</code> / <code>HeapDelete</code></strong>: Logical records describing a high-level heap operation. These are primarily used for generating precise undo operations.</li>
 <li><strong><code>Checkpoint</code></strong>: A special record that marks a point of partial durability, allowing the log to be truncated.</li>
 <li><strong><code>CLR</code> (Compensation Log Record)</strong>: A special record written during recovery to describe an <strong>undo</strong> action. CLRs are redo-only and are never undone themselves.</li>
 </ul>
@@ -206,11 +206,10 @@
 <ol>
 <li>The <code>UndoExecutor</code> takes the list of loser transactions.</li>
 <li>For each loser transaction, it scans the WAL <strong>backwards</strong>, following the chain of log records for that transaction.</li>
-<li>For each operation record (like <code>HeapInsert</code>, <code>HeapUpdate</code>), it performs the logical inverse operation:
+<li>For each operation record (like <code>HeapInsert</code>, <code>HeapDelete</code>), it performs the logical inverse operation:
 <ul>
 <li>To undo an <code>Insert</code>, it performs a <code>Delete</code>.</li>
 <li>To undo a <code>Delete</code>, it restores the deleted data.</li>
-<li>To undo an <code>Update</code>, it restores the data from before the update.</li>
 </ul>
 </li>
 <li><strong>Crucially</strong>, for every undo action it performs, it writes a <strong>Compensation Log Record (CLR)</strong> to the WAL. The CLR contains information about the undo action and, importantly, a pointer to the <em>next</em> log record that needs to be undone for that transaction.</li>

@@ -164,7 +164,7 @@
 <li>An <code>MvccHeap</code> wrapper that maintains version chains.</li>
 <li>All indexes defined on the table.</li>
 </ul>
-<p>The binding exposes ergonomic methods such as <code>scan</code>, <code>index_scan</code>, <code>insert</code>, <code>update</code>, <code>delete</code>, and <code>prepare_row_for_write</code>. Each method internally uses the <code>TableHeap</code> + <code>MvccHeap</code> pair, appends the appropriate logical WAL record (HeapInsert/Update/Delete), and keeps indexes in sync. This keeps physical operators extremely small and makes it easy to swap out the storage engine for experiments.</p>
+<p>The binding exposes ergonomic methods such as <code>scan</code>, <code>index_scan</code>, <code>insert</code>, <code>update</code>, <code>delete</code>, and <code>prepare_row_for_write</code>. Each method internally uses the <code>TableHeap</code> + <code>MvccHeap</code> pair, appends the appropriate logical WAL record (HeapInsert/HeapDelete), and keeps indexes in sync. This keeps physical operators extremely small and makes it easy to swap out the storage engine for experiments.</p>
 <h2 id="tuple-serialization"><a class="header" href="#tuple-serialization"><code>Tuple</code> Serialization</a></h2>
 <p>A logical <code>Tuple</code> struct in memory must be converted into a byte array to be stored on a page. This process is handled by <code>storage/codec/tuple.rs</code>.</p>
 <p>The serialized format of a tuple consists of two parts:</p>
@@ -193,7 +193,6 @@
 <p>Every heap mutation emits a logical WAL record before the page frame is dirtied:</p>
 <div class="table-wrapper"><table><thead><tr><th>Operation</th><th>Payload</th><th>Redo</th><th>Undo</th></tr></thead><tbody>
 <tr><td>Insert</td><td><code>HeapInsertPayload</code></td><td>Re-insert tuple bytes into the slot</td><td>Remove the tuple (implicit via delete logic)</td></tr>
-<tr><td>Update</td><td><code>HeapUpdatePayload</code> (new + old meta/data)</td><td>Reapply new meta/bytes</td><td>Restore old meta/bytes</td></tr>
 <tr><td>Delete</td><td><code>HeapDeletePayload</code> (new tombstone + old tuple)</td><td>Mark slot deleted and update version chain</td><td>Recreate the prior tuple image</td></tr>
 </tbody></table>
 </div>

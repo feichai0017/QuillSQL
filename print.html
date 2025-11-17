@@ -349,7 +349,6 @@
 <pre class="mermaid">flowchart LR
     subgraph WAL Record Types
         HI[&quot;HeapInsert&quot;] --&gt; redo
-        HU[&quot;HeapUpdate&quot;] --&gt; redo &amp; undo
         HD[&quot;HeapDelete&quot;] --&gt; redo &amp; undo
         PI[&quot;PageImage&quot;]
         PD[&quot;PageDelta&quot;]
@@ -1544,7 +1543,7 @@ only describe intent.</p>
 and emit WAL.</li>
 <li><strong>Buffer Manager</strong> – <code>TableHeap</code>/<code>BPlusTreeIndex</code> access pages through the shared buffer
 pool.</li>
-<li><strong>Recovery</strong> – Heap/index mutations generate WAL records (<code>HeapInsert</code>, <code>HeapUpdate</code>,
+<li><strong>Recovery</strong> – Heap/index mutations generate WAL records (<code>HeapInsert</code>, <code>HeapDelete</code>,
 <code>IndexInsert</code>, …) that ARIES replays.</li>
 <li><strong>Background</strong> – MVCC vacuum and index cleanup obtain handles and iterate tuples via
 the same abstractions as foreground scans.</li>
@@ -1695,7 +1694,7 @@ a custom iterator on top of <code>ReadPages</code> if you want to experiment wit
 <li>An <code>MvccHeap</code> wrapper that maintains version chains.</li>
 <li>All indexes defined on the table.</li>
 </ul>
-<p>The binding exposes ergonomic methods such as <code>scan</code>, <code>index_scan</code>, <code>insert</code>, <code>update</code>, <code>delete</code>, and <code>prepare_row_for_write</code>. Each method internally uses the <code>TableHeap</code> + <code>MvccHeap</code> pair, appends the appropriate logical WAL record (HeapInsert/Update/Delete), and keeps indexes in sync. This keeps physical operators extremely small and makes it easy to swap out the storage engine for experiments.</p>
+<p>The binding exposes ergonomic methods such as <code>scan</code>, <code>index_scan</code>, <code>insert</code>, <code>update</code>, <code>delete</code>, and <code>prepare_row_for_write</code>. Each method internally uses the <code>TableHeap</code> + <code>MvccHeap</code> pair, appends the appropriate logical WAL record (HeapInsert/HeapDelete), and keeps indexes in sync. This keeps physical operators extremely small and makes it easy to swap out the storage engine for experiments.</p>
 <h2 id="tuple-serialization"><a class="header" href="#tuple-serialization"><code>Tuple</code> Serialization</a></h2>
 <p>A logical <code>Tuple</code> struct in memory must be converted into a byte array to be stored on a page. This process is handled by <code>storage/codec/tuple.rs</code>.</p>
 <p>The serialized format of a tuple consists of two parts:</p>
@@ -1724,7 +1723,6 @@ a custom iterator on top of <code>ReadPages</code> if you want to experiment wit
 <p>Every heap mutation emits a logical WAL record before the page frame is dirtied:</p>
 <div class="table-wrapper"><table><thead><tr><th>Operation</th><th>Payload</th><th>Redo</th><th>Undo</th></tr></thead><tbody>
 <tr><td>Insert</td><td><code>HeapInsertPayload</code></td><td>Re-insert tuple bytes into the slot</td><td>Remove the tuple (implicit via delete logic)</td></tr>
-<tr><td>Update</td><td><code>HeapUpdatePayload</code> (new + old meta/data)</td><td>Reapply new meta/bytes</td><td>Restore old meta/bytes</td></tr>
 <tr><td>Delete</td><td><code>HeapDeletePayload</code> (new tombstone + old tuple)</td><td>Mark slot deleted and update version chain</td><td>Recreate the prior tuple image</td></tr>
 </tbody></table>
 </div>
@@ -2275,7 +2273,7 @@ extended.</li>
 <ul>
 <li><strong><code>Transaction</code></strong>: Marks the <code>BEGIN</code>, <code>COMMIT</code>, or <code>ABORT</code> of a transaction.</li>
 <li><strong><code>PageWrite</code> / <code>PageDelta</code></strong>: Physical/Physiological records describing a change to a page. <code>PageWrite</code> contains a full image of the page (used for the first write after a checkpoint, a technique called First-Page-Write or FPW), while <code>PageDelta</code> contains only the changed bytes.</li>
-<li><strong><code>HeapInsert</code> / <code>HeapUpdate</code> / <code>HeapDelete</code></strong>: Logical records describing a high-level heap operation. These are primarily used for generating precise undo operations.</li>
+<li><strong><code>HeapInsert</code> / <code>HeapDelete</code></strong>: Logical records describing a high-level heap operation. These are primarily used for generating precise undo operations.</li>
 <li><strong><code>Checkpoint</code></strong>: A special record that marks a point of partial durability, allowing the log to be truncated.</li>
 <li><strong><code>CLR</code> (Compensation Log Record)</strong>: A special record written during recovery to describe an <strong>undo</strong> action. CLRs are redo-only and are never undone themselves.</li>
 </ul>
@@ -2307,11 +2305,10 @@ extended.</li>
 <ol>
 <li>The <code>UndoExecutor</code> takes the list of loser transactions.</li>
 <li>For each loser transaction, it scans the WAL <strong>backwards</strong>, following the chain of log records for that transaction.</li>
-<li>For each operation record (like <code>HeapInsert</code>, <code>HeapUpdate</code>), it performs the logical inverse operation:
+<li>For each operation record (like <code>HeapInsert</code>, <code>HeapDelete</code>), it performs the logical inverse operation:
 <ul>
 <li>To undo an <code>Insert</code>, it performs a <code>Delete</code>.</li>
 <li>To undo a <code>Delete</code>, it restores the deleted data.</li>
-<li>To undo an <code>Update</code>, it restores the data from before the update.</li>
 </ul>
 </li>
 <li><strong>Crucially</strong>, for every undo action it performs, it writes a <strong>Compensation Log Record (CLR)</strong> to the WAL. The CLR contains information about the undo action and, importantly, a pointer to the <em>next</em> log record that needs to be undone for that transaction.</li>

@@ -209,7 +209,7 @@ only describe intent.</p>
 and emit WAL.</li>
 <li><strong>Buffer Manager</strong> – <code>TableHeap</code>/<code>BPlusTreeIndex</code> access pages through the shared buffer
 pool.</li>
-<li><strong>Recovery</strong> – Heap/index mutations generate WAL records (<code>HeapInsert</code>, <code>HeapUpdate</code>,
+<li><strong>Recovery</strong> – Heap/index mutations generate WAL records (<code>HeapInsert</code>, <code>HeapDelete</code>,
 <code>IndexInsert</code>, …) that ARIES replays.</li>
 <li><strong>Background</strong> – MVCC vacuum and index cleanup obtain handles and iterate tuples via
 the same abstractions as foreground scans.</li>
