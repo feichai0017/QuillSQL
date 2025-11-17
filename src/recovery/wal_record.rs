@@ -15,8 +15,7 @@ pub use crate::storage::heap::wal_codec::{
 };
 pub use crate::storage::index::wal_codec::{
     decode_index_record as decode_index, encode_index_record as encode_index,
-    IndexLeafDeletePayload, IndexLeafInsertPayload, IndexLeafUpdatePayload, IndexRecordPayload,
-    IndexRelationIdent,
+    IndexLeafDeletePayload, IndexLeafInsertPayload, IndexRecordPayload, IndexRelationIdent,
 };
 
 #[derive(Debug, Clone)]

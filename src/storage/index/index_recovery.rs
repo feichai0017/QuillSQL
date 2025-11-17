@@ -11,8 +11,7 @@ use crate::recovery::wal::codec::{ResourceManagerId, WalFrame};
 use crate::recovery::Lsn;
 use crate::storage::codec::{BPlusTreeLeafPageCodec, TupleCodec};
 use crate::storage::index::wal_codec::{
-    decode_index_record, IndexLeafDeletePayload, IndexLeafInsertPayload, IndexLeafUpdatePayload,
-    IndexRecordPayload,
+    decode_index_record, IndexLeafDeletePayload, IndexLeafInsertPayload, IndexRecordPayload,
 };
 use crate::storage::tuple::Tuple;
 use crate::transaction::TransactionId;
@@ -28,11 +27,9 @@ impl IndexResourceManager {
 
     fn transaction_id_of(payload: &IndexRecordPayload) -> Option<TransactionId> {
         match payload {
-            IndexRecordPayload::LeafInsert(body) => Some(body.op_txn_id),
-            IndexRecordPayload::LeafDelete(body) => Some(body.op_txn_id),
-            IndexRecordPayload::LeafUpdate(body) => Some(body.op_txn_id),
+            IndexRecordPayload::LeafInsert(_) => None,
+            IndexRecordPayload::LeafDelete(_) => None,
         }
-        .filter(|id| *id != 0)
     }
 
     fn apply_leaf<F>(
@@ -128,27 +125,6 @@ impl IndexResourceManager {
         })
     }
 
-    fn redo_update(
-        &self,
-        frame: &WalFrame,
-        ctx: &RedoContext,
-        payload: &IndexLeafUpdatePayload,
-    ) -> QuillSQLResult<bool> {
-        self.apply_leaf(ctx, &payload.relation, payload.page_id, frame.lsn, |leaf| {
-            let tuple = decode_tuple(&payload.relation, &payload.key_data)?;
-            if let Some(existing) = leaf.look_up_mut(&tuple) {
-                *existing = payload.new_rid;
-                leaf.header.version += 1;
-                Ok(true)
-            } else {
-                // If the key is missing, treat as insert to keep redo idempotent
-                leaf.insert(tuple, payload.new_rid);
-                leaf.header.version += 1;
-                Ok(true)
-            }
-        })
-    }
-
     fn undo_insert(
         &self,
         ctx: &UndoContext,
@@ -182,25 +158,6 @@ impl IndexResourceManager {
         })?;
         Ok(())
     }
-
-    fn undo_update(
-        &self,
-        ctx: &UndoContext,
-        payload: &IndexLeafUpdatePayload,
-    ) -> QuillSQLResult<()> {
-        let redo_like = RedoContext {
-            disk_scheduler: ctx.disk_scheduler.clone(),
-            buffer_pool: ctx.buffer_pool.clone(),
-        };
-        self.apply_leaf(&redo_like, &payload.relation, payload.page_id, 0, |leaf| {
-            let tuple = decode_tuple(&payload.relation, &payload.key_data)?;
-            if let Some(existing) = leaf.look_up_mut(&tuple) {
-                *existing = payload.old_rid;
-            }
-            Ok(true)
-        })?;
-        Ok(())
-    }
 }
 
 impl ResourceManager for IndexResourceManager {
@@ -209,7 +166,6 @@ impl ResourceManager for IndexResourceManager {
         let applied = match &payload {
             IndexRecordPayload::LeafInsert(body) => self.redo_insert(frame, ctx, body)?,
             IndexRecordPayload::LeafDelete(body) => self.redo_delete(frame, ctx, body)?,
-            IndexRecordPayload::LeafUpdate(body) => self.redo_update(frame, ctx, body)?,
         };
         Ok(applied as usize)
     }
@@ -219,7 +175,6 @@ impl ResourceManager for IndexResourceManager {
         match payload {
             IndexRecordPayload::LeafInsert(body) => self.undo_insert(ctx, &body),
             IndexRecordPayload::LeafDelete(body) => self.undo_delete(ctx, &body),
-            IndexRecordPayload::LeafUpdate(body) => self.undo_update(ctx, &body),
         }
     }
 

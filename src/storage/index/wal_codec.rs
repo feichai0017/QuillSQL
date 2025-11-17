@@ -3,7 +3,6 @@ use crate::catalog::{Column, DataType, Schema, SchemaRef};
 use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::storage::codec::{CommonCodec, RidCodec};
 use crate::storage::page::RecordId;
-use crate::transaction::TransactionId;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,7 +59,6 @@ pub struct ColumnRepr {
 pub struct IndexLeafInsertPayload {
     pub relation: IndexRelationIdent,
     pub page_id: PageId,
-    pub op_txn_id: TransactionId,
     pub key_data: Vec<u8>,
     pub rid: RecordId,
 }
@@ -69,26 +67,14 @@ pub struct IndexLeafInsertPayload {
 pub struct IndexLeafDeletePayload {
     pub relation: IndexRelationIdent,
     pub page_id: PageId,
-    pub op_txn_id: TransactionId,
     pub key_data: Vec<u8>,
     pub old_rid: RecordId,
-}
-
-#[derive(Debug, Clone)]
-pub struct IndexLeafUpdatePayload {
-    pub relation: IndexRelationIdent,
-    pub page_id: PageId,
-    pub op_txn_id: TransactionId,
-    pub key_data: Vec<u8>,
-    pub old_rid: RecordId,
-    pub new_rid: RecordId,
 }
 
 #[derive(Debug, Clone)]
 pub enum IndexRecordPayload {
     LeafInsert(IndexLeafInsertPayload),
     LeafDelete(IndexLeafDeletePayload),
-    LeafUpdate(IndexLeafUpdatePayload),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,7 +82,6 @@ pub enum IndexRecordPayload {
 pub enum IndexRecordKind {
     LeafInsert = 1,
     LeafDelete = 2,
-    LeafUpdate = 3,
 }
 
 impl TryFrom<u8> for IndexRecordKind {
@@ -106,7 +91,6 @@ impl TryFrom<u8> for IndexRecordKind {
         match value {
             1 => Ok(IndexRecordKind::LeafInsert),
             2 => Ok(IndexRecordKind::LeafDelete),
-            3 => Ok(IndexRecordKind::LeafUpdate),
             other => Err(QuillSQLError::Internal(format!(
                 "Unknown index record kind: {}",
                 other
@@ -123,9 +107,6 @@ pub fn encode_index_record(payload: &IndexRecordPayload) -> (u8, Vec<u8>) {
         IndexRecordPayload::LeafDelete(body) => {
             (IndexRecordKind::LeafDelete as u8, encode_leaf_delete(body))
         }
-        IndexRecordPayload::LeafUpdate(body) => {
-            (IndexRecordKind::LeafUpdate as u8, encode_leaf_update(body))
-        }
     }
 }
 
@@ -137,9 +118,6 @@ pub fn decode_index_record(bytes: &[u8], info: u8) -> QuillSQLResult<IndexRecord
         IndexRecordKind::LeafDelete => {
             Ok(IndexRecordPayload::LeafDelete(decode_leaf_delete(bytes)?))
         }
-        IndexRecordKind::LeafUpdate => {
-            Ok(IndexRecordPayload::LeafUpdate(decode_leaf_update(bytes)?))
-        }
     }
 }
 
@@ -147,7 +125,6 @@ fn encode_leaf_insert(body: &IndexLeafInsertPayload) -> Vec<u8> {
     let mut buf = Vec::new();
     encode_relation(&body.relation, &mut buf);
     buf.extend_from_slice(&body.page_id.to_le_bytes());
-    buf.extend_from_slice(&body.op_txn_id.to_le_bytes());
     encode_bytes(&body.key_data, &mut buf);
     buf.extend(RidCodec::encode(&body.rid));
     buf
@@ -155,22 +132,19 @@ fn encode_leaf_insert(body: &IndexLeafInsertPayload) -> Vec<u8> {
 
 fn decode_leaf_insert(bytes: &[u8]) -> QuillSQLResult<IndexLeafInsertPayload> {
     let (relation, mut offset) = decode_relation(bytes)?;
-    if bytes.len() < offset + 4 + 8 {
+    if bytes.len() < offset + 4 {
         return Err(QuillSQLError::Internal(
             "Index leaf insert payload too short".to_string(),
         ));
     }
     let page_id = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
     offset += 4;
-    let op_txn_id = u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap());
-    offset += 8;
     let (key_data, consumed) = decode_bytes(&bytes[offset..])?;
     offset += consumed;
     let (rid, _) = RidCodec::decode(&bytes[offset..])?;
     Ok(IndexLeafInsertPayload {
         relation,
         page_id,
-        op_txn_id,
         key_data,
         rid,
     })
@@ -180,7 +154,6 @@ fn encode_leaf_delete(body: &IndexLeafDeletePayload) -> Vec<u8> {
     let mut buf = Vec::new();
     encode_relation(&body.relation, &mut buf);
     buf.extend_from_slice(&body.page_id.to_le_bytes());
-    buf.extend_from_slice(&body.op_txn_id.to_le_bytes());
     encode_bytes(&body.key_data, &mut buf);
     buf.extend(RidCodec::encode(&body.old_rid));
     buf
@@ -188,61 +161,21 @@ fn encode_leaf_delete(body: &IndexLeafDeletePayload) -> Vec<u8> {
 
 fn decode_leaf_delete(bytes: &[u8]) -> QuillSQLResult<IndexLeafDeletePayload> {
     let (relation, mut offset) = decode_relation(bytes)?;
-    if bytes.len() < offset + 4 + 8 {
+    if bytes.len() < offset + 4 {
         return Err(QuillSQLError::Internal(
             "Index leaf delete payload too short".to_string(),
         ));
     }
     let page_id = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
     offset += 4;
-    let op_txn_id = u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap());
-    offset += 8;
     let (key_data, consumed) = decode_bytes(&bytes[offset..])?;
     offset += consumed;
     let (old_rid, _) = RidCodec::decode(&bytes[offset..])?;
     Ok(IndexLeafDeletePayload {
         relation,
         page_id,
-        op_txn_id,
         key_data,
         old_rid,
-    })
-}
-
-fn encode_leaf_update(body: &IndexLeafUpdatePayload) -> Vec<u8> {
-    let mut buf = Vec::new();
-    encode_relation(&body.relation, &mut buf);
-    buf.extend_from_slice(&body.page_id.to_le_bytes());
-    buf.extend_from_slice(&body.op_txn_id.to_le_bytes());
-    encode_bytes(&body.key_data, &mut buf);
-    buf.extend(RidCodec::encode(&body.old_rid));
-    buf.extend(RidCodec::encode(&body.new_rid));
-    buf
-}
-
-fn decode_leaf_update(bytes: &[u8]) -> QuillSQLResult<IndexLeafUpdatePayload> {
-    let (relation, mut offset) = decode_relation(bytes)?;
-    if bytes.len() < offset + 4 + 8 {
-        return Err(QuillSQLError::Internal(
-            "Index leaf update payload too short".to_string(),
-        ));
-    }
-    let page_id = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
-    offset += 4;
-    let op_txn_id = u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap());
-    offset += 8;
-    let (key_data, consumed) = decode_bytes(&bytes[offset..])?;
-    offset += consumed;
-    let (old_rid, consumed_old) = RidCodec::decode(&bytes[offset..])?;
-    offset += consumed_old;
-    let (new_rid, _) = RidCodec::decode(&bytes[offset..])?;
-    Ok(IndexLeafUpdatePayload {
-        relation,
-        page_id,
-        op_txn_id,
-        key_data,
-        old_rid,
-        new_rid,
     })
 }
 

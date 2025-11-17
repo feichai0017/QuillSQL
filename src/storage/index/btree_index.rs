@@ -20,12 +20,11 @@ use crate::recovery::wal_record::WalRecordPayload;
 use crate::storage::codec::BPlusTreePageTypeCodec;
 pub use crate::storage::index::btree_iterator::TreeIndexIterator;
 use crate::storage::index::wal_codec::{
-    IndexLeafDeletePayload, IndexLeafInsertPayload, IndexLeafUpdatePayload, IndexRecordPayload,
-    IndexRelationIdent, SchemaRepr,
+    IndexLeafDeletePayload, IndexLeafInsertPayload, IndexRecordPayload, IndexRelationIdent,
+    SchemaRepr,
 };
 use crate::storage::page::BPlusTreePageType;
 use crate::storage::tuple::Tuple;
-use crate::transaction::TransactionId;
 // OLC bounded restart and backoff configuration
 const MAX_OLC_RESTARTS: usize = 64;
 const OLC_BACKOFF_BASE_US: u64 = 50;
@@ -36,10 +35,6 @@ pub struct Context<'a> {
     /// When a child node is safe for the operation, all ancestor locks
     /// can be released (clear this set) to reduce lock footprint.
     pub write_set: VecDeque<WritePageGuard>,
-
-    /// Optional read guards used on read paths for validations/restarts.
-    pub read_set: VecDeque<ReadPageGuard>,
-
     /// Holds the header page lock during structural changes (e.g., root switch).
     pub header_lock_guard: Option<RwLockWriteGuard<'a, ()>>,
 }
@@ -48,7 +43,6 @@ impl<'a> Context<'a> {
     pub fn new() -> Self {
         Self {
             write_set: VecDeque::new(),
-            read_set: VecDeque::new(),
             header_lock_guard: None,
         }
     }
@@ -56,10 +50,6 @@ impl<'a> Context<'a> {
     /// Push a write guard onto the traversal path.
     pub fn push_write_guard(&mut self, guard: WritePageGuard) {
         self.write_set.push_back(guard);
-    }
-
-    pub fn push_read_guard(&mut self, guard: ReadPageGuard) {
-        self.read_set.push_back(guard);
     }
 
     /// Release all ancestor write locks when it is safe to proceed.
@@ -110,9 +100,6 @@ impl BPlusTreeIndex {
         Ok(())
     }
 
-    fn wal_txn_id(&self) -> TransactionId {
-        0
-    }
     pub fn new(
         key_schema: SchemaRef,
         buffer_pool: Arc<BufferManager>,
@@ -256,14 +243,6 @@ impl BPlusTreeIndex {
         is_insert: bool,
         mut context: Context<'a>,
     ) -> QuillSQLResult<(WritePageGuard, Context<'a>)> {
-        if self.config.debug_find_level >= 1 {
-            eprintln!(
-                "[FIND] thread={:?} begin is_insert={} key={}",
-                std::thread::current().id(),
-                is_insert,
-                key
-            );
-        }
         // Do not pre-hold header lock on insert path; only take it around root modifications
         let root_page_id = self.get_root_page_id()?;
         if root_page_id == INVALID_PAGE_ID {
@@ -285,14 +264,6 @@ impl BPlusTreeIndex {
                         self.key_schema.clone(),
                         key,
                     )?;
-                    if self.config.debug_find_level >= 1 {
-                        eprintln!(
-                            "[FIND] thread={:?} at_internal parent={} -> child={}",
-                            std::thread::current().id(),
-                            current_guard.page_id(),
-                            child_page_id
-                        );
-                    }
                     let child_guard = self.buffer_pool.fetch_page_write(child_page_id)?;
                     // header-only safety check for overflow
                     let will_overflow = match BPlusTreePageTypeCodec::decode(child_guard.data())?.0
@@ -311,48 +282,16 @@ impl BPlusTreeIndex {
 
                     if is_insert {
                         if !will_overflow {
-                            if std::env::var("QUILL_DEBUG_FIND").ok().as_deref() == Some("1") {
-                                eprintln!(
-                                    "[FIND] thread={:?} safe_descend release_ancestors parent={} child={}",
-                                    std::thread::current().id(),
-                                    current_guard.page_id(),
-                                    child_page_id
-                                );
-                            }
                             context.release_all_write_locks();
                             drop(current_guard);
                             current_guard = child_guard;
                             continue;
-                        } else if self.config.debug_find_level >= 1 {
-                            eprintln!(
-                                "[FIND] thread={:?} hold_parent due_to_full child={} write_set_len={}",
-                                std::thread::current().id(),
-                                child_page_id,
-                                context.write_set.len()
-                            );
                         }
-                    }
-
-                    if self.config.debug_find_level >= 2 {
-                        eprintln!(
-                            "[FIND DEBUG] hold-parent: parent={}, child={}, write_set_len={}",
-                            current_guard.page_id(),
-                            child_page_id,
-                            context.write_set.len()
-                        );
                     }
                     context.push_write_guard(current_guard);
                     current_guard = child_guard;
                 }
                 BPlusTreePage::Leaf(_) => {
-                    if self.config.debug_find_level >= 1 {
-                        eprintln!(
-                            "[FIND] thread={:?} reached_leaf leaf_page_id={} write_set_len={}",
-                            std::thread::current().id(),
-                            current_guard.page_id(),
-                            context.write_set.len()
-                        );
-                    }
                     return Ok((current_guard, context));
                 }
             }
@@ -362,26 +301,12 @@ impl BPlusTreeIndex {
     /// 公共 API: 插入一个键值对，使用闩锁耦合实现高并发。
     pub fn insert(&self, key: &Tuple, rid: RecordId) -> QuillSQLResult<()> {
         let mut context = Context::new();
-        if self.config.debug_insert_level >= 1 {
-            eprintln!(
-                "[INSERT] thread={:?} start key={}",
-                std::thread::current().id(),
-                key
-            );
-        }
 
         // Guard tree initialization to avoid concurrent start_new_tree races.
         if self.is_empty()? {
             let _lock = self.header_page_lock.write();
             let root_now = self.get_root_page_id()?;
             if root_now == INVALID_PAGE_ID {
-                if self.config.debug_insert_level >= 1 {
-                    eprintln!(
-                        "[INSERT] thread={:?} start_new_tree key={}",
-                        std::thread::current().id(),
-                        key
-                    );
-                }
                 // Create root leaf and set root under header lock.
                 self.start_new_tree(key, rid)?;
                 return Ok(());
@@ -390,13 +315,6 @@ impl BPlusTreeIndex {
 
         // Split-before-insert loop: ensure we never insert into a full node.
         loop {
-            if self.config.debug_insert_level >= 1 {
-                eprintln!(
-                    "[INSERT] thread={:?} find_leaf_pessimistic key={}",
-                    std::thread::current().id(),
-                    key
-                );
-            }
             let (mut leaf_guard, mut local_ctx) =
                 self.find_leaf_page_pessimistic(key, true, context)?;
             let (mut leaf_page, _) =
@@ -411,13 +329,6 @@ impl BPlusTreeIndex {
                 )?;
                 let expected_pid = parent_page_chk.look_up(key);
                 if expected_pid != leaf_guard.page_id() {
-                    if std::env::var("QUILL_DEBUG_FIND").ok().as_deref() == Some("1") {
-                        eprintln!(
-                            "[INSERT] parent_guided_redirect: from_leaf={} -> expected_child={}",
-                            leaf_guard.page_id(),
-                            expected_pid
-                        );
-                    }
                     drop(leaf_guard);
                     leaf_guard = self.buffer_pool.fetch_page_write(expected_pid)?;
                     let (new_leaf, _) =
@@ -450,17 +361,6 @@ impl BPlusTreeIndex {
                 if *key < next_first_key {
                     break;
                 }
-                if self.config.debug_insert_level >= 1 {
-                    eprintln!(
-                        "[INSERT] thread={:?} redirect_to_sibling: from_leaf={} -> next_leaf={} key={} last_key={} next_first_key={}",
-                        std::thread::current().id(),
-                        leaf_guard.page_id(),
-                        next_pid,
-                        key,
-                        last_key_ref,
-                        next_first_key
-                    );
-                }
                 // Release any parents held and current leaf, then jump to next sibling directly
                 local_ctx.release_all_write_locks();
                 drop(leaf_guard);
@@ -473,28 +373,24 @@ impl BPlusTreeIndex {
 
             // Update if key exists
             if let Some(existing_rid) = leaf_page.look_up_mut(key) {
-                if self.config.debug_insert_level >= 1 {
-                    eprintln!(
-                        "[INSERT] thread={:?} update leaf_page_id={} key={} old_rid={:?} new_rid={:?}",
-                        std::thread::current().id(),
-                        leaf_guard.page_id(),
-                        key,
-                        *existing_rid,
-                        rid
-                    );
-                }
                 let old_rid = *existing_rid;
                 *existing_rid = rid;
                 leaf_page.header.version += 1;
-                let payload = IndexRecordPayload::LeafUpdate(IndexLeafUpdatePayload {
+                let key_encoded = TupleCodec::encode(key);
+                let delete_payload = IndexRecordPayload::LeafDelete(IndexLeafDeletePayload {
                     relation: self.relation_ident(),
                     page_id: leaf_guard.page_id(),
-                    op_txn_id: self.wal_txn_id(),
-                    key_data: TupleCodec::encode(key),
+                    key_data: key_encoded.clone(),
                     old_rid,
-                    new_rid: rid,
                 });
-                self.append_index_record(payload)?;
+                self.append_index_record(delete_payload)?;
+                let insert_payload = IndexRecordPayload::LeafInsert(IndexLeafInsertPayload {
+                    relation: self.relation_ident(),
+                    page_id: leaf_guard.page_id(),
+                    key_data: key_encoded,
+                    rid,
+                });
+                self.append_index_record(insert_payload)?;
                 let encoded = BPlusTreeLeafPageCodec::encode(&leaf_page);
                 self.wal_overwrite_page(&mut leaf_guard, encoded)?;
                 local_ctx.release_all_write_locks();
@@ -503,14 +399,6 @@ impl BPlusTreeIndex {
 
             // If page is at capacity, split first, then retry to find the correct leaf
             if leaf_page.header.current_size == leaf_page.header.max_size {
-                if std::env::var("QUILL_DEBUG_INSERT").ok().as_deref() == Some("1") {
-                    eprintln!(
-                        "[INSERT] thread={:?} leaf_full split leaf_page_id={} key={}",
-                        std::thread::current().id(),
-                        leaf_guard.page_id(),
-                        key
-                    );
-                }
                 // Avoid deadlock: allow split to acquire header lock when promoting root
                 local_ctx.header_lock_guard = None;
                 match self.split(leaf_guard, &mut local_ctx) {
@@ -531,21 +419,11 @@ impl BPlusTreeIndex {
             }
 
             // Safe to insert
-            if std::env::var("QUILL_DEBUG_INSERT").ok().as_deref() == Some("1") {
-                eprintln!(
-                    "[INSERT] thread={:?} insert leaf_page_id={} key={} rid={:?}",
-                    std::thread::current().id(),
-                    leaf_guard.page_id(),
-                    key,
-                    rid
-                );
-            }
             leaf_page.insert(key.clone(), rid);
             leaf_page.header.version += 1;
             let payload = IndexRecordPayload::LeafInsert(IndexLeafInsertPayload {
                 relation: self.relation_ident(),
                 page_id: leaf_guard.page_id(),
-                op_txn_id: self.wal_txn_id(),
                 key_data: TupleCodec::encode(key),
                 rid,
             });
@@ -579,13 +457,6 @@ impl BPlusTreeIndex {
                 )?;
                 let expected_pid = parent_page_chk.look_up(key);
                 if expected_pid != leaf_guard.page_id() {
-                    if std::env::var("QUILL_DEBUG_FIND").ok().as_deref() == Some("1") {
-                        eprintln!(
-                            "[DELETE] parent_guided_redirect: from_leaf={} -> expected_child={}",
-                            leaf_guard.page_id(),
-                            expected_pid
-                        );
-                    }
                     drop(leaf_guard);
                     leaf_guard = self.buffer_pool.fetch_page_write(expected_pid)?;
                     let (new_leaf, _) =
@@ -604,24 +475,8 @@ impl BPlusTreeIndex {
                     break;
                 }
                 let next_pid = leaf_page.header.next_page_id;
-                if std::env::var("QUILL_DEBUG_FIND").ok().as_deref() == Some("1") {
-                    eprintln!(
-                        "[DELETE] thread={:?} redirect_to_sibling: from_leaf={} -> next_leaf={} key={} last_key={}",
-                        std::thread::current().id(),
-                        leaf_guard.page_id(),
-                        next_pid,
-                        key,
-                        last_key_ref
-                    );
-                }
                 hops += 1;
                 if hops > 8 {
-                    if std::env::var("QUILL_DEBUG_FIND").ok().as_deref() == Some("1") {
-                        eprintln!(
-                            "[DELETE] redirect_hops_exceeded: restart from root at leaf={}",
-                            leaf_guard.page_id()
-                        );
-                    }
                     local_ctx.release_all_write_locks();
                     drop(leaf_guard);
                     context = Context::new();
@@ -657,7 +512,6 @@ impl BPlusTreeIndex {
             let payload = IndexRecordPayload::LeafDelete(IndexLeafDeletePayload {
                 relation: self.relation_ident(),
                 page_id: leaf_guard.page_id(),
-                op_txn_id: self.wal_txn_id(),
                 key_data: key_bytes,
                 old_rid: target_rid,
             });
@@ -1353,22 +1207,8 @@ impl BPlusTreeIndex {
         mut page_guard: WritePageGuard,
         context: &mut Context<'a>,
     ) -> QuillSQLResult<()> {
-        if self.config.debug_split_level >= 2 {
-            eprintln!(
-                "[SPLIT DEBUG] splitting page={}, write_set_len={}",
-                page_guard.page_id(),
-                context.write_set.len()
-            );
-        }
         loop {
             let page_id = page_guard.page_id();
-            if self.config.debug_split_level >= 2 {
-                eprintln!(
-                    "[SPLIT DEBUG] splitting page={}, write_set_len={}",
-                    page_id,
-                    context.write_set.len()
-                );
-            }
             let (mut page, _) =
                 BPlusTreePageCodec::decode(page_guard.data(), self.key_schema.clone())?;
 
@@ -1387,14 +1227,6 @@ impl BPlusTreeIndex {
                     let new_data = BPlusTreeLeafPageCodec::encode(&new_leaf);
                     self.wal_overwrite_page(&mut new_page_guard, new_data)?;
                     leaf_page.header.version += 1;
-                    if self.config.debug_split_level >= 2 && new_leaf.header.current_size > 0 {
-                        eprintln!(
-                            "[SPLIT DEBUG] leaf_split left={} right={} sep_key={}",
-                            page_id,
-                            new_page_id,
-                            new_leaf.key_at(0)
-                        );
-                    }
                     new_leaf.key_at(0).clone()
                 }
                 BPlusTreePage::Internal(internal_page) => {
@@ -1443,12 +1275,6 @@ impl BPlusTreeIndex {
                     // B-link: publish right sibling pointer for readers to chase
                     internal_page.header.next_page_id = new_page_id;
                     internal_page.header.version += 1;
-                    if self.config.debug_split_level >= 2 {
-                        eprintln!(
-                            "[SPLIT DEBUG] internal_split left={} right={} promote_key={}",
-                            page_id, new_page_id, middle_key
-                        );
-                    }
                     middle_key
                 }
             };
@@ -1459,12 +1285,6 @@ impl BPlusTreeIndex {
 
             // 若当前分裂页是根（无父在 write_set），则创建新的根
             if page_guard.page_id() == self.get_root_page_id()? {
-                if self.config.debug_split_level >= 2 {
-                    eprintln!(
-                        "[SPLIT DEBUG] root-split: old_root={}, new_right={}",
-                        page_id, new_page_id
-                    );
-                }
                 let mut new_root_guard = self.buffer_pool.new_page()?;
                 let new_root_id = new_root_guard.page_id();
                 let mut new_root_page =
@@ -1495,14 +1315,6 @@ impl BPlusTreeIndex {
                     ));
                 }
             };
-            if std::env::var("QUILL_DEBUG_SPLIT").ok().as_deref() == Some("2") {
-                eprintln!(
-                    "[SPLIT DEBUG] promote to parent={}, left={}, right={}",
-                    parent_guard.page_id(),
-                    page_id,
-                    new_page_id
-                );
-            }
             let (mut parent_page, _) =
                 BPlusTreeInternalPageCodec::decode(parent_guard.data(), self.key_schema.clone())?;
             // Insert the separator key right after the original left child (page_id)
