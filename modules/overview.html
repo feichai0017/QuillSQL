@@ -12,21 +12,20 @@
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <meta name="theme-color" content="#ffffff">
 
-        <link rel="icon" href="../favicon.svg">
-        <link rel="shortcut icon" href="../favicon.png">
-        <link rel="stylesheet" href="../css/variables.css">
-        <link rel="stylesheet" href="../css/general.css">
-        <link rel="stylesheet" href="../css/chrome.css">
-        <link rel="stylesheet" href="../css/print.css" media="print">
+        <link rel="icon" href="../favicon-de23e50b.svg">
+        <link rel="shortcut icon" href="../favicon-8114d1fc.png">
+        <link rel="stylesheet" href="../css/variables-8adf115d.css">
+        <link rel="stylesheet" href="../css/general-2459343d.css">
+        <link rel="stylesheet" href="../css/chrome-9dfbd86b.css">
+        <link rel="stylesheet" href="../css/print-9e4910d8.css" media="print">
 
         <!-- Fonts -->
-        <link rel="stylesheet" href="../FontAwesome/css/font-awesome.css">
-        <link rel="stylesheet" href="../fonts/fonts.css">
+        <link rel="stylesheet" href="../fonts/fonts-9644e21d.css">
 
         <!-- Highlight.js Stylesheets -->
-        <link rel="stylesheet" id="highlight-css" href="../highlight.css">
-        <link rel="stylesheet" id="tomorrow-night-css" href="../tomorrow-night.css">
-        <link rel="stylesheet" id="ayu-highlight-css" href="../ayu-highlight.css">
+        <link rel="stylesheet" id="mdbook-highlight-css" href="../highlight-493f70e1.css">
+        <link rel="stylesheet" id="mdbook-tomorrow-night-css" href="../tomorrow-night-4c0ae647.css">
+        <link rel="stylesheet" id="mdbook-ayu-highlight-css" href="../ayu-highlight-3fdfc3ac.css">
 
         <!-- Custom theme stylesheets -->
 
@@ -38,7 +37,7 @@
             const default_dark_theme = "navy";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="../toc.js"></script>
+        <script src="../toc-eb7c302c.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -51,7 +50,7 @@
             </div>
         </div>
     </div>
-    <div id="body-container">
+    <div id="mdbook-body-container">
         <!-- Work around some values being stored in localStorage wrapped in quotes -->
         <script>
             try {
@@ -80,12 +79,12 @@
             html.classList.add("js");
         </script>
 
-        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+        <input type="checkbox" id="mdbook-sidebar-toggle-anchor" class="hidden">
 
         <!-- Hide / unhide sidebar before it is displayed -->
         <script>
             let sidebar = null;
-            const sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            const sidebar_toggle = document.getElementById("mdbook-sidebar-toggle-anchor");
             if (document.body.clientWidth >= 1080) {
                 try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
                 sidebar = sidebar || 'visible';
@@ -100,36 +99,36 @@
             }
         </script>
 
-        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+        <nav id="mdbook-sidebar" class="sidebar" aria-label="Table of contents">
             <!-- populated by js -->
             <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
             <noscript>
                 <iframe class="sidebar-iframe-outer" src="../toc.html"></iframe>
             </noscript>
-            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+            <div id="mdbook-sidebar-resize-handle" class="sidebar-resize-handle">
                 <div class="sidebar-resize-indicator"></div>
             </div>
         </nav>
 
-        <div id="page-wrapper" class="page-wrapper">
+        <div id="mdbook-page-wrapper" class="page-wrapper">
 
             <div class="page">
-                <div id="menu-bar-hover-placeholder"></div>
-                <div id="menu-bar" class="menu-bar sticky">
+                <div id="mdbook-menu-bar-hover-placeholder"></div>
+                <div id="mdbook-menu-bar" class="menu-bar sticky">
                     <div class="left-buttons">
-                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
-                            <i class="fa fa-bars"></i>
+                        <label id="mdbook-sidebar-toggle" class="icon-button" for="mdbook-sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="mdbook-sidebar">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M0 96C0 78.3 14.3 64 32 64H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32C14.3 128 0 113.7 0 96zM0 256c0-17.7 14.3-32 32-32H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32c-17.7 0-32-14.3-32-32zM448 416c0 17.7-14.3 32-32 32H32c-17.7 0-32-14.3-32-32s14.3-32 32-32H416c17.7 0 32 14.3 32 32z"/></svg></span>
                         </label>
-                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
-                            <i class="fa fa-paint-brush"></i>
+                        <button id="mdbook-theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="mdbook-theme-list">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M371.3 367.1c27.3-3.9 51.9-19.4 67.2-42.9L600.2 74.1c12.6-19.5 9.4-45.3-7.6-61.2S549.7-4.4 531.1 9.6L294.4 187.2c-24 18-38.2 46.1-38.4 76.1L371.3 367.1zm-19.6 25.4l-116-104.4C175.9 290.3 128 339.6 128 400c0 3.9 .2 7.8 .6 11.6c1.8 17.5-10.2 36.4-27.8 36.4H96c-17.7 0-32 14.3-32 32s14.3 32 32 32H240c61.9 0 112-50.1 112-112c0-2.5-.1-5-.2-7.5z"/></svg></span>
                         </button>
-                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
-                            <li role="none"><button role="menuitem" class="theme" id="default_theme">Auto</button></li>
-                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
-                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
-                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
-                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
-                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        <ul id="mdbook-theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-ayu">Ayu</button></li>
                         </ul>
                     </div>
 
@@ -137,7 +136,7 @@
 
                     <div class="right-buttons">
                         <a href="../print.html" title="Print this book" aria-label="Print this book">
-                            <i id="print-button" class="fa fa-print"></i>
+                            <span class=fa-svg id="print-button"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M128 0C92.7 0 64 28.7 64 64v96h64V64H354.7L384 93.3V160h64V93.3c0-17-6.7-33.3-18.7-45.3L400 18.7C388 6.7 371.7 0 354.7 0H128zM384 352v32 64H128V384 368 352H384zm64 32h32c17.7 0 32-14.3 32-32V256c0-35.3-28.7-64-64-64H64c-35.3 0-64 28.7-64 64v96c0 17.7 14.3 32 32 32H64v64c0 35.3 28.7 64 64 64H384c35.3 0 64-28.7 64-64V384zm-16-88c-13.3 0-24-10.7-24-24s10.7-24 24-24s24 10.7 24 24s-10.7 24-24 24z"/></svg></span>
                         </a>
 
                     </div>
@@ -146,27 +145,33 @@
 
                 <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
                 <script>
-                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
-                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
-                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                    document.getElementById('mdbook-sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('mdbook-sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#mdbook-sidebar a')).forEach(function(link) {
                         link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
                     });
                 </script>
 
-                <div id="content" class="content">
+                <div id="mdbook-content" class="content">
                     <main>
                         <h1 id="module-overview"><a class="header" href="#module-overview">Module Overview</a></h1>
 <p>This page gives a teaching-friendly tour of every QuillSQL subsystem. Each section
 explains where the code lives (<code>src/&lt;module&gt;</code>), the most important types, and the
 design decisions that make the module fit into the whole system. Read it together
 with <a href="../architecture.html"><code>architecture.md</code></a> for the big-picture data flow.</p>
-<hr />
+<hr>
 <h2 id="1-sql-front-end-srcsql"><a class="header" href="#1-sql-front-end-srcsql">1. SQL Front-End (<code>src/sql</code>)</a></h2>
-<div class="table-wrapper"><table><thead><tr><th>Submodule</th><th>Responsibilities</th><th>Key Types / Functions</th></tr></thead><tbody>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Submodule</th><th>Responsibilities</th><th>Key Types / Functions</th></tr>
+</thead>
+<tbody>
 <tr><td><code>lexer.rs</code>, <code>parser.rs</code></td><td>Translate raw SQL into an AST using <code>sqlparser</code> plus Quill-specific extensions.</td><td><code>parse_sql(&amp;str) -&gt; Vec&lt;Statement&gt;</code></td></tr>
 <tr><td><code>ast/mod.rs</code></td><td>Normalises identifiers, handles multi-part names, attaches spans for diagnostics.</td><td><code>NormalizedIdent</code>, <code>ObjectNameExt</code></td></tr>
 <tr><td><code>plan/lowering.rs</code></td><td>Bridges AST → planner structs for DDL extras not in upstream <code>sqlparser</code>.</td><td><code>CreateIndexSpec</code>, <code>ColumnDefExt</code></td></tr>
-</tbody></table>
+</tbody>
+</table>
 </div>
 <p>Implementation notes:</p>
 <ul>
@@ -178,13 +183,19 @@ show students exactly which token misbehaved.</li>
 <li>Suggested exercises: extend the parser with <code>ALTER TABLE</code> or window functions, then
 observe how the new AST nodes flow into the planner layer.</li>
 </ul>
-<hr />
+<hr>
 <h2 id="2-logical-planning-srcplan"><a class="header" href="#2-logical-planning-srcplan">2. Logical Planning (<code>src/plan</code>)</a></h2>
-<div class="table-wrapper"><table><thead><tr><th>Component</th><th>Description</th></tr></thead><tbody>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Component</th><th>Description</th></tr>
+</thead>
+<tbody>
 <tr><td><code>LogicalPlanner</code></td><td>Converts AST nodes into strongly typed <code>LogicalPlan</code> variants. Responsible for type checking, alias resolution, and scope handling.</td></tr>
 <tr><td><code>PlannerContext</code></td><td>Surface for catalog lookups while planning.</td></tr>
 <tr><td><code>PhysicalPlanner</code></td><td>Lowers optimized logical plans into physical Volcano operators (<code>PhysicalPlan</code>).</td></tr>
-</tbody></table>
+</tbody>
+</table>
 </div>
 <p>Highlights:</p>
 <ul>
@@ -195,12 +206,18 @@ correlation so students can see how real compilers resolve identifiers.</li>
 <li>DDL nodes capture <code>TableReference</code> + <code>Schema</code> objects. Later phases use them to skip
 repeated catalog lookups (helpful for labs about metadata caching).</li>
 </ul>
-<hr />
+<hr>
 <h2 id="3-optimizer-srcoptimizer"><a class="header" href="#3-optimizer-srcoptimizer">3. Optimizer (<code>src/optimizer</code>)</a></h2>
-<div class="table-wrapper"><table><thead><tr><th>Piece</th><th>Responsibility</th></tr></thead><tbody>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Piece</th><th>Responsibility</th></tr>
+</thead>
+<tbody>
 <tr><td><code>LogicalOptimizer</code></td><td>Applies a pipeline of rule-based rewrites (predicate pushdown, projection pruning, constant folding).</td></tr>
 <tr><td><code>rules</code></td><td>Individual <code>OptimizerRule</code> implementations.</td></tr>
-</tbody></table>
+</tbody>
+</table>
 </div>
 <p>Teaching hooks:</p>
 <ul>
@@ -213,13 +230,19 @@ estimate exceeds X?”).</li>
 <li>Example lab: add constant folding or join commutation, run the sqllogictest suite, and
 compare plan dumps to see new shapes.</li>
 </ul>
-<hr />
+<hr>
 <h2 id="4-execution-engine-srcexecution"><a class="header" href="#4-execution-engine-srcexecution">4. Execution Engine (<code>src/execution</code>)</a></h2>
-<div class="table-wrapper"><table><thead><tr><th>Element</th><th>Details</th></tr></thead><tbody>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Element</th><th>Details</th></tr>
+</thead>
+<tbody>
 <tr><td><code>PhysicalPlan</code></td><td>Enum covering all Volcano operators. Each variant implements <code>VolcanoExecutor</code>.</td></tr>
 <tr><td><code>VolcanoExecutor</code></td><td><code>init(&amp;mut ExecutionContext)</code> and <code>next(&amp;mut ExecutionContext)</code> pair define the iterator model.</td></tr>
 <tr><td><code>ExecutionContext</code></td><td>Supplies catalog access, expression evaluation, and (most importantly) a pluggable <code>StorageEngine</code>.</td></tr>
-</tbody></table>
+</tbody>
+</table>
 </div>
 <p>Design notes:</p>
 <ul>
@@ -235,13 +258,19 @@ are taken or released.</li>
 <code>PhysicalPlan</code>s without ever touching storage-specific code. This highlights the payoff
 of the handle abstraction.</li>
 </ul>
-<hr />
+<hr>
 <h2 id="5-transaction-runtime-srctransaction"><a class="header" href="#5-transaction-runtime-srctransaction">5. Transaction Runtime (<code>src/transaction</code>)</a></h2>
-<div class="table-wrapper"><table><thead><tr><th>Type</th><th>Purpose</th></tr></thead><tbody>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Type</th><th>Purpose</th></tr>
+</thead>
+<tbody>
 <tr><td><code>TransactionManager</code></td><td>Creates/commits/aborts transactions, manages undo chains, and coordinates WAL durability.</td></tr>
 <tr><td><code>TxnContext</code></td><td>Per-command wrapper passed to execution. Provides MVCC snapshot (<code>TransactionSnapshot</code>), lock helpers, and command ids.</td></tr>
 <tr><td><code>LockManager</code></td><td>Multi-granularity 2PL with deadlock detection.</td></tr>
-</tbody></table>
+</tbody>
+</table>
 </div>
 <p>Deeper dive:</p>
 <ul>
@@ -258,13 +287,19 @@ concurrency lectures.</li>
 <li>Undo entries (<code>UndoRecord</code>) store heap + index data. When an abort occurs the engine
 generates CLRs, demonstrating ARIES-style logical undo.</li>
 </ul>
-<hr />
+<hr>
 <h2 id="6-storage-engine--handles-srcstorage"><a class="header" href="#6-storage-engine--handles-srcstorage">6. Storage Engine &amp; Handles (<code>src/storage</code>)</a></h2>
-<div class="table-wrapper"><table><thead><tr><th>Component</th><th>Highlights</th></tr></thead><tbody>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Component</th><th>Highlights</th></tr>
+</thead>
+<tbody>
 <tr><td><code>engine.rs</code></td><td>Defines <code>StorageEngine</code>, <code>TableHandle</code>, <code>IndexHandle</code>, <code>TupleStream</code>, and <code>IndexScanRequest</code>.</td></tr>
 <tr><td><code>table_heap</code></td><td>Slotted-page heap with MVCC metadata (<code>TupleMeta</code>, forward/back pointers).</td></tr>
 <tr><td><code>index</code></td><td>B+Tree (B-link) implementation with iterators and codecs.</td></tr>
-</tbody></table>
+</tbody>
+</table>
 </div>
 <p>Key ideas for teaching:
 Topics to emphasise:</p>
@@ -283,13 +318,19 @@ see how new versions link together.</li>
 <code>TreeIndexIterator</code> shows how to perform lock-free range scans using sibling pointers—
 perfect for advanced systems lectures.</li>
 </ul>
-<hr />
+<hr>
 <h2 id="7-buffer-manager--disk-io-srcbuffer-srcstoragedisk_"><a class="header" href="#7-buffer-manager--disk-io-srcbuffer-srcstoragedisk_">7. Buffer Manager &amp; Disk I/O (<code>src/buffer</code>, <code>src/storage/disk_*</code>)</a></h2>
-<div class="table-wrapper"><table><thead><tr><th>Module</th><th>Description</th></tr></thead><tbody>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Module</th><th>Description</th></tr>
+</thead>
+<tbody>
 <tr><td><code>buffer::BufferManager</code></td><td>Page table + LRU-K/TinyLFU replacer, dirty tracking, guard types for safe borrowing.</td></tr>
 <tr><td><code>storage::disk_scheduler</code></td><td><code>io_uring</code>-powered async I/O. Foreground threads enqueue read/write/fsync commands and await completions.</td></tr>
 <tr><td><code>storage::disk_manager</code></td><td>Thin wrapper for file layout, page enlargement, and durability fences.</td></tr>
-</tbody></table>
+</tbody>
+</table>
 </div>
 <p>Extra details:</p>
 <ul>
@@ -300,13 +341,19 @@ feature flag to measure hit-rate differences under sqllogictest or custom worklo
 <li>DiskScheduler uses lock-free queues plus dedicated worker tasks. A teaching exercise is
 to run with <code>RUST_LOG=debug</code> and observe how read/write/fsync commands are batched.</li>
 </ul>
-<hr />
+<hr>
 <h2 id="8-recovery--wal-srcrecovery"><a class="header" href="#8-recovery--wal-srcrecovery">8. Recovery &amp; WAL (<code>src/recovery</code>)</a></h2>
-<div class="table-wrapper"><table><thead><tr><th>Item</th><th>Notes</th></tr></thead><tbody>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Item</th><th>Notes</th></tr>
+</thead>
+<tbody>
 <tr><td><code>WalManager</code></td><td>Allocates LSNs, buffers log records, drives background WAL writer, and integrates with checkpoints.</td></tr>
 <tr><td><code>RecoveryManager</code></td><td>Implements ARIES analysis/redo/undo. Uses <code>ControlFileManager</code> snapshots to seed restart.</td></tr>
 <tr><td><code>wal_record.rs</code></td><td>Defines logical (<code>HeapInsert</code>, <code>IndexDelete</code>) and physical (<code>PageWrite</code>, <code>PageDelta</code>) records.</td></tr>
-</tbody></table>
+</tbody>
+</table>
 </div>
 <p>Teaching hook:</p>
 <ul>
@@ -319,14 +366,20 @@ reconstructed—ideal for demystifying ARIES’ first phase.</li>
 <li>Students can implement “logical replay only” or “page image replay” modes by toggling
 the commit record types, then verify behaviour using the provided transaction tests.</li>
 </ul>
-<hr />
+<hr>
 <h2 id="9-background-services-srcbackground"><a class="header" href="#9-background-services-srcbackground">9. Background Services (<code>src/background</code>)</a></h2>
-<div class="table-wrapper"><table><thead><tr><th>Worker</th><th>What it does</th></tr></thead><tbody>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Worker</th><th>What it does</th></tr>
+</thead>
+<tbody>
 <tr><td>WAL writer</td><td>Flushes WAL buffer at configured cadence.</td></tr>
 <tr><td>Checkpoint</td><td>Captures the Dirty Page Table + Active Transaction Table.</td></tr>
 <tr><td>Buffer writer</td><td>Flushes dirty frames to keep checkpoints short.</td></tr>
 <tr><td>MVCC vacuum</td><td>Reclaims tuple versions older than <code>safe_xmin</code>.</td></tr>
-</tbody></table>
+</tbody>
+</table>
 </div>
 <p>More context:</p>
 <ul>
@@ -341,13 +394,19 @@ students to trace background effects.</li>
 <li>Exercise idea: tweak <code>MvccVacuumConfig::batch_limit</code> and observe how many tuple
 versions stay behind by querying hidden statistics tables.</li>
 </ul>
-<hr />
+<hr>
 <h2 id="10-configuration--session-layer-srcdatabase-srcsession-srcconfig"><a class="header" href="#10-configuration--session-layer-srcdatabase-srcsession-srcconfig">10. Configuration &amp; Session Layer (<code>src/database</code>, <code>src/session</code>, <code>src/config</code>)</a></h2>
-<div class="table-wrapper"><table><thead><tr><th>Type</th><th>Role</th></tr></thead><tbody>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Type</th><th>Role</th></tr>
+</thead>
+<tbody>
 <tr><td><code>Database</code></td><td>Boots disk/WAL/buffer components, runs recovery, wires background workers, and executes SQL strings.</td></tr>
 <tr><td><code>SessionContext</code></td><td>Tracks per-connection defaults (autocommit, isolation) and holds the active transaction handle.</td></tr>
 <tr><td><code>config::*</code></td><td>Central place for WAL, buffer pool, vacuum, and HTTP/CLI tuning knobs.</td></tr>
-</tbody></table>
+</tbody>
+</table>
 </div>
 <p>Extra pointers:</p>
 <ul>
@@ -360,13 +419,19 @@ transaction and uses <code>TransactionScope</code> to interpret <code>SET TRANSA
 <li>Configuration structs derive <code>Clone + Debug</code>, making them easy to print in labs or
 feed from environment variables (HTTP server uses <code>QUILL_DB_FILE</code>, <code>PORT</code>, etc.).</li>
 </ul>
-<hr />
+<hr>
 <h2 id="11-testing--documentation-tests-docs"><a class="header" href="#11-testing--documentation-tests-docs">11. Testing &amp; Documentation (<code>tests/</code>, <code>docs/</code>)</a></h2>
-<div class="table-wrapper"><table><thead><tr><th>Area</th><th>Purpose</th></tr></thead><tbody>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Area</th><th>Purpose</th></tr>
+</thead>
+<tbody>
 <tr><td><code>tests/sql_example/*.slt</code></td><td>sqllogictest suites for SQL coverage.</td></tr>
 <tr><td><code>tests/transaction_tests.rs</code></td><td>Unit tests for MVCC invariants, locking, and visibility.</td></tr>
 <tr><td><code>docs/</code></td><td>This mdBook. Every module adds its own deep-dive chapter, making it straightforward for students to jump from code to guided explanations.</td></tr>
-</tbody></table>
+</tbody>
+</table>
 </div>
 <p>Testing strategy:</p>
 <ul>
@@ -379,7 +444,7 @@ in <code>tests/sql_example</code>, git diffs double as documentation.</li>
 <li>For modules with heavy concurrency (lock manager, WAL), pair unit tests with tracing: the
 CI logs become walkthroughs for tricky paths.</li>
 </ul>
-<hr />
+<hr>
 <h2 id="12-suggested-reading-order-for-learners"><a class="header" href="#12-suggested-reading-order-for-learners">12. Suggested Reading Order for Learners</a></h2>
 <ol>
 <li><strong>Introduction ➜ Architecture</strong> – get the 10,000ft view.</li>
@@ -397,11 +462,11 @@ where to look next.</p>
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
                             <a rel="prev" href="../architecture.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
-                                <i class="fa fa-angle-left"></i>
+                                <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                             </a>
 
                             <a rel="next prefetch" href="../contributing.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
-                                <i class="fa fa-angle-right"></i>
+                                <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                             </a>
 
                         <div style="clear: both"></div>
@@ -411,16 +476,21 @@ where to look next.</p>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
                     <a rel="prev" href="../architecture.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
-                        <i class="fa fa-angle-left"></i>
+                        <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                     </a>
 
                     <a rel="next prefetch" href="../contributing.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
-                        <i class="fa fa-angle-right"></i>
+                        <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                     </a>
             </nav>
 
         </div>
 
+        <template id=fa-eye><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M288 32c-80.8 0-145.5 36.8-192.6 80.6C48.6 156 17.3 208 2.5 243.7c-3.3 7.9-3.3 16.7 0 24.6C17.3 304 48.6 356 95.4 399.4C142.5 443.2 207.2 480 288 480s145.5-36.8 192.6-80.6c46.8-43.5 78.1-95.4 93-131.1c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C433.5 68.8 368.8 32 288 32zM432 256c0 79.5-64.5 144-144 144s-144-64.5-144-144s64.5-144 144-144s144 64.5 144 144zM288 192c0 35.3-28.7 64-64 64c-11.5 0-22.3-3-31.6-8.4c-.2 2.8-.4 5.5-.4 8.4c0 53 43 96 96 96s96-43 96-96s-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6z"/></svg></span></template>
+        <template id=fa-eye-slash><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M38.8 5.1C28.4-3.1 13.3-1.2 5.1 9.2S-1.2 34.7 9.2 42.9l592 464c10.4 8.2 25.5 6.3 33.7-4.1s6.3-25.5-4.1-33.7L525.6 386.7c39.6-40.6 66.4-86.1 79.9-118.4c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C465.5 68.8 400.8 32 320 32c-68.2 0-125 26.3-169.3 60.8L38.8 5.1zM223.1 149.5C248.6 126.2 282.7 112 320 112c79.5 0 144 64.5 144 144c0 24.9-6.3 48.3-17.4 68.7L408 294.5c5.2-11.8 8-24.8 8-38.5c0-53-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6c0 10.2-2.4 19.8-6.6 28.3l-90.3-70.8zm223.1 298L373 389.9c-16.4 6.5-34.3 10.1-53 10.1c-79.5 0-144-64.5-144-144c0-6.9 .5-13.6 1.4-20.2L83.1 161.5C60.3 191.2 44 220.8 34.5 243.7c-3.3 7.9-3.3 16.7 0 24.6c14.9 35.7 46.2 87.7 93 131.1C174.5 443.2 239.2 480 320 480c47.8 0 89.9-12.9 126.2-32.5z"/></svg></span></template>
+        <template id=fa-copy><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M502.6 70.63l-61.25-61.25C435.4 3.371 427.2 0 418.7 0H255.1c-35.35 0-64 28.66-64 64l.0195 256C192 355.4 220.7 384 256 384h192c35.2 0 64-28.8 64-64V93.25C512 84.77 508.6 76.63 502.6 70.63zM464 320c0 8.836-7.164 16-16 16H255.1c-8.838 0-16-7.164-16-16L239.1 64.13c0-8.836 7.164-16 16-16h128L384 96c0 17.67 14.33 32 32 32h47.1V320zM272 448c0 8.836-7.164 16-16 16H63.1c-8.838 0-16-7.164-16-16L47.98 192.1c0-8.836 7.164-16 16-16H160V128H63.99c-35.35 0-64 28.65-64 64l.0098 256C.002 483.3 28.66 512 64 512h192c35.2 0 64-28.8 64-64v-32h-47.1L272 448z"/></svg></span></template>
+        <template id=fa-play><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 384 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M73 39c-14.8-9.1-33.4-9.4-48.5-.9S0 62.6 0 80V432c0 17.4 9.4 33.4 24.5 41.9s33.7 8.1 48.5-.9L361 297c14.3-8.7 23-24.2 23-41s-8.7-32.2-23-41L73 39z"/></svg></span></template>
+        <template id=fa-clock-rotate-left><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M75 75L41 41C25.9 25.9 0 36.6 0 57.9V168c0 13.3 10.7 24 24 24H134.1c21.4 0 32.1-25.9 17-41l-30.8-30.8C155 85.5 203 64 256 64c106 0 192 86 192 192s-86 192-192 192c-40.8 0-78.6-12.7-109.7-34.4c-14.5-10.1-34.4-6.6-44.6 7.9s-6.6 34.4 7.9 44.6C151.2 495 201.7 512 256 512c141.4 0 256-114.6 256-256S397.4 0 256 0C185.3 0 121.3 28.7 75 75zm181 53c-13.3 0-24 10.7-24 24V256c0 6.4 2.5 12.5 7 17l72 72c9.4 9.4 24.6 9.4 33.9 0s9.4-24.6 0-33.9l-65-65V152c0-13.3-10.7-24-24-24z"/></svg></span></template>
 
 
 
@@ -430,13 +500,13 @@ where to look next.</p>
 
 
 
-        <script src="../clipboard.min.js"></script>
-        <script src="../highlight.js"></script>
-        <script src="../book.js"></script>
+        <script src="../clipboard-1626706a.min.js"></script>
+        <script src="../highlight-abc7f01d.js"></script>
+        <script src="../book-a0b12cfe.js"></script>
 
         <!-- Custom JS scripts -->
-        <script src="../mermaid.min.js"></script>
-        <script src="../mermaid-init.js"></script>
+        <script src="../mermaid-eefea253.min.js"></script>
+        <script src="../mermaid-init-ccf746f1.js"></script>
 
 
 
