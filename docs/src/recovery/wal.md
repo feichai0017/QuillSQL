@@ -39,7 +39,7 @@ serializes a record, while `WalAppendContext` reports the LSN range back to the 
 | `Page` | `PageWritePayload` | Full-page image (FPW) on first-touch or large diffs; carries `prev_page_lsn` for redo checks. |
 | `Page` | `PageDeltaPayload` | Offset + byte slice for small modifications to keep WAL compact. |
 | `Heap` | `HeapRecordPayload::{Insert,Update,Delete}` | Logical tuples containing relation id, page/slot, `TupleMetaRepr`, and tuple bytes. |
-| `Index` | `IndexRecordPayload::{LeafInsert,LeafDelete,LeafUpdate}` | Logical B+Tree leaf mutations with key bytes and `RecordId`. |
+| `Index` | `IndexRecordPayload::{LeafInsert,LeafDelete}` | Logical B+Tree leaf mutations with key bytes and `RecordId`. |
 | `Transaction` | `TransactionPayload` | BEGIN / COMMIT / ABORT markers that seed Undo’s per-txn chains. |
 | `Checkpoint` | `CheckpointPayload` | Captures ATT/DPT snapshots plus redo start. |
 | `Clr` | `ClrPayload` | Compensation Log Records documenting each undo step and its `undo_next_lsn`. |
@@ -73,7 +73,7 @@ Transaction/CLR/Checkpoint → interpreted by the analysis/undo phases.
 
 ## 4. Index WAL: logical B+Tree leaf operations
 
-- **Emission points** – `BPlusTreeIndex` records every leaf insert/delete/update via
+- **Emission points** – `BPlusTreeIndex` records every leaf insert/delete via
   `append_index_record` (`src/storage/index/btree_index.rs:86-145`), using
   `src/storage/index/wal_codec.rs` to encode key schema, key bytes, target page, and
   transaction id.
@@ -83,8 +83,8 @@ Transaction/CLR/Checkpoint → interpreted by the analysis/undo phases.
   3. Skip if `page_lsn >= frame_lsn`; otherwise apply the logical mutation and bump the
      leaf version.
   4. Write the updated page back with the frame LSN.
-- **Undo** – Performs the inverse operation (insert→delete, delete→insert old RID,
-  update→restore old RID) only for loser transactions.
+- **Undo** – Performs the inverse operation (insert→delete, delete→insert old RID)
+  only for loser transactions.
 - **Benefits** – Heap and index WAL are decoupled: heap redo never reads index pages,
   and logical leaf updates avoid writing full-page images for small key/value changes.
   Structural operations (splits/merges) still rely on page-level logging.

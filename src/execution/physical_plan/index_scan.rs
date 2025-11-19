@@ -1,10 +1,12 @@
-use parking_lot::Mutex;
+//! Index-backed range scan operator with MVCC filtering.
+
+use std::cell::RefCell;
 use std::ops::{Bound, RangeBounds};
 use std::sync::OnceLock;
 
 use super::scan::ScanPrefetch;
 use crate::catalog::SchemaRef;
-use crate::error::QuillSQLError;
+use crate::execution::physical_plan::{resolve_table_binding, stream_not_ready};
 use crate::execution::{ExecutionContext, VolcanoExecutor};
 use crate::storage::{
     engine::{IndexScanRequest, TableBinding, TupleStream},
@@ -21,7 +23,7 @@ pub struct PhysicalIndexScan {
     table_schema: SchemaRef,
     start_bound: Bound<Tuple>,
     end_bound: Bound<Tuple>,
-    stream: Mutex<Option<Box<dyn TupleStream>>>,
+    stream: RefCell<Option<Box<dyn TupleStream>>>,
     prefetch: ScanPrefetch,
     table_binding: OnceLock<TableBinding>,
 }
@@ -39,7 +41,7 @@ impl PhysicalIndexScan {
             table_schema,
             start_bound: range.start_bound().cloned(),
             end_bound: range.end_bound().cloned(),
-            stream: Mutex::new(None),
+            stream: RefCell::new(None),
             prefetch: ScanPrefetch::new(INDEX_PREFETCH_BATCH),
             table_binding: OnceLock::new(),
         }
@@ -47,10 +49,10 @@ impl PhysicalIndexScan {
 
     fn refill_buffer(&self) -> QuillSQLResult<bool> {
         self.prefetch.refill(|limit, out| {
-            let mut stream_guard = self.stream.lock();
+            let mut stream_guard = self.stream.borrow_mut();
             let stream = stream_guard
                 .as_mut()
-                .ok_or_else(|| QuillSQLError::Execution("index stream not created".to_string()))?;
+                .ok_or_else(|| stream_not_ready("IndexScan"))?;
             for _ in 0..limit {
                 match stream.next()? {
                     Some(entry) => out.push_back(entry),
@@ -87,16 +89,10 @@ impl VolcanoExecutor for PhysicalIndexScan {
                 .lock_table(self.table_ref.clone(), LockMode::IntentionShared)?;
         }
 
-        if self.table_binding.get().is_none() {
-            let binding = context.table(&self.table_ref)?;
-            let _ = self.table_binding.set(binding);
-        }
-        let binding = self
-            .table_binding
-            .get()
-            .expect("table binding not initialized");
+        let binding = resolve_table_binding(&self.table_binding, context, &self.table_ref)?;
         let request = IndexScanRequest::new(self.start_bound.clone(), self.end_bound.clone());
-        *self.stream.lock() = Some(binding.index_scan(&self.index_name, request)?);
+        self.stream
+            .replace(Some(binding.index_scan(&self.index_name, request)?));
 
         self.prefetch.clear();
 

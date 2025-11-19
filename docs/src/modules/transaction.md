@@ -60,7 +60,8 @@ violating correctness.
 - **ExecutionContext** – all helpers (lock acquisition, visibility checks, undo logging)
   are exposed here, so physical operators never touch `LockManager` directly.
 - **StorageEngine** – handles call `TxnContext` before mutating heaps/indexes; MVCC metadata
-  lives in `TupleMeta`.
+  lives in `TupleMeta`. Deletes and updates now push the affected index keys into the undo
+  chain so heap/index WAL stay in lockstep.
 - **Recovery** – Begin/Commit/Abort records emitted here drive ARIES undo/redo.
 - **Background** – MVCC vacuum reads `TransactionManager::oldest_active_txn()` to compute
   `safe_xmin`.
@@ -74,6 +75,20 @@ violating correctness.
 - Write a unit test that deadlocks two transactions and watch `LockManager` pick a victim.
 - Implement statement-level snapshot refresh or Serializable Snapshot Isolation (SSI) as
   an advanced exercise.
+
+## Lab Walkthrough (à la CMU 15-445)
+
+1. **Warm-up** – Start two sessions, run `BEGIN; SELECT ...;` under RC vs RR, and trace
+   which snapshot `TxnRuntime` installs by logging `txn.current_command_id()`.
+2. **MVCC visibility** – Extend the `transaction_tests.rs` suite with a scenario where
+   `txn1` updates a row while `txn2` reads it. Instrument `TupleMeta` printing so
+   students see how `(insert_txn_id, delete_txn_id)` change as versions are linked.
+3. **Undo tracing** – Force an abort after a multi-index UPDATE. Watch the undo stack
+   entries unfold: `Insert` removes the new version + index entries, `Delete` restores
+   the old version + keys. Map each step to the WAL records that are written.
+4. **Crash drill** – Add `panic!()` right after `TransactionManager::commit` is called
+   but before locks are released. Reboot, run recovery, and inspect the loser list;
+   students can connect the dots between undo actions, CLRs, and ARIES theory.
 
 ---
 

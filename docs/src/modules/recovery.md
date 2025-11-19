@@ -69,10 +69,10 @@ All log frames share the envelope defined in `wal_record.rs` and are routed by
   replays inserts/updates/deletes by splicing tuples back into the heap. Undo paths
   rely on the same metadata to restore tuple bytes or clear delete flags.
 - **Index (`ResourceManagerId::Index`)** – `BPlusTreeIndex` writes logical leaf
-  operations (`LeafInsert/Delete/Update`) that store key bytes and the target `RecordId`.
+  operations (`LeafInsert/Delete`) that store key bytes and the target `RecordId`.
   `IndexResourceManager` decodes the tuple via `TupleCodec` and mutates the leaf (via
   the buffer pool if available, otherwise direct disk I/O). Redo is idempotent (missing
-  keys are inserted), while undo mirrors insert/delete/update semantics.
+  keys are inserted), while undo mirrors insert/delete semantics.
 - **Transaction / CLR / Checkpoint** – `TransactionPayload` (BEGIN/COMMIT/ABORT)
   enables the undo index to link per-transaction log records. `ClrPayload` documents
   each undo step so the recovery process can survive crashes mid-undo. Checkpoints
@@ -94,10 +94,10 @@ records uniformly.
   `safe_xmin` passes them.
 - **Index** – B+Tree leaf operations log the logical key/value change, unaffected by
   page layout. Redo loads the leaf (buffer pool or disk), checks the leaf version to
-  avoid reapplying newer changes, and performs the requested insert/delete/update.
-  Undo mirrors the inverse operation so loser transactions roll back cleanly without
-  touching the heap. This keeps heap and index WAL independent: heap redo never needs
-  to read index pages, and vice versa.
+  avoid reapplying newer changes, and performs the requested insert/delete. Undo mirrors
+  the inverse operation so loser transactions roll back cleanly without touching the
+  heap. This keeps heap and index WAL independent: heap redo never needs to read index
+  pages, and vice versa.
 - **Page images** – For heap/index structural changes that rewrite large sections (e.g.,
   new heap page, B+Tree splits), page guards still emit FPWs through
   `WalManager::log_page_update`. The logical heap/index WAL layers ensure redo can
@@ -137,6 +137,20 @@ manual attention—great for classroom demonstrations.
 - Add a new WAL record type (like `CreateIndex`) to see how `RecoveryManager` must be
   extended.
 - Compare physical vs logical redo costs to discuss ARIES trade-offs.
+
+## Recovery Lab Playbook (CMU 15-445 style)
+
+1. **Mini ARIES** – Disable the background WAL writer, perform a few INSERT/UPDATE
+   operations, crash the process mid-transaction, and single-step through
+   `analysis_pass.rs` to observe ATT/DPT reconstruction.
+2. **Logical vs physical redo** – Comment out `WalManager::log_page_update` for heap
+   pages and re-run the experiment. Recovery still succeeds thanks to logical heap
+   payloads; re-enable FPWs to contrast log volume.
+3. **Index crash test** – Inject a panic after `BPlusTreeIndex::insert` logs a leaf
+   insert. On restart, watch the undo phase remove the stray key before replay finishes.
+4. **Group commit tuning** – Play with `WalOptions::flush_coalesce_bytes`,
+   `writer_interval_ms`, and `synchronous_commit` to demonstrate how throughput vs
+   latency tradeoffs mirror the 15-445 checkpoints/commit labs.
 
 ---
 

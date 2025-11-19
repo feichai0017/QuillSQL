@@ -47,7 +47,9 @@ ready for column stores, remote storage, or async engines.
 ### TableHandle
 Offers `full_scan()`, `insert`, `delete`, `update`, and
 `prepare_row_for_write`. MVCC, undo, and locking concerns live here so execution operators
-only describe intent.
+only describe intent. Every delete/update now receives the table’s index handles so
+`HeapTableHandle` can delete or re-insert keys in tandem with heap tuples—exactly the
+behaviour CMU 15-445’s buffer/heap projects walk you through.
 
 ### TupleStream
 Minimal iterator that returns `(RecordId, TupleMeta, Tuple)` triples. Index scans use
@@ -77,6 +79,9 @@ Minimal iterator that returns `(RecordId, TupleMeta, Tuple)` triples. Index scan
   so students can experiment with column pruning.
 - Enable `RUST_LOG=storage::table_heap=trace` and trace MVCC version chains as updates
   occur.
+- Follow the CMU 15-445 Lab 2 flow: instrument `TableBinding::delete` to print every RID
+  + key pair, run an UPDATE with multiple indexes, and confirm the WAL stream contains the
+  matching HeapInsert/HeapDelete + IndexLeafInsert/IndexLeafDelete entries.
 
 ---
 

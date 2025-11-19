@@ -1,3 +1,8 @@
+use std::sync::OnceLock;
+
+use crate::storage::engine::TableBinding;
+use crate::utils::table_ref::TableReference;
+
 mod aggregate;
 mod analyze;
 mod create_index;
@@ -189,4 +194,20 @@ impl std::fmt::Display for PhysicalPlan {
             Self::Analyze(op) => write!(f, "{op}"),
         }
     }
+}
+
+pub(crate) fn resolve_table_binding<'a>(
+    cache: &'a OnceLock<TableBinding>,
+    context: &mut ExecutionContext,
+    table: &TableReference,
+) -> QuillSQLResult<&'a TableBinding> {
+    if cache.get().is_none() {
+        let binding = context.table(table)?;
+        let _ = cache.set(binding);
+    }
+    Ok(cache.get().expect("table binding not initialized"))
+}
+
+pub(crate) fn stream_not_ready(op: &str) -> crate::error::QuillSQLError {
+    crate::error::QuillSQLError::Execution(format!("{op} stream not initialized"))
 }

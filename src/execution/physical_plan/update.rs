@@ -1,5 +1,8 @@
+//! UPDATE operator that rewrites tuples and keeps heap/index metadata in sync.
+
 use crate::catalog::{SchemaRef, UPDATE_OUTPUT_SCHEMA_REF};
 use crate::error::{QuillSQLError, QuillSQLResult};
+use crate::execution::physical_plan::{resolve_table_binding, stream_not_ready};
 use crate::execution::{ExecutionContext, VolcanoExecutor};
 use crate::expression::Expr;
 use crate::storage::{
@@ -9,9 +12,9 @@ use crate::storage::{
 use crate::transaction::LockMode;
 use crate::utils::scalar::ScalarValue;
 use crate::utils::table_ref::TableReference;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Mutex;
 use std::sync::OnceLock;
 
 pub struct PhysicalUpdate {
@@ -21,7 +24,7 @@ pub struct PhysicalUpdate {
     pub selection: Option<Expr>,
 
     update_rows: AtomicU32,
-    table_iterator: Mutex<Option<Box<dyn TupleStream>>>,
+    table_iterator: RefCell<Option<Box<dyn TupleStream>>>,
     table_binding: OnceLock<TableBinding>,
 }
 
@@ -38,7 +41,7 @@ impl PhysicalUpdate {
             assignments,
             selection,
             update_rows: AtomicU32::new(0),
-            table_iterator: Mutex::new(None),
+            table_iterator: RefCell::new(None),
             table_binding: OnceLock::new(),
         }
     }
@@ -48,16 +51,9 @@ impl VolcanoExecutor for PhysicalUpdate {
     fn init(&self, context: &mut ExecutionContext) -> QuillSQLResult<()> {
         self.update_rows.store(0, Ordering::SeqCst);
         context.txn_ctx().ensure_writable(&self.table, "UPDATE")?;
-        if self.table_binding.get().is_none() {
-            let binding = context.table(&self.table)?;
-            let _ = self.table_binding.set(binding);
-        }
-        let binding = self
-            .table_binding
-            .get()
-            .expect("table binding not initialized");
+        let binding = resolve_table_binding(&self.table_binding, context, &self.table)?;
         let stream = binding.scan()?;
-        *self.table_iterator.lock().unwrap() = Some(stream);
+        self.table_iterator.replace(Some(stream));
         context
             .txn_ctx_mut()
             .lock_table(self.table.clone(), LockMode::IntentionExclusive)
@@ -72,13 +68,13 @@ impl VolcanoExecutor for PhysicalUpdate {
 
     fn next(&self, context: &mut ExecutionContext) -> QuillSQLResult<Option<Tuple>> {
         // TODO may scan index
-        let Some(table_iterator) = &mut *self.table_iterator.lock().unwrap() else {
-            return Err(QuillSQLError::Execution(
-                "table stream not created".to_string(),
-            ));
-        };
         loop {
-            if let Some((rid, meta, tuple)) = table_iterator.next()? {
+            let next_entry = {
+                let mut guard = self.table_iterator.borrow_mut();
+                let stream = guard.as_mut().ok_or_else(|| stream_not_ready("Update"))?;
+                stream.next()?
+            };
+            if let Some((rid, meta, tuple)) = next_entry {
                 // Skip versions that were created by this command so we do not
                 // immediately reprocess the freshly inserted MVCC tuple and loop forever.
                 if meta.insert_txn_id == context.txn_ctx().txn_id()
@@ -93,10 +89,7 @@ impl VolcanoExecutor for PhysicalUpdate {
                     }
                 }
 
-                let binding = self
-                    .table_binding
-                    .get()
-                    .expect("table binding not initialized");
+                let binding = resolve_table_binding(&self.table_binding, context, &self.table)?;
                 let Some((prev_meta, mut current_tuple)) =
                     binding.prepare_row_for_write(context.txn_ctx_mut(), rid, &meta)?
                 else {

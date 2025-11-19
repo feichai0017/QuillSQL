@@ -1,8 +1,12 @@
+//! DELETE operator that scans a table and removes visible tuples.
+
+use std::cell::RefCell;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::OnceLock;
 
 use crate::catalog::{SchemaRef, DELETE_OUTPUT_SCHEMA_REF};
-use crate::error::{QuillSQLError, QuillSQLResult};
+use crate::error::QuillSQLResult;
+use crate::execution::physical_plan::{resolve_table_binding, stream_not_ready};
 use crate::execution::{ExecutionContext, VolcanoExecutor};
 use crate::expression::Expr;
 use crate::storage::{
@@ -18,7 +22,7 @@ pub struct PhysicalDelete {
     pub table_schema: SchemaRef,
     pub predicate: Option<Expr>,
     deleted_rows: AtomicU32,
-    iterator: std::sync::Mutex<Option<Box<dyn TupleStream>>>,
+    iterator: RefCell<Option<Box<dyn TupleStream>>>,
     table_binding: OnceLock<TableBinding>,
 }
 
@@ -29,7 +33,7 @@ impl PhysicalDelete {
             table_schema,
             predicate,
             deleted_rows: AtomicU32::new(0),
-            iterator: std::sync::Mutex::new(None),
+            iterator: RefCell::new(None),
             table_binding: OnceLock::new(),
         }
     }
@@ -42,28 +46,20 @@ impl VolcanoExecutor for PhysicalDelete {
         context
             .txn_ctx_mut()
             .lock_table(self.table.clone(), LockMode::IntentionExclusive)?;
-        if self.table_binding.get().is_none() {
-            let binding = context.table(&self.table)?;
-            let _ = self.table_binding.set(binding);
-        }
-        let binding = self
-            .table_binding
-            .get()
-            .expect("table binding not initialized");
+        let binding = resolve_table_binding(&self.table_binding, context, &self.table)?;
         let stream = binding.scan()?;
-        *self.iterator.lock().unwrap() = Some(stream);
+        self.iterator.replace(Some(stream));
         Ok(())
     }
 
     fn next(&self, context: &mut ExecutionContext) -> QuillSQLResult<Option<Tuple>> {
-        let Some(iterator) = &mut *self.iterator.lock().unwrap() else {
-            return Err(QuillSQLError::Execution(
-                "table stream not created".to_string(),
-            ));
-        };
-
         loop {
-            let Some((rid, meta, tuple)) = iterator.next()? else {
+            let next_entry = {
+                let mut guard = self.iterator.borrow_mut();
+                let stream = guard.as_mut().ok_or_else(|| stream_not_ready("Delete"))?;
+                stream.next()?
+            };
+            let Some((rid, meta, tuple)) = next_entry else {
                 let deleted = self.deleted_rows.swap(0, Ordering::SeqCst);
                 if deleted == 0 {
                     return Ok(None);
@@ -80,10 +76,7 @@ impl VolcanoExecutor for PhysicalDelete {
                 }
             }
 
-            let binding = self
-                .table_binding
-                .get()
-                .expect("table binding not initialized");
+            let binding = resolve_table_binding(&self.table_binding, context, &self.table)?;
             let Some((current_meta, current_tuple)) =
                 binding.prepare_row_for_write(context.txn_ctx_mut(), rid, &meta)?
             else {

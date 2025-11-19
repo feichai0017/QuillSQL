@@ -1,3 +1,5 @@
+//! Hash-based GROUP BY operator aggregating entire input in memory.
+
 use crate::catalog::SchemaRef;
 use crate::error::QuillSQLError;
 use crate::execution::physical_plan::PhysicalPlan;
@@ -6,9 +8,10 @@ use crate::expression::Expr;
 use crate::function::Accumulator;
 use crate::utils::scalar::ScalarValue;
 use crate::{error::QuillSQLResult, storage::tuple::Tuple};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 #[derive(Debug)]
 pub struct PhysicalAggregate {
@@ -21,7 +24,7 @@ pub struct PhysicalAggregate {
     /// The schema description of the aggregate output
     pub schema: SchemaRef,
 
-    pub output_rows: Mutex<Vec<Tuple>>,
+    pub output_rows: RefCell<Vec<Tuple>>,
     pub cursor: AtomicUsize,
 }
 
@@ -37,7 +40,7 @@ impl PhysicalAggregate {
             group_exprs,
             aggr_exprs,
             schema,
-            output_rows: Mutex::new(vec![]),
+            output_rows: RefCell::new(vec![]),
             cursor: AtomicUsize::new(0),
         }
     }
@@ -69,7 +72,7 @@ impl VolcanoExecutor for PhysicalAggregate {
     }
 
     fn next(&self, context: &mut ExecutionContext) -> QuillSQLResult<Option<Tuple>> {
-        let output_rows_len = self.output_rows.lock().unwrap().len();
+        let output_rows_len = self.output_rows.borrow().len();
         // build output rows
         if output_rows_len == 0 {
             let mut groups: HashMap<Vec<ScalarValue>, Vec<Box<dyn Accumulator>>> = HashMap::new();
@@ -98,14 +101,13 @@ impl VolcanoExecutor for PhysicalAggregate {
                     .collect::<QuillSQLResult<Vec<ScalarValue>>>()?;
                 values.extend(group_key);
                 self.output_rows
-                    .lock()
-                    .unwrap()
+                    .borrow_mut()
                     .push(Tuple::new(self.schema.clone(), values));
             }
         }
 
         let cursor = self.cursor.fetch_add(1, Ordering::SeqCst);
-        Ok(self.output_rows.lock().unwrap().get(cursor).cloned())
+        Ok(self.output_rows.borrow().get(cursor).cloned())
     }
 
     fn output_schema(&self) -> SchemaRef {

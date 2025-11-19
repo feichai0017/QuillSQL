@@ -1,9 +1,11 @@
-use parking_lot::Mutex;
+//! Table sequential scan operator (full-table read with MVCC filtering).
+
+use std::cell::RefCell;
 use std::sync::OnceLock;
 
 use super::scan::ScanPrefetch;
 use crate::catalog::SchemaRef;
-use crate::error::QuillSQLError;
+use crate::execution::physical_plan::{resolve_table_binding, stream_not_ready};
 use crate::storage::{
     engine::{TableBinding, TupleStream},
     page::{RecordId, TupleMeta},
@@ -22,7 +24,7 @@ pub struct PhysicalSeqScan {
     pub table: TableReference,
     pub table_schema: SchemaRef,
 
-    iterator: Mutex<Option<Box<dyn TupleStream>>>,
+    iterator: RefCell<Option<Box<dyn TupleStream>>>,
     prefetch: ScanPrefetch,
     table_binding: OnceLock<TableBinding>,
 }
@@ -32,7 +34,7 @@ impl PhysicalSeqScan {
         PhysicalSeqScan {
             table,
             table_schema,
-            iterator: Mutex::new(None),
+            iterator: RefCell::new(None),
             prefetch: ScanPrefetch::new(PREFETCH_BATCH),
             table_binding: OnceLock::new(),
         }
@@ -56,16 +58,9 @@ impl VolcanoExecutor for PhysicalSeqScan {
         context
             .txn_ctx_mut()
             .lock_table(self.table.clone(), LockMode::IntentionShared)?;
-        if self.table_binding.get().is_none() {
-            let binding = context.table(&self.table)?;
-            let _ = self.table_binding.set(binding);
-        }
-        let binding = self
-            .table_binding
-            .get()
-            .expect("table binding not initialized");
+        let binding = resolve_table_binding(&self.table_binding, context, &self.table)?;
         let stream = binding.scan()?;
-        *self.iterator.lock() = Some(stream);
+        self.iterator.replace(Some(stream));
         self.prefetch.clear();
         Ok(())
     }
@@ -80,10 +75,8 @@ impl VolcanoExecutor for PhysicalSeqScan {
             }
 
             if !self.prefetch.refill(|limit, out| {
-                let mut guard = self.iterator.lock();
-                let stream = guard.as_mut().ok_or_else(|| {
-                    QuillSQLError::Execution("table stream not created".to_string())
-                })?;
+                let mut guard = self.iterator.borrow_mut();
+                let stream = guard.as_mut().ok_or_else(|| stream_not_ready("SeqScan"))?;
                 for _ in 0..limit {
                     match stream.next()? {
                         Some(entry) => out.push_back(entry),

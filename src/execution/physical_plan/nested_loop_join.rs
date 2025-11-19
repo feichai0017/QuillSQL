@@ -1,5 +1,8 @@
+//! Teaching-first nested loop join with optional predicate evaluation.
+
 use log::debug;
-use std::sync::{Arc, Mutex};
+use std::cell::RefCell;
+use std::sync::Arc;
 
 use crate::catalog::SchemaRef;
 use crate::expression::Expr;
@@ -20,7 +23,7 @@ pub struct PhysicalNestedLoopJoin {
     pub right_input: Arc<PhysicalPlan>,
     pub schema: SchemaRef,
 
-    left_tuple: Mutex<Option<Tuple>>,
+    left_tuple: RefCell<Option<Tuple>>,
 }
 impl PhysicalNestedLoopJoin {
     pub fn new(
@@ -36,7 +39,7 @@ impl PhysicalNestedLoopJoin {
             left_input,
             right_input,
             schema,
-            left_tuple: Mutex::new(None),
+            left_tuple: RefCell::new(None),
         }
     }
 }
@@ -45,18 +48,15 @@ impl VolcanoExecutor for PhysicalNestedLoopJoin {
         debug!("init nested loop join executor");
         self.left_input.init(context)?;
         self.right_input.init(context)?;
-        *self.left_tuple.lock().unwrap() = None;
+        self.left_tuple.borrow_mut().take();
         Ok(())
     }
     fn next(&self, context: &mut ExecutionContext) -> QuillSQLResult<Option<Tuple>> {
-        let left_tuple = self.left_tuple.lock().unwrap();
-        let mut left_next_tuple = if left_tuple.is_none() {
+        let mut left_next_tuple = if self.left_tuple.borrow().is_none() {
             self.left_input.next(context)?
         } else {
-            Some(left_tuple.clone().unwrap())
+            self.left_tuple.borrow().clone()
         };
-        // release mutex
-        drop(left_tuple);
 
         while left_next_tuple.is_some() {
             let left_tuple = left_next_tuple.clone().unwrap();
@@ -70,12 +70,12 @@ impl VolcanoExecutor for PhysicalNestedLoopJoin {
                     let merged_tuple =
                         Tuple::try_merge(vec![left_tuple.clone(), right_tuple.clone()])?;
                     if context.eval_predicate(condition, &merged_tuple)? {
-                        *self.left_tuple.lock().unwrap() = Some(left_tuple.clone());
+                        self.left_tuple.borrow_mut().replace(left_tuple.clone());
                         return Ok(Some(Tuple::try_merge(vec![left_tuple, right_tuple])?));
                     }
                 } else {
                     // save latest left_next_result before return
-                    *self.left_tuple.lock().unwrap() = Some(left_tuple.clone());
+                    self.left_tuple.borrow_mut().replace(left_tuple.clone());
 
                     return Ok(Some(Tuple::try_merge(vec![left_tuple, right_tuple])?));
                 }

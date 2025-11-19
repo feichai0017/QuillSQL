@@ -1,6 +1,9 @@
+//! Full in-memory sort operator (teaching-friendly implementation).
+
+use std::cell::RefCell;
 use std::cmp::Ordering as CmpOrdering;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use crate::catalog::SchemaRef;
 use crate::error::QuillSQLError;
@@ -19,7 +22,7 @@ pub struct PhysicalSort {
     pub order_bys: Vec<OrderByExpr>,
     pub input: Arc<PhysicalPlan>,
 
-    all_tuples: Mutex<Vec<Tuple>>,
+    all_tuples: RefCell<Vec<Tuple>>,
     cursor: AtomicUsize,
 }
 impl PhysicalSort {
@@ -27,7 +30,7 @@ impl PhysicalSort {
         PhysicalSort {
             order_bys,
             input,
-            all_tuples: Mutex::new(Vec::new()),
+            all_tuples: RefCell::new(Vec::new()),
             cursor: AtomicUsize::new(0),
         }
     }
@@ -60,13 +63,13 @@ impl PhysicalSort {
 impl VolcanoExecutor for PhysicalSort {
     fn init(&self, context: &mut ExecutionContext) -> QuillSQLResult<()> {
         self.input.init(context)?;
-        *self.all_tuples.lock().unwrap() = vec![];
+        self.all_tuples.borrow_mut().clear();
         self.cursor.store(0, Ordering::SeqCst);
         Ok(())
     }
 
     fn next(&self, context: &mut ExecutionContext) -> QuillSQLResult<Option<Tuple>> {
-        if self.all_tuples.lock().unwrap().is_empty() {
+        if self.all_tuples.borrow().is_empty() {
             let mut keyed_rows: Vec<(Tuple, Vec<ScalarValue>)> = Vec::new();
             while let Some(tuple) = self.input.next(context)? {
                 let mut keys = Vec::with_capacity(self.order_bys.len());
@@ -94,14 +97,15 @@ impl VolcanoExecutor for PhysicalSort {
                 .into_iter()
                 .map(|(tuple, _)| tuple)
                 .collect::<Vec<_>>();
-            *self.all_tuples.lock().unwrap() = tuples;
+            *self.all_tuples.borrow_mut() = tuples;
         }
 
         let cursor = self.cursor.fetch_add(1, Ordering::SeqCst);
-        if cursor >= self.all_tuples.lock().unwrap().len() {
+        let tuples_ref = self.all_tuples.borrow();
+        if cursor >= tuples_ref.len() {
             Ok(None)
         } else {
-            Ok(self.all_tuples.lock().unwrap().get(cursor).cloned())
+            Ok(tuples_ref.get(cursor).cloned())
         }
     }
 
