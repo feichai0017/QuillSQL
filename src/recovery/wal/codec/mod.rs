@@ -411,7 +411,7 @@ mod tests {
                 next_version: None,
                 prev_version: None,
             },
-            old_tuple_data: None,
+            old_tuple_data: vec![1, 2, 3],
         }));
         let bytes = payload.encode(80, 60);
         let (frame, len) = decode_frame(&bytes).unwrap();
@@ -424,7 +424,7 @@ mod tests {
                 assert_eq!(body.relation.root_page_id, 7);
                 assert!(body.new_tuple_meta.is_deleted);
                 assert!(body.old_tuple_meta.is_deleted);
-                assert!(body.old_tuple_data.is_none());
+                assert_eq!(body.old_tuple_data, vec![1, 2, 3]);
             }
             other => panic!("unexpected payload variant: {:?}", other),
         }

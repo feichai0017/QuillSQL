@@ -142,7 +142,7 @@ impl MvccHeap {
             op_txn_id: txn_id,
             new_tuple_meta: TupleMetaRepr::from(*new_meta),
             old_tuple_meta: TupleMetaRepr::from(*old_meta),
-            old_tuple_data: Some(TupleCodec::encode(tuple)),
+            old_tuple_data: TupleCodec::encode(tuple),
         });
         self.append_heap_record(payload)
     }

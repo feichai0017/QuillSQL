@@ -544,7 +544,7 @@ mod tests {
                     op_txn_id: 6,
                     new_tuple_meta: crate::recovery::wal_record::TupleMetaRepr::from(deleted_meta),
                     old_tuple_meta: crate::recovery::wal_record::TupleMetaRepr::from(old_meta),
-                    old_tuple_data: Some(old_bytes.clone()),
+                    old_tuple_data: old_bytes.clone(),
                 },
             ))
         })
@@ -1069,7 +1069,7 @@ mod tests {
                     op_txn_id: 99,
                     new_tuple_meta: crate::recovery::wal_record::TupleMetaRepr::from(deleted_meta),
                     old_tuple_meta: crate::recovery::wal_record::TupleMetaRepr::from(insert_meta),
-                    old_tuple_data: Some(vec![1u8; 8]),
+                    old_tuple_data: vec![1u8; 8],
                 },
             ))
         })

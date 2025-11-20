@@ -119,7 +119,7 @@ impl UndoAction {
                     op_txn_id: meta.insert_txn_id,
                     new_tuple_meta: TupleMetaRepr::from(deleted_meta),
                     old_tuple_meta: TupleMetaRepr::from(meta),
-                    old_tuple_data: Some(TupleCodec::encode(&tuple)),
+                    old_tuple_data: TupleCodec::encode(&tuple),
                 }))
             }
             UndoAction::Delete {

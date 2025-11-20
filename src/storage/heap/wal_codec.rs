@@ -70,7 +70,7 @@ pub struct HeapDeletePayload {
     pub op_txn_id: TransactionId,
     pub new_tuple_meta: TupleMetaRepr,
     pub old_tuple_meta: TupleMetaRepr,
-    pub old_tuple_data: Option<Vec<u8>>,
+    pub old_tuple_data: Vec<u8>,
 }
 
 #[derive(Debug, Clone)]
@@ -224,31 +224,6 @@ fn decode_bytes(bytes: &[u8]) -> QuillSQLResult<(Vec<u8>, usize)> {
     Ok((bytes[4..4 + len].to_vec(), 4 + len))
 }
 
-fn encode_optional_bytes(opt: &Option<Vec<u8>>, buf: &mut Vec<u8>) {
-    match opt {
-        Some(data) => {
-            buf.push(1);
-            encode_bytes(data, buf);
-        }
-        None => buf.push(0),
-    }
-}
-
-fn decode_optional_bytes(bytes: &[u8]) -> QuillSQLResult<(Option<Vec<u8>>, usize)> {
-    if bytes.is_empty() {
-        return Err(QuillSQLError::Internal(
-            "Heap payload missing option flag".to_string(),
-        ));
-    }
-    let flag = bytes[0];
-    if flag == 0 {
-        Ok((None, 1))
-    } else {
-        let (data, consumed) = decode_bytes(&bytes[1..])?;
-        Ok((Some(data), consumed + 1))
-    }
-}
-
 fn encode_heap_insert(body: &HeapInsertPayload) -> Vec<u8> {
     // Heap/Insert (rmid=Heap, info=1)
     // body: relation(root_id u32) + page_id(4) + slot_id(2) + op_txn_id(8) + tuple_meta(17B) + tuple_data_len+data
@@ -304,7 +279,7 @@ fn encode_heap_delete(body: &HeapDeletePayload) -> Vec<u8> {
     buf.extend_from_slice(&body.op_txn_id.to_le_bytes());
     encode_tuple_meta(&body.new_tuple_meta, &mut buf);
     encode_tuple_meta(&body.old_tuple_meta, &mut buf);
-    encode_optional_bytes(&body.old_tuple_data, &mut buf);
+    encode_bytes(&body.old_tuple_data, &mut buf);
     buf
 }
 
@@ -331,7 +306,7 @@ fn decode_heap_delete(bytes: &[u8]) -> QuillSQLResult<HeapDeletePayload> {
     offset += consumed_new;
     let (old_tuple_meta, consumed) = decode_tuple_meta(&bytes[offset..])?;
     offset += consumed;
-    let (old_tuple_data, _consumed) = decode_optional_bytes(&bytes[offset..])?;
+    let (old_tuple_data, _consumed) = decode_bytes(&bytes[offset..])?;
     Ok(HeapDeletePayload {
         relation,
         page_id,
@@ -341,4 +316,89 @@ fn decode_heap_delete(bytes: &[u8]) -> QuillSQLResult<HeapDeletePayload> {
         old_tuple_meta,
         old_tuple_data,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transaction::TransactionId;
+
+    fn roundtrip(payload: HeapRecordPayload, kind: HeapRecordKind) {
+        let (info, bytes) = match &payload {
+            HeapRecordPayload::Insert(body) => (kind as u8, encode_heap_insert(body)),
+            HeapRecordPayload::Delete(body) => (kind as u8, encode_heap_delete(body)),
+        };
+        let decoded = decode_heap_record(&bytes, info).unwrap();
+        match (payload, decoded) {
+            (HeapRecordPayload::Insert(a), HeapRecordPayload::Insert(b)) => {
+                assert_eq!(a.relation.root_page_id, b.relation.root_page_id);
+                assert_eq!(a.page_id, b.page_id);
+                assert_eq!(a.slot_id, b.slot_id);
+                assert_eq!(a.op_txn_id, b.op_txn_id);
+                assert_eq!(a.tuple_meta, b.tuple_meta);
+                assert_eq!(a.tuple_data, b.tuple_data);
+            }
+            (HeapRecordPayload::Delete(a), HeapRecordPayload::Delete(b)) => {
+                assert_eq!(a.relation.root_page_id, b.relation.root_page_id);
+                assert_eq!(a.page_id, b.page_id);
+                assert_eq!(a.slot_id, b.slot_id);
+                assert_eq!(a.op_txn_id, b.op_txn_id);
+                assert_eq!(a.new_tuple_meta, b.new_tuple_meta);
+                assert_eq!(a.old_tuple_meta, b.old_tuple_meta);
+                assert_eq!(a.old_tuple_data, b.old_tuple_data);
+            }
+            _ => panic!("payload variant mismatch"),
+        }
+    }
+
+    #[test]
+    fn heap_insert_roundtrip() {
+        let payload = HeapRecordPayload::Insert(HeapInsertPayload {
+            relation: RelationIdent { root_page_id: 11 },
+            page_id: 9,
+            slot_id: 3,
+            op_txn_id: 42,
+            tuple_meta: TupleMetaRepr {
+                insert_txn_id: 42,
+                insert_cid: 1,
+                delete_txn_id: 0,
+                delete_cid: 0,
+                is_deleted: false,
+                next_version: None,
+                prev_version: None,
+            },
+            tuple_data: vec![1, 2, 3, 4],
+        });
+        roundtrip(payload, HeapRecordKind::Insert);
+    }
+
+    #[test]
+    fn heap_delete_roundtrip() {
+        let payload = HeapRecordPayload::Delete(HeapDeletePayload {
+            relation: RelationIdent { root_page_id: 7 },
+            page_id: 5,
+            slot_id: 2,
+            op_txn_id: TransactionId::default(),
+            new_tuple_meta: TupleMetaRepr {
+                insert_txn_id: 1,
+                insert_cid: 0,
+                delete_txn_id: 2,
+                delete_cid: 0,
+                is_deleted: true,
+                next_version: None,
+                prev_version: None,
+            },
+            old_tuple_meta: TupleMetaRepr {
+                insert_txn_id: 1,
+                insert_cid: 0,
+                delete_txn_id: 0,
+                delete_cid: 0,
+                is_deleted: false,
+                next_version: None,
+                prev_version: None,
+            },
+            old_tuple_data: vec![9; 6],
+        });
+        roundtrip(payload, HeapRecordKind::Delete);
+    }
 }

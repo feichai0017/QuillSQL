@@ -1362,3 +1362,106 @@ fn decode_string(bytes: &[u8]) -> QuillSQLResult<(String, usize)> {
     offset += len;
     Ok((value, offset))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::catalog::{Column, DataType, Schema};
+    use crate::storage::codec::TupleCodec;
+    use crate::storage::tuple::Tuple;
+    use crate::utils::scalar::ScalarValue;
+    use std::sync::Arc;
+
+    fn schema() -> SchemaRef {
+        Arc::new(Schema::new(vec![Column::new("k", DataType::Int32, false)]))
+    }
+
+    fn roundtrip(payload: IndexRecordPayload, kind: IndexRecordKind) {
+        let (info, bytes) = encode_index_record(&payload);
+        assert_eq!(info, kind as u8);
+        let decoded = decode_index_record(&bytes, info).unwrap();
+        match (payload, decoded) {
+            (IndexRecordPayload::LeafInsert(a), IndexRecordPayload::LeafInsert(b)) => {
+                assert_eq!(a.relation.header_page_id, b.relation.header_page_id);
+                assert_eq!(a.page_id, b.page_id);
+                assert_eq!(a.op_txn_id, b.op_txn_id);
+                assert_eq!(a.key_data, b.key_data);
+                assert_eq!(a.rid, b.rid);
+            }
+            (IndexRecordPayload::LeafDelete(a), IndexRecordPayload::LeafDelete(b)) => {
+                assert_eq!(a.relation.header_page_id, b.relation.header_page_id);
+                assert_eq!(a.page_id, b.page_id);
+                assert_eq!(a.op_txn_id, b.op_txn_id);
+                assert_eq!(a.key_data, b.key_data);
+                assert_eq!(a.old_rid, b.old_rid);
+            }
+            (
+                IndexRecordPayload::RootInstallInternal(a),
+                IndexRecordPayload::RootInstallInternal(b),
+            ) => {
+                assert_eq!(a.relation.header_page_id, b.relation.header_page_id);
+                assert_eq!(a.page_id, b.page_id);
+                assert_eq!(a.internal_max_size, b.internal_max_size);
+                assert_eq!(a.entries.len(), b.entries.len());
+                assert_eq!(a.high_key, b.high_key);
+                assert_eq!(a.next_page_id, b.next_page_id);
+            }
+            (lhs, rhs) => panic!("payload variant mismatch: {:?} vs {:?}", lhs, rhs),
+        }
+    }
+
+    #[test]
+    fn leaf_insert_roundtrip() {
+        let schema = schema();
+        let payload = IndexRecordPayload::LeafInsert(IndexLeafInsertPayload {
+            relation: IndexRelationIdent {
+                header_page_id: 99,
+                schema: SchemaRepr::from(schema.clone()),
+            },
+            page_id: 7,
+            op_txn_id: 1,
+            key_data: TupleCodec::encode(&Tuple::new(schema, vec![ScalarValue::Int32(Some(3))])),
+            rid: RecordId::new(4, 2),
+        });
+        roundtrip(payload, IndexRecordKind::LeafInsert);
+    }
+
+    #[test]
+    fn leaf_delete_roundtrip() {
+        let schema = schema();
+        let payload = IndexRecordPayload::LeafDelete(IndexLeafDeletePayload {
+            relation: IndexRelationIdent {
+                header_page_id: 3,
+                schema: SchemaRepr::from(schema.clone()),
+            },
+            page_id: 2,
+            op_txn_id: 4,
+            key_data: TupleCodec::encode(&Tuple::new(schema, vec![ScalarValue::Int32(Some(5))])),
+            old_rid: RecordId::new(9, 1),
+        });
+        roundtrip(payload, IndexRecordKind::LeafDelete);
+    }
+
+    #[test]
+    fn root_install_internal_roundtrip() {
+        let schema = schema();
+        let payload = IndexRecordPayload::RootInstallInternal(IndexRootInstallInternalPayload {
+            relation: IndexRelationIdent {
+                header_page_id: 5,
+                schema: SchemaRepr::from(schema.clone()),
+            },
+            page_id: 6,
+            internal_max_size: 8,
+            entries: vec![IndexInternalEntryPayload {
+                key_data: TupleCodec::encode(&Tuple::new(
+                    schema.clone(),
+                    vec![ScalarValue::Int32(Some(10))],
+                )),
+                child_page_id: 11,
+            }],
+            high_key: None,
+            next_page_id: 12,
+        });
+        roundtrip(payload, IndexRecordKind::RootInstallInternal);
+    }
+}
