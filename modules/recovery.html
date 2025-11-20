@@ -16,7 +16,7 @@
         <link rel="shortcut icon" href="../favicon-8114d1fc.png">
         <link rel="stylesheet" href="../css/variables-8adf115d.css">
         <link rel="stylesheet" href="../css/general-2459343d.css">
-        <link rel="stylesheet" href="../css/chrome-9dfbd86b.css">
+        <link rel="stylesheet" href="../css/chrome-ae938929.css">
         <link rel="stylesheet" href="../css/print-9e4910d8.css" media="print">
 
         <!-- Fonts -->
@@ -37,7 +37,7 @@
             const default_dark_theme = "navy";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="../toc-eb7c302c.js"></script>
+        <script src="../toc-3cb649c7.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -189,10 +189,9 @@ attaches an LSN, encodes the frame, pushes it into the ring, and auto-flushes wh
 either record count or byte thresholds (<code>max_buffer_records</code>,
 <code>flush_coalesce_bytes</code>, or a full WAL page) are met. Writers never block on Vec
 reallocation and thus scale with concurrent transactions.</li>
-<li><strong>Physical logging</strong> – <code>log_page_update</code> inspects old/new page images using
-<code>find_contiguous_diff</code>. First touches (tracked via <code>DashSet&lt;PageId&gt;</code>) or large diffs
-emit 4 KiB <code>PageWrite</code> FPWs; otherwise <code>PageDelta</code> keeps logs small. Both payloads
-carry the previous <code>page_lsn</code> so redo can enforce the WAL rule.</li>
+<li><strong>Physical logging</strong> – <code>log_page_update</code> emits 4 KiB <code>PageWrite</code> FPWs on first touch
+(tracked via <code>DashSet&lt;PageId&gt;</code>) or when logical redo is unavailable. Payloads carry
+the previous <code>page_lsn</code> so redo can enforce the WAL rule.</li>
 <li><strong>Segmentation &amp; flush</strong> – <code>WalStorage</code> appends frames to rolling segments under the
 configured WAL directory, queues async write/fsync tickets via the <code>DiskScheduler</code>
 sink, and recycles sealed segments after checkpoints. <code>flush()</code> drains buffered
@@ -214,20 +213,17 @@ to block until <code>durable_lsn &gt;= target</code>.</li>
 <p>All log frames share the envelope defined in <code>wal_record.rs</code> and are routed by
 <code>ResourceManagerId</code>:</p>
 <ul>
-<li><strong>Page (<code>ResourceManagerId::Page</code>)</strong> – purely physical <code>PageWrite</code> and <code>PageDelta</code>
-payloads. The default page resource manager checks <code>page_lsn</code> through the buffer
-pool (when available) before rewriting the page on redo. No undo is required
-because these are low-level physical changes.</li>
-<li><strong>Heap (<code>ResourceManagerId::Heap</code>)</strong> – logical payloads emitted by
-<code>TableHeap::append_heap_record</code> include relation id, page/slot, tuple metadata, and
-raw bytes. <code>HeapResourceManager</code> decodes them, rebuilds a temporary page image, and
-replays inserts/updates/deletes by splicing tuples back into the heap. Undo paths
-rely on the same metadata to restore tuple bytes or clear delete flags.</li>
-<li><strong>Index (<code>ResourceManagerId::Index</code>)</strong> – <code>BPlusTreeIndex</code> writes logical leaf
-operations (<code>LeafInsert/Delete</code>) that store key bytes and the target <code>RecordId</code>.
-<code>IndexResourceManager</code> decodes the tuple via <code>TupleCodec</code> and mutates the leaf (via
-the buffer pool if available, otherwise direct disk I/O). Redo is idempotent (missing
-keys are inserted), while undo mirrors insert/delete semantics.</li>
+<li><strong>Page (<code>ResourceManagerId::Page</code>)</strong> – purely physical <code>PageWrite</code> payloads. The page
+resource manager checks <code>page_lsn</code> (buffer pool if available) before rewriting the
+page on redo. No undo is required because these are low-level physical changes.</li>
+<li><strong>Heap (<code>ResourceManagerId::Heap</code>)</strong> – logical payloads include relation id, page/slot,
+tuple metadata, and tuple bytes. <code>HeapResourceManager</code> applies inserts/overwrites at
+the slot level with LSN checks and repacks slotted pages. Undo uses the stored
+before-image (metadata + bytes) for loser transactions.</li>
+<li><strong>Index (<code>ResourceManagerId::Index</code>)</strong> – logs leaf inserts/deletes plus structural
+changes (split/merge/redistribute, parent updates, root install/adopt/reset). Redo
+mutates leaves or rebuilds structural pages with LSN/version guards; undo mirrors
+leaf inserts/deletes only. Heap and index WAL remain independent.</li>
 <li><strong>Transaction / CLR / Checkpoint</strong> – <code>TransactionPayload</code> (BEGIN/COMMIT/ABORT)
 enables the undo index to link per-transaction log records. <code>ClrPayload</code> documents
 each undo step so the recovery process can survive crashes mid-undo. Checkpoints
@@ -239,23 +235,22 @@ records uniformly.</p>
 <h2 id="heap--index-wal-design"><a class="header" href="#heap--index-wal-design">Heap / Index WAL design</a></h2>
 <ul>
 <li><strong>Heap</strong> – Execution operators call <code>ExecutionContext::insert_tuple_with_indexes</code>
-(and friends), which ultimately invoke <code>TableHeap::append_heap_record</code>. Each tuple
-carries <code>TupleMetaRepr</code> (insert/delete txn + CID, MVCC chain pointers) plus encoded
-column bytes. During redo, <code>HeapResourceManager</code> reconstructs page images, inserts
-or overwrites slots, and updates tuple metadata before writing the packed page back
-via <code>TableHeap::recovery_view</code>. Undo leverages the stored “before image” to restore
-bytes or toggle delete flags; vacuum code can later reclaim dead slots once
-<code>safe_xmin</code> passes them.</li>
-<li><strong>Index</strong> – B+Tree leaf operations log the logical key/value change, unaffected by
-page layout. Redo loads the leaf (buffer pool or disk), checks the leaf version to
-avoid reapplying newer changes, and performs the requested insert/delete. Undo mirrors
-the inverse operation so loser transactions roll back cleanly without touching the
-heap. This keeps heap and index WAL independent: heap redo never needs to read index
-pages, and vice versa.</li>
+(and friends), which ultimately invoke <code>MvccHeap</code> to write WAL before dirtying the
+page. Each tuple carries <code>TupleMetaRepr</code> (insert/delete txn + CID, MVCC chain
+pointers) plus encoded column bytes. During redo, <code>HeapResourceManager</code> applies
+inserts or overwrites at the slot level with LSN checks and repacks the slotted page
+before writing it back via <code>TableHeap::recovery_view</code>. Undo leverages the stored
+before-image to restore bytes or toggle delete flags; vacuum code can later reclaim
+dead slots once <code>safe_xmin</code> passes them.</li>
+<li><strong>Index</strong> – B+Tree leaf operations log the logical key/value change, plus structural
+records for split/merge/redistribute/parent updates and root install/adopt/reset.
+Redo loads or rebuilds pages (buffer pool or disk), checks page LSN/version to avoid
+reapplying newer changes, and performs the requested mutation. Undo mirrors
+leaf-level inserts/deletes only. Heap and index WAL stay independent.</li>
 <li><strong>Page images</strong> – For heap/index structural changes that rewrite large sections (e.g.,
 new heap page, B+Tree splits), page guards still emit FPWs through
-<code>WalManager::log_page_update</code>. The logical heap/index WAL layers ensure redo can
-operate even when FPWs are skipped after the first touch.</li>
+<code>WalManager::log_page_update</code>. Logical heap/index WAL ensures redo still works even
+when FPWs are skipped after the first touch.</li>
 </ul>
 <hr>
 <h2 id="aries-recovery"><a class="header" href="#aries-recovery">ARIES Recovery</a></h2>

@@ -16,7 +16,7 @@
         <link rel="shortcut icon" href="../favicon-8114d1fc.png">
         <link rel="stylesheet" href="../css/variables-8adf115d.css">
         <link rel="stylesheet" href="../css/general-2459343d.css">
-        <link rel="stylesheet" href="../css/chrome-9dfbd86b.css">
+        <link rel="stylesheet" href="../css/chrome-ae938929.css">
         <link rel="stylesheet" href="../css/print-9e4910d8.css" media="print">
 
         <!-- Fonts -->
@@ -37,7 +37,7 @@
             const default_dark_theme = "navy";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="../toc-eb7c302c.js"></script>
+        <script src="../toc-3cb649c7.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -195,10 +195,9 @@ serializes a record, while <code>WalAppendContext</code> reports the LSN range b
 <tr><th>ResourceManagerId</th><th>Payload</th><th>Purpose</th></tr>
 </thead>
 <tbody>
-<tr><td><code>Page</code></td><td><code>PageWritePayload</code></td><td>Full-page image (FPW) on first-touch or large diffs; carries <code>prev_page_lsn</code> for redo checks.</td></tr>
-<tr><td><code>Page</code></td><td><code>PageDeltaPayload</code></td><td>Offset + byte slice for small modifications to keep WAL compact.</td></tr>
-<tr><td><code>Heap</code></td><td><code>HeapRecordPayload::{Insert,Update,Delete}</code></td><td>Logical tuples containing relation id, page/slot, <code>TupleMetaRepr</code>, and tuple bytes.</td></tr>
-<tr><td><code>Index</code></td><td><code>IndexRecordPayload::{LeafInsert,LeafDelete}</code></td><td>Logical B+Tree leaf mutations with key bytes and <code>RecordId</code>.</td></tr>
+<tr><td><code>Page</code></td><td><code>PageWritePayload</code></td><td>Full-page image (FPW) on first-touch; also used when logical redo is not available.</td></tr>
+<tr><td><code>Heap</code></td><td><code>HeapRecordPayload::{Insert,Delete}</code></td><td>Logical tuple records carrying relation id, page/slot, <code>TupleMetaRepr</code>, and tuple bytes (delete payloads always carry the before-image).</td></tr>
+<tr><td><code>Index</code></td><td><code>IndexRecordPayload::{LeafInsert,LeafDelete,Leaf/Internal Split/Merge/Redistribute,Parent*,Root*}</code></td><td>Logical B+Tree leaf mutations plus structural changes (split/merge/redistribute, parent updates, root install/adopt/reset).</td></tr>
 <tr><td><code>Transaction</code></td><td><code>TransactionPayload</code></td><td>BEGIN / COMMIT / ABORT markers that seed Undo’s per-txn chains.</td></tr>
 <tr><td><code>Checkpoint</code></td><td><code>CheckpointPayload</code></td><td>Captures ATT/DPT snapshots plus redo start.</td></tr>
 <tr><td><code>Clr</code></td><td><code>ClrPayload</code></td><td>Compensation Log Records documenting each undo step and its <code>undo_next_lsn</code>.</td></tr>
@@ -212,43 +211,42 @@ Transaction/CLR/Checkpoint → interpreted by the analysis/undo phases.</p>
 <h2 id="3-heap-wal-mvcc-aware-logical-logging"><a class="header" href="#3-heap-wal-mvcc-aware-logical-logging">3. Heap WAL: MVCC-aware logical logging</a></h2>
 <ul>
 <li><strong>Emission points</strong> – <code>TableHeap::{insert,update,delete}_tuple</code> call
-<code>append_heap_record</code> (see <code>src/storage/heap/table_heap.rs:72-156</code>) after updating the
-in-memory page. Each record stores the relation identifier, page/slot, tuple metadata,
-and before/after tuple bytes.</li>
+<code>append_heap_record</code> (see <code>src/storage/heap/mvcc_heap.rs</code>) before the data page is
+overwritten. Each record stores the relation identifier, page/slot, tuple metadata,
+and tuple bytes (delete payloads include the exact before-image).</li>
 <li><strong>Encoding</strong> – <code>src/storage/heap/wal_codec.rs</code> serializes <code>TupleMeta</code> (insert/delete
-txn id, command id, MVCC chain pointers) plus optional previous tuple bytes in a
-compact layout.</li>
+txn id, command id, MVCC chain pointers) plus tuple bytes in a compact layout.</li>
 <li><strong>Redo</strong> – <code>HeapResourceManager</code> (<code>src/storage/heap/heap_recovery.rs</code>) decodes the
-payload, reconstructs a <code>PageImage</code>, applies insert / overwrite / delete to the target
-slot, and writes the rebuilt page back, updating the page LSN. If the buffer pool is
-available, <code>TableHeap::recovery_view</code> mutates the cached page directly.</li>
-<li><strong>Undo</strong> – Uses the stored “before” metadata and bytes to restore tuples or clear
-delete flags when loser transactions roll back.</li>
-<li><strong>Interaction with FPW</strong> – Logical heap redo allows tuple-level replay without FPWs.
-FPWs are still emitted for first touches or large diffs to guard against torn-page
-scenarios, but small updates remain lightweight.</li>
+payload and applies it at the slot level (insert/overwrite) with an LSN check; it
+repacks the slotted page layout to keep offsets consistent and sets page LSN to the
+frame LSN.</li>
+<li><strong>Undo</strong> – Always restores the stored before-image (metadata + tuple bytes) for loser
+transactions, removing the optional/branchy path.</li>
+<li><strong>Interaction with FPW</strong> – Heap logical redo handles tuple-level replay; FPWs are only
+used on first-touch or when no logical log exists for a page.</li>
 </ul>
 <hr>
 <h2 id="4-index-wal-logical-btree-leaf-operations"><a class="header" href="#4-index-wal-logical-btree-leaf-operations">4. Index WAL: logical B+Tree leaf operations</a></h2>
 <ul>
-<li><strong>Emission points</strong> – <code>BPlusTreeIndex</code> records every leaf insert/delete via
-<code>append_index_record</code> (<code>src/storage/index/btree_index.rs:86-145</code>), using
-<code>src/storage/index/wal_codec.rs</code> to encode key schema, key bytes, target page, and
-transaction id.</li>
+<li><strong>Emission points</strong> – <code>BPlusTreeIndex</code> logs every leaf insert/delete and all structural
+changes (split/merge/redistribute, parent updates, root install/adopt/reset) via
+<code>append_index_record</code> (<code>src/storage/index/btree_index.rs</code>), using
+<code>src/storage/index/wal_codec.rs</code> to encode key schema, key bytes, page ids, and txns.</li>
 <li><strong>Redo</strong> (<code>src/storage/index/index_recovery.rs</code>) steps:
 <ol>
 <li>Decode the key with <code>TupleCodec</code> using the stored schema.</li>
-<li>Fetch the leaf through the buffer pool (preferred) or <code>DiskScheduler</code>.</li>
-<li>Skip if <code>page_lsn &gt;= frame_lsn</code>; otherwise apply the logical mutation and bump the
-leaf version.</li>
-<li>Write the updated page back with the frame LSN.</li>
+<li>Fetch the target page through the buffer pool (preferred) or <code>DiskScheduler</code>.</li>
+<li>Skip if <code>page_lsn &gt;= frame_lsn</code>; otherwise apply the logical mutation/structural
+rebuild and bump the page version.</li>
+<li>Write the updated page back with the frame LSN (including header root pointer for
+root install/adopt/reset).</li>
 </ol>
 </li>
-<li><strong>Undo</strong> – Performs the inverse operation (insert→delete, delete→insert old RID)
-only for loser transactions.</li>
-<li><strong>Benefits</strong> – Heap and index WAL are decoupled: heap redo never reads index pages,
-and logical leaf updates avoid writing full-page images for small key/value changes.
-Structural operations (splits/merges) still rely on page-level logging.</li>
+<li><strong>Undo</strong> – Inverts leaf inserts/deletes for loser transactions. Structural records are
+redo-only (idempotent via LSN/version checks).</li>
+<li><strong>Benefits</strong> – Heap and index WAL are decoupled; logical leaf updates and structured
+payloads avoid full-page writes while remaining crash-safe for splits/merges/root
+changes.</li>
 </ul>
 <hr>
 <h2 id="5-buffering--flush-strategy"><a class="header" href="#5-buffering--flush-strategy">5. Buffering &amp; flush strategy</a></h2>

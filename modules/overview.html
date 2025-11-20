@@ -16,7 +16,7 @@
         <link rel="shortcut icon" href="../favicon-8114d1fc.png">
         <link rel="stylesheet" href="../css/variables-8adf115d.css">
         <link rel="stylesheet" href="../css/general-2459343d.css">
-        <link rel="stylesheet" href="../css/chrome-9dfbd86b.css">
+        <link rel="stylesheet" href="../css/chrome-ae938929.css">
         <link rel="stylesheet" href="../css/print-9e4910d8.css" media="print">
 
         <!-- Fonts -->
@@ -37,7 +37,7 @@
             const default_dark_theme = "navy";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="../toc-eb7c302c.js"></script>
+        <script src="../toc-3cb649c7.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -351,7 +351,7 @@ to run with <code>RUST_LOG=debug</code> and observe how read/write/fsync command
 <tbody>
 <tr><td><code>WalManager</code></td><td>Allocates LSNs, buffers log records, drives background WAL writer, and integrates with checkpoints.</td></tr>
 <tr><td><code>RecoveryManager</code></td><td>Implements ARIES analysis/redo/undo. Uses <code>ControlFileManager</code> snapshots to seed restart.</td></tr>
-<tr><td><code>wal_record.rs</code></td><td>Defines logical (<code>HeapInsert</code>, <code>IndexDelete</code>) and physical (<code>PageWrite</code>, <code>PageDelta</code>) records.</td></tr>
+<tr><td><code>wal_record.rs</code></td><td>Defines logical (<code>HeapInsert</code>, <code>IndexDelete</code>, index structure/root records) and physical (<code>PageWrite</code> FPWs) records.</td></tr>
 </tbody>
 </table>
 </div>
