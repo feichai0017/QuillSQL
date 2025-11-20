@@ -16,7 +16,7 @@
 - **Buffer manager**: LRU-K + TinyLFU, WAL-aware dirty tracking, prefetch API, background writer
 - **Asynchronous storage**: Dispatcher + io_uring worker pool for data pages, plus a buffered WAL runtime with cached segment handles for sequential log I/O
 - **Streaming / Prefetch**: Large sequential scans bypass the cache via a small direct I/O ring buffer; targeted prefetch warms hot paths without pins
-- **WAL & Recovery (ARIES-inspired)**: FPW + PageDelta, DPT, chained CLR, per-transaction undo chains, idempotent replays
+- **WAL & Recovery (ARIES-inspired)**: FPW, logical heap/index records, DPT, chained CLR, per-transaction undo chains, idempotent replays
 - **Information schema**: `information_schema.schemas`, `tables`, `columns`, `indexes`
 - **Docs**: 📖 **[Read the Book Online](https://feichai0017.github.io/QuillSQL/)** 
 

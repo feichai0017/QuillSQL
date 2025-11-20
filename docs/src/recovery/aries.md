@@ -20,8 +20,9 @@ The WAL is a sequential, append-only file composed of **log records**. Each reco
 QuillSQL uses several types of log records:
 
 - **`Transaction`**: Marks the `BEGIN`, `COMMIT`, or `ABORT` of a transaction.
-- **`PageWrite` / `PageDelta`**: Physical/Physiological records describing a change to a page. `PageWrite` contains a full image of the page (used for the first write after a checkpoint, a technique called First-Page-Write or FPW), while `PageDelta` contains only the changed bytes.
-- **`HeapInsert` / `HeapDelete`**: Logical records describing a high-level heap operation. These are primarily used for generating precise undo operations.
+- **`PageWrite`**: Physical records describing a change to a page. `PageWrite` contains a full image of the page (used for first-touch or when logical redo is unavailable), a First-Page-Write (FPW) style safeguard.
+- **`HeapInsert` / `HeapDelete`**: Logical tuple-level records. Each delete carries the full before-image so undo can always restore bytes/metadata.
+- **`Index*`**: Logical B+Tree records covering leaf inserts/deletes and structural changes (split/merge/redistribute, parent updates, root install/adopt/reset).
 - **`Checkpoint`**: A special record that marks a point of partial durability, allowing the log to be truncated.
 - **`CLR` (Compensation Log Record)**: A special record written during recovery to describe an **undo** action. CLRs are redo-only and are never undone themselves.
 
@@ -47,7 +48,7 @@ The goal of the Redo phase (`recovery/redo.rs`) is to restore the database to it
 
 1.  The Redo phase finds the smallest `recLSN` from the Dirty Page Table built during Analysis. This LSN is the starting point for the redo scan.
 2.  It scans the log **forward** from this starting point.
-3.  For every log record it encounters that describes a physical change to a page (e.g., `PageWrite`, `PageDelta`, `Heap*`), it re-applies the change. This is idempotent: if the change is already present on the page (because it was successfully flushed to disk before the crash), re-applying it does no harm.
+3.  For every log record it encounters that describes a change to a page (e.g., `PageWrite`, `Heap*`, `Index*`), it re-applies the change. This is idempotent: if the change is already present on the page (because it was successfully flushed to disk before the crash), re-applying it does no harm.
 
 At the end of this phase, the database state on disk is identical to how it was in memory right before the crash.
 
