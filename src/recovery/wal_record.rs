@@ -2,11 +2,11 @@ use crate::recovery::wal::codec;
 use crate::recovery::Lsn;
 
 pub use crate::recovery::wal::codec::{
-    decode_checkpoint, decode_clr, decode_frame, decode_page_delta, decode_page_write,
+    decode_checkpoint, decode_clr, decode_frame, decode_page_write,
     decode_payload as decode_wal_payload, decode_transaction, encode_frame,
-    heap_record_kind_to_info, CheckpointPayload, ClrPayload, PageDeltaPayload, PageWritePayload,
-    ResourceManagerId, TransactionPayload, TransactionRecordKind, WalFrame, WAL_CRC_LEN,
-    WAL_HEADER_LEN, WAL_MAGIC, WAL_VERSION, WAL_VERSION_V1,
+    heap_record_kind_to_info, CheckpointPayload, ClrPayload, PageWritePayload, ResourceManagerId,
+    TransactionPayload, TransactionRecordKind, WalFrame, WAL_CRC_LEN, WAL_HEADER_LEN, WAL_MAGIC,
+    WAL_VERSION, WAL_VERSION_V1,
 };
 
 pub use crate::storage::heap::wal_codec::{
@@ -15,14 +15,17 @@ pub use crate::storage::heap::wal_codec::{
 };
 pub use crate::storage::index::wal_codec::{
     decode_index_record as decode_index, encode_index_record as encode_index,
-    IndexLeafDeletePayload, IndexLeafInsertPayload, IndexRecordPayload, IndexRelationIdent,
+    IndexInternalEntryPayload, IndexInternalMergePayload, IndexInternalRedistributePayload,
+    IndexInternalSplitPayload, IndexLeafDeletePayload, IndexLeafInsertPayload,
+    IndexLeafMergePayload, IndexLeafRedistributePayload, IndexLeafSplitEntryPayload,
+    IndexLeafSplitPayload, IndexParentDeletePayload, IndexParentInsertPayload,
+    IndexParentUpdatePayload, IndexRecordPayload, IndexRelationIdent, IndexRootAdoptPayload,
+    IndexRootInstallInternalPayload, IndexRootInstallLeafPayload, IndexRootResetPayload,
 };
 
 #[derive(Debug, Clone)]
 pub enum WalRecordPayload {
     PageWrite(PageWritePayload),
-    /// Apply a byte-range delta to a page (physiological logging)
-    PageDelta(PageDeltaPayload),
     Transaction(TransactionPayload),
     Heap(HeapRecordPayload),
     Index(IndexRecordPayload),

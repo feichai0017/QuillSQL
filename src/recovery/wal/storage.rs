@@ -52,10 +52,12 @@ pub(super) struct WalStorage {
 impl WalStorage {
     pub(super) fn new(config: WalConfig, sink: Arc<dyn WalSink>) -> QuillSQLResult<Self> {
         fs::create_dir_all(&config.directory)?;
-        let segment = discover_latest_segment(&config.directory, config.segment_size)?;
+        let min_segment = (WAL_PAGE_SIZE as u64) * 2;
+        let segment_size = config.segment_size.max(min_segment);
+        let segment = discover_latest_segment(&config.directory, segment_size)?;
         Ok(Self {
             directory: config.directory,
-            segment_size: config.segment_size,
+            segment_size,
             sync_on_flush: config.sync_on_flush,
             current_segment: segment,
             sink,

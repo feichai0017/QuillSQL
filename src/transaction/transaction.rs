@@ -85,7 +85,7 @@ impl UndoAction {
                 indexes,
             } => {
                 for (index, key) in indexes.into_iter() {
-                    index.delete(&key)?;
+                    index.delete_with_txn(&key, txn_id)?;
                 }
                 table.recover_delete_tuple(rid, txn_id, 0)?;
                 Ok(())
@@ -98,7 +98,7 @@ impl UndoAction {
                 indexes,
             } => {
                 for (index, key) in indexes {
-                    index.insert(&key, rid)?;
+                    index.insert_with_txn(&key, rid, txn_id)?;
                 }
                 table.recover_restore_tuple(rid, prev_meta, &prev_tuple)?;
                 Ok(())
@@ -119,7 +119,7 @@ impl UndoAction {
                     op_txn_id: meta.insert_txn_id,
                     new_tuple_meta: TupleMetaRepr::from(deleted_meta),
                     old_tuple_meta: TupleMetaRepr::from(meta),
-                    old_tuple_data: Some(TupleCodec::encode(&tuple)),
+                    old_tuple_data: TupleCodec::encode(&tuple),
                 }))
             }
             UndoAction::Delete {

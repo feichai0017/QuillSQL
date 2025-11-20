@@ -224,7 +224,7 @@ impl TableHandle for HeapTableHandle {
         for handle in indexes {
             if let Ok(key_tuple) = tuple.project_with_schema(handle.key_schema()) {
                 let index = handle.index();
-                index.insert(&key_tuple, rid)?;
+                index.insert_with_txn(&key_tuple, rid, txn.txn_id())?;
                 index_links.push((index, key_tuple));
             }
         }
@@ -250,7 +250,7 @@ impl TableHandle for HeapTableHandle {
         for handle in indexes {
             if let Ok(key_tuple) = prev_tuple.project_with_schema(handle.key_schema()) {
                 let index = handle.index();
-                index.delete(&key_tuple)?;
+                index.delete_with_txn(&key_tuple, txn.txn_id())?;
                 index_links.push((index, key_tuple));
             }
         }
@@ -282,7 +282,7 @@ impl TableHandle for HeapTableHandle {
         for handle in indexes {
             if let Ok(old_key_tuple) = prev_tuple.project_with_schema(handle.key_schema()) {
                 let index = handle.index();
-                index.delete(&old_key_tuple)?;
+                index.delete_with_txn(&old_key_tuple, txn.txn_id())?;
                 old_keys.push((index, old_key_tuple));
             }
         }
@@ -291,7 +291,7 @@ impl TableHandle for HeapTableHandle {
         for handle in indexes {
             if let Ok(new_key_tuple) = new_tuple.project_with_schema(handle.key_schema()) {
                 let index = handle.index();
-                index.insert(&new_key_tuple, new_rid)?;
+                index.insert_with_txn(&new_key_tuple, new_rid, txn.txn_id())?;
                 new_keys.push((index, new_key_tuple));
             }
         }

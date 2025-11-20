@@ -21,133 +21,6 @@ use crate::storage::tuple::Tuple;
 use crate::transaction::{CommandId, TransactionId};
 use std::sync::OnceLock;
 
-#[derive(Debug)]
-struct PageImage {
-    header: TablePageHeader,
-    slots: Vec<Vec<u8>>,
-}
-
-impl PageImage {
-    fn load(bytes: &[u8]) -> QuillSQLResult<Self> {
-        let (mut header, _) = TablePageHeaderCodec::decode(bytes)?;
-        let mut slots = Vec::with_capacity(header.tuple_infos.len());
-        for info in &header.tuple_infos {
-            let start = info.offset as usize;
-            let end = start + info.size as usize;
-            if end > bytes.len() {
-                return Err(QuillSQLError::Storage(format!(
-                    "heap page tuple range [{}, {}) exceeds page size {}",
-                    start,
-                    end,
-                    bytes.len()
-                )));
-            }
-            slots.push(bytes[start..end].to_vec());
-        }
-        header.num_tuples = header.tuple_infos.len() as u16;
-        header.num_deleted_tuples = header
-            .tuple_infos
-            .iter()
-            .filter(|info| info.meta.is_deleted)
-            .count() as u16;
-        Ok(Self { header, slots })
-    }
-
-    fn refresh_counts(&mut self) {
-        self.header.num_tuples = self.slots.len() as u16;
-        self.header.num_deleted_tuples = self
-            .header
-            .tuple_infos
-            .iter()
-            .filter(|info| info.meta.is_deleted)
-            .count() as u16;
-    }
-
-    fn persist(&mut self, data: &mut [u8]) -> QuillSQLResult<()> {
-        if self.header.tuple_infos.len() != self.slots.len() {
-            return Err(QuillSQLError::Internal(
-                "heap redo tuple metadata count mismatch".to_string(),
-            ));
-        }
-        self.refresh_counts();
-        data.fill(0);
-        let mut tail = PAGE_SIZE;
-        for (info, tuple) in self.header.tuple_infos.iter_mut().zip(self.slots.iter()) {
-            let len = tuple.len();
-            if len > PAGE_SIZE {
-                return Err(QuillSQLError::Storage(
-                    "tuple length exceeds page capacity".to_string(),
-                ));
-            }
-            if tail < len {
-                return Err(QuillSQLError::Storage(
-                    "insufficient free space while rebuilding heap page".to_string(),
-                ));
-            }
-            tail -= len;
-            info.offset = tail as u16;
-            info.size = len as u16;
-        }
-        let header_bytes = TablePageHeaderCodec::encode(&self.header);
-        if header_bytes.len() > tail {
-            return Err(QuillSQLError::Storage(
-                "heap page header overlaps tuple data during redo".to_string(),
-            ));
-        }
-        data[..header_bytes.len()].copy_from_slice(&header_bytes);
-        for (info, tuple) in self.header.tuple_infos.iter().zip(self.slots.iter()) {
-            let start = info.offset as usize;
-            let end = start + tuple.len();
-            data[start..end].copy_from_slice(tuple);
-        }
-        Ok(())
-    }
-
-    fn insert_at(&mut self, slot: usize, meta: TupleMeta, bytes: &[u8]) -> QuillSQLResult<()> {
-        if slot > self.slots.len() {
-            return Err(QuillSQLError::Storage(format!(
-                "heap redo insert slot {} out of bounds (len={})",
-                slot,
-                self.slots.len()
-            )));
-        }
-        self.slots.insert(slot, bytes.to_vec());
-        self.header.tuple_infos.insert(
-            slot,
-            TupleInfo {
-                offset: 0,
-                size: bytes.len() as u16,
-                meta,
-            },
-        );
-        self.refresh_counts();
-        Ok(())
-    }
-
-    fn overwrite_slot(&mut self, slot: usize, meta: TupleMeta, bytes: &[u8]) -> QuillSQLResult<()> {
-        if slot >= self.slots.len() {
-            return Err(QuillSQLError::Storage(format!(
-                "heap redo update slot {} out of bounds (len={})",
-                slot,
-                self.slots.len()
-            )));
-        }
-        self.slots[slot] = bytes.to_vec();
-        self.header.tuple_infos[slot].meta = meta;
-        self.refresh_counts();
-        Ok(())
-    }
-
-    fn set_slot_meta(&mut self, slot: usize, meta: TupleMeta) -> QuillSQLResult<()> {
-        if slot >= self.slots.len() {
-            return Ok(());
-        }
-        self.header.tuple_infos[slot].meta = meta;
-        self.refresh_counts();
-        Ok(())
-    }
-}
-
 #[derive(Default)]
 struct HeapResourceManager;
 
@@ -316,26 +189,14 @@ impl HeapResourceManager {
         body: &HeapInsertPayload,
     ) -> QuillSQLResult<bool> {
         self.apply_with_page(ctx, body.page_id, frame.lsn, |page_bytes, lsn| {
-            let mut image = PageImage::load(page_bytes)?;
-            if lsn != 0 && image.header.lsn >= lsn {
-                return Ok(false);
-            }
-            let slot = body.slot_id as usize;
-            let meta: TupleMeta = body.tuple_meta.into();
-            if slot == image.slots.len() {
-                image.insert_at(slot, meta, &body.tuple_data)?;
-            } else if slot < image.slots.len() {
-                image.overwrite_slot(slot, meta, &body.tuple_data)?;
-            } else {
-                return Err(QuillSQLError::Storage(format!(
-                    "heap insert slot {} beyond tuple count {}",
-                    slot,
-                    image.slots.len()
-                )));
-            }
-            image.header.lsn = lsn;
-            image.persist(page_bytes)?;
-            Ok(true)
+            Self::apply_tuple_update(
+                page_bytes,
+                lsn,
+                body.slot_id as usize,
+                Some(body.tuple_meta.into()),
+                Some(&body.tuple_data),
+                true,
+            )
         })
     }
 
@@ -346,28 +207,227 @@ impl HeapResourceManager {
         body: &HeapDeletePayload,
     ) -> QuillSQLResult<bool> {
         self.apply_with_page(ctx, body.page_id, frame.lsn, |page_bytes, lsn| {
-            let mut image = PageImage::load(page_bytes)?;
-            if lsn != 0 && image.header.lsn >= lsn {
-                return Ok(false);
-            }
-            let slot = body.slot_id as usize;
-            if slot >= image.slots.len() {
-                return Ok(false);
-            }
-            let meta: TupleMeta = body.new_tuple_meta.into();
-            image.set_slot_meta(slot, meta)?;
-            image.header.lsn = lsn;
-            image.persist(page_bytes)?;
-            Ok(true)
+            Self::apply_tuple_update(
+                page_bytes,
+                lsn,
+                body.slot_id as usize,
+                Some(body.new_tuple_meta.into()),
+                None,
+                false,
+            )
         })
+    }
+
+    fn collect_slots(header: &TablePageHeader, page: &[u8]) -> QuillSQLResult<Vec<Vec<u8>>> {
+        let mut slots = Vec::with_capacity(header.tuple_infos.len());
+        for info in &header.tuple_infos {
+            let start = info.offset as usize;
+            let end = start + info.size as usize;
+            if end > page.len() {
+                return Err(QuillSQLError::Storage(format!(
+                    "heap redo tuple range [{}, {}) exceeds page size {}",
+                    start,
+                    end,
+                    page.len()
+                )));
+            }
+            slots.push(page[start..end].to_vec());
+        }
+        Ok(slots)
+    }
+
+    fn pack_page(
+        header: &mut TablePageHeader,
+        tuples: &[Vec<u8>],
+        dest: &mut [u8],
+    ) -> QuillSQLResult<()> {
+        if header.tuple_infos.len() != tuples.len() {
+            return Err(QuillSQLError::Internal(
+                "heap redo tuple metadata count mismatch".to_string(),
+            ));
+        }
+        dest.fill(0);
+        let mut tail = PAGE_SIZE;
+        for (info, tuple) in header.tuple_infos.iter_mut().zip(tuples.iter()) {
+            let len = tuple.len();
+            if len > PAGE_SIZE {
+                return Err(QuillSQLError::Storage(
+                    "tuple length exceeds page capacity".to_string(),
+                ));
+            }
+            if tail < len {
+                return Err(QuillSQLError::Storage(
+                    "insufficient free space while rebuilding heap page".to_string(),
+                ));
+            }
+            tail -= len;
+            info.offset = tail as u16;
+            info.size = len as u16;
+        }
+        header.num_tuples = header.tuple_infos.len() as u16;
+        header.num_deleted_tuples = header
+            .tuple_infos
+            .iter()
+            .filter(|info| info.meta.is_deleted)
+            .count() as u16;
+        let header_bytes = TablePageHeaderCodec::encode(header);
+        if header_bytes.len() > tail {
+            return Err(QuillSQLError::Storage(
+                "heap page header overlaps tuple data during redo".to_string(),
+            ));
+        }
+        dest[..header_bytes.len()].copy_from_slice(&header_bytes);
+        for (info, tuple) in header.tuple_infos.iter().zip(tuples.iter()) {
+            let start = info.offset as usize;
+            let end = start + tuple.len();
+            dest[start..end].copy_from_slice(tuple);
+        }
+        Ok(())
+    }
+
+    fn apply_tuple_update(
+        page_bytes: &mut [u8],
+        lsn: Lsn,
+        slot: usize,
+        new_meta: Option<TupleMeta>,
+        new_tuple: Option<&[u8]>,
+        allow_insert: bool,
+    ) -> QuillSQLResult<bool> {
+        let (mut header, _) = TablePageHeaderCodec::decode(page_bytes)?;
+        if lsn != 0 && header.lsn >= lsn {
+            return Ok(false);
+        }
+        let existing_slots = header.tuple_infos.len();
+        if slot > existing_slots {
+            return Err(QuillSQLError::Storage(format!(
+                "heap redo slot {} beyond tuple count {}",
+                slot, existing_slots
+            )));
+        }
+
+        let mut tuples = Self::collect_slots(&header, page_bytes)?;
+
+        if slot == existing_slots {
+            if !allow_insert {
+                return Ok(false);
+            }
+            let Some(bytes) = new_tuple else {
+                return Err(QuillSQLError::Storage(
+                    "heap redo insert missing tuple bytes".to_string(),
+                ));
+            };
+            let Some(meta) = new_meta else {
+                return Err(QuillSQLError::Storage(
+                    "heap redo insert missing tuple metadata".to_string(),
+                ));
+            };
+            header.tuple_infos.push(TupleInfo {
+                offset: 0,
+                size: 0,
+                meta,
+            });
+            tuples.push(bytes.to_vec());
+        } else {
+            if let Some(meta) = new_meta {
+                header.tuple_infos[slot].meta = meta;
+            }
+            if let Some(bytes) = new_tuple {
+                tuples[slot] = bytes.to_vec();
+            }
+        }
+
+        header.lsn = lsn;
+        Self::pack_page(&mut header, &tuples, page_bytes)?;
+        Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::page::TupleMeta;
+
+    fn decode_header(page: &[u8]) -> TablePageHeader {
+        TablePageHeaderCodec::decode(page).unwrap().0
+    }
+
+    #[test]
+    fn apply_tuple_update_inserts_and_updates_lsn() {
+        let mut page = vec![0u8; PAGE_SIZE];
+        let lsn1 = 10;
+        let meta = TupleMeta::new(1, 0);
+        let data1 = vec![1u8, 2, 3];
+        let applied = HeapResourceManager::apply_tuple_update(
+            &mut page,
+            lsn1,
+            0,
+            Some(meta),
+            Some(&data1),
+            true,
+        )
+        .expect("apply insert");
+        assert!(applied);
+        let header = decode_header(&page);
+        assert_eq!(header.lsn, lsn1);
+        assert_eq!(header.num_tuples, 1);
+        let info = &header.tuple_infos[0];
+        let stored = &page[info.offset as usize..(info.offset + info.size) as usize];
+        assert_eq!(stored, data1.as_slice());
+
+        // Older LSN should be ignored
+        let skipped =
+            HeapResourceManager::apply_tuple_update(&mut page, lsn1 - 1, 0, None, None, false)
+                .expect("apply older lsn");
+        assert!(!skipped);
+        let header_after = decode_header(&page);
+        assert_eq!(header_after.lsn, lsn1);
+    }
+
+    #[test]
+    fn apply_tuple_update_overwrites_and_repacks() {
+        let mut page = vec![0u8; PAGE_SIZE];
+        let lsn1 = 5;
+        let mut meta = TupleMeta::new(2, 0);
+        let data_small = vec![7u8, 7];
+        HeapResourceManager::apply_tuple_update(
+            &mut page,
+            lsn1,
+            0,
+            Some(meta),
+            Some(&data_small),
+            true,
+        )
+        .unwrap();
+
+        let lsn2 = 20;
+        meta.mark_deleted(9, 0);
+        let data_large = vec![9u8, 9, 9, 9, 9];
+        let applied = HeapResourceManager::apply_tuple_update(
+            &mut page,
+            lsn2,
+            0,
+            Some(meta),
+            Some(&data_large),
+            false,
+        )
+        .unwrap();
+        assert!(applied);
+
+        let header = decode_header(&page);
+        assert_eq!(header.lsn, lsn2);
+        assert_eq!(header.num_tuples, 1);
+        assert!(header.tuple_infos[0].meta.is_deleted);
+        let info = &header.tuple_infos[0];
+        let stored = &page[info.offset as usize..(info.offset + info.size) as usize];
+        assert_eq!(stored, data_large.as_slice());
     }
 }
 impl ResourceManager for HeapResourceManager {
     fn redo(&self, frame: &WalFrame, ctx: &RedoContext) -> QuillSQLResult<usize> {
         let payload = self.decode_payload(frame)?;
-        let applied = match &payload {
-            HeapRecordPayload::Insert(body) => self.redo_insert(frame, ctx, body)?,
-            HeapRecordPayload::Delete(body) => self.redo_delete(frame, ctx, body)?,
+        let applied = match payload {
+            HeapRecordPayload::Insert(ref body) => self.redo_insert(frame, ctx, body)?,
+            HeapRecordPayload::Delete(ref body) => self.redo_delete(frame, ctx, body)?,
         };
         Ok(applied as usize)
     }
@@ -378,19 +438,13 @@ impl ResourceManager for HeapResourceManager {
             HeapRecordPayload::Insert(body) => {
                 self.apply_tuple_meta_flag(ctx, body.page_id, body.slot_id as usize, true)
             }
-            HeapRecordPayload::Delete(body) => {
-                if let Some(old_bytes) = body.old_tuple_data.as_deref() {
-                    self.restore_tuple(
-                        ctx,
-                        body.page_id,
-                        body.slot_id as usize,
-                        body.old_tuple_meta,
-                        old_bytes,
-                    )
-                } else {
-                    self.apply_tuple_meta_flag(ctx, body.page_id, body.slot_id as usize, false)
-                }
-            }
+            HeapRecordPayload::Delete(body) => self.restore_tuple(
+                ctx,
+                body.page_id,
+                body.slot_id as usize,
+                body.old_tuple_meta,
+                &body.old_tuple_data,
+            ),
         }
     }
 

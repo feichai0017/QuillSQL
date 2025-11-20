@@ -160,7 +160,7 @@ Extra details:
 | ---- | ----- |
 | `WalManager` | Allocates LSNs, buffers log records, drives background WAL writer, and integrates with checkpoints. |
 | `RecoveryManager` | Implements ARIES analysis/redo/undo. Uses `ControlFileManager` snapshots to seed restart. |
-| `wal_record.rs` | Defines logical (`HeapInsert`, `IndexDelete`) and physical (`PageWrite`, `PageDelta`) records. |
+| `wal_record.rs` | Defines logical (`HeapInsert`, `IndexDelete`, index structure/root records) and physical (`PageWrite` FPWs) records. |
 
 Teaching hook:
 - WAL and data share the disk scheduler. Students can trace one UPDATE from log append,

@@ -15,10 +15,7 @@ pub mod txn;
 
 pub use checkpoint::{decode_checkpoint, encode_checkpoint, CheckpointPayload};
 pub use clr::{decode_clr, encode_clr, ClrPayload};
-pub use page::{
-    decode_page_delta, decode_page_write, encode_page_delta, encode_page_write, PageDeltaPayload,
-    PageWritePayload,
-};
+pub use page::{decode_page_write, encode_page_write, PageWritePayload};
 pub use txn::{decode_transaction, encode_transaction, TransactionPayload, TransactionRecordKind};
 
 pub const WAL_MAGIC: u32 = 0x5157_414c; // "QWAL" (LE)
@@ -98,7 +95,6 @@ pub fn decode_frame(bytes: &[u8]) -> QuillSQLResult<(WalFrame, usize)> {
 pub(crate) fn encode_body(payload: &WalRecordPayload) -> (ResourceManagerId, u8, Vec<u8>) {
     match payload {
         WalRecordPayload::PageWrite(body) => (ResourceManagerId::Page, 0, encode_page_write(body)),
-        WalRecordPayload::PageDelta(body) => (ResourceManagerId::Page, 1, encode_page_delta(body)),
         WalRecordPayload::Transaction(body) => {
             let (info, buf) = encode_transaction(body);
             (ResourceManagerId::Transaction, info, buf)
@@ -272,7 +268,6 @@ pub fn decode_payload(frame: &WalFrame) -> QuillSQLResult<WalRecordPayload> {
     match frame.rmid {
         ResourceManagerId::Page => match frame.info {
             0 => Ok(WalRecordPayload::PageWrite(decode_page_write(&frame.body)?)),
-            1 => Ok(WalRecordPayload::PageDelta(decode_page_delta(&frame.body)?)),
             other => Err(QuillSQLError::Internal(format!(
                 "Unknown Page info kind: {}",
                 other
@@ -330,30 +325,6 @@ mod tests {
                 assert_eq!(body.page_id, 42);
                 assert_eq!(body.prev_page_lsn, 7);
                 assert_eq!(body.page_image, vec![1, 2, 3, 4, 5]);
-            }
-            other => panic!("unexpected payload variant: {:?}", other),
-        }
-    }
-
-    #[test]
-    fn encode_decode_page_delta() {
-        let payload = WalRecordPayload::PageDelta(PageDeltaPayload {
-            page_id: 17,
-            prev_page_lsn: 8,
-            offset: 5,
-            data: vec![9, 9, 9],
-        });
-        let bytes = payload.encode(200, 150);
-        let (frame, len) = decode_frame(&bytes).unwrap();
-        assert_eq!(len, bytes.len());
-        assert_eq!(frame.rmid, ResourceManagerId::Page);
-        assert_eq!(frame.info, 1);
-        let decoded = decode_payload(&frame).unwrap();
-        match decoded {
-            WalRecordPayload::PageDelta(body) => {
-                assert_eq!(body.page_id, 17);
-                assert_eq!(body.offset, 5);
-                assert_eq!(body.data, vec![9, 9, 9]);
             }
             other => panic!("unexpected payload variant: {:?}", other),
         }
@@ -440,7 +411,7 @@ mod tests {
                 next_version: None,
                 prev_version: None,
             },
-            old_tuple_data: None,
+            old_tuple_data: vec![1, 2, 3],
         }));
         let bytes = payload.encode(80, 60);
         let (frame, len) = decode_frame(&bytes).unwrap();
@@ -453,7 +424,7 @@ mod tests {
                 assert_eq!(body.relation.root_page_id, 7);
                 assert!(body.new_tuple_meta.is_deleted);
                 assert!(body.old_tuple_meta.is_deleted);
-                assert!(body.old_tuple_data.is_none());
+                assert_eq!(body.old_tuple_data, vec![1, 2, 3]);
             }
             other => panic!("unexpected payload variant: {:?}", other),
         }

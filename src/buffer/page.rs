@@ -172,7 +172,7 @@ impl WritePageGuard {
         }
         if let Some(wal) = self.bpm.wal_manager() {
             let prev_lsn = self.lsn();
-            let wal_result = wal.log_page_update(self.page_id(), prev_lsn, self.data(), image)?;
+            let wal_result = wal.log_page_update(self.page_id(), prev_lsn, image)?;
             if let Some(result) = wal_result {
                 self.overwrite(image, Some(result.end_lsn));
                 return Ok(Some(result.end_lsn));

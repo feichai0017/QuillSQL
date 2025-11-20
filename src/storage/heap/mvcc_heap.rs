@@ -1,5 +1,6 @@
 use crate::error::QuillSQLResult;
 use crate::recovery::wal_record::WalRecordPayload;
+use crate::recovery::Lsn;
 use crate::storage::codec::TupleCodec;
 use crate::storage::heap::table_heap::TableHeap;
 use crate::storage::heap::wal_codec::{
@@ -41,8 +42,11 @@ impl MvccHeap {
     ) -> QuillSQLResult<(RecordId, TupleMeta)> {
         let mut meta = TupleMeta::new(txn_id, cid);
         meta.set_prev_version(prev_version);
-        let rid = self.heap.insert_tuple(&meta, tuple)?;
-        self.log_insert(rid, &meta, tuple)?;
+        let rid = self
+            .heap
+            .insert_tuple_with(&meta, tuple, |rid, meta_ref, tuple_ref| {
+                self.log_insert(rid, meta_ref, tuple_ref)
+            })?;
         Ok((rid, meta))
     }
 
@@ -100,12 +104,18 @@ impl MvccHeap {
             new_meta.set_next_version(Some(next));
         }
         new_meta.mark_deleted(txn_id, cid);
-        self.heap.write_tuple_meta(rid, new_meta)?;
-        self.log_delete(rid, txn_id, &new_meta, &prev_meta, &tuple)?;
+        let wal_lsn = self.log_delete(rid, txn_id, &new_meta, &prev_meta, &tuple)?;
+        self.heap
+            .write_tuple_meta_with_lsn(rid, new_meta, wal_lsn)?;
         Ok(prev_meta)
     }
 
-    fn log_insert(&self, rid: RecordId, meta: &TupleMeta, tuple: &Tuple) -> QuillSQLResult<()> {
+    fn log_insert(
+        &self,
+        rid: RecordId,
+        meta: &TupleMeta,
+        tuple: &Tuple,
+    ) -> QuillSQLResult<Option<Lsn>> {
         let payload = HeapRecordPayload::Insert(HeapInsertPayload {
             relation: self.relation_ident(),
             page_id: rid.page_id,
@@ -124,7 +134,7 @@ impl MvccHeap {
         new_meta: &TupleMeta,
         old_meta: &TupleMeta,
         tuple: &Tuple,
-    ) -> QuillSQLResult<()> {
+    ) -> QuillSQLResult<Option<Lsn>> {
         let payload = HeapRecordPayload::Delete(HeapDeletePayload {
             relation: self.relation_ident(),
             page_id: rid.page_id,
@@ -132,16 +142,18 @@ impl MvccHeap {
             op_txn_id: txn_id,
             new_tuple_meta: TupleMetaRepr::from(*new_meta),
             old_tuple_meta: TupleMetaRepr::from(*old_meta),
-            old_tuple_data: Some(TupleCodec::encode(tuple)),
+            old_tuple_data: TupleCodec::encode(tuple),
         });
         self.append_heap_record(payload)
     }
 
-    fn append_heap_record(&self, payload: HeapRecordPayload) -> QuillSQLResult<()> {
+    fn append_heap_record(&self, payload: HeapRecordPayload) -> QuillSQLResult<Option<Lsn>> {
         if let Some(wal) = self.heap.buffer_pool.wal_manager() {
-            let _ = wal.append_record_with(|_| WalRecordPayload::Heap(payload.clone()))?;
+            let res = wal.append_record_with(|_| WalRecordPayload::Heap(payload.clone()))?;
+            Ok(Some(res.end_lsn))
+        } else {
+            Ok(None)
         }
-        Ok(())
     }
 
     fn relation_ident(&self) -> RelationIdent {

@@ -167,20 +167,22 @@ This binding hides every MVCC/WAL detail from the operators:
 flowchart LR
     subgraph WAL Record Types
         HI["HeapInsert"] --> redo
-        HD["HeapDelete"] --> redo & undo
-        PI["PageImage"]
-        PD["PageDelta"]
+        HD["HeapDelete (with before-image)"] --> redo & undo
+        LI["IndexLeaf{Insert,Delete}"]
+        IS["IndexSplit/Merge/Redistribute/Parent*"]
+        IR["IndexRoot Install/Adopt/Reset"]
+        PI["PageWrite (FPW)"]
         CI["Checkpoint"]
         CL["CLR"]
     end
     Exec -->|Heap/Index payloads| WalMgr
-    BufferMgr -->|needs FPW| WalMgr
+    BufferMgr -->|first-touch FPW| WalMgr
     WalMgr --> DiskScheduler --> log files
-    Recovery -->|analysis/redone/undo| BufferMgr
+    Recovery -->|analysis/redo/undo| BufferMgr
 ```
 
 - **Logical logging first**: heap/index mutations emit redo + undo at the logical level. This keeps the WAL stream compact and human-readable for teaching.
-- **Physical fallbacks**: metadata-heavy pages (meta, freelist, header) still leverage PageWrite/PageDelta to guarantee a consistent base image, especially on the first page flush after a crash.
+- **Physical fallbacks**: metadata-heavy pages (meta, freelist, header) still leverage PageWrite FPWs to guarantee a consistent base image, especially on the first page flush after a crash.
 - **Restart**: `RecoveryManager` performs the classical ARIES sequence. It uses the `dirty_page_table` and `active_txn_table` captured by checkpoints to limit redo and undo work.
 
 ---

@@ -33,10 +33,9 @@ ARIES algorithm, QuillSQL can recover to a consistent state after crashes.
   either record count or byte thresholds (`max_buffer_records`,
   `flush_coalesce_bytes`, or a full WAL page) are met. Writers never block on Vec
   reallocation and thus scale with concurrent transactions.
-- **Physical logging** – `log_page_update` inspects old/new page images using
-  `find_contiguous_diff`. First touches (tracked via `DashSet<PageId>`) or large diffs
-  emit 4 KiB `PageWrite` FPWs; otherwise `PageDelta` keeps logs small. Both payloads
-  carry the previous `page_lsn` so redo can enforce the WAL rule.
+- **Physical logging** – `log_page_update` emits 4 KiB `PageWrite` FPWs on first touch
+  (tracked via `DashSet<PageId>`) or when logical redo is unavailable. Payloads carry
+  the previous `page_lsn` so redo can enforce the WAL rule.
 - **Segmentation & flush** – `WalStorage` appends frames to rolling segments under the
   configured WAL directory, queues async write/fsync tickets via the `DiskScheduler`
   sink, and recycles sealed segments after checkpoints. `flush()` drains buffered
@@ -59,20 +58,17 @@ ARIES algorithm, QuillSQL can recover to a consistent state after crashes.
 All log frames share the envelope defined in `wal_record.rs` and are routed by
 `ResourceManagerId`:
 
-- **Page (`ResourceManagerId::Page`)** – purely physical `PageWrite` and `PageDelta`
-  payloads. The default page resource manager checks `page_lsn` through the buffer
-  pool (when available) before rewriting the page on redo. No undo is required
-  because these are low-level physical changes.
-- **Heap (`ResourceManagerId::Heap`)** – logical payloads emitted by
-  `TableHeap::append_heap_record` include relation id, page/slot, tuple metadata, and
-  raw bytes. `HeapResourceManager` decodes them, rebuilds a temporary page image, and
-  replays inserts/updates/deletes by splicing tuples back into the heap. Undo paths
-  rely on the same metadata to restore tuple bytes or clear delete flags.
-- **Index (`ResourceManagerId::Index`)** – `BPlusTreeIndex` writes logical leaf
-  operations (`LeafInsert/Delete`) that store key bytes and the target `RecordId`.
-  `IndexResourceManager` decodes the tuple via `TupleCodec` and mutates the leaf (via
-  the buffer pool if available, otherwise direct disk I/O). Redo is idempotent (missing
-  keys are inserted), while undo mirrors insert/delete semantics.
+- **Page (`ResourceManagerId::Page`)** – purely physical `PageWrite` payloads. The page
+  resource manager checks `page_lsn` (buffer pool if available) before rewriting the
+  page on redo. No undo is required because these are low-level physical changes.
+- **Heap (`ResourceManagerId::Heap`)** – logical payloads include relation id, page/slot,
+  tuple metadata, and tuple bytes. `HeapResourceManager` applies inserts/overwrites at
+  the slot level with LSN checks and repacks slotted pages. Undo uses the stored
+  before-image (metadata + bytes) for loser transactions.
+- **Index (`ResourceManagerId::Index`)** – logs leaf inserts/deletes plus structural
+  changes (split/merge/redistribute, parent updates, root install/adopt/reset). Redo
+  mutates leaves or rebuilds structural pages with LSN/version guards; undo mirrors
+  leaf inserts/deletes only. Heap and index WAL remain independent.
 - **Transaction / CLR / Checkpoint** – `TransactionPayload` (BEGIN/COMMIT/ABORT)
   enables the undo index to link per-transaction log records. `ClrPayload` documents
   each undo step so the recovery process can survive crashes mid-undo. Checkpoints
@@ -85,23 +81,22 @@ records uniformly.
 ## Heap / Index WAL design
 
 - **Heap** – Execution operators call `ExecutionContext::insert_tuple_with_indexes`
-  (and friends), which ultimately invoke `TableHeap::append_heap_record`. Each tuple
-  carries `TupleMetaRepr` (insert/delete txn + CID, MVCC chain pointers) plus encoded
-  column bytes. During redo, `HeapResourceManager` reconstructs page images, inserts
-  or overwrites slots, and updates tuple metadata before writing the packed page back
-  via `TableHeap::recovery_view`. Undo leverages the stored “before image” to restore
-  bytes or toggle delete flags; vacuum code can later reclaim dead slots once
-  `safe_xmin` passes them.
-- **Index** – B+Tree leaf operations log the logical key/value change, unaffected by
-  page layout. Redo loads the leaf (buffer pool or disk), checks the leaf version to
-  avoid reapplying newer changes, and performs the requested insert/delete. Undo mirrors
-  the inverse operation so loser transactions roll back cleanly without touching the
-  heap. This keeps heap and index WAL independent: heap redo never needs to read index
-  pages, and vice versa.
+  (and friends), which ultimately invoke `MvccHeap` to write WAL before dirtying the
+  page. Each tuple carries `TupleMetaRepr` (insert/delete txn + CID, MVCC chain
+  pointers) plus encoded column bytes. During redo, `HeapResourceManager` applies
+  inserts or overwrites at the slot level with LSN checks and repacks the slotted page
+  before writing it back via `TableHeap::recovery_view`. Undo leverages the stored
+  before-image to restore bytes or toggle delete flags; vacuum code can later reclaim
+  dead slots once `safe_xmin` passes them.
+- **Index** – B+Tree leaf operations log the logical key/value change, plus structural
+  records for split/merge/redistribute/parent updates and root install/adopt/reset.
+  Redo loads or rebuilds pages (buffer pool or disk), checks page LSN/version to avoid
+  reapplying newer changes, and performs the requested mutation. Undo mirrors
+  leaf-level inserts/deletes only. Heap and index WAL stay independent.
 - **Page images** – For heap/index structural changes that rewrite large sections (e.g.,
   new heap page, B+Tree splits), page guards still emit FPWs through
-  `WalManager::log_page_update`. The logical heap/index WAL layers ensure redo can
-  operate even when FPWs are skipped after the first touch.
+  `WalManager::log_page_update`. Logical heap/index WAL ensures redo still works even
+  when FPWs are skipped after the first touch.
 
 ---
 
