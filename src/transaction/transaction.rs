@@ -85,7 +85,7 @@ impl UndoAction {
                 indexes,
             } => {
                 for (index, key) in indexes.into_iter() {
-                    index.delete(&key)?;
+                    index.delete_with_txn(&key, txn_id)?;
                 }
                 table.recover_delete_tuple(rid, txn_id, 0)?;
                 Ok(())
@@ -98,7 +98,7 @@ impl UndoAction {
                 indexes,
             } => {
                 for (index, key) in indexes {
-                    index.insert(&key, rid)?;
+                    index.insert_with_txn(&key, rid, txn_id)?;
                 }
                 table.recover_restore_tuple(rid, prev_meta, &prev_tuple)?;
                 Ok(())

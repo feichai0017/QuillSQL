@@ -1,5 +1,6 @@
 use crate::buffer::{AtomicPageId, WritePageGuard, INVALID_PAGE_ID};
 use crate::catalog::SchemaRef;
+use crate::recovery::Lsn;
 use crate::storage::codec::TablePageCodec;
 use crate::storage::page::{RecordId, TablePage, TupleMeta, INVALID_RID};
 use crate::{buffer::BufferManager, error::QuillSQLResult};
@@ -48,9 +49,10 @@ impl TableHeap {
         &self,
         guard: &mut WritePageGuard,
         table_page: &mut TablePage,
+        new_lsn: Option<Lsn>,
     ) -> QuillSQLResult<()> {
         let new_image = TablePageCodec::encode(table_page);
-        guard.apply_page_image(&new_image)?;
+        guard.overwrite(&new_image, new_lsn.or(Some(guard.lsn())));
         Ok(())
     }
 
@@ -63,6 +65,18 @@ impl TableHeap {
     /// Inserts `tuple` with MVCC metadata `meta`, allocating a new page if the
     /// current tail page runs out of capacity.
     pub fn insert_tuple(&self, meta: &TupleMeta, tuple: &Tuple) -> QuillSQLResult<RecordId> {
+        self.insert_tuple_with(meta, tuple, |_rid, _meta, _tuple| Ok(None))
+    }
+
+    pub fn insert_tuple_with<F>(
+        &self,
+        meta: &TupleMeta,
+        tuple: &Tuple,
+        mut wal_cb: F,
+    ) -> QuillSQLResult<RecordId>
+    where
+        F: FnMut(RecordId, &TupleMeta, &Tuple) -> QuillSQLResult<Option<Lsn>>,
+    {
         let mut current_page_id = self.last_page_id.load(Ordering::SeqCst);
 
         loop {
@@ -73,17 +87,19 @@ impl TableHeap {
 
             if table_page.next_tuple_offset(tuple).is_ok() {
                 let slot_id = table_page.insert_tuple(meta, tuple)?;
-                self.write_back_page(&mut current_page_guard, &mut table_page)?;
-                return Ok(RecordId::new(current_page_id, slot_id as u32));
+                let rid = RecordId::new(current_page_id, slot_id as u32);
+                let wal_lsn = wal_cb(rid, meta, tuple)?;
+                self.write_back_page(&mut current_page_guard, &mut table_page, wal_lsn)?;
+                return Ok(rid);
             }
 
             let mut new_page_guard = self.buffer_pool.new_page()?;
             let new_page_id = new_page_guard.page_id();
             let mut new_table_page = TablePage::new(self.schema.clone(), INVALID_PAGE_ID);
-            self.write_back_page(&mut new_page_guard, &mut new_table_page)?;
+            self.write_back_page(&mut new_page_guard, &mut new_table_page, None)?;
 
             table_page.header.next_page_id = new_page_id;
-            self.write_back_page(&mut current_page_guard, &mut table_page)?;
+            self.write_back_page(&mut current_page_guard, &mut table_page, None)?;
             drop(current_page_guard);
 
             self.last_page_id.store(new_page_id, Ordering::SeqCst);
@@ -101,13 +117,22 @@ impl TableHeap {
 
     /// Overwrite the tuple metadata at `rid` without emitting WAL.
     pub fn write_tuple_meta(&self, rid: RecordId, meta: TupleMeta) -> QuillSQLResult<()> {
+        self.write_tuple_meta_with_lsn(rid, meta, None)
+    }
+
+    pub fn write_tuple_meta_with_lsn(
+        &self,
+        rid: RecordId,
+        meta: TupleMeta,
+        new_lsn: Option<Lsn>,
+    ) -> QuillSQLResult<()> {
         let mut page_guard = self.buffer_pool.fetch_page_write(rid.page_id)?;
         let mut table_page = TablePageCodec::decode(page_guard.data(), self.schema.clone())?.0;
         table_page.set_lsn(page_guard.lsn());
 
         let slot = rid.slot_num as u16;
         table_page.update_tuple_meta(meta, slot)?;
-        self.write_back_page(&mut page_guard, &mut table_page)
+        self.write_back_page(&mut page_guard, &mut table_page, new_lsn)
     }
 
     pub fn tuple(&self, rid: RecordId) -> QuillSQLResult<Tuple> {
@@ -175,7 +200,7 @@ impl TableHeap {
         }
 
         table_page.reclaim_tuple(slot)?;
-        self.write_back_page(&mut page_guard, &mut table_page)?;
+        self.write_back_page(&mut page_guard, &mut table_page, None)?;
         Ok(true)
     }
 }

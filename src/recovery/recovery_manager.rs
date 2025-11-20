@@ -111,8 +111,7 @@ mod tests {
     use crate::recovery::undo::{UndoExecutor, UndoOutcome};
     use crate::recovery::wal::page::WAL_PAGE_SIZE;
     use crate::recovery::wal_record::{
-        PageDeltaPayload, PageWritePayload, TransactionPayload, TransactionRecordKind,
-        WalRecordPayload,
+        PageWritePayload, TransactionPayload, TransactionRecordKind, WalRecordPayload,
     };
     use crate::recovery::WalManager;
     use crate::storage::codec::TablePageHeaderCodec;
@@ -259,13 +258,14 @@ mod tests {
         .unwrap();
         wal.flush(None).unwrap();
 
-        // Apply a delta at offset 100
+        // Apply an updated page image with bytes at offset 100
+        let mut updated = zero.clone();
+        updated[100..105].copy_from_slice(&[1, 2, 3, 4, 5]);
         wal.append_record_with(|_| {
-            WalRecordPayload::PageDelta(PageDeltaPayload {
+            WalRecordPayload::PageWrite(PageWritePayload {
                 page_id: 2,
                 prev_page_lsn: 0,
-                offset: 100,
-                data: vec![1, 2, 3, 4, 5],
+                page_image: updated.clone(),
             })
         })
         .unwrap();
@@ -747,17 +747,21 @@ mod tests {
         .unwrap();
         wal.flush(None).unwrap();
 
-        // Write many small deltas to rotate segments, record an early recLSN
+        // Write many small rewrites to rotate segments, record an early recLSN
         let mut first_delta_lsn = 0u64;
+        let mut current = base.clone();
         for i in 0..128u16 {
             // enough to rotate
             let res = wal
                 .append_record_with(|_| {
-                    WalRecordPayload::PageDelta(PageDeltaPayload {
+                    let off = (i % 32) * 8;
+                    for b in &mut current[(off as usize)..(off as usize + 8)] {
+                        *b = i as u8;
+                    }
+                    WalRecordPayload::PageWrite(PageWritePayload {
                         page_id: pid,
                         prev_page_lsn: 0,
-                        offset: (i % 32) * 8,
-                        data: vec![i as u8; 8],
+                        page_image: current.clone(),
                     })
                 })
                 .unwrap();
@@ -826,13 +830,13 @@ mod tests {
             })
         })
         .unwrap();
-        // Subsequent small change as delta
+        // Subsequent change rewrites the full page again (no deltas)
+        page[102..104].copy_from_slice(&[9, 9]);
         wal.append_record_with(|_| {
-            WalRecordPayload::PageDelta(PageDeltaPayload {
+            WalRecordPayload::PageWrite(PageWritePayload {
                 page_id: pid,
                 prev_page_lsn: 0,
-                offset: 102,
-                data: vec![9, 9],
+                page_image: page.clone(),
             })
         })
         .unwrap();

@@ -16,15 +16,21 @@ use crate::storage::page::{BPlusTreeHeaderPage, BPlusTreeInternalPage};
 use crate::storage::page::{BPlusTreeLeafPage, BPlusTreePage, RecordId};
 
 use crate::config::BTreeConfig;
-use crate::recovery::wal_record::WalRecordPayload;
+use crate::recovery::{wal_record::WalRecordPayload, Lsn};
 use crate::storage::codec::BPlusTreePageTypeCodec;
 pub use crate::storage::index::btree_iterator::TreeIndexIterator;
 use crate::storage::index::wal_codec::{
-    IndexLeafDeletePayload, IndexLeafInsertPayload, IndexRecordPayload, IndexRelationIdent,
+    IndexInternalEntryPayload, IndexInternalMergePayload, IndexInternalRedistributePayload,
+    IndexInternalSplitPayload, IndexLeafDeletePayload, IndexLeafInsertPayload,
+    IndexLeafMergePayload, IndexLeafRedistributePayload, IndexLeafSplitEntryPayload,
+    IndexLeafSplitPayload, IndexParentDeletePayload, IndexParentInsertPayload,
+    IndexParentUpdatePayload, IndexRecordPayload, IndexRelationIdent, IndexRootAdoptPayload,
+    IndexRootInstallInternalPayload, IndexRootInstallLeafPayload, IndexRootResetPayload,
     SchemaRepr,
 };
 use crate::storage::page::BPlusTreePageType;
 use crate::storage::tuple::Tuple;
+use crate::transaction::TransactionId;
 // OLC bounded restart and backoff configuration
 const MAX_OLC_RESTARTS: usize = 64;
 const OLC_BACKOFF_BASE_US: u64 = 50;
@@ -80,9 +86,14 @@ impl BPlusTreeIndex {
         &self,
         guard: &mut WritePageGuard,
         new_image: Vec<u8>,
+        new_lsn: Option<Lsn>,
     ) -> QuillSQLResult<()> {
         debug_assert_eq!(new_image.len(), PAGE_SIZE);
-        guard.apply_page_image(&new_image)?;
+        if new_lsn.is_some() {
+            guard.overwrite(&new_image, new_lsn);
+        } else {
+            guard.apply_page_image(&new_image)?;
+        }
         Ok(())
     }
 
@@ -93,11 +104,13 @@ impl BPlusTreeIndex {
         }
     }
 
-    fn append_index_record(&self, payload: IndexRecordPayload) -> QuillSQLResult<()> {
+    fn append_index_record(&self, payload: IndexRecordPayload) -> QuillSQLResult<Option<Lsn>> {
         if let Some(wal) = self.buffer_pool.wal_manager() {
-            let _ = wal.append_record_with(|_| WalRecordPayload::Index(payload.clone()))?;
+            let res = wal.append_record_with(|_| WalRecordPayload::Index(payload.clone()))?;
+            Ok(Some(res.end_lsn))
+        } else {
+            Ok(None)
         }
-        Ok(())
     }
 
     pub fn new(
@@ -187,14 +200,13 @@ impl BPlusTreeIndex {
         Ok(header_page.root_page_id)
     }
 
-    fn set_root_page_id(&self, page_id: PageId) -> QuillSQLResult<()> {
+    fn set_root_page_id(&self, page_id: PageId, wal_lsn: Option<Lsn>) -> QuillSQLResult<()> {
         let mut header_guard = self.buffer_pool.fetch_page_write(self.header_page_id)?;
-        //
         let header_page = BPlusTreeHeaderPage {
             root_page_id: page_id,
         };
         let encoded = BPlusTreeHeaderPageCodec::encode(&header_page);
-        self.wal_overwrite_page(&mut header_guard, encoded)?;
+        self.wal_overwrite_page(&mut header_guard, encoded, wal_lsn)?;
         Ok(())
     }
 
@@ -298,8 +310,17 @@ impl BPlusTreeIndex {
         }
     }
 
-    /// 公共 API: 插入一个键值对，使用闩锁耦合实现高并发。
     pub fn insert(&self, key: &Tuple, rid: RecordId) -> QuillSQLResult<()> {
+        self.insert_with_txn(key, rid, TransactionId::default())
+    }
+
+    /// 公共 API: 插入一个键值对，使用闩锁耦合实现高并发。
+    pub fn insert_with_txn(
+        &self,
+        key: &Tuple,
+        rid: RecordId,
+        txn_id: TransactionId,
+    ) -> QuillSQLResult<()> {
         let mut context = Context::new();
 
         // Guard tree initialization to avoid concurrent start_new_tree races.
@@ -307,9 +328,8 @@ impl BPlusTreeIndex {
             let _lock = self.header_page_lock.write();
             let root_now = self.get_root_page_id()?;
             if root_now == INVALID_PAGE_ID {
-                // Create root leaf and set root under header lock.
-                self.start_new_tree(key, rid)?;
-                return Ok(());
+                // Create an empty root leaf under header lock.
+                self.start_new_tree()?;
             }
         }
 
@@ -380,19 +400,23 @@ impl BPlusTreeIndex {
                 let delete_payload = IndexRecordPayload::LeafDelete(IndexLeafDeletePayload {
                     relation: self.relation_ident(),
                     page_id: leaf_guard.page_id(),
+                    op_txn_id: txn_id,
                     key_data: key_encoded.clone(),
                     old_rid,
                 });
-                self.append_index_record(delete_payload)?;
+                let mut wal_lsn = self.append_index_record(delete_payload)?;
                 let insert_payload = IndexRecordPayload::LeafInsert(IndexLeafInsertPayload {
                     relation: self.relation_ident(),
                     page_id: leaf_guard.page_id(),
+                    op_txn_id: txn_id,
                     key_data: key_encoded,
                     rid,
                 });
-                self.append_index_record(insert_payload)?;
+                if let Some(lsn) = self.append_index_record(insert_payload)? {
+                    wal_lsn = Some(lsn);
+                }
                 let encoded = BPlusTreeLeafPageCodec::encode(&leaf_page);
-                self.wal_overwrite_page(&mut leaf_guard, encoded)?;
+                self.wal_overwrite_page(&mut leaf_guard, encoded, wal_lsn)?;
                 local_ctx.release_all_write_locks();
                 return Ok(());
             }
@@ -424,12 +448,13 @@ impl BPlusTreeIndex {
             let payload = IndexRecordPayload::LeafInsert(IndexLeafInsertPayload {
                 relation: self.relation_ident(),
                 page_id: leaf_guard.page_id(),
+                op_txn_id: txn_id,
                 key_data: TupleCodec::encode(key),
                 rid,
             });
-            self.append_index_record(payload)?;
+            let wal_lsn = self.append_index_record(payload)?;
             let encoded = BPlusTreeLeafPageCodec::encode(&leaf_page);
-            self.wal_overwrite_page(&mut leaf_guard, encoded)?;
+            self.wal_overwrite_page(&mut leaf_guard, encoded, wal_lsn)?;
             local_ctx.release_all_write_locks();
             return Ok(());
         }
@@ -437,6 +462,10 @@ impl BPlusTreeIndex {
 
     /// Public API: delete a key with latch coupling to ensure concurrency safety.
     pub fn delete(&self, key: &Tuple) -> QuillSQLResult<()> {
+        self.delete_with_txn(key, TransactionId::default())
+    }
+
+    pub fn delete_with_txn(&self, key: &Tuple, txn_id: TransactionId) -> QuillSQLResult<()> {
         if self.is_empty()? {
             return Ok(());
         }
@@ -512,12 +541,13 @@ impl BPlusTreeIndex {
             let payload = IndexRecordPayload::LeafDelete(IndexLeafDeletePayload {
                 relation: self.relation_ident(),
                 page_id: leaf_guard.page_id(),
+                op_txn_id: txn_id,
                 key_data: key_bytes,
                 old_rid: target_rid,
             });
-            self.append_index_record(payload)?;
+            let wal_lsn = self.append_index_record(payload)?;
             let encoded = BPlusTreeLeafPageCodec::encode(&leaf_page);
-            self.wal_overwrite_page(&mut leaf_guard, encoded)?;
+            self.wal_overwrite_page(&mut leaf_guard, encoded, wal_lsn)?;
 
             // If the node is underflowing, handle it.
             if leaf_page.header.current_size < leaf_page.min_size() {
@@ -558,7 +588,7 @@ impl BPlusTreeIndex {
                                 parent_page.array[node_idx].0 = leaf_page.key_at(0).clone();
                                 parent_page.header.version += 1;
                                 let encoded = BPlusTreeInternalPageCodec::encode(&parent_page);
-                                self.wal_overwrite_page(&mut parent_guard, encoded)?;
+                                self.wal_overwrite_page(&mut parent_guard, encoded, None)?;
                             }
                         }
                         // push back to maintain path for later releases
@@ -804,6 +834,7 @@ impl BPlusTreeIndex {
         mut parent_guard: WritePageGuard,
         context: &mut Context,
     ) -> QuillSQLResult<()> {
+        let relation = self.relation_ident();
         let (mut left_page, _) =
             BPlusTreePageCodec::decode(left_guard.data(), self.key_schema.clone())?;
         let (mut right_page, _) =
@@ -821,31 +852,64 @@ impl BPlusTreeIndex {
             }
         };
 
-        match (&mut left_page, &mut right_page) {
+        let child_payload = match (&mut left_page, &mut right_page) {
             (BPlusTreePage::Leaf(left), BPlusTreePage::Leaf(right)) => {
                 left.merge(right);
+                left.header.version += 1;
+                IndexRecordPayload::LeafMerge(IndexLeafMergePayload {
+                    relation: relation.clone(),
+                    left_page_id: left_guard.page_id(),
+                    right_page_id,
+                    leaf_max_size: self.leaf_max_size,
+                    left_next_page_id: left.header.next_page_id,
+                    entries: left
+                        .array
+                        .iter()
+                        .map(|(key, rid)| IndexLeafSplitEntryPayload {
+                            key_data: TupleCodec::encode(key),
+                            rid: *rid,
+                        })
+                        .collect(),
+                })
             }
             (BPlusTreePage::Internal(left), BPlusTreePage::Internal(right)) => {
                 left.merge(middle_key, right);
-                // B-link maintenance: after merge, left should inherit right's high bound and next pointer
                 left.header.next_page_id = right.header.next_page_id;
                 left.high_key = right.high_key.clone();
+                left.header.version += 1;
+                IndexRecordPayload::InternalMerge(IndexInternalMergePayload {
+                    relation: relation.clone(),
+                    left_page_id: left_guard.page_id(),
+                    right_page_id,
+                    internal_max_size: self.internal_max_size,
+                    left_entries: left
+                        .array
+                        .iter()
+                        .map(|(tuple, child)| IndexInternalEntryPayload {
+                            key_data: TupleCodec::encode(tuple),
+                            child_page_id: *child,
+                        })
+                        .collect(),
+                    high_key: left.high_key.as_ref().map(|t| TupleCodec::encode(t)),
+                    next_page_id: left.header.next_page_id,
+                })
             }
             _ => unreachable!("Mismatched page types in coalesce"),
-        }
+        };
 
-        // Update pages on disk
-        if let BPlusTreePage::Leaf(p) = &mut left_page {
-            p.header.version += 1;
-        } else if let BPlusTreePage::Internal(p) = &mut left_page {
-            p.header.version += 1;
-        }
-        parent_page.header.version += 1;
-
+        let child_lsn = self.append_index_record(child_payload)?;
         let left_encoded = BPlusTreePageCodec::encode(&left_page);
-        self.wal_overwrite_page(&mut left_guard, left_encoded)?;
+        self.wal_overwrite_page(&mut left_guard, left_encoded, child_lsn)?;
+
+        parent_page.header.version += 1;
+        let parent_payload = IndexRecordPayload::ParentDelete(IndexParentDeletePayload {
+            relation: relation.clone(),
+            parent_page_id: parent_guard.page_id(),
+            child_page_id: right_page_id,
+        });
+        let parent_lsn = self.append_index_record(parent_payload)?;
         let parent_encoded = BPlusTreeInternalPageCodec::encode(&parent_page);
-        self.wal_overwrite_page(&mut parent_guard, parent_encoded)?;
+        self.wal_overwrite_page(&mut parent_guard, parent_encoded, parent_lsn)?;
         drop(left_guard);
         drop(right_guard);
         self.buffer_pool.delete_page(right_page_id)?;
@@ -869,6 +933,7 @@ impl BPlusTreeIndex {
         parent_idx_of_to_node: usize,
         from_is_left_sibling: bool,
     ) -> QuillSQLResult<()> {
+        let relation = self.relation_ident();
         let (mut from_page, _) =
             BPlusTreePageCodec::decode(from_guard.data(), self.key_schema.clone())?;
         let (mut to_page, _) =
@@ -876,41 +941,50 @@ impl BPlusTreeIndex {
         let (mut parent_page, _) =
             BPlusTreeInternalPageCodec::decode(parent_guard.data(), self.key_schema.clone())?;
 
-        if from_is_left_sibling {
-            // from=left(from_internal), to=right(to_internal). Separator key is at parent_idx_of_to_node.
+        let (child_payload, parent_child_id, parent_key_tuple) = if from_is_left_sibling {
             let separator_idx = parent_idx_of_to_node;
             match (&mut to_page, &mut from_page) {
                 (BPlusTreePage::Leaf(to_leaf), BPlusTreePage::Leaf(from_leaf)) => {
-                    let item_to_move = from_leaf.remove_last_kv();
-                    to_leaf.array.insert(0, item_to_move);
+                    let (moved_key, moved_rid) = from_leaf.remove_last_kv();
+                    let moved_payload = IndexLeafSplitEntryPayload {
+                        key_data: TupleCodec::encode(&moved_key),
+                        rid: moved_rid,
+                    };
+                    to_leaf.array.insert(0, (moved_key, moved_rid));
                     to_leaf.header.current_size += 1;
-                    // Parent separator stores the minimal key of the RIGHT child
                     parent_page.array[separator_idx].0 = to_leaf.key_at(0).clone();
                     to_leaf.header.version += 1;
                     from_leaf.header.version += 1;
+                    (
+                        IndexRecordPayload::LeafRedistribute(IndexLeafRedistributePayload {
+                            relation: relation.clone(),
+                            from_page_id: from_guard.page_id(),
+                            to_page_id: to_guard.page_id(),
+                            from_is_left: true,
+                            moved_entry: moved_payload,
+                        }),
+                        to_guard.page_id(),
+                        parent_page.array[separator_idx].0.clone(),
+                    )
                 }
                 (BPlusTreePage::Internal(to_internal), BPlusTreePage::Internal(from_internal)) => {
-                    // This logic is based on bustub's BPlusTreeInternalPage::MoveLastToFrontOf
-                    // 1. Get the last key-pointer pair from the left sibling (from_internal)
-                    let item_to_move = from_internal.remove_last_kv(); // This is (K_last, P_last)
+                    let item_to_move = from_internal.remove_last_kv();
                     let separator_key_in_parent = parent_page.key_at(separator_idx).clone();
-
-                    // 2. The old separator key from the parent moves down to become the first key in the recipient (to_internal).
-                    // The original sentinel pointer of the recipient becomes the pointer for this new key.
-                    to_internal
-                        .array
-                        .insert(1, (separator_key_in_parent, to_internal.value_at(0)));
-
-                    // 3. The pointer from the moved item becomes the new sentinel for the recipient.
-                    to_internal.array[0].1 = item_to_move.1; // Set sentinel to P_last
-
-                    // 4. The key from the moved item becomes the new separator in the parent.
-                    parent_page.array[separator_idx].0 = item_to_move.0; // Set parent key to K_last
-
+                    let from_old_sentinel = from_internal.value_at(0);
+                    let to_old_sentinel = to_internal.value_at(0);
+                    let moved_payload = IndexInternalEntryPayload {
+                        key_data: TupleCodec::encode(&item_to_move.0),
+                        child_page_id: item_to_move.1,
+                    };
+                    to_internal.array.insert(
+                        1,
+                        (separator_key_in_parent.clone(), to_internal.value_at(0)),
+                    );
+                    to_internal.array[0].1 = item_to_move.1;
+                    parent_page.array[separator_idx].0 = item_to_move.0.clone();
                     to_internal.header.current_size += 1;
                     to_internal.header.version += 1;
                     from_internal.header.version += 1;
-
                     self.refresh_internal_child_fence(
                         &parent_page,
                         to_guard.page_id(),
@@ -921,45 +995,79 @@ impl BPlusTreeIndex {
                         from_guard.page_id(),
                         from_internal,
                     )?;
+                    (
+                        IndexRecordPayload::InternalRedistribute(
+                            IndexInternalRedistributePayload {
+                                relation: relation.clone(),
+                                from_page_id: from_guard.page_id(),
+                                to_page_id: to_guard.page_id(),
+                                parent_page_id: parent_guard.page_id(),
+                                from_is_left: true,
+                                from_old_sentinel,
+                                to_old_sentinel,
+                                moved_entry: moved_payload,
+                                separator_key_data: TupleCodec::encode(&separator_key_in_parent),
+                                to_new_high_key: to_internal
+                                    .high_key
+                                    .as_ref()
+                                    .map(|t| TupleCodec::encode(t)),
+                                to_new_next_page_id: to_internal.header.next_page_id,
+                                from_new_high_key: from_internal
+                                    .high_key
+                                    .as_ref()
+                                    .map(|t| TupleCodec::encode(t)),
+                                from_new_next_page_id: from_internal.header.next_page_id,
+                            },
+                        ),
+                        to_guard.page_id(),
+                        parent_page.array[separator_idx].0.clone(),
+                    )
                 }
                 _ => return Err(QuillSQLError::Internal("Mismatched page types".to_string())),
             }
         } else {
-            // Borrow from RIGHT
-            // from=right(from_internal), to=left(to_internal). Separator key is at parent_idx_of_to_node + 1.
             let separator_idx = parent_idx_of_to_node + 1;
             match (&mut to_page, &mut from_page) {
                 (BPlusTreePage::Leaf(to_leaf), BPlusTreePage::Leaf(from_leaf)) => {
-                    let item_to_move = from_leaf.remove_first_kv();
-                    to_leaf.array.push(item_to_move);
+                    let (moved_key, moved_rid) = from_leaf.remove_first_kv();
+                    let moved_payload = IndexLeafSplitEntryPayload {
+                        key_data: TupleCodec::encode(&moved_key),
+                        rid: moved_rid,
+                    };
+                    to_leaf.array.push((moved_key, moved_rid));
                     to_leaf.header.current_size += 1;
-                    // Parent separator stores the minimal key of the RIGHT child
                     parent_page.array[separator_idx].0 = from_leaf.key_at(0).clone();
                     to_leaf.header.version += 1;
                     from_leaf.header.version += 1;
+                    (
+                        IndexRecordPayload::LeafRedistribute(IndexLeafRedistributePayload {
+                            relation: relation.clone(),
+                            from_page_id: from_guard.page_id(),
+                            to_page_id: to_guard.page_id(),
+                            from_is_left: false,
+                            moved_entry: moved_payload,
+                        }),
+                        from_guard.page_id(),
+                        parent_page.array[separator_idx].0.clone(),
+                    )
                 }
                 (BPlusTreePage::Internal(to_internal), BPlusTreePage::Internal(from_internal)) => {
-                    // This logic is based on bustub's BPlusTreeInternalPage::MoveFirstToEndOf
-                    // 1. Get the separator from the parent and the first *real* item from the right sibling (from_internal)
                     let separator_key_in_parent = parent_page.key_at(separator_idx).clone();
-                    let item_to_move = from_internal.remove_first_kv(); // This is (K_R1, P_R1)
-
-                    // 2. The old separator moves down to the end of the recipient (to_internal).
-                    // Its pointer is the original sentinel pointer of the right sibling.
+                    let item_to_move = from_internal.remove_first_kv();
+                    let from_old_sentinel = from_internal.value_at(0);
+                    let to_old_sentinel = to_internal.value_at(0);
+                    let moved_payload = IndexInternalEntryPayload {
+                        key_data: TupleCodec::encode(&item_to_move.0),
+                        child_page_id: item_to_move.1,
+                    };
                     to_internal
                         .array
-                        .push((separator_key_in_parent, from_internal.value_at(0)));
-
-                    // 3. The key from the moved item becomes the new separator in the parent.
-                    parent_page.array[separator_idx].0 = item_to_move.0; // Set parent key to K_R1
-
-                    // 4. The pointer from the moved item becomes the new sentinel of the right sibling.
-                    from_internal.array[0].1 = item_to_move.1; // Set right sibling's sentinel to P_R1
-
+                        .push((separator_key_in_parent.clone(), from_internal.value_at(0)));
+                    parent_page.array[separator_idx].0 = item_to_move.0.clone();
+                    from_internal.array[0].1 = item_to_move.1;
                     to_internal.header.current_size += 1;
                     to_internal.header.version += 1;
                     from_internal.header.version += 1;
-
                     self.refresh_internal_child_fence(
                         &parent_page,
                         to_guard.page_id(),
@@ -970,19 +1078,54 @@ impl BPlusTreeIndex {
                         from_guard.page_id(),
                         from_internal,
                     )?;
+                    (
+                        IndexRecordPayload::InternalRedistribute(
+                            IndexInternalRedistributePayload {
+                                relation: relation.clone(),
+                                from_page_id: from_guard.page_id(),
+                                to_page_id: to_guard.page_id(),
+                                parent_page_id: parent_guard.page_id(),
+                                from_is_left: false,
+                                from_old_sentinel,
+                                to_old_sentinel,
+                                moved_entry: moved_payload,
+                                separator_key_data: TupleCodec::encode(&separator_key_in_parent),
+                                to_new_high_key: to_internal
+                                    .high_key
+                                    .as_ref()
+                                    .map(|t| TupleCodec::encode(t)),
+                                to_new_next_page_id: to_internal.header.next_page_id,
+                                from_new_high_key: from_internal
+                                    .high_key
+                                    .as_ref()
+                                    .map(|t| TupleCodec::encode(t)),
+                                from_new_next_page_id: from_internal.header.next_page_id,
+                            },
+                        ),
+                        from_guard.page_id(),
+                        parent_page.array[separator_idx].0.clone(),
+                    )
                 }
                 _ => return Err(QuillSQLError::Internal("Mismatched page types".to_string())),
             }
-        }
+        };
+
+        let child_lsn = self.append_index_record(child_payload)?;
+        let from_encoded = BPlusTreePageCodec::encode(&from_page);
+        self.wal_overwrite_page(&mut from_guard, from_encoded, child_lsn)?;
+        let to_encoded = BPlusTreePageCodec::encode(&to_page);
+        self.wal_overwrite_page(&mut to_guard, to_encoded, child_lsn)?;
 
         parent_page.header.version += 1;
-
-        let from_encoded = BPlusTreePageCodec::encode(&from_page);
-        self.wal_overwrite_page(&mut from_guard, from_encoded)?;
-        let to_encoded = BPlusTreePageCodec::encode(&to_page);
-        self.wal_overwrite_page(&mut to_guard, to_encoded)?;
+        let parent_payload = IndexRecordPayload::ParentUpdate(IndexParentUpdatePayload {
+            relation,
+            parent_page_id: parent_guard.page_id(),
+            child_page_id: parent_child_id,
+            key_data: TupleCodec::encode(&parent_key_tuple),
+        });
+        let parent_lsn = self.append_index_record(parent_payload)?;
         let parent_encoded = BPlusTreeInternalPageCodec::encode(&parent_page);
-        self.wal_overwrite_page(&mut parent_guard, parent_encoded)?;
+        self.wal_overwrite_page(&mut parent_guard, parent_encoded, parent_lsn)?;
 
         Ok(())
     }
@@ -1015,21 +1158,30 @@ impl BPlusTreeIndex {
 
         if let BPlusTreePage::Internal(root_internal) = root_page {
             if root_internal.header.current_size == 1 {
+                let payload = IndexRecordPayload::RootAdopt(IndexRootAdoptPayload {
+                    relation: self.relation_ident(),
+                    new_root_page_id: root_internal.value_at(0),
+                });
+                let wal_lsn = self.append_index_record(payload)?;
                 // The lock is already held by the caller (e.g., delete).
                 // Re-acquiring it would cause a deadlock.
                 let new_root_id = root_internal.value_at(0);
                 // Drop page guard before touching header to avoid page<->header lock inversion
                 drop(root_guard);
                 let _lock = self.header_page_lock.write();
-                self.set_root_page_id(new_root_id)?;
+                self.set_root_page_id(new_root_id, wal_lsn)?;
                 // Delay old-root physical deallocation to avoid races with concurrent readers
             }
         } else if let BPlusTreePage::Leaf(root_leaf) = root_page {
             if root_leaf.header.current_size == 0 {
+                let payload = IndexRecordPayload::RootReset(IndexRootResetPayload {
+                    relation: self.relation_ident(),
+                });
+                let wal_lsn = self.append_index_record(payload)?;
                 // The lock is already held by the caller.
                 drop(root_guard);
                 let _lock = self.header_page_lock.write();
-                self.set_root_page_id(INVALID_PAGE_ID)?;
+                self.set_root_page_id(INVALID_PAGE_ID, wal_lsn)?;
                 // Delay old-root physical deallocation to avoid races with concurrent readers
             }
         }
@@ -1037,17 +1189,25 @@ impl BPlusTreeIndex {
     }
 
     /// Internal: create the very first node when the tree is empty.
-    fn start_new_tree(&self, key: &Tuple, rid: RecordId) -> QuillSQLResult<()> {
+    fn start_new_tree(&self) -> QuillSQLResult<()> {
         let mut root_guard = self.buffer_pool.new_page()?;
         let root_page_id = root_guard.page_id();
         let mut leaf_page = BPlusTreeLeafPage::new(self.key_schema.clone(), self.leaf_max_size);
-        leaf_page.insert(key.clone(), rid);
+        leaf_page.header.version += 1;
+        let payload = IndexRecordPayload::RootInstallLeaf(IndexRootInstallLeafPayload {
+            relation: self.relation_ident(),
+            page_id: root_page_id,
+            leaf_max_size: self.leaf_max_size,
+            next_page_id: leaf_page.header.next_page_id,
+            entries: Vec::new(),
+        });
+        let wal_lsn = self.append_index_record(payload)?;
         let encoded_data = BPlusTreeLeafPageCodec::encode(&leaf_page);
-        self.wal_overwrite_page(&mut root_guard, encoded_data)?;
+        self.wal_overwrite_page(&mut root_guard, encoded_data, wal_lsn)?;
         // Update root id (release page latch before touching header to avoid lock inversion).
         // Precondition: caller holds header_page_lock.
         drop(root_guard);
-        self.set_root_page_id(root_page_id)?;
+        self.set_root_page_id(root_page_id, wal_lsn)?;
         Ok(())
     }
 
@@ -1215,35 +1375,46 @@ impl BPlusTreeIndex {
             let mut new_page_guard = self.buffer_pool.new_page()?;
             let new_page_id = new_page_guard.page_id();
 
-            let middle_key = match &mut page {
+            let (middle_key, split_wal_lsn) = match &mut page {
                 BPlusTreePage::Leaf(leaf_page) => {
+                    let split_at = leaf_page.header.current_size as usize / 2;
                     let mut new_leaf =
                         BPlusTreeLeafPage::new(self.key_schema.clone(), self.leaf_max_size);
-                    new_leaf.batch_insert(
-                        leaf_page.split_off(leaf_page.header.current_size as usize / 2),
-                    );
+                    new_leaf.batch_insert(leaf_page.split_off(split_at));
                     new_leaf.header.next_page_id = leaf_page.header.next_page_id;
                     leaf_page.header.next_page_id = new_page_id;
+                    let entries_payload = new_leaf
+                        .array
+                        .iter()
+                        .map(|(key, rid)| IndexLeafSplitEntryPayload {
+                            key_data: TupleCodec::encode(key),
+                            rid: *rid,
+                        })
+                        .collect::<Vec<_>>();
+                    let payload = IndexRecordPayload::LeafSplit(IndexLeafSplitPayload {
+                        relation: self.relation_ident(),
+                        left_page_id: page_id,
+                        right_page_id: new_page_id,
+                        leaf_max_size: self.leaf_max_size,
+                        split_index: split_at as u16,
+                        right_next_page_id: new_leaf.header.next_page_id,
+                        entries: entries_payload,
+                    });
+                    let wal_lsn = self.append_index_record(payload)?;
                     let new_data = BPlusTreeLeafPageCodec::encode(&new_leaf);
-                    self.wal_overwrite_page(&mut new_page_guard, new_data)?;
+                    self.wal_overwrite_page(&mut new_page_guard, new_data, wal_lsn)?;
                     leaf_page.header.version += 1;
-                    new_leaf.key_at(0).clone()
+                    (new_leaf.key_at(0).clone(), wal_lsn)
                 }
                 BPlusTreePage::Internal(internal_page) => {
                     let mut new_internal =
                         BPlusTreeInternalPage::new(self.key_schema.clone(), self.internal_max_size);
 
-                    // 计算应上推的中间键位置：
-                    // 假设 array 以哨兵在索引0，真实键在 [1..num_pointers-1]
-                    // promote_idx = 1 + floor((num_pointers - 1) / 2)
                     let num_pointers = internal_page.header.current_size as usize;
                     let promote_idx = 1 + (num_pointers.saturating_sub(1) / 2);
 
-                    // 将 [promote_idx, ..) 全部从左页移出
                     let mut moved = internal_page.split_off(promote_idx);
 
-                    // moved[0] 为 (K_mid, P_mid)。提升 K_mid 到父节点。
-                    // 右页的哨兵应为 P_mid（对应右页首键的左侧指针）。
                     let (middle_key, right_sentinel_ptr) = {
                         let pair = moved.get(0).ok_or(QuillSQLError::Internal(
                             "Internal split moved entries empty".to_string(),
@@ -1251,37 +1422,55 @@ impl BPlusTreeIndex {
                         (pair.0.clone(), pair.1)
                     };
 
-                    // 右页插入哨兵 (Empty, P_mid)
                     new_internal.insert(Tuple::empty(self.key_schema.clone()), right_sentinel_ptr);
-
-                    // 将剩余的键值对（严格大于 middle_key 的部分）批量放入右页
                     if moved.len() > 1 {
-                        // 跳过 moved[0]（middle_key）
                         new_internal.batch_insert(moved.split_off(1));
                     }
 
-                    // Set B-link wires:
-                    // - Save old high_key and next pointer from left
                     let old_high_key = internal_page.high_key.clone();
                     let old_next = internal_page.header.next_page_id;
-                    // - Left's high_key becomes middle_key
                     internal_page.high_key = Some(middle_key.clone());
-                    // - Right's high_key inherits old left's high bound
                     new_internal.high_key = old_high_key;
-                    // - Right's next pointer inherits left's next
                     new_internal.header.next_page_id = old_next;
-                    let new_data = BPlusTreeInternalPageCodec::encode(&new_internal);
-                    self.wal_overwrite_page(&mut new_page_guard, new_data)?;
-                    // B-link: publish right sibling pointer for readers to chase
                     internal_page.header.next_page_id = new_page_id;
                     internal_page.header.version += 1;
-                    middle_key
+
+                    let right_entries = new_internal
+                        .array
+                        .iter()
+                        .map(|(tuple, child)| IndexInternalEntryPayload {
+                            key_data: TupleCodec::encode(tuple),
+                            child_page_id: *child,
+                        })
+                        .collect::<Vec<_>>();
+                    let payload = IndexRecordPayload::InternalSplit(IndexInternalSplitPayload {
+                        relation: self.relation_ident(),
+                        left_page_id: page_id,
+                        left_new_size: internal_page.header.current_size as u16,
+                        left_high_key: internal_page
+                            .high_key
+                            .as_ref()
+                            .map(|t| TupleCodec::encode(t)),
+                        left_next_page_id: internal_page.header.next_page_id,
+                        right_page_id: new_page_id,
+                        internal_max_size: self.internal_max_size,
+                        right_entries,
+                        right_high_key: new_internal
+                            .high_key
+                            .as_ref()
+                            .map(|t| TupleCodec::encode(t)),
+                        right_next_page_id: new_internal.header.next_page_id,
+                    });
+                    let wal_lsn = self.append_index_record(payload)?;
+                    let new_data = BPlusTreeInternalPageCodec::encode(&new_internal);
+                    self.wal_overwrite_page(&mut new_page_guard, new_data, wal_lsn)?;
+                    (middle_key, wal_lsn)
                 }
             };
 
             // 写回修改后的旧页面和新页面（保持子页锁直到父更新完成）
             let old_page_data = BPlusTreePageCodec::encode(&page);
-            self.wal_overwrite_page(&mut page_guard, old_page_data)?;
+            self.wal_overwrite_page(&mut page_guard, old_page_data, split_wal_lsn)?;
 
             // 若当前分裂页是根（无父在 write_set），则创建新的根
             if page_guard.page_id() == self.get_root_page_id()? {
@@ -1292,16 +1481,38 @@ impl BPlusTreeIndex {
 
                 new_root_page.insert(Tuple::empty(self.key_schema.clone()), page_id);
                 new_root_page.insert(middle_key, new_page_id);
+                new_root_page.header.version += 1;
 
+                let entries_payload = new_root_page
+                    .array
+                    .iter()
+                    .map(|(key, child)| IndexInternalEntryPayload {
+                        key_data: TupleCodec::encode(key),
+                        child_page_id: *child,
+                    })
+                    .collect::<Vec<_>>();
+                let payload =
+                    IndexRecordPayload::RootInstallInternal(IndexRootInstallInternalPayload {
+                        relation: self.relation_ident(),
+                        page_id: new_root_id,
+                        internal_max_size: self.internal_max_size,
+                        entries: entries_payload,
+                        high_key: new_root_page
+                            .high_key
+                            .as_ref()
+                            .map(|t| TupleCodec::encode(t)),
+                        next_page_id: new_root_page.header.next_page_id,
+                    });
+                let wal_lsn = self.append_index_record(payload)?;
                 let encoded = BPlusTreeInternalPageCodec::encode(&new_root_page);
-                self.wal_overwrite_page(&mut new_root_guard, encoded)?;
+                self.wal_overwrite_page(&mut new_root_guard, encoded, wal_lsn)?;
 
                 // Avoid deadlock: release child page latches before taking header lock
                 drop(new_page_guard);
                 drop(page_guard);
 
                 let _lock = self.header_page_lock.write();
-                self.set_root_page_id(new_root_id)?;
+                self.set_root_page_id(new_root_id, wal_lsn)?;
                 return Ok(());
             }
 
@@ -1324,11 +1535,20 @@ impl BPlusTreeIndex {
                     "split: parent no longer contains left child".to_string(),
                 ));
             }
-            parent_page.insert_after(page_id, middle_key, new_page_id);
+            parent_page.insert_after(page_id, middle_key.clone(), new_page_id);
             parent_page.header.version += 1;
 
+            let parent_payload = IndexRecordPayload::ParentInsert(IndexParentInsertPayload {
+                relation: self.relation_ident(),
+                parent_page_id: parent_guard.page_id(),
+                left_child_page_id: page_id,
+                right_child_page_id: new_page_id,
+                key_data: TupleCodec::encode(&middle_key),
+            });
+            let parent_lsn = self.append_index_record(parent_payload)?;
+
             let encoded = BPlusTreeInternalPageCodec::encode(&parent_page);
-            self.wal_overwrite_page(&mut parent_guard, encoded)?;
+            self.wal_overwrite_page(&mut parent_guard, encoded, parent_lsn)?;
 
             if parent_page.is_full() {
                 // 子页到父的结构已一致，现在可释放子页锁，继续向上分裂父
@@ -1349,6 +1569,7 @@ impl BPlusTreeIndex {
 #[cfg(test)]
 mod tests {
     use parking_lot::deadlock;
+    use std::collections::HashSet;
     use std::sync::Arc;
     use std::sync::Once;
     use std::time::Duration;
@@ -1494,6 +1715,62 @@ mod tests {
             i += 1;
         }
         assert_eq!(i, 31);
+    }
+
+    #[test]
+    fn test_index_recovery_replays_wal_delete_merge() {
+        ensure_deadlock_watchdog();
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("delete.db");
+        let wal_dir = tmp.path().join("wal");
+
+        let (bpm, wal, scheduler) = setup_with_wal(&db_path, &wal_dir, 64);
+        let key_schema: SchemaRef =
+            Arc::new(Schema::new(vec![Column::new("a", DataType::Int64, false)]));
+        let index = BPlusTreeIndex::new(key_schema.clone(), bpm.clone(), 2, 3);
+        let header_pid = index.header_page_id;
+
+        let keys: Vec<i64> = (1..=40).collect();
+        for k in &keys {
+            let t = Tuple::new(key_schema.clone(), vec![(*k).into()]);
+            index.insert(&t, rid_from_key(*k)).unwrap();
+        }
+
+        let deletes: Vec<i64> = (5..=25).collect();
+        for k in &deletes {
+            let t = Tuple::new(key_schema.clone(), vec![(*k).into()]);
+            index.delete(&t).unwrap();
+        }
+
+        let _ = wal.flush(None).unwrap();
+        drop(index);
+        drop(bpm);
+        drop(wal);
+        drop(scheduler);
+
+        let dm2 = Arc::new(DiskManager::try_new(&db_path).unwrap());
+        let scheduler2 = Arc::new(DiskScheduler::new(dm2));
+        let mut cfg2 = WalConfig::default();
+        cfg2.directory = wal_dir.clone();
+        let wal2 = Arc::new(WalManager::new(cfg2, None, None).unwrap());
+        let rm = RecoveryManager::new(wal2.clone(), scheduler2.clone());
+        let _summary = rm.replay().unwrap();
+
+        let bpm2 = Arc::new(BufferManager::new(128, scheduler2.clone()));
+        let reopened = BPlusTreeIndex::open(key_schema.clone(), bpm2.clone(), 2, 3, header_pid);
+        let delete_set: HashSet<i64> = deletes.into_iter().collect();
+
+        for k in &keys {
+            let tuple = Tuple::new(key_schema.clone(), vec![(*k).into()]);
+            let result = reopened.get(&tuple).unwrap();
+            if delete_set.contains(k) {
+                assert!(result.is_none(), "key {} should be removed", k);
+            } else {
+                let rid = result.expect("missing key after recovery");
+                assert_eq!(rid.page_id, rid_from_key(*k).page_id);
+                assert_eq!(rid.slot_num, rid_from_key(*k).slot_num);
+            }
+        }
     }
 
     /// Helper function to create RID from i64 key (exactly like BusTub's RID construction)

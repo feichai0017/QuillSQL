@@ -23,14 +23,13 @@ use crate::config::WalConfig;
 use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::recovery::control_file::{ControlFileManager, WalInitState};
 use crate::recovery::wal::codec::{
-    decode_frame, encode_body, encode_frame, CheckpointPayload, PageDeltaPayload, PageWritePayload,
-    WalFrame, WAL_CRC_LEN, WAL_HEADER_LEN,
+    decode_frame, encode_body, encode_frame, CheckpointPayload, PageWritePayload, WalFrame,
+    WAL_CRC_LEN, WAL_HEADER_LEN,
 };
 use crate::recovery::wal::page::{WalPage, WalPageFragmentKind, WAL_PAGE_SIZE};
 use crate::recovery::wal_record::WalRecordPayload;
 use crate::storage::disk_manager::DiskManager;
 use crate::storage::disk_scheduler::DiskScheduler;
-use crate::utils::util::find_contiguous_diff;
 use bytes::Bytes;
 use dashmap::DashSet;
 
@@ -235,43 +234,24 @@ impl WalManager {
         &self,
         page_id: PageId,
         prev_page_lsn: Lsn,
-        old_image: &[u8],
         new_image: &[u8],
     ) -> QuillSQLResult<Option<WalAppendResult>> {
-        if old_image.len() != new_image.len() || old_image.len() != PAGE_SIZE {
+        if new_image.len() != PAGE_SIZE {
             return Err(QuillSQLError::Internal(format!(
-                "page {} image size mismatch: old={}, new={}",
+                "page {} image size mismatch: new={}",
                 page_id,
-                old_image.len(),
                 new_image.len()
             )));
         }
 
-        let Some((start, end)) = find_contiguous_diff(old_image, new_image) else {
-            return Ok(None);
-        };
-
-        let delta_threshold = PAGE_SIZE / 16;
-        let first_touch = self.fpw_first_touch(page_id);
-        if first_touch || (end - start) > delta_threshold {
-            let page_image = new_image.to_vec();
-            let result = self.append_record_with(|_| {
-                WalRecordPayload::PageWrite(PageWritePayload {
-                    page_id,
-                    prev_page_lsn,
-                    page_image: page_image.clone(),
-                })
-            })?;
-            return Ok(Some(result));
-        }
-
-        let diff = new_image[start..end].to_vec();
+        // Track touched page for checkpoint bookkeeping even though we always log full image.
+        let _ = self.fpw_first_touch(page_id);
+        let page_image = new_image.to_vec();
         let result = self.append_record_with(|_| {
-            WalRecordPayload::PageDelta(PageDeltaPayload {
+            WalRecordPayload::PageWrite(PageWritePayload {
                 page_id,
                 prev_page_lsn,
-                offset: start as u16,
-                data: diff.clone(),
+                page_image: page_image.clone(),
             })
         })?;
         Ok(Some(result))
@@ -340,7 +320,7 @@ impl WalManager {
     }
 
     fn flush_with_mode(&self, target: Option<Lsn>, force_sync: bool) -> QuillSQLResult<Lsn> {
-        let recycle_lsn = self.last_checkpoint.load(Ordering::Acquire);
+        let recycle_lsn = self.checkpoint_redo_start.load(Ordering::Acquire);
 
         let (desired, tickets) = {
             let mut guard = self.state.lock();

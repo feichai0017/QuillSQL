@@ -364,15 +364,17 @@ impl HeapResourceManager {
 }
 impl ResourceManager for HeapResourceManager {
     fn redo(&self, frame: &WalFrame, ctx: &RedoContext) -> QuillSQLResult<usize> {
+        // TODO: replace with real physiological redo once TableHeap exposes WAL-aware apply helpers.
         let payload = self.decode_payload(frame)?;
-        let applied = match &payload {
-            HeapRecordPayload::Insert(body) => self.redo_insert(frame, ctx, body)?,
-            HeapRecordPayload::Delete(body) => self.redo_delete(frame, ctx, body)?,
+        let applied = match payload {
+            HeapRecordPayload::Insert(ref body) => self.redo_insert(frame, ctx, body)?,
+            HeapRecordPayload::Delete(ref body) => self.redo_delete(frame, ctx, body)?,
         };
         Ok(applied as usize)
     }
 
     fn undo(&self, frame: &WalFrame, ctx: &UndoContext) -> QuillSQLResult<()> {
+        // TODO: replace with logical undo once redo path no longer uses PageImage reconstruction.
         let payload = self.decode_payload(frame)?;
         match payload {
             HeapRecordPayload::Insert(body) => {
