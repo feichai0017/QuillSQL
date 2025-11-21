@@ -152,6 +152,11 @@ impl TablePage {
 
     // Get the offset for the next tuple insertion.
     pub fn next_tuple_offset(&self, tuple: &Tuple) -> QuillSQLResult<usize> {
+        let tuple_bytes = TupleCodec::encode(tuple);
+        self.next_tuple_offset_with_len(tuple_bytes.len())
+    }
+
+    pub fn next_tuple_offset_with_len(&self, tuple_len: usize) -> QuillSQLResult<usize> {
         // Get the ending offset of the current slot. If there are inserted tuples,
         // get the offset of the previous inserted tuple; otherwise, set it to the size of the page.
         let slot_end_offset = if self.header.num_tuples > 0 {
@@ -161,7 +166,7 @@ impl TablePage {
         };
 
         // Check if the current slot has enough space for the new tuple. Return None if not.
-        if slot_end_offset < TupleCodec::encode(tuple).len() {
+        if slot_end_offset < tuple_len {
             return Err(QuillSQLError::Storage(
                 "No enough space to store tuple".to_string(),
             ));
@@ -169,7 +174,7 @@ impl TablePage {
 
         // Calculate the insertion offset for the new tuple by subtracting its data length
         // from the ending offset of the current slot.
-        let tuple_offset = slot_end_offset - TupleCodec::encode(tuple).len();
+        let tuple_offset = slot_end_offset - tuple_len;
 
         // Calculate the minimum valid tuple insertion offset, including the table page header size,
         // the total size of each tuple info (existing tuple infos and newly added tuple info).
@@ -186,10 +191,18 @@ impl TablePage {
     }
 
     pub fn insert_tuple(&mut self, meta: &TupleMeta, tuple: &Tuple) -> QuillSQLResult<u16> {
-        // Get the offset for the next tuple insertion.
-        let tuple_offset = self.next_tuple_offset(tuple)?;
-        let tuple_id = self.header.num_tuples;
         let tuple_bytes = TupleCodec::encode(tuple);
+        self.insert_tuple_bytes(meta, &tuple_bytes)
+    }
+
+    pub fn insert_tuple_bytes(
+        &mut self,
+        meta: &TupleMeta,
+        tuple_bytes: &[u8],
+    ) -> QuillSQLResult<u16> {
+        // Get the offset for the next tuple insertion.
+        let tuple_offset = self.next_tuple_offset_with_len(tuple_bytes.len())?;
+        let tuple_id = self.header.num_tuples;
         debug_assert!(tuple_bytes.len() < u16::MAX as usize);
 
         // Store tuple information including offset, length, and metadata.

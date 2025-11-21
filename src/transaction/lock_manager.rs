@@ -6,6 +6,7 @@ use parking_lot::{Condvar, Mutex};
 use std::collections::{hash_map::Entry, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LockMode {
@@ -57,6 +58,7 @@ pub struct LockManager {
     row_lock_map: Mutex<HashMap<RowKey, Arc<ResourceLock>>>,
     request_id: AtomicU64,
     wait_for: Mutex<HashMap<TransactionId, HashSet<TransactionId>>>,
+    deadlock_timeout: Duration,
 }
 
 impl LockManager {
@@ -67,6 +69,7 @@ impl LockManager {
             row_lock_map: Mutex::new(HashMap::new()),
             request_id: AtomicU64::new(1),
             wait_for: Mutex::new(HashMap::new()),
+            deadlock_timeout: Duration::from_millis(1000),
         }
     }
 
@@ -211,6 +214,7 @@ impl LockManager {
             queue_guard.requests.back().map(|req| req.id).unwrap_or(0)
         };
 
+        let mut wait_since = Instant::now();
         loop {
             if can_grant(&queue_guard.requests, request_id) {
                 if let Some(req) = queue_guard
@@ -233,7 +237,8 @@ impl LockManager {
             let blockers = blockers_for(&queue_guard.requests, request_id);
             if !blockers.is_empty() {
                 trace!("wait edge: txn={} blocking_on={:?}", txn_id, blockers);
-                if self.record_wait(txn_id, &blockers) {
+                let should_check = wait_since.elapsed() >= self.deadlock_timeout;
+                if should_check && self.record_wait(txn_id, &blockers) {
                     warn!("deadlock detected: txn={}", txn_id);
                     if let Some(mode) = prev_mode {
                         if let Some(req) = queue_guard
@@ -251,8 +256,10 @@ impl LockManager {
                     return false;
                 }
             }
-            resource.condvar.wait(&mut queue_guard);
+            let remaining = self.deadlock_timeout.saturating_sub(wait_since.elapsed());
+            resource.condvar.wait_for(&mut queue_guard, remaining);
             self.clear_wait_edges(txn_id);
+            wait_since = Instant::now();
         }
     }
 

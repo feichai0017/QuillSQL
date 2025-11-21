@@ -77,6 +77,7 @@ impl TableHeap {
     where
         F: FnMut(RecordId, &TupleMeta, &Tuple) -> QuillSQLResult<Option<Lsn>>,
     {
+        let tuple_bytes = crate::storage::codec::TupleCodec::encode(tuple);
         let mut current_page_id = self.last_page_id.load(Ordering::SeqCst);
 
         loop {
@@ -85,8 +86,11 @@ impl TableHeap {
                 TablePageCodec::decode(current_page_guard.data(), self.schema.clone())?.0;
             table_page.set_lsn(current_page_guard.lsn());
 
-            if table_page.next_tuple_offset(tuple).is_ok() {
-                let slot_id = table_page.insert_tuple(meta, tuple)?;
+            if table_page
+                .next_tuple_offset_with_len(tuple_bytes.len())
+                .is_ok()
+            {
+                let slot_id = table_page.insert_tuple_bytes(meta, &tuple_bytes)?;
                 let rid = RecordId::new(current_page_id, slot_id as u32);
                 let wal_lsn = wal_cb(rid, meta, tuple)?;
                 self.write_back_page(&mut current_page_guard, &mut table_page, wal_lsn)?;
