@@ -4,48 +4,35 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>QUILLSQL</title>
+  <title>QuillSQL Web Shell</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Source+Code+Pro:wght@400;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://unpkg.com/jquery.terminal@2.x.x/css/jquery.terminal.min.css" />
+  <script src="https://unpkg.com/jquery@3.x.x/dist/jquery.min.js"></script>
+  <script src="https://unpkg.com/jquery.terminal@2.x.x/js/jquery.terminal.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/gh/jcubic/static/js/wcwidth.js"></script>
   <style>
     :root {
-      --bg: #040607;
-      --surface: #05090b;
-      --surface-lite: #0b1014;
-      --border: #131c22;
-      --text: #d1f0ff;
-      --text-muted: #6c8593;
-      --accent: #27f79a;
-      --accent-soft: rgba(39, 247, 154, 0.16);
-      --accent-strong: rgba(39, 247, 154, 0.7);
-      --warning: #f7c948;
-      --error: #ff7b72;
-      --success: #2ee6c5;
-      --scanline: rgba(39, 247, 154, 0.045);
+      --bg: #030609;
+      --accent: #7ef7c7;
+      --accent-strong: #24f7a0;
+      --text: #d4f5ff;
+      --muted: #7ea1b8;
     }
 
     * {
       box-sizing: border-box;
     }
 
-    html,
     body {
       margin: 0;
-      height: 100%;
-      background: radial-gradient(circle at 50% -20%, rgba(39, 247, 154, 0.22), transparent 60%), var(--bg);
+      font-family: 'Source Code Pro', monospace;
+      background: radial-gradient(circle at 20% 20%, rgba(36, 247, 160, 0.22), transparent 50%), radial-gradient(circle at 80% 0%, rgba(30, 90, 255, 0.12), transparent 55%), var(--bg);
       color: var(--text);
-      font-family: "JetBrains Mono", "Fira Mono", "SFMono-Regular", Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-      letter-spacing: 0.02em;
-      -webkit-font-smoothing: antialiased;
-    }
-
-    body::before {
-      content: "";
-      position: fixed;
-      inset: 0;
-      pointer-events: none;
-      background: linear-gradient(var(--scanline) 1px, transparent 1px);
-      background-size: 100% 2px;
-      mix-blend-mode: screen;
-      opacity: 0.65;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
     }
 
     body::after {
@@ -53,591 +40,179 @@
       position: fixed;
       inset: 0;
       pointer-events: none;
-      background: radial-gradient(circle at 20% 20%, rgba(39, 247, 154, 0.18), transparent 50%),
-        radial-gradient(circle at 80% 80%, rgba(39, 120, 247, 0.12), transparent 55%);
-      opacity: 0.6;
-      mix-blend-mode: color-dodge;
+      background: linear-gradient(rgba(126, 247, 199, 0.05) 1px, transparent 1px);
+      background-size: 100% 2px;
+      opacity: 0.25;
     }
 
-    a {
-      color: var(--accent);
+    .hero {
+      padding: 36px 20px 12px;
+      display: flex;
+      justify-content: center;
     }
 
-    .terminal {
-      position: relative;
+    .hero-card {
+      display: flex;
+      gap: 24px;
+      align-items: center;
       max-width: 960px;
-      height: 88vh;
-      margin: 3vh auto;
-      background: linear-gradient(140deg, rgba(39, 247, 154, 0.07), transparent 70%), var(--surface);
-      border: 1px solid var(--border);
-      box-shadow: 0 18px 60px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(39, 247, 154, 0.05);
+      width: 100%;
+      padding: 24px 28px;
+      border: 1px solid rgba(126, 247, 199, 0.24);
+      border-radius: 16px;
+      background: rgba(2, 9, 14, 0.76);
+      backdrop-filter: blur(10px);
+      box-shadow: 0 18px 48px rgba(0, 0, 0, 0.45);
+    }
+
+    .hero-card img {
+      width: 96px;
+      height: 96px;
+      border-radius: 12px;
+      border: 1px solid rgba(126, 247, 199, 0.4);
+      padding: 8px;
+      background: rgba(7, 19, 24, 0.9);
+    }
+
+    .hero-meta {
       display: flex;
       flex-direction: column;
-      overflow: hidden;
+      gap: 10px;
     }
 
-    .bezel {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      padding: 12px 14px;
-      background: rgba(4, 12, 14, 0.94);
-      border-bottom: 1px solid rgba(39, 247, 154, 0.08);
-      box-shadow: inset 0 -1px 0 rgba(39, 247, 154, 0.08);
+    .hero-meta h1 {
+      margin: 0;
+      font-size: 1.8rem;
+      color: var(--text);
+      letter-spacing: 0.04em;
     }
 
-    .bezel-links {
-      margin-left: auto;
-      display: inline-flex;
-      gap: 8px;
-      align-items: center;
+    .hero-meta p {
+      margin: 0;
+      color: var(--muted);
+      max-width: 640px;
     }
 
-    .bezel-link {
-      padding: 4px 10px;
-      border: 1px solid rgba(39, 247, 154, 0.24);
-      border-radius: 6px;
-      color: var(--accent);
-      font-size: 11px;
-      letter-spacing: 0.16em;
+    .eyebrow {
       text-transform: uppercase;
-      text-decoration: none;
-      transition: background 0.15s ease, color 0.15s ease, border 0.15s ease;
+      font-size: 0.8rem;
+      letter-spacing: 0.4em;
+      color: var(--accent);
+    }
+
+    .hero-actions {
+      margin-top: 8px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+
+    .hero-actions button {
+      border: 1px solid rgba(126, 247, 199, 0.45);
+      color: var(--accent);
       background: transparent;
+      padding: 6px 14px;
+      border-radius: 6px;
       cursor: pointer;
-    }
-
-    .bezel-link:hover {
-      background: rgba(39, 247, 154, 0.12);
-      border-color: rgba(39, 247, 154, 0.5);
-    }
-
-    .led-strip {
-      display: inline-flex;
-      gap: 6px;
-    }
-
-    .led {
-      width: 11px;
-      height: 11px;
-      border-radius: 50%;
-      background: rgba(39, 247, 154, 0.25);
-      box-shadow: 0 0 4px rgba(39, 247, 154, 0.65);
-    }
-
-    .led.warn {
-      background: rgba(247, 201, 72, 0.35);
-      box-shadow: 0 0 4px rgba(247, 201, 72, 0.65);
-    }
-
-    .led.error {
-      background: rgba(255, 123, 114, 0.35);
-      box-shadow: 0 0 4px rgba(255, 123, 114, 0.65);
-    }
-
-    .bezel .title {
-      font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: 0.18em;
-      font-size: 11px;
-      color: var(--text-muted);
-    }
-
-    .status {
-      margin-left: 16px;
-      font-size: 12px;
       text-transform: uppercase;
       letter-spacing: 0.16em;
-      color: var(--accent);
+      font-weight: 600;
     }
 
-    .status[data-state="busy"] {
-      color: var(--warning);
+    .hero-actions button:hover {
+      background: rgba(126, 247, 199, 0.12);
     }
 
-    .status[data-state="error"] {
-      color: var(--error);
-    }
-
-    .screen {
-      display: flex;
-      flex-direction: column;
+    #terminal {
+      width: min(1100px, 92%);
+      margin: 12px auto 42px;
+      min-height: 480px;
+      border-radius: 12px;
+      overflow: hidden;
+      border: 1px solid rgba(126, 247, 199, 0.35);
+      box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
       position: relative;
-      flex: 1;
-      padding: 0;
-      min-height: 0;
     }
 
-    .screen::before {
+    #terminal.terminal {
+      --background: rgba(3, 7, 12, 0.96);
+      --color: var(--text);
+      --link-color: var(--accent-strong);
+      --font: 'Source Code Pro', monospace;
+      height: 100%;
+    }
+
+    #terminal.terminal::after {
       content: "";
       position: absolute;
       inset: 0;
+      background-image: url('rust-db.png');
+      background-size: 420px;
+      background-repeat: no-repeat;
+      background-position: 70% 20%;
+      opacity: 0.03;
       pointer-events: none;
-      background: repeating-linear-gradient(180deg, rgba(0, 0, 0, 0.12) 0px, rgba(0, 0, 0, 0.12) 1px, transparent 1px, transparent 3px);
-      mix-blend-mode: multiply;
-      opacity: 0.45;
+      transform: rotate(-18deg);
     }
 
-    .screen::after {
-      content: "";
-      position: absolute;
-      inset: 0;
-      pointer-events: none;
-      background: radial-gradient(circle at 50% 0%, rgba(255, 255, 255, 0.08), transparent 55%);
-      opacity: 0.3;
-      mix-blend-mode: screen;
-    }
-
-    .overlay {
-      position: absolute;
-      inset: 0;
-      pointer-events: none;
-      background: linear-gradient(rgba(39, 247, 154, 0.1), transparent), linear-gradient(90deg, rgba(39, 247, 154, 0.05), transparent 60%);
-      mix-blend-mode: soft-light;
-      opacity: 0.35;
-    }
-
-    .content {
-      position: relative;
-      flex: 1;
-      display: grid;
-      grid-template-rows: auto 1fr auto auto;
-      gap: 12px;
-      padding: 16px 22px 12px 22px;
-      min-height: 0;
-      z-index: 1;
-    }
-
-    pre.logo {
-      margin: 0;
-      margin-bottom: 14px;
-      color: var(--accent);
-      font-size: 12px;
-      text-shadow: 0 0 8px rgba(39, 247, 154, 0.45);
-    }
-
-    #log {
-      overflow-y: auto;
-      padding-right: 8px;
-      display: flex;
-      flex-direction: column;
-      gap: 10px;
-      min-height: 0;
-    }
-
-    #log::-webkit-scrollbar {
-      width: 8px;
-    }
-
-    #log::-webkit-scrollbar-thumb {
-      background: rgba(39, 247, 154, 0.12);
-      border-radius: 8px;
-    }
-
-    .line {
-      white-space: pre-wrap;
-      word-break: break-word;
-      font-size: 13px;
-    }
-
-    .line.prompt {
-      color: var(--accent);
-    }
-
-    .line.error {
-      color: var(--error);
-    }
-
-    .line.success {
-      color: var(--success);
-    }
-
-    .line.muted {
-      color: var(--text-muted);
-    }
-
-    .line .prompt-text {
-      color: var(--accent);
-      margin-right: 8px;
-    }
-
-    pre.block {
-      margin: 0;
-      background: rgba(7, 12, 14, 0.74);
-      border: 1px solid rgba(39, 247, 154, 0.18);
-      padding: 12px 14px;
-      border-radius: 6px;
-      font-size: 13px;
-      line-height: 1.6;
-      color: var(--text);
-      backdrop-filter: blur(4px);
-      box-shadow: 0 0 0 1px rgba(39, 247, 154, 0.05) inset;
-      white-space: pre-wrap;
-      word-break: break-word;
-    }
-
-    form.input-form {
-      position: relative;
-      display: flex;
-      align-items: flex-start;
-      gap: 10px;
-      margin-top: 16px;
-      padding: 12px 14px;
-      border: 1px solid rgba(39, 247, 154, 0.12);
-      border-radius: 8px;
-      background: rgba(5, 11, 14, 0.78);
-      box-shadow: inset 0 0 0 1px rgba(39, 247, 154, 0.05), 0 12px 32px rgba(0, 0, 0, 0.45);
-    }
-
-    form.input-form:focus-within {
-      border-color: rgba(39, 247, 154, 0.34);
-      box-shadow: inset 0 0 0 1px rgba(39, 247, 154, 0.18), 0 0 16px rgba(39, 247, 154, 0.18);
-    }
-
-    .prompt-label {
-      color: var(--accent);
-      padding-top: 4px;
-    }
-
-    #cmd {
-      flex: 1;
-      min-height: 22px;
-      max-height: 160px;
-      background: transparent;
-      border: none;
-      outline: none;
-      resize: none;
-      color: var(--text);
-      font: inherit;
-      line-height: 1.6;
-      padding: 0;
-      caret-color: var(--accent);
-    }
-
-    #cmd::placeholder {
-      color: rgba(108, 133, 147, 0.55);
-    }
-
-    .hint {
-      font-size: 11px;
-      color: var(--text-muted);
-      margin-top: 6px;
-    }
-
-    .badge {
-      display: inline-block;
-      padding: 2px 6px;
-      border: 1px solid rgba(39, 247, 154, 0.24);
-      border-radius: 4px;
-      font-size: 10px;
-      letter-spacing: 0.12em;
-      text-transform: uppercase;
-      color: var(--accent);
+    #terminal .terminal-wrapper {
+      backdrop-filter: blur(5px);
     }
 
     @media (max-width: 720px) {
-      .terminal {
-        margin: 0;
-        height: 100vh;
-        border-radius: 0;
-      }
-
-      .bezel {
-        flex-wrap: wrap;
-        gap: 8px;
-      }
-
-      form.input-form {
+      .hero-card {
         flex-direction: column;
+        text-align: center;
       }
 
-      .prompt-label {
-        padding-top: 0;
+      .hero-card img {
+        width: 72px;
+        height: 72px;
+      }
+
+      .hero-meta p {
+        text-align: center;
+      }
+
+      .hero-actions {
+        justify-content: center;
+      }
+
+      #terminal {
+        min-height: 60vh;
       }
     }
   </style>
 </head>
 
 <body>
-  <div class="terminal">
-    <div class="bezel">
-      <div class="led-strip">
-        <span class="led error"></span>
-        <span class="led warn"></span>
-        <span class="led"></span>
-      </div>
-      <span class="title">QUILLSQL TERMINAL</span>
-      <div class="bezel-links">
-        <a href="https://feichai0017.github.io/QuillSQL/" target="_blank" class="bezel-link">DOCS</a>
-        <button class="bezel-link" id="openGithub">GITHUB</button>
-        <button class="bezel-link" id="openProfile">PROFILE</button>
-      </div>
-      <span id="status" class="status" data-state="ready">READY</span>
-    </div>
-    <div class="screen">
-      <div class="overlay"></div>
-      <div class="content">
-        <pre class="logo" id="logo"></pre>
-        <div id="log" class="log"></div>
-        <form id="input-form" class="input-form" autocomplete="off">
-          <span class="prompt-label">quill@tty:~$</span>
-          <textarea id="cmd" rows="1" placeholder="type help for usage · Shift+Enter to add newline"></textarea>
-        </form>
-        <div class="hint">Commands: help · github · profile · clear · examples · example
-          &lt;name&gt; · history · Any other input executes SQL.</div>
+  <div class="hero">
+    <div class="hero-card">
+      <img src="rust-db.png" alt="QuillSQL">
+      <div class="hero-meta">
+        <span class="eyebrow">QuillSQL</span>
+        <h1>QuillSQL Web Shell</h1>
+        <p>An educational Rust RDBMS with MVCC, B+Tree, WAL, and CMU 15-445 style ergonomics. This
+          browser shell talks directly to the QuillSQL server HTTP API.</p>
+        <div class="hero-actions">
+          <button data-link="https://feichai0017.github.io/QuillSQL/">Docs</button>
+          <button data-link="https://github.com/feichai0017/QuillSQL">GitHub</button>
+          <button data-link="https://github.com/feichai0017">Profile</button>
+        </div>
       </div>
     </div>
   </div>
-  <script>
-    const statusEl = document.getElementById('status');
-    const logEl = document.getElementById('log');
-    const cmdEl = document.getElementById('cmd');
-    const formEl = document.getElementById('input-form');
-    const logoEl = document.getElementById('logo');
-    const openGithubBtn = document.getElementById('openGithub');
-    const openProfileBtn = document.getElementById('openProfile');
+  <div id="terminal"></div>
 
+  <script>
     const STORAGE_KEY = 'quillsql:apiBase';
-    const DEFAULT_API_BASE = '/api/sql';
+    const DEFAULT_ENDPOINT = '/api/sql';
+    const DOCS_URL = 'https://feichai0017.github.io/QuillSQL/';
     const GITHUB_URL = 'https://github.com/feichai0017/QuillSQL';
     const PROFILE_URL = 'https://github.com/feichai0017';
-    const commandHistory = [];
-    let historyIndex = 0;
+    const META_COMMANDS = new Set(['help', 'docs', 'github', 'profile', 'endpoint', 'history', 'clear']);
 
-    const getApiBase = () => localStorage.getItem(STORAGE_KEY) || DEFAULT_API_BASE;
-    const setApiBase = (value) => localStorage.setItem(STORAGE_KEY, value);
-
-    function escapeHtml(text = '') {
-      return text.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c] || c));
-    }
-
-    function scrollLogToBottom() {
-      logEl.scrollTop = logEl.scrollHeight;
-    }
-
-    function appendLine(text, variant = '') {
-      const line = document.createElement('div');
-      line.className = `line${variant ? ` ${variant}` : ''}`;
-      line.textContent = text;
-      logEl.appendChild(line);
-      scrollLogToBottom();
-    }
-
-    function appendBlock(text) {
-      const block = document.createElement('pre');
-      block.className = 'block';
-      block.textContent = text;
-      logEl.appendChild(block);
-      scrollLogToBottom();
-    }
-
-    function appendPrompt(cmd) {
-      const line = document.createElement('div');
-      line.className = 'line prompt';
-      line.innerHTML = `<span class="prompt-text">quill@tty:~$</span>${escapeHtml(cmd)}`;
-      logEl.appendChild(line);
-      scrollLogToBottom();
-    }
-
-    function openExternal(url) {
-      const newTab = window.open(url, '_blank', 'noopener');
-      if (!newTab) {
-        appendLine(`Unable to open link automatically. Please open manually: ${url}`, 'error');
-      }
-    }
-
-    function setStatus(state, label) {
-      statusEl.dataset.state = state;
-      statusEl.textContent = label;
-    }
-
-    function printHelp() {
-      appendBlock([
-        'Built-in commands:',
-        '  help           Show this message',
-        '  github         Open the GitHub repository info',
-        '  profile        Maintainer profile + link',
-        '  clear          Clear the terminal log',
-        '  history        Show submitted SQL commands',
-        '  examples       List available `.slt` demos from /api/examples',
-        '  example <name> Load an example into the prompt and run it',
-        '  endpoint <url> Set custom SQL endpoint (persisted in localStorage)',
-        '',
-        'Any other input is sent to the SQL API.',
-      ].join('\n'));
-    }
-
-    function showExamples() {
-      const keys = Object.keys(examples).sort();
-      if (!keys.length) {
-        appendLine('Examples are still loading (or none available).', 'muted');
-        return;
-      }
-      appendBlock(['Available examples:', ...keys.map((k) => `  example ${k}`)].join('\n'));
-    }
-
-    function splitStatements(sqlText) {
-      return sqlText
-        .split(';')
-        .map((s) => s.trim())
-        .filter(Boolean)
-        .slice(0, 100);
-    }
-
-    function ensureStatementTerminated(sql) {
-      if (!sql) return '';
-      return /;\s*$/.test(sql) ? sql : `${sql.trim()};`;
-    }
-
-    function convertExampleScript(raw = '') {
-      const statements = [];
-      const lines = raw.replace(/\r/g, '').split('\n');
-      let i = 0;
-
-      const collectStatement = (sqlLines) => {
-        const sql = sqlLines.join('\n').trim();
-        if (!sql) {
-          return;
-        }
-        statements.push(ensureStatementTerminated(sql));
-      };
-
-      while (i < lines.length) {
-        const current = lines[i].trim();
-        if (!current) {
-          i += 1;
-          continue;
-        }
-
-        if (current.startsWith('statement')) {
-          i += 1;
-          const sqlLines = [];
-          while (i < lines.length && lines[i].trim() !== '') {
-            sqlLines.push(lines[i]);
-            i += 1;
-          }
-          collectStatement(sqlLines);
-          continue;
-        }
-
-        if (current.startsWith('query')) {
-          i += 1;
-          while (i < lines.length && lines[i].trim() === '') {
-            i += 1;
-          }
-          const sqlLines = [];
-          while (i < lines.length) {
-            const text = lines[i].trim();
-            if (!text || text === '----') {
-              break;
-            }
-            sqlLines.push(lines[i]);
-            i += 1;
-          }
-          if (i < lines.length && lines[i].trim() === '----') {
-            i += 1;
-            while (i < lines.length && lines[i].trim() !== '') {
-              i += 1;
-            }
-          }
-          collectStatement(sqlLines);
-          continue;
-        }
-
-        const fallback = [];
-        while (i < lines.length && lines[i].trim() !== '') {
-          fallback.push(lines[i]);
-          i += 1;
-        }
-        collectStatement(fallback);
-      }
-
-      return statements;
-    }
-
-    function formatRows(rows) {
-      if (!rows || rows.length === 0) {
-        return '✓ Query executed successfully (0 rows)';
-      }
-      const widths = [];
-      rows.forEach((row) => {
-        row.forEach((cell, idx) => {
-          const len = String(cell ?? '').length;
-          widths[idx] = Math.max(widths[idx] || 0, len);
-        });
-      });
-      const formatted = rows.map((row) =>
-        row
-          .map((cell, idx) => {
-            const text = String(cell ?? '');
-            return text.padEnd(widths[idx]);
-          })
-          .join(' | ')
-      );
-      return formatted.join('\n');
-    }
-
-    async function runSQL(rawInput) {
-      const sql = rawInput.trim();
-      if (!sql) {
-        appendLine('Nothing to execute.', 'muted');
-        return;
-      }
-      setStatus('busy', 'RUNNING');
-      try {
-        const endpoint = getApiBase();
-        const batchEndpoint = endpoint.endsWith('/sql')
-          ? endpoint.replace(/\/sql$/, '/sql_batch')
-          : `${endpoint}_batch`;
-        const payload = { sql: rawInput };
-        const statements = splitStatements(rawInput);
-
-        let executed = false;
-        try {
-          const batchRes = await fetch(batchEndpoint, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload),
-          });
-          if (batchRes.ok) {
-            const data = await batchRes.json();
-            const resultSets = Array.isArray(data.results) ? data.results : [];
-            resultSets.forEach((rows, idx) => {
-              const stmt = statements[idx] || `(statement ${idx + 1})`;
-              appendBlock(`Statement ${idx + 1}: ${stmt}\n${formatRows(rows || [])}`);
-            });
-            appendLine(`Batch executed (${resultSets.length} statement(s)).`, 'success');
-            executed = true;
-          }
-        } catch (_) {
-          // ignore and fallback
-        }
-
-        if (!executed) {
-          const res = await fetch(endpoint, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ sql }),
-          });
-          if (!res.ok) {
-            const errText = await res.text();
-            appendLine(`❌ ${errText || `HTTP ${res.status}`}`, 'error');
-            setStatus('error', 'ERROR');
-            return;
-          }
-          const data = await res.json();
-          appendBlock(`${sql}\n${formatRows(data.rows || [])}`);
-          appendLine(`Rows: ${(data.rows || []).length}`, 'muted');
-        }
-        setStatus('ready', 'READY');
-      } catch (err) {
-        console.error('SQL execution failed:', err);
-        appendLine(`❌ Network error: ${err.message}`, 'error');
-        setStatus('error', 'ERROR');
-      }
-    }
-
-    const asciiLogo = [
+    const ASCII_LOGO = String.raw`
       '   ██████╗ ██╗   ██╗██╗██╗     ██╗     ███████╗ ██████╗ ██╗      ',
       '  ██╔═══██╗██║   ██║██║██║     ██║     ██╔════╝██╔═══██╗██║      ',
       '  ██║   ██║██║   ██║██║██║     ██║     ███████╗██║   ██║██║      ',
@@ -646,185 +221,213 @@
       '   ╚══▀▀═╝  ╚═════╝ ╚═╝╚══════╝╚══════╝╚══════╝ ╚══▀▀═╝ ╚══════╝ ',
       '-----------------------------------------------------------------',
       '    QuillSQL • Interactive Terminal • `help` for usage           '
+`;
+
+    const HELP_TEXT = [
+      '[[b;;]Commands]',
+      '  \\help               Show this message',
+      '  \\docs               Open the QuillSQL Book in a new tab',
+      '  \\github             Open the repository',
+      '  \\profile            Maintainer profile',
+      '  \\endpoint           Show current SQL endpoint',
+      '  \\endpoint <value>   Override SQL endpoint (use `default` to reset)',
+      '  \\history            Print submitted SQL blocks',
+      '  \\clear              Clear the terminal',
+      '',
+      'End SQL statements with a semicolon. Paste multi-line scripts and the shell will split them automatically.'
     ].join('\n');
 
-    logoEl.textContent = asciiLogo;
+    const commandHistory = [];
+    let pendingSql = '';
 
-    let examples = {};
+    const getEndpoint = () => localStorage.getItem(STORAGE_KEY) || DEFAULT_ENDPOINT;
+    const setEndpoint = (value) => localStorage.setItem(STORAGE_KEY, value);
 
-    (async function loadExamples() {
+    function splitStatements(sqlText) {
+      return sqlText
+        .split(';')
+        .map((s) => s.trim())
+        .filter(Boolean)
+        .map((s) => `${s};`);
+    }
+
+    function formatRows(rows) {
+      if (!rows || rows.length === 0) {
+        return '✓ OK (0 rows)';
+      }
+      const widths = [];
+      rows.forEach((row) =>
+        row.forEach((cell, idx) => {
+          const len = String(cell ?? '').length;
+          widths[idx] = Math.max(widths[idx] || 0, len);
+        }),
+      );
+      return rows
+        .map((row) =>
+          row
+            .map((cell, idx) => String(cell ?? '').padEnd(widths[idx]))
+            .join(' | ')
+        )
+        .join('\n');
+    }
+
+    async function executeStatement(sql) {
+      const response = await fetch(getEndpoint(), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sql }),
+      });
+      if (!response.ok) {
+        const errText = await response.text();
+        throw new Error(errText || `HTTP ${response.status}`);
+      }
+      const data = await response.json();
+      return Array.isArray(data.rows) ? data.rows : [];
+    }
+
+    async function runSQL(block, term) {
+      const statements = splitStatements(block);
+      if (!statements.length) {
+        term.echo('[[;#7ea1b8;]No executable SQL detected.]');
+        return;
+      }
+      commandHistory.push(block.trim());
+      term.echo(`[[;${'#7ef7c7'};]Running ${statements.length} statement(s) against ${getEndpoint()}]`);
+      term.pause();
       try {
-        const response = await fetch('/api/examples');
-        if (!response.ok) {
-          throw new Error(`HTTP error! status: ${response.status}`);
+        for (let i = 0; i < statements.length; i += 1) {
+          const stmt = statements[i];
+          term.echo(`[[b;;]#${i + 1}] ${stmt.trim()}`);
+          const rows = await executeStatement(stmt);
+          term.echo(formatRows(rows));
+          term.echo('');
         }
-        examples = await response.json();
-        appendLine('✓ SQL examples loaded from server.', 'success');
-      } catch (e) {
-        appendLine(`❌ Failed to load SQL examples: ${e}`, 'error');
-        console.error('Failed to load examples:', e);
+      } catch (err) {
+        term.echo(`[[;#ff7b72;]${err.message}]`);
+      } finally {
+        term.resume();
       }
-    })();
-
-
-
-    function showGithub() {
-      appendLine('GitHub repository', 'muted');
-      appendBlock([
-        'Project: QuillSQL',
-        `URL   : ${GITHUB_URL}`,
-        'Stars : give it a ⭐ if you find it useful!',
-        '',
-        'Tip: run `git clone` with the URL above to explore locally.'
-      ].join('\n'));
     }
 
-    function showProfile() {
-      appendLine('Maintainer profile', 'muted');
-      appendBlock([
-        'Handle : feichai0017',
-        `URL    : ${PROFILE_URL}`,
-        'Bio    : Systems & database tinkerer. Find more projects on GitHub.'
-      ].join('\n'));
+    function openLink(url) {
+      const win = window.open(url, '_blank', 'noopener');
+      if (!win) {
+        alert(`Please open ${url} manually (popup blocked).`);
+      }
     }
 
-    function handleCommand(input) {
-      const trimmed = input.trim();
-      if (!trimmed) {
-        appendLine('(empty)', 'muted');
+    function showHistory(term) {
+      if (!commandHistory.length) {
+        term.echo('[[;#7ea1b8;]History is empty.]');
         return;
       }
+      commandHistory.forEach((cmd, idx) => {
+        term.echo(`${String(idx + 1).padStart(2, '0')}: ${cmd}`);
+      });
+    }
 
-      if (trimmed === 'help') {
-        printHelp();
-        return;
+    function handleMetaCommand(input, term) {
+      const trimmed = input.startsWith('\\') ? input.slice(1) : input;
+      const [cmd, ...rest] = trimmed.trim().split(/\s+/);
+      const args = rest.join(' ').trim();
+
+      switch ((cmd || '').toLowerCase()) {
+        case 'help':
+          term.echo(HELP_TEXT);
+          break;
+        case 'docs':
+          openLink(DOCS_URL);
+          term.echo(`Opened docs: ${DOCS_URL}`);
+          break;
+        case 'github':
+          openLink(GITHUB_URL);
+          term.echo(`Opened repository: ${GITHUB_URL}`);
+          break;
+        case 'profile':
+          openLink(PROFILE_URL);
+          term.echo(`Opened maintainer profile: ${PROFILE_URL}`);
+          break;
+        case 'endpoint':
+          if (!args) {
+            term.echo(`Current SQL endpoint: ${getEndpoint()}`);
+          } else if (args === 'default' || args === 'reset') {
+            setEndpoint(DEFAULT_ENDPOINT);
+            term.echo(`Endpoint reset to ${DEFAULT_ENDPOINT}`);
+          } else {
+            setEndpoint(args);
+            term.echo(`Endpoint set to ${args}`);
+          }
+          break;
+        case 'history':
+          showHistory(term);
+          break;
+        case 'clear':
+          term.clear();
+          term.echo(greeting());
+          break;
+        default:
+          term.echo(`[[;#ff7b72;]Unknown command: ${cmd}]`);
       }
+    }
 
-      if (trimmed === 'github') {
-        showGithub();
-        return;
+    function parseMeta(input) {
+      if (!input) return null;
+      if (input.trim().startsWith('\\')) {
+        return input;
       }
-
-      if (trimmed === 'profile') {
-        showProfile();
-        return;
+      const keyword = input.trim().split(/\s+/)[0]?.toLowerCase();
+      if (META_COMMANDS.has(keyword)) {
+        return input;
       }
+      return null;
+    }
 
-      if (trimmed === 'clear') {
-        logEl.innerHTML = '';
-        appendLine('Session cleared.', 'muted');
-        return;
-      }
+    function greeting() {
+      return `${ASCII_LOGO}
+[[b;;]QuillSQL Web Shell]
+Type [[b;;]\\help] for commands. Statements run through the HTTP API exposed by \`cargo run --bin server\`.
+`;
+    }
 
-      if (trimmed === 'history') {
-        if (commandHistory.length === 0) {
-          appendLine('No history yet.', 'muted');
+    $(document).ready(() => {
+      document.querySelectorAll('[data-link]').forEach((btn) => {
+        btn.addEventListener('click', (event) => {
+          const url = event.currentTarget.getAttribute('data-link');
+          openLink(url);
+        });
+      });
+
+      const term = $('#terminal').terminal(async (command) => {
+        const meta = parseMeta(command);
+        if (meta) {
+          pendingSql = '';
+          handleMetaCommand(meta, term);
+          term.set_prompt(promptText());
+          return;
+        }
+
+        pendingSql = pendingSql ? `${pendingSql}\n${command}` : command;
+        if (/;\s*$/.test(pendingSql.trim())) {
+          const block = pendingSql;
+          pendingSql = '';
+          term.set_prompt(promptText());
+          await runSQL(block, term);
+        } else if (!pendingSql.trim()) {
+          pendingSql = '';
+          term.set_prompt(promptText());
         } else {
-          appendBlock(commandHistory.map((cmd, idx) => `${String(idx + 1).padStart(2, '0')}: ${cmd}`).join('\n'));
+          term.set_prompt(promptText(true));
         }
-        return;
-      }
+      }, {
+        greetings: greeting(),
+        name: 'quillsql-shell',
+        prompt: () => promptText(),
+      });
 
-      if (trimmed === 'endpoint') {
-        appendLine(`Current SQL endpoint: ${getApiBase()}`, 'muted');
-        return;
-      }
-
-      if (trimmed.startsWith('endpoint ')) {
-        const target = trimmed.slice('endpoint'.length).trim();
-        if (!target) {
-          appendLine('Usage: endpoint <url|default|reset>', 'error');
-          return;
-        }
-        if (target === 'default' || target === 'reset') {
-          setApiBase(DEFAULT_API_BASE);
-          appendLine(`SQL endpoint reset to default (${DEFAULT_API_BASE})`, 'success');
-        } else {
-          setApiBase(target);
-          appendLine(`SQL endpoint set to ${target}`, 'success');
-        }
-        return;
-      }
-
-      if (trimmed === 'examples') {
-        showExamples();
-        return;
-      }
-
-      if (trimmed.startsWith('example ')) {
-        const key = trimmed.split(/\s+/)[1];
-        const script = examples[key];
-        if (!script) {
-          appendLine(`Unknown example: ${key}`, 'error');
-          return;
-        }
-        const statements = convertExampleScript(script);
-        if (!statements.length) {
-          appendLine(`Example '${key}' has no runnable SQL statements.`, 'error');
-          return;
-        }
-        const sqlText = statements.join('\n\n');
-        cmdEl.value = sqlText;
-        cmdEl.dispatchEvent(new Event('input'));
-        appendLine(`Loaded example '${key}' (${statements.length} statement(s)).`, 'success');
-        runSQL(sqlText);
-        return;
-      }
-
-      runSQL(input);
-    }
-
-    formEl.addEventListener('submit', (event) => {
-      event.preventDefault();
-      const value = cmdEl.value;
-      const normalized = value.replace(/\s+$/g, '');
-      appendPrompt(normalized || value);
-      if (value.trim()) {
-        commandHistory.push(value.trim());
-        historyIndex = commandHistory.length;
-        handleCommand(value);
-      } else {
-        appendLine('(empty)', 'muted');
-      }
-      cmdEl.value = '';
-      cmdEl.style.height = '22px';
-    });
-
-    cmdEl.addEventListener('keydown', (event) => {
-      if (event.key === 'Enter' && !event.shiftKey) {
-        event.preventDefault();
-        formEl.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
-      } else if (event.key === 'ArrowUp') {
-        event.preventDefault();
-        if (commandHistory.length === 0) return;
-        historyIndex = Math.max(0, historyIndex - 1);
-        cmdEl.value = commandHistory[historyIndex] || '';
-        cmdEl.dispatchEvent(new Event('input'));
-      } else if (event.key === 'ArrowDown') {
-        event.preventDefault();
-        if (commandHistory.length === 0) return;
-        historyIndex = Math.min(commandHistory.length, historyIndex + 1);
-        cmdEl.value = commandHistory[historyIndex] || '';
-        cmdEl.dispatchEvent(new Event('input'));
+      function promptText(continuation) {
+        return continuation || pendingSql ? '[[b;;]... ]' : '[[b;;]quillsql> ]';
       }
     });
-
-    cmdEl.addEventListener('input', () => {
-      cmdEl.style.height = '22px';
-      cmdEl.style.height = `${cmdEl.scrollHeight}px`;
-    });
-
-    openGithubBtn.addEventListener('click', () => {
-      openExternal(GITHUB_URL);
-    });
-
-    openProfileBtn.addEventListener('click', () => {
-      openExternal(PROFILE_URL);
-    });
-
-    appendLine('Welcome to QUILLSQL Terminal. Type `help` to get started.', 'muted');
-    appendLine(`Current SQL endpoint: ${getApiBase()}`, 'muted');
-    cmdEl.focus();
   </script>
 </body>
 
