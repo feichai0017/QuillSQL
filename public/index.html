@@ -4,350 +4,796 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>QUILLSQL</title>
+  <title>QuillSQL • Interactive Demo</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;600&family=Source+Code+Pro:wght@400;600&display=swap" rel="stylesheet">
   <style>
     :root {
-      --bg: #040607;
-      --surface: #05090b;
-      --surface-lite: #0b1014;
-      --border: #131c22;
-      --text: #d1f0ff;
-      --text-muted: #6c8593;
-      --accent: #27f79a;
-      --accent-soft: rgba(39, 247, 154, 0.16);
-      --accent-strong: rgba(39, 247, 154, 0.7);
-      --warning: #f7c948;
+      --bg: #03070c;
+      --card: rgba(4, 10, 18, 0.82);
+      --accent: #7ef7c7;
+      --accent-strong: #1fe6a1;
+      --muted: #91a9bd;
+      --text: #e1f7ff;
+      --terminal: rgba(2, 6, 9, 0.96);
+      --border: rgba(126, 247, 199, 0.28);
       --error: #ff7b72;
-      --success: #2ee6c5;
-      --scanline: rgba(39, 247, 154, 0.045);
+      --warn: #f7c948;
+      --pulse: rgba(126, 247, 199, 0.25);
     }
 
     * {
       box-sizing: border-box;
     }
 
-    html,
     body {
       margin: 0;
-      height: 100%;
-      background: radial-gradient(circle at 50% -20%, rgba(39, 247, 154, 0.22), transparent 60%), var(--bg);
+      min-height: 100vh;
+      background: radial-gradient(circle at 10% 20%, rgba(31, 230, 161, 0.15), transparent 55%),
+        radial-gradient(circle at 80% 0%, rgba(61, 119, 255, 0.18), transparent 65%),
+        var(--bg);
       color: var(--text);
-      font-family: "JetBrains Mono", "Fira Mono", "SFMono-Regular", Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-      letter-spacing: 0.02em;
+      font-family: 'Space Grotesk', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
       -webkit-font-smoothing: antialiased;
+      overflow-x: hidden;
     }
 
     body::before {
       content: "";
       position: fixed;
-      inset: 0;
+      inset: -20%;
+      background: conic-gradient(from 90deg, rgba(126, 247, 199, 0.2), transparent 45%, rgba(63, 182, 255, 0.18));
+      filter: blur(120px);
+      opacity: 0.6;
       pointer-events: none;
-      background: linear-gradient(var(--scanline) 1px, transparent 1px);
-      background-size: 100% 2px;
-      mix-blend-mode: screen;
-      opacity: 0.65;
+      animation: aurora 26s ease-in-out infinite alternate;
     }
 
     body::after {
       content: "";
       position: fixed;
       inset: 0;
+      background: linear-gradient(rgba(126, 247, 199, 0.08) 1px, transparent 1px);
+      background-size: 100% 2px;
+      opacity: 0.35;
       pointer-events: none;
-      background: radial-gradient(circle at 20% 20%, rgba(39, 247, 154, 0.18), transparent 50%),
-        radial-gradient(circle at 80% 80%, rgba(39, 120, 247, 0.12), transparent 55%);
-      opacity: 0.6;
-      mix-blend-mode: color-dodge;
+      animation: scan 8s linear infinite;
     }
 
-    a {
-      color: var(--accent);
+    .bg-particles,
+    .parallax-layer {
+      position: fixed;
+      inset: 0;
+      overflow: hidden;
+      pointer-events: none;
+      z-index: 0;
     }
 
-    .terminal {
-      position: relative;
-      max-width: 960px;
-      height: 88vh;
-      margin: 3vh auto;
-      background: linear-gradient(140deg, rgba(39, 247, 154, 0.07), transparent 70%), var(--surface);
-      border: 1px solid var(--border);
-      box-shadow: 0 18px 60px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(39, 247, 154, 0.05);
+    .parallax-layer {
+      mix-blend-mode: screen;
+      opacity: 0.25;
+      background: radial-gradient(circle at 30% 40%, rgba(126, 247, 199, 0.2), transparent 60%),
+        radial-gradient(circle at 70% 60%, rgba(63, 182, 255, 0.2), transparent 60%);
+      transform: translateZ(0);
+      animation: parallaxDrift 28s ease-in-out infinite alternate;
+    }
+
+    .parallax-layer.layer-two {
+      animation-duration: 36s;
+      animation-delay: 8s;
+      opacity: 0.2;
+      filter: blur(20px);
+    }
+
+    .bg-particles span {
+      position: absolute;
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      background: radial-gradient(circle, rgba(126, 247, 199, 0.9), transparent 70%);
+      box-shadow: 0 0 20px rgba(126, 247, 199, 0.45);
+      animation: floatParticle 18s linear infinite;
+      opacity: 0.35;
+    }
+
+    .bg-particles span:nth-child(odd) {
+      width: 8px;
+      height: 8px;
+      animation-duration: 22s;
+      background: radial-gradient(circle, rgba(63, 182, 255, 0.9), transparent 70%);
+      box-shadow: 0 0 20px rgba(63, 182, 255, 0.35);
+    }
+
+    #root {
+      width: min(1240px, 94vw);
+      margin: 0 auto;
+      padding: 48px 0 72px;
       display: flex;
       flex-direction: column;
+      gap: 36px;
+      position: relative;
+      z-index: 1;
+    }
+
+    .hero {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+      gap: 32px;
+      align-items: stretch;
+      perspective: 1400px;
+    }
+
+    .hero-card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 24px;
+      padding: 36px;
+      box-shadow: 0 30px 90px rgba(0, 0, 0, 0.6);
+      position: relative;
       overflow: hidden;
+      transform-style: preserve-3d;
+      transition: transform 0.8s ease, box-shadow 0.6s ease;
     }
 
-    .bezel {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      padding: 12px 14px;
-      background: rgba(4, 12, 14, 0.94);
-      border-bottom: 1px solid rgba(39, 247, 154, 0.08);
-      box-shadow: inset 0 -1px 0 rgba(39, 247, 154, 0.08);
+    .hero-card::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background: radial-gradient(circle at 30% 20%, rgba(126, 247, 199, 0.25), transparent 60%),
+        radial-gradient(circle at 70% 80%, rgba(63, 182, 255, 0.15), transparent 60%);
+      opacity: 0.45;
+      animation: aurora 14s ease-in-out infinite alternate;
     }
 
-    .bezel-links {
-      margin-left: auto;
-      display: inline-flex;
-      gap: 8px;
-      align-items: center;
+    .hero-card::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background: conic-gradient(from 90deg, rgba(126, 247, 199, 0.2), transparent 40%, rgba(63, 182, 255, 0.2));
+      filter: blur(60px);
+      opacity: 0.4;
+      animation: parallaxDrift 20s ease-in-out infinite alternate;
     }
 
-    .bezel-link {
-      padding: 4px 10px;
-      border: 1px solid rgba(39, 247, 154, 0.24);
-      border-radius: 6px;
-      color: var(--accent);
-      font-size: 11px;
-      letter-spacing: 0.16em;
+    .hero-card:hover {
+      transform: translateY(-8px) scale(1.03);
+      box-shadow: 0 40px 120px rgba(0, 0, 0, 0.65), 0 0 45px rgba(126, 247, 199, 0.25);
+    }
+
+    .hero-card:hover::before {
+      opacity: 0.5;
+    }
+
+    .hero-copy {
+      position: relative;
+      z-index: 1;
+    }
+
+    .eyebrow {
+      letter-spacing: 0.45em;
       text-transform: uppercase;
-      text-decoration: none;
-      transition: background 0.15s ease, color 0.15s ease, border 0.15s ease;
-      background: transparent;
+      font-size: 0.82rem;
+      color: var(--accent);
+    }
+
+    h1 {
+      margin: 12px 0;
+      font-size: clamp(2rem, 4vw, 3rem);
+      letter-spacing: 0.02em;
+    }
+
+    .hero-copy p {
+      margin: 0 0 22px;
+      color: var(--muted);
+      font-size: 1.05rem;
+    }
+
+    .hero-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+
+    .hero-actions button {
+      backdrop-filter: blur(6px);
+      border-radius: 999px;
+      border: 1px solid rgba(126, 247, 199, 0.5);
+      background: rgba(126, 247, 199, 0.12);
+      color: var(--accent);
+      padding: 10px 20px;
+      text-transform: uppercase;
+      letter-spacing: 0.2em;
+      font-weight: 600;
       cursor: pointer;
     }
 
-    .bezel-link:hover {
-      background: rgba(39, 247, 154, 0.12);
-      border-color: rgba(39, 247, 154, 0.5);
+    .hero-actions button:hover {
+      border-color: var(--accent-strong);
+      background: rgba(126, 247, 199, 0.2);
     }
 
-    .led-strip {
+    .info-panel {
+      background: rgba(5, 14, 20, 0.75);
+      border: 1px solid rgba(126, 247, 199, 0.2);
+      border-radius: 24px;
+      padding: 28px;
+      position: relative;
+      overflow: hidden;
+      box-shadow: 0 25px 70px rgba(0, 0, 0, 0.55);
+    }
+
+    .info-panel::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background: radial-gradient(circle at top right, rgba(126, 247, 199, 0.18), transparent 60%);
+      opacity: 0.5;
+    }
+
+    .info-panel ul {
+      list-style: none;
+      padding: 0;
+      margin: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+      position: relative;
+      z-index: 1;
+    }
+
+    .info-row {
+      display: grid;
+      grid-template-columns: 56px 1fr;
+      align-items: center;
+      gap: 16px;
+    }
+
+    .info-icon {
+      width: 56px;
+      height: 56px;
+      border-radius: 18px;
+      background: rgba(6, 16, 22, 0.85);
+      border: 1px solid rgba(126, 247, 199, 0.2);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1.4rem;
+    }
+
+    .info-meta h3 {
+      margin: 0;
+      letter-spacing: 0.12em;
+      font-size: 0.85rem;
+      color: var(--muted);
+      text-transform: uppercase;
+    }
+
+    .info-meta strong {
+      display: block;
+      font-size: 1.5rem;
+      color: var(--accent);
+      margin: 2px 0;
+    }
+
+    .info-meta p {
+      margin: 2px 0 8px;
+      color: var(--muted);
+      font-size: 0.95rem;
+    }
+
+    .info-progress {
+      width: 100%;
+      height: 6px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.08);
+      position: relative;
+      overflow: hidden;
+    }
+
+    .info-progress span {
+      position: absolute;
+      inset: 0;
+      background: linear-gradient(90deg, rgba(126, 247, 199, 0.8), rgba(35, 214, 159, 0.8));
+      border-radius: inherit;
+      transform-origin: left;
+    }
+
+    .feature-tabs {
+      margin-top: 12px;
+      border: 1px solid rgba(126, 247, 199, 0.25);
+      border-radius: 22px;
+      background: rgba(5, 12, 18, 0.8);
+      box-shadow: 0 25px 80px rgba(0, 0, 0, 0.55);
+    }
+
+    .feature-controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      padding: 16px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    }
+
+    .feature-controls button {
+      flex: 1;
+      min-width: 140px;
+      border: 1px solid rgba(126, 247, 199, 0.2);
+      background: rgba(3, 9, 13, 0.9);
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.2em;
+      font-size: 0.7rem;
+      padding: 10px 12px;
+      border-radius: 14px;
+      cursor: pointer;
+      transition: border-color 0.3s ease, background 0.3s ease, color 0.3s ease;
+    }
+
+    .feature-controls button.active {
+      border-color: rgba(126, 247, 199, 0.6);
+      color: var(--accent);
+      background: linear-gradient(135deg, rgba(126, 247, 199, 0.25), rgba(63, 182, 255, 0.18));
+    }
+
+    .feature-pane {
+      padding: 24px;
+      display: grid;
+      grid-template-columns: minmax(240px, 1fr) minmax(220px, 300px);
+      gap: 20px;
+      align-items: stretch;
+    }
+
+    .feature-pane .copy h3 {
+      margin: 0;
+      font-size: 1.3rem;
+      letter-spacing: 0.1em;
+      color: var(--accent);
+      text-transform: uppercase;
+    }
+
+    .feature-pane .copy p {
+      margin: 10px 0 16px;
+      color: var(--muted);
+      line-height: 1.5;
+    }
+
+    .feature-pane ul {
+      list-style: none;
+      padding: 0;
+      margin: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .feature-pane li {
+      display: flex;
+      gap: 10px;
+      align-items: flex-start;
+      font-size: 0.95rem;
+      color: var(--text);
+    }
+
+    .feature-pane li::before {
+      content: '▸';
+      color: var(--accent);
+      margin-top: 2px;
+    }
+
+    .micro-graphic {
+      border-radius: 18px;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      padding: 16px;
+      position: relative;
+      overflow: hidden;
+      box-shadow: inset 0 0 45px rgba(0, 0, 0, 0.5);
+    }
+
+    .micro-graphic canvas,
+    .micro-graphic .timeline {
+      width: 100%;
+      height: 100%;
+    }
+
+    .mvcc-timeline {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .mvcc-event {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .mvcc-event span {
+      flex: 1;
+      height: 6px;
+      border-radius: 999px;
+      background: rgba(126, 247, 199, 0.25);
+      position: relative;
+      overflow: hidden;
+    }
+
+    .mvcc-event span::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background: linear-gradient(90deg, rgba(126, 247, 199, 0.7), rgba(63, 182, 255, 0.7));
+      width: var(--fill, 60%);
+    }
+
+    .mvcc-event label {
+      font-size: 0.75rem;
+      color: var(--muted);
+      letter-spacing: 0.15em;
+      text-transform: uppercase;
+    }
+
+    .demo-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 18px;
+      margin-top: 16px;
+      perspective: 1000px;
+    }
+
+    .demo-card {
+      background: rgba(4, 11, 16, 0.8);
+      border: 1px solid rgba(126, 247, 199, 0.18);
+      border-radius: 18px;
+      padding: 18px;
+      position: relative;
+      overflow: hidden;
+      transform: translateZ(0);
+      transition: transform 0.4s ease, border-color 0.3s ease;
+    }
+
+    .demo-card::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background: linear-gradient(120deg, rgba(126, 247, 199, 0.18), transparent 65%);
+      opacity: 0;
+      transition: opacity 0.3s ease;
+    }
+
+    .demo-card:hover,
+    .demo-card.active {
+      transform: translateY(-6px) scale(1.02);
+      border-color: rgba(126, 247, 199, 0.35);
+    }
+
+    .demo-card:hover::before,
+    .demo-card.active::before {
+      opacity: 1;
+    }
+
+    .demo-card h5 {
+      margin: 0 0 8px;
+      color: var(--accent);
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      font-size: 0.8rem;
+    }
+
+    .demo-card p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 0.95rem;
+      line-height: 1.4;
+    }
+
+    .plan-visual {
+      margin-top: 20px;
+      border-radius: 20px;
+      border: 1px solid rgba(126, 247, 199, 0.2);
+      background: rgba(5, 12, 18, 0.85);
+      padding: 24px 18px;
+      position: relative;
+      overflow: hidden;
+      box-shadow: 0 20px 50px rgba(0, 0, 0, 0.5);
+    }
+
+    .plan-visual::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background: linear-gradient(120deg, rgba(126, 247, 199, 0.14), transparent 60%);
+      opacity: 0;
+      animation: shimmer 4s ease-in-out infinite;
+    }
+
+    .plan-sql {
+      margin-bottom: 18px;
+      border-radius: 12px;
+      background: rgba(2, 6, 10, 0.85);
+      border: 1px solid rgba(126, 247, 199, 0.18);
+      padding: 14px 16px;
+      font-family: 'Source Code Pro', monospace;
+      font-size: 0.9rem;
+      color: var(--text);
+      box-shadow: inset 0 0 25px rgba(0, 0, 0, 0.35);
+      white-space: pre-wrap;
+    }
+
+    .plan-tree {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 28px;
+      position: relative;
+    }
+
+    .plan-node {
+      width: min(360px, 90%);
+      text-align: center;
+      padding: 14px 12px;
+      border-radius: 14px;
+      border: 1px solid rgba(126, 247, 199, 0.25);
+      background: rgba(2, 8, 12, 0.8);
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
+      position: relative;
+      animation: pulseGlow 6s ease-in-out infinite;
+    }
+
+    .plan-node::before,
+    .plan-node::after {
+      content: "";
+      position: absolute;
+      width: 1px;
+      height: 24px;
+      background: rgba(126, 247, 199, 0.25);
+      left: 50%;
+      transform: translateX(-50%);
+    }
+
+    .plan-node::before {
+      top: -30px;
+    }
+
+    .plan-node::after {
+      bottom: -30px;
+    }
+
+    .plan-node:first-child::before {
+      display: none;
+    }
+
+    .plan-node:last-child::after {
+      display: none;
+    }
+
+    .plan-node h6 {
+      margin: 4px 0;
+      letter-spacing: 0.2em;
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      color: var(--accent);
+    }
+
+    .plan-node p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+
+    .feature-card h4 {
+      margin: 0 0 8px;
+      color: var(--accent);
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      font-size: 0.88rem;
+    }
+
+    .feature-card p {
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.4;
+    }
+
+    .terminal-wrapper {
+      margin-top: 12px;
+      padding: 0;
+      border-radius: 20px;
+      border: 1px solid var(--border);
+      box-shadow: 0 30px 80px rgba(0, 0, 0, 0.6);
+      background: var(--terminal);
+      position: relative;
+      overflow: hidden;
+    }
+
+    .terminal-header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 12px 18px;
+      border-bottom: 1px solid rgba(126, 247, 199, 0.1);
+      background: rgba(1, 3, 4, 0.8);
+    }
+
+    .lights {
       display: inline-flex;
       gap: 6px;
     }
 
-    .led {
+    .dot {
       width: 11px;
       height: 11px;
       border-radius: 50%;
-      background: rgba(39, 247, 154, 0.25);
-      box-shadow: 0 0 4px rgba(39, 247, 154, 0.65);
+      background: rgba(126, 247, 199, 0.32);
+      box-shadow: 0 0 6px rgba(126, 247, 199, 0.7);
     }
 
-    .led.warn {
-      background: rgba(247, 201, 72, 0.35);
-      box-shadow: 0 0 4px rgba(247, 201, 72, 0.65);
+    .dot.warn {
+      background: rgba(247, 201, 72, 0.4);
+      box-shadow: 0 0 6px rgba(247, 201, 72, 0.7);
     }
 
-    .led.error {
-      background: rgba(255, 123, 114, 0.35);
-      box-shadow: 0 0 4px rgba(255, 123, 114, 0.65);
+    .dot.error {
+      background: rgba(255, 123, 114, 0.4);
+      box-shadow: 0 0 6px rgba(255, 123, 114, 0.7);
     }
 
-    .bezel .title {
-      font-weight: 600;
+    .terminal-title {
+      letter-spacing: 0.3em;
+      font-size: 0.75rem;
+      color: var(--muted);
       text-transform: uppercase;
-      letter-spacing: 0.18em;
-      font-size: 11px;
-      color: var(--text-muted);
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
     }
 
-    .status {
-      margin-left: 16px;
-      font-size: 12px;
+    .terminal-title img {
+      width: 48px;
+      height: 32px;
+      border-radius: 10px;
+      border: 1px solid rgba(126, 247, 199, 0.3);
+      box-shadow: 0 0 12px rgba(126, 247, 199, 0.25);
+      object-fit: cover;
+    }
+
+    .status-chip {
+      margin-left: auto;
+      padding: 4px 10px;
+      border-radius: 999px;
+      border: 1px solid rgba(126, 247, 199, 0.4);
+      letter-spacing: 0.3em;
+      font-size: 0.65rem;
       text-transform: uppercase;
-      letter-spacing: 0.16em;
-      color: var(--accent);
     }
 
-    .status[data-state="busy"] {
-      color: var(--warning);
+    .status-chip.busy {
+      border-color: var(--warn);
+      color: var(--warn);
     }
 
-    .status[data-state="error"] {
+    .status-chip.error {
+      border-color: var(--error);
       color: var(--error);
     }
 
-    .screen {
-      display: flex;
-      flex-direction: column;
-      position: relative;
-      flex: 1;
-      padding: 0;
-      min-height: 0;
-    }
-
-    .screen::before {
-      content: "";
-      position: absolute;
-      inset: 0;
-      pointer-events: none;
-      background: repeating-linear-gradient(180deg, rgba(0, 0, 0, 0.12) 0px, rgba(0, 0, 0, 0.12) 1px, transparent 1px, transparent 3px);
-      mix-blend-mode: multiply;
-      opacity: 0.45;
-    }
-
-    .screen::after {
-      content: "";
-      position: absolute;
-      inset: 0;
-      pointer-events: none;
-      background: radial-gradient(circle at 50% 0%, rgba(255, 255, 255, 0.08), transparent 55%);
-      opacity: 0.3;
-      mix-blend-mode: screen;
-    }
-
-    .overlay {
-      position: absolute;
-      inset: 0;
-      pointer-events: none;
-      background: linear-gradient(rgba(39, 247, 154, 0.1), transparent), linear-gradient(90deg, rgba(39, 247, 154, 0.05), transparent 60%);
-      mix-blend-mode: soft-light;
-      opacity: 0.35;
-    }
-
-    .content {
-      position: relative;
-      flex: 1;
-      display: grid;
-      grid-template-rows: auto 1fr auto auto;
-      gap: 12px;
-      padding: 16px 22px 12px 22px;
-      min-height: 0;
-      z-index: 1;
-    }
-
-    pre.logo {
-      margin: 0;
-      margin-bottom: 14px;
-      color: var(--accent);
-      font-size: 12px;
-      text-shadow: 0 0 8px rgba(39, 247, 154, 0.45);
-    }
-
-    #log {
+    .terminal-body {
+      height: 560px;
       overflow-y: auto;
-      padding-right: 8px;
-      display: flex;
-      flex-direction: column;
-      gap: 10px;
-      min-height: 0;
+      padding: 22px 26px;
+      font-family: 'Source Code Pro', monospace;
+      position: relative;
+      background: linear-gradient(145deg, rgba(9, 20, 29, 0.85), rgba(4, 11, 17, 0.9));
     }
 
-    #log::-webkit-scrollbar {
+    .terminal-body::-webkit-scrollbar {
       width: 8px;
     }
 
-    #log::-webkit-scrollbar-thumb {
-      background: rgba(39, 247, 154, 0.12);
+    .terminal-body::-webkit-scrollbar-thumb {
+      background: rgba(126, 247, 199, 0.14);
       border-radius: 8px;
     }
 
-    .line {
+    .log-line {
       white-space: pre-wrap;
-      word-break: break-word;
-      font-size: 13px;
+      margin-bottom: 9px;
+      color: var(--text);
+      font-size: 0.95rem;
     }
 
-    .line.prompt {
-      color: var(--accent);
+    .log-line.muted {
+      color: var(--muted);
     }
 
-    .line.error {
+    .log-line.error {
       color: var(--error);
     }
 
-    .line.success {
-      color: var(--success);
+    .log-line.success {
+      color: var(--accent);
     }
 
-    .line.muted {
-      color: var(--text-muted);
-    }
-
-    .line .prompt-text {
+    .log-prompt {
       color: var(--accent);
       margin-right: 8px;
     }
 
-    pre.block {
-      margin: 0;
-      background: rgba(7, 12, 14, 0.74);
-      border: 1px solid rgba(39, 247, 154, 0.18);
-      padding: 12px 14px;
-      border-radius: 6px;
-      font-size: 13px;
-      line-height: 1.6;
-      color: var(--text);
-      backdrop-filter: blur(4px);
-      box-shadow: 0 0 0 1px rgba(39, 247, 154, 0.05) inset;
-      white-space: pre-wrap;
-      word-break: break-word;
+    .log-block {
+      background: rgba(3, 8, 12, 0.88);
+      border: 1px solid rgba(126, 247, 199, 0.22);
+      border-radius: 14px;
+      padding: 14px 16px;
+      font-size: 0.95rem;
+      line-height: 1.5;
+      margin-bottom: 16px;
+      overflow-x: auto;
+      box-shadow: inset 0 0 35px rgba(0, 0, 0, 0.45);
     }
 
-    form.input-form {
-      position: relative;
+    .terminal-input {
+      border-top: 1px solid rgba(126, 247, 199, 0.1);
+      padding: 16px 22px 20px;
+      background: rgba(0, 3, 5, 0.85);
+    }
+
+    .terminal-input form {
       display: flex;
+      gap: 12px;
       align-items: flex-start;
-      gap: 10px;
-      margin-top: 16px;
+      border: 1px solid rgba(126, 247, 199, 0.2);
+      border-radius: 12px;
       padding: 12px 14px;
-      border: 1px solid rgba(39, 247, 154, 0.12);
-      border-radius: 8px;
-      background: rgba(5, 11, 14, 0.78);
-      box-shadow: inset 0 0 0 1px rgba(39, 247, 154, 0.05), 0 12px 32px rgba(0, 0, 0, 0.45);
+      background: rgba(2, 6, 10, 0.6);
     }
 
-    form.input-form:focus-within {
-      border-color: rgba(39, 247, 154, 0.34);
-      box-shadow: inset 0 0 0 1px rgba(39, 247, 154, 0.18), 0 0 16px rgba(39, 247, 154, 0.18);
+    .terminal-input form:focus-within {
+      border-color: rgba(126, 247, 199, 0.5);
+      box-shadow: 0 0 12px rgba(126, 247, 199, 0.18);
     }
 
     .prompt-label {
       color: var(--accent);
+      font-family: 'Source Code Pro', monospace;
       padding-top: 4px;
     }
 
-    #cmd {
+    textarea {
       flex: 1;
-      min-height: 22px;
-      max-height: 160px;
-      background: transparent;
       border: none;
-      outline: none;
-      resize: none;
+      background: transparent;
+      font-family: 'Source Code Pro', monospace;
+      font-size: 0.95rem;
       color: var(--text);
-      font: inherit;
-      line-height: 1.6;
-      padding: 0;
+      resize: none;
+      outline: none;
+      line-height: 1.5;
       caret-color: var(--accent);
     }
 
-    #cmd::placeholder {
-      color: rgba(108, 133, 147, 0.55);
-    }
-
-    .hint {
-      font-size: 11px;
-      color: var(--text-muted);
-      margin-top: 6px;
-    }
-
-    .badge {
-      display: inline-block;
-      padding: 2px 6px;
-      border: 1px solid rgba(39, 247, 154, 0.24);
-      border-radius: 4px;
-      font-size: 10px;
-      letter-spacing: 0.12em;
-      text-transform: uppercase;
-      color: var(--accent);
+    .terminal-hint {
+      margin-top: 8px;
+      font-size: 0.8rem;
+      color: var(--muted);
     }
 
     @media (max-width: 720px) {
-      .terminal {
-        margin: 0;
-        height: 100vh;
-        border-radius: 0;
+      #root {
+        padding: 32px 0 64px;
       }
 
-      .bezel {
-        flex-wrap: wrap;
-        gap: 8px;
+      .terminal-body {
+        height: 480px;
       }
 
-      form.input-form {
+      .hero-card {
+        padding: 24px;
+      }
+
+      .feature-pane {
+        grid-template-columns: 1fr;
+      }
+
+      .terminal-input form {
         flex-direction: column;
       }
 
@@ -355,206 +801,233 @@
         padding-top: 0;
       }
     }
+
+    @keyframes scan {
+      0% {
+        transform: translateY(0);
+      }
+
+      100% {
+        transform: translateY(2px);
+      }
+    }
+
+    @keyframes aurora {
+      0% {
+        transform: rotate(0deg) scale(1);
+      }
+
+      100% {
+        transform: rotate(20deg) scale(1.1);
+      }
+    }
+
+    @keyframes floatGlow {
+      0% {
+        transform: translateY(0);
+        box-shadow: 0 30px 90px rgba(0, 0, 0, 0.6);
+      }
+
+      50% {
+        transform: translateY(-6px);
+        box-shadow: 0 20px 70px rgba(0, 0, 0, 0.5), 0 0 25px rgba(126, 247, 199, 0.25);
+      }
+
+      100% {
+        transform: translateY(0);
+        box-shadow: 0 30px 90px rgba(0, 0, 0, 0.6);
+      }
+    }
+
+    @keyframes parallaxDrift {
+      0% {
+        transform: translate3d(-40px, -30px, 0);
+      }
+
+      100% {
+        transform: translate3d(40px, 30px, 0);
+      }
+    }
+
+    @keyframes shimmer {
+      0% {
+        opacity: 0;
+        transform: scale(0.8);
+      }
+
+      50% {
+        opacity: 0.7;
+        transform: scale(1.2);
+      }
+
+      100% {
+        opacity: 0;
+        transform: scale(1.5);
+      }
+    }
+
+    @keyframes drift {
+      0% {
+        transform: translateY(0) rotate(0deg);
+      }
+
+      100% {
+        transform: translateY(60px) rotate(4deg);
+      }
+    }
+
+    @keyframes floatParticle {
+      0% {
+        transform: translate3d(var(--x, 0), 120vh, 0) scale(0.9);
+      }
+
+      100% {
+        transform: translate3d(calc(var(--x, 0) + 40px), -10vh, 0) scale(1.1);
+      }
+    }
+
+    @keyframes pulseGlow {
+      0%,
+      100% {
+        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4), 0 0 12px rgba(126, 247, 199, 0.15);
+      }
+
+      50% {
+        box-shadow: 0 18px 40px rgba(0, 0, 0, 0.45), 0 0 25px rgba(126, 247, 199, 0.3);
+      }
+    }
   </style>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 </head>
 
 <body>
-  <div class="terminal">
-    <div class="bezel">
-      <div class="led-strip">
-        <span class="led error"></span>
-        <span class="led warn"></span>
-        <span class="led"></span>
-      </div>
-      <span class="title">QUILLSQL TERMINAL</span>
-      <div class="bezel-links">
-        <a href="https://feichai0017.github.io/QuillSQL/" target="_blank" class="bezel-link">DOCS</a>
-        <button class="bezel-link" id="openGithub">GITHUB</button>
-        <button class="bezel-link" id="openProfile">PROFILE</button>
-      </div>
-      <span id="status" class="status" data-state="ready">READY</span>
-    </div>
-    <div class="screen">
-      <div class="overlay"></div>
-      <div class="content">
-        <pre class="logo" id="logo"></pre>
-        <div id="log" class="log"></div>
-        <form id="input-form" class="input-form" autocomplete="off">
-          <span class="prompt-label">quill@tty:~$</span>
-          <textarea id="cmd" rows="1" placeholder="type help for usage · Shift+Enter to add newline"></textarea>
-        </form>
-        <div class="hint">Commands: help · github · profile · clear · history · endpoint · Any other input executes SQL.</div>
-      </div>
-    </div>
+  <div class="parallax-layer layer-one"></div>
+  <div class="parallax-layer layer-two"></div>
+  <div class="bg-particles">
+    <span style="--x:5vw; animation-delay: 0s;"></span>
+    <span style="--x:25vw; animation-delay: 3s;"></span>
+    <span style="--x:45vw; animation-delay: 6s;"></span>
+    <span style="--x:65vw; animation-delay: 2s;"></span>
+    <span style="--x:85vw; animation-delay: 5s;"></span>
+    <span style="--x:15vw; animation-delay: 8s;"></span>
   </div>
-  <script>
-    const statusEl = document.getElementById('status');
-    const logEl = document.getElementById('log');
-    const cmdEl = document.getElementById('cmd');
-    const formEl = document.getElementById('input-form');
-    const logoEl = document.getElementById('logo');
-    const openGithubBtn = document.getElementById('openGithub');
-    const openProfileBtn = document.getElementById('openProfile');
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useEffect, useMemo, useRef } = React;
 
-    const STORAGE_KEY = 'quillsql:apiBase';
-    const DEFAULT_API_BASE = '/api/sql';
+    const DOCS_URL = 'https://feichai0017.github.io/QuillSQL/';
     const GITHUB_URL = 'https://github.com/feichai0017/QuillSQL';
     const PROFILE_URL = 'https://github.com/feichai0017';
-    const commandHistory = [];
-    let historyIndex = 0;
+    const STORAGE_KEY = 'quillsql:endpoint';
+    const DEFAULT_ENDPOINT = '/api/sql';
 
-    const getApiBase = () => localStorage.getItem(STORAGE_KEY) || DEFAULT_API_BASE;
-    const setApiBase = (value) => localStorage.setItem(STORAGE_KEY, value);
+    const HERO_STATS = [
+      { label: 'Isolation', value: 'MVCC ×4', detail: 'read-uncommitted → serializable', icon: '🌀', progress: 100 },
+      { label: 'Storage', value: 'Heap + B+Tree', detail: 'WAL + checkpoints, buffer pool', icon: '💾', progress: 92 },
+      { label: 'Executor', value: 'Volcano', detail: 'physical planner & runtime', icon: '🧠', progress: 88 },
+      { label: 'Tests', value: 'sqllogictest', detail: 'suite-backed demo scripts', icon: '✅', progress: 80 },
+    ];
 
-    function escapeHtml(text = '') {
-      return text.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c] || c));
-    }
+    const FEATURE_SECTIONS = {
+      transactions: {
+        title: 'Transactions / MVCC',
+        body: 'Snapshot isolation, row/table locks, MVCC vacuum workers, transaction snapshots, and timeline tooling.',
+        bullets: [
+          'BEGIN / COMMIT / ROLLBACK with \\\\set transaction',
+          'Lock manager + deadlock detector hooks',
+          'Background vacuum honoring oldest active txn',
+        ],
+      },
+      storage: {
+        title: 'Storage & WAL',
+        body: 'Heap with MVCC tuple headers, WAL with checkpoints, buffer pool featuring LRU-K + TinyLFU and io_uring scheduler.',
+        bullets: [
+          'ARIES-style redo/undo with control files',
+          'Prefetch API and streaming scans for large tables',
+          'B+Tree with OLC, B-link pages, WAL-coded operations',
+        ],
+      },
+      execution: {
+        title: 'Planner & Executor',
+        body: 'Logical optimizer rules, Volcano-style executor, expression engine, and plan visualization for teaching.',
+        bullets: [
+          'Push-down rules (filter/limit), limit merge',
+          'Physical planner bridging scans/indexes/joins',
+          'Explain output for logical & physical plans',
+        ],
+      },
+      teaching: {
+        title: 'Teaching Stack',
+        body: 'Module boundaries mirror CMU 15-445 for labs, docs surfaced in mdBook, CLI + web shell for demos.',
+        bullets: [
+          'sqllogictest based labs, ready-to-run scripts',
+          'Docs + CLI + HTTP API for integration',
+          'Pluggable components for experiments',
+        ],
+      },
+    };
 
-    function scrollLogToBottom() {
-      logEl.scrollTop = logEl.scrollHeight;
-    }
+    const DEMO_SCRIPTS = [
+      {
+        title: 'Analytics',
+        body: 'Orders per region with aggregation.',
+        sql: 'SELECT region, COUNT(*) FROM orders GROUP BY region ORDER BY 2 DESC;',
+        plan: [
+          { label: 'Aggregate', desc: 'Hash Aggregate' },
+          { label: 'Join', desc: 'Hash Join (orders ↔ regions)' },
+          { label: 'Scan', desc: 'Seq Scan orders' },
+          { label: 'Scan', desc: 'Seq Scan regions' },
+        ],
+      },
+      {
+        title: 'MVCC Snapshot',
+        body: 'Repeatable-read account snapshot.',
+        sql: 'BEGIN ISOLATION LEVEL REPEATABLE READ; SELECT * FROM accounts WHERE balance > 1000;',
+        plan: [
+          { label: 'Filter', desc: 'Predicate balance > 1000' },
+          { label: 'Scan', desc: 'Seq Scan accounts (MVCC visible)' },
+        ],
+      },
+      {
+        title: 'Index Probe',
+        body: 'Email LIKE search via index.',
+        sql: 'CREATE INDEX idx_users_email ON users(email); SELECT * FROM users WHERE email LIKE \'%quill%\';',
+        plan: [
+          { label: 'Filter', desc: 'email LIKE %quill%' },
+          { label: 'Index Scan', desc: 'idx_users_email' },
+          { label: 'Table Fetch', desc: 'Heap lookup users' },
+        ],
+      },
+      {
+        title: 'Join + Aggregate',
+        body: 'Customer revenue summary.',
+        sql: 'SELECT c.name, SUM(o.total) FROM customers c JOIN orders o ON c.id = o.customer_id GROUP BY c.name;',
+        plan: [
+          { label: 'Aggregate', desc: 'Group by c.name' },
+          { label: 'Join', desc: 'Nested Loop Join' },
+          { label: 'Seq Scan', desc: 'orders' },
+          { label: 'Index Scan', desc: 'customers idx_id' },
+        ],
+      },
+    ];
 
-    function appendLine(text, variant = '') {
-      const line = document.createElement('div');
-      line.className = `line${variant ? ` ${variant}` : ''}`;
-      line.textContent = text;
-      logEl.appendChild(line);
-      scrollLogToBottom();
-    }
+    const HELP_TEXT = [
+      'Built-in commands:',
+      '  \\help               Show this message',
+      '  \\docs               Open the QuillSQL docs',
+      '  \\github             Open the GitHub repo',
+      '  \\profile            Maintainer profile',
+      '  \\history            List submitted SQL blocks',
+      '  \\endpoint           Show current SQL endpoint',
+      '  \\endpoint <value>   Override endpoint (use `default` to reset)',
+      '  \\clear              Clear the terminal output',
+      '',
+      'Regular input is treated as SQL. Statements are split by semicolons before hitting the HTTP API.',
+    ].join('\n');
 
-    function appendBlock(text) {
-      const block = document.createElement('pre');
-      block.className = 'block';
-      block.textContent = text;
-      logEl.appendChild(block);
-      scrollLogToBottom();
-    }
-
-    function appendPrompt(cmd) {
-      const line = document.createElement('div');
-      line.className = 'line prompt';
-      line.innerHTML = `<span class="prompt-text">quill@tty:~$</span>${escapeHtml(cmd)}`;
-      logEl.appendChild(line);
-      scrollLogToBottom();
-    }
-
-    function openExternal(url) {
-      const newTab = window.open(url, '_blank', 'noopener');
-      if (!newTab) {
-        appendLine(`Unable to open link automatically. Please open manually: ${url}`, 'error');
-      }
-    }
-
-    function setStatus(state, label) {
-      statusEl.dataset.state = state;
-      statusEl.textContent = label;
-    }
-
-    function printHelp() {
-      appendBlock([
-        'Built-in commands:',
-        '  help           Show this message',
-        '  github         Open the GitHub repository info',
-        '  profile        Maintainer profile + link',
-        '  clear          Clear the terminal log',
-        '  history        Show submitted SQL commands',
-        '  endpoint <url> Set custom SQL endpoint (persisted in localStorage)',
-        '',
-        'Any other input is sent to the SQL API.',
-      ].join('\n'));
-    }
-
-    function splitStatements(sqlText) {
-      return sqlText
-        .split(';')
-        .map((s) => s.trim())
-        .filter(Boolean)
-        .slice(0, 100);
-    }
-
-    function formatRows(rows) {
-      if (!rows || rows.length === 0) {
-        return '✓ Query executed successfully (0 rows)';
-      }
-      const widths = [];
-      rows.forEach((row) => {
-        row.forEach((cell, idx) => {
-          const len = String(cell ?? '').length;
-          widths[idx] = Math.max(widths[idx] || 0, len);
-        });
-      });
-      const formatted = rows.map((row) =>
-        row
-          .map((cell, idx) => {
-            const text = String(cell ?? '');
-            return text.padEnd(widths[idx]);
-          })
-          .join(' | ')
-      );
-      return formatted.join('\n');
-    }
-
-    async function runSQL(rawInput) {
-      const sql = rawInput.trim();
-      if (!sql) {
-        appendLine('Nothing to execute.', 'muted');
-        return;
-      }
-      setStatus('busy', 'RUNNING');
-      try {
-        const endpoint = getApiBase();
-        const batchEndpoint = endpoint.endsWith('/sql')
-          ? endpoint.replace(/\/sql$/, '/sql_batch')
-          : `${endpoint}_batch`;
-        const payload = { sql: rawInput };
-        const statements = splitStatements(rawInput);
-
-        let executed = false;
-        try {
-          const batchRes = await fetch(batchEndpoint, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload),
-          });
-          if (batchRes.ok) {
-            const data = await batchRes.json();
-            const resultSets = Array.isArray(data.results) ? data.results : [];
-            resultSets.forEach((rows, idx) => {
-              const stmt = statements[idx] || `(statement ${idx + 1})`;
-              appendBlock(`Statement ${idx + 1}: ${stmt}\n${formatRows(rows || [])}`);
-            });
-            appendLine(`Batch executed (${resultSets.length} statement(s)).`, 'success');
-            executed = true;
-          }
-        } catch (_) {
-          // ignore and fallback
-        }
-
-        if (!executed) {
-          const res = await fetch(endpoint, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ sql }),
-          });
-          if (!res.ok) {
-            const errText = await res.text();
-            appendLine(`❌ ${errText || `HTTP ${res.status}`}`, 'error');
-            setStatus('error', 'ERROR');
-            return;
-          }
-          const data = await res.json();
-          appendBlock(`${sql}\n${formatRows(data.rows || [])}`);
-          appendLine(`Rows: ${(data.rows || []).length}`, 'muted');
-        }
-        setStatus('ready', 'READY');
-      } catch (err) {
-        console.error('SQL execution failed:', err);
-        appendLine(`❌ Network error: ${err.message}`, 'error');
-        setStatus('error', 'ERROR');
-      }
-    }
-
-    const asciiLogo = [
+    const ASCII_LOGO = [
       '   ██████╗ ██╗   ██╗██╗██╗     ██╗     ███████╗ ██████╗ ██╗      ',
       '  ██╔═══██╗██║   ██║██║██║     ██║     ██╔════╝██╔═══██╗██║      ',
       '  ██║   ██║██║   ██║██║██║     ██║     ███████╗██║   ██║██║      ',
@@ -562,143 +1035,457 @@
       '  ╚██████╔╝╚██████╔╝██║███████╗███████╗███████║╚██████╔╝███████╗ ',
       '   ╚══▀▀═╝  ╚═════╝ ╚═╝╚══════╝╚══════╝╚══════╝ ╚══▀▀═╝ ╚══════╝ ',
       '-----------------------------------------------------------------',
-      '    QuillSQL • Interactive Terminal • `help` for usage           '
+      '           QuillSQL • Interactive Terminal • `\\help`            ',
     ].join('\n');
 
-    logoEl.textContent = asciiLogo;
+    const metaCommands = new Set(['help', 'docs', 'github', 'profile', 'history', 'clear', 'endpoint']);
 
-    function showGithub() {
-      appendLine('GitHub repository', 'muted');
-      appendBlock([
-        'Project: QuillSQL',
-        `URL   : ${GITHUB_URL}`,
-        'Stars : give it a ⭐ if you find it useful!',
-        '',
-        'Tip: run `git clone` with the URL above to explore locally.'
-      ].join('\n'));
+    const splitStatements = (text) => (
+      text
+        .split(';')
+        .map((stmt) => stmt.trim())
+        .filter(Boolean)
+        .map((stmt) => stmt.endsWith(';') ? stmt : `${stmt};`)
+    );
+
+    const formatRows = (rows) => {
+      if (!rows || rows.length === 0) {
+        return '✓ OK (0 rows)';
+      }
+      const widths = [];
+      rows.forEach((row) => (
+        row.forEach((cell, idx) => {
+          const len = String(cell ?? '').length;
+          widths[idx] = Math.max(widths[idx] || 0, len);
+        })
+      ));
+      return rows
+        .map((row) => row.map((cell, idx) => String(cell ?? '').padEnd(widths[idx])).join(' | '))
+        .join('\n');
+    };
+
+    const getStoredEndpoint = () => localStorage.getItem(STORAGE_KEY) || DEFAULT_ENDPOINT;
+
+    function Hero() {
+      return (
+        <section className="hero">
+          <div className="hero-card">
+            <div className="hero-copy">
+              <span className="eyebrow">QuillSQL</span>
+              <h1>Rust RDBMS for CMU 15-445 style teaching.</h1>
+              <p>
+                Single-binary database engine featuring MVCC transactions, ARIES-inspired WAL/recovery, B+Tree indexes
+                and a Volcano executor. Use the live terminal below to run SQL against a real QuillSQL instance.
+              </p>
+              <div className="hero-actions">
+                <button onClick={() => window.open(DOCS_URL, '_blank', 'noopener')}>Docs</button>
+                <button onClick={() => window.open(GITHUB_URL, '_blank', 'noopener')}>GitHub</button>
+                <button onClick={() => window.open(PROFILE_URL, '_blank', 'noopener')}>Profile</button>
+              </div>
+            </div>
+          </div>
+          <aside className="info-panel">
+            <ul>
+              {HERO_STATS.map((stat) => (
+                <li className="info-row" key={stat.label}>
+                  <div className="info-icon">{stat.icon}</div>
+                  <div className="info-meta">
+                    <h3>{stat.label}</h3>
+                    <strong>{stat.value}</strong>
+                    <p>{stat.detail}</p>
+                    <div className="info-progress">
+                      <span style={{ transform: `scaleX(${stat.progress / 100})` }} />
+                    </div>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </aside>
+        </section>
+      );
     }
 
-    function showProfile() {
-      appendLine('Maintainer profile', 'muted');
-      appendBlock([
-        'Handle : feichai0017',
-        `URL    : ${PROFILE_URL}`,
-        'Bio    : Systems & database tinkerer. Find more projects on GitHub.'
-      ].join('\n'));
+    function FeatureTabs() {
+      const keys = Object.keys(FEATURE_SECTIONS);
+      const [active, setActive] = useState(keys[0]);
+      const data = FEATURE_SECTIONS[active];
+
+      return (
+        <section className="feature-tabs">
+          <div className="feature-controls">
+            {keys.map((key) => (
+              <button
+                key={key}
+                className={key === active ? 'active' : ''}
+                onClick={() => setActive(key)}
+              >
+                {FEATURE_SECTIONS[key].title.split(' / ')[0]}
+              </button>
+            ))}
+          </div>
+          <div className="feature-pane">
+            <div className="copy">
+              <h3>{data.title}</h3>
+              <p>{data.body}</p>
+              <ul>
+                {data.bullets.map((item) => (
+                  <li key={item}>{item}</li>
+                ))}
+              </ul>
+            </div>
+            <div className="micro-graphic">
+              {active === 'transactions' ? (
+                <div className="mvcc-timeline">
+                  <div className="mvcc-event">
+                    <label>T0</label>
+                    <span style={{ '--fill': '30%' }}></span>
+                    <small>Txn A read</small>
+                  </div>
+                  <div className="mvcc-event">
+                    <label>T1</label>
+                    <span style={{ '--fill': '60%' }}></span>
+                    <small>Txn B update</small>
+                  </div>
+                  <div className="mvcc-event">
+                    <label>T2</label>
+                    <span style={{ '--fill': '90%' }}></span>
+                    <small>Commit + vacuum</small>
+                  </div>
+                </div>
+              ) : (
+                <div className="mvcc-timeline">
+                  {active === 'storage' && (
+                    <>
+                      <div className="mvcc-event">
+                        <label>WAL</label>
+                        <span style={{ '--fill': '70%' }}></span>
+                        <small>durability</small>
+                      </div>
+                      <div className="mvcc-event">
+                        <label>Buffer</label>
+                        <span style={{ '--fill': '55%' }}></span>
+                        <small>LRU-K / TinyLFU</small>
+                      </div>
+                      <div className="mvcc-event">
+                        <label>B+Tree</label>
+                        <span style={{ '--fill': '80%' }}></span>
+                        <small>OLC + WAL</small>
+                      </div>
+                    </>
+                  )}
+                  {active === 'execution' && (
+                    <>
+                      <div className="mvcc-event">
+                        <label>Optimizer</label>
+                        <span style={{ '--fill': '50%' }}></span>
+                        <small>rules</small>
+                      </div>
+                      <div className="mvcc-event">
+                        <label>Planner</label>
+                        <span style={{ '--fill': '65%' }}></span>
+                        <small>physical tree</small>
+                      </div>
+                      <div className="mvcc-event">
+                        <label>Executor</label>
+                        <span style={{ '--fill': '85%' }}></span>
+                        <small>Volcano</small>
+                      </div>
+                    </>
+                  )}
+                  {active === 'teaching' && (
+                    <>
+                      <div className="mvcc-event">
+                        <label>Docs</label>
+                        <span style={{ '--fill': '60%' }}></span>
+                        <small>mdBook</small>
+                      </div>
+                      <div className="mvcc-event">
+                        <label>Labs</label>
+                        <span style={{ '--fill': '70%' }}></span>
+                        <small>sqllogictest</small>
+                      </div>
+                      <div className="mvcc-event">
+                        <label>CLI</label>
+                        <span style={{ '--fill': '55%' }}></span>
+                        <small>Rust REPL</small>
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        </section>
+      );
     }
 
-    function handleCommand(input) {
-      const trimmed = input.trim();
-      if (!trimmed) {
-        appendLine('(empty)', 'muted');
-        return;
-      }
+    function DemoShowcase() {
+      const [activeIdx, setActiveIdx] = useState(0);
+      const active = DEMO_SCRIPTS[activeIdx];
 
-      if (trimmed === 'help') {
-        printHelp();
-        return;
-      }
+      return (
+        <section>
+          <h2 style={{ letterSpacing: '0.2em', textTransform: 'uppercase', fontSize: '0.9rem', color: 'var(--muted)', margin: '0 0 12px' }}>
+            Demo Scripts
+          </h2>
+          <div className="demo-grid">
+            {DEMO_SCRIPTS.map((demo, idx) => (
+              <article
+                className={`demo-card ${idx === activeIdx ? 'active' : ''}`}
+                key={demo.title}
+                onMouseEnter={() => setActiveIdx(idx)}
+                onFocus={() => setActiveIdx(idx)}
+                tabIndex={0}
+              >
+                <h5>{demo.title}</h5>
+                <p>{demo.body}</p>
+              </article>
+            ))}
+          </div>
+          <section className="plan-visual">
+            <h2 style={{ letterSpacing: '0.2em', textTransform: 'uppercase', fontSize: '0.85rem', color: 'var(--muted)', margin: '0 0 12px' }}>
+              Execution Plan Preview
+            </h2>
+            <div className="plan-sql">{active.sql}</div>
+            <div className="plan-tree">
+              {active.plan.map((node, idx) => (
+                <div className="plan-node" key={`${node.label}-${idx}`}>
+                  <h6>{node.label}</h6>
+                  <p>{node.desc}</p>
+                </div>
+              ))}
+            </div>
+          </section>
+        </section>
+      );
+    }
 
-      if (trimmed === 'github') {
-        showGithub();
-        return;
-      }
+    function Terminal() {
+      const [endpoint, setEndpoint] = useState(getStoredEndpoint);
+      const [log, setLog] = useState(() => ([
+        { type: 'block', text: ASCII_LOGO },
+        { type: 'line', variant: 'muted', text: 'Welcome to the QuillSQL web shell. Type \\help for built-ins.' },
+        { type: 'line', variant: 'muted', text: `Current SQL endpoint: ${getStoredEndpoint()}` },
+      ]));
+      const [input, setInput] = useState('');
+      const [status, setStatus] = useState('ready');
+      const historyRef = useRef([]);
+      const [historyIndex, setHistoryIndex] = useState(0);
+      const logRef = useRef(null);
 
-      if (trimmed === 'profile') {
-        showProfile();
-        return;
-      }
+      useEffect(() => {
+        logRef.current?.scrollTo({ top: logRef.current.scrollHeight });
+      }, [log]);
 
-      if (trimmed === 'clear') {
-        logEl.innerHTML = '';
-        appendLine('Session cleared.', 'muted');
-        return;
-      }
+      const appendEntry = (entry) => {
+        setLog((prev) => [...prev, entry]);
+      };
 
-      if (trimmed === 'history') {
-        if (commandHistory.length === 0) {
-          appendLine('No history yet.', 'muted');
-        } else {
-          appendBlock(commandHistory.map((cmd, idx) => `${String(idx + 1).padStart(2, '0')}: ${cmd}`).join('\n'));
+      const appendLine = (text, variant = '') => appendEntry({ type: 'line', variant, text });
+      const appendBlock = (text) => appendEntry({ type: 'block', text });
+      const appendPrompt = (text) => appendEntry({ type: 'prompt', text });
+
+      const resetLog = () => {
+        setLog([
+          { type: 'block', text: ASCII_LOGO },
+          { type: 'line', variant: 'muted', text: 'Welcome to the QuillSQL web shell. Type \\help for built-ins.' },
+          { type: 'line', variant: 'muted', text: `Current SQL endpoint: ${endpoint}` },
+        ]);
+      };
+
+      const handleMeta = (raw) => {
+        const trimmed = raw.trim().replace(/^\\/, '');
+        const [cmd, ...rest] = trimmed.split(/\s+/);
+        const args = rest.join(' ').trim();
+        switch ((cmd || '').toLowerCase()) {
+          case 'help':
+            appendBlock(HELP_TEXT);
+            break;
+          case 'docs':
+            window.open(DOCS_URL, '_blank', 'noopener');
+            appendLine(`Opened docs: ${DOCS_URL}`, 'muted');
+            break;
+          case 'github':
+            window.open(GITHUB_URL, '_blank', 'noopener');
+            appendLine(`Opened repository: ${GITHUB_URL}`, 'muted');
+            break;
+          case 'profile':
+            window.open(PROFILE_URL, '_blank', 'noopener');
+            appendLine(`Opened maintainer profile: ${PROFILE_URL}`, 'muted');
+            break;
+          case 'history':
+            if (historyRef.current.length === 0) {
+              appendLine('History is empty.', 'muted');
+            } else {
+              appendBlock(historyRef.current.map((cmd, idx) => `${String(idx + 1).padStart(2, '0')}: ${cmd}`).join('\n'));
+            }
+            break;
+          case 'clear':
+            resetLog();
+            break;
+          case 'endpoint':
+            if (!args) {
+              appendLine(`Current SQL endpoint: ${endpoint}`, 'muted');
+            } else if (args === 'default' || args === 'reset') {
+              localStorage.removeItem(STORAGE_KEY);
+              setEndpoint(DEFAULT_ENDPOINT);
+              appendLine(`Endpoint reset to ${DEFAULT_ENDPOINT}`, 'success');
+            } else {
+              localStorage.setItem(STORAGE_KEY, args);
+              setEndpoint(args);
+              appendLine(`Endpoint set to ${args}`, 'success');
+            }
+            break;
+          default:
+            appendLine(`Unknown command: ${cmd}`, 'error');
         }
-        return;
-      }
+      };
 
-      if (trimmed === 'endpoint') {
-        appendLine(`Current SQL endpoint: ${getApiBase()}`, 'muted');
-        return;
-      }
-
-      if (trimmed.startsWith('endpoint ')) {
-        const target = trimmed.slice('endpoint'.length).trim();
-        if (!target) {
-          appendLine('Usage: endpoint <url|default|reset>', 'error');
+      const runSQL = async (sqlText) => {
+        const statements = splitStatements(sqlText);
+        if (!statements.length) {
+          appendLine('No executable SQL detected.', 'muted');
           return;
         }
-        if (target === 'default' || target === 'reset') {
-          setApiBase(DEFAULT_API_BASE);
-          appendLine(`SQL endpoint reset to default (${DEFAULT_API_BASE})`, 'success');
-        } else {
-          setApiBase(target);
-          appendLine(`SQL endpoint set to ${target}`, 'success');
+        historyRef.current.push(sqlText.trim());
+        setHistoryIndex(historyRef.current.length);
+        appendLine(`Running ${statements.length} statement(s) via ${endpoint}`, 'success');
+        setStatus('busy');
+        try {
+          for (let i = 0; i < statements.length; i += 1) {
+            const stmt = statements[i];
+            appendLine(`#${i + 1} ${stmt.trim()}`, 'muted');
+            const response = await fetch(endpoint, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ sql: stmt }),
+            });
+            if (!response.ok) {
+              const errText = await response.text();
+              throw new Error(errText || `HTTP ${response.status}`);
+            }
+            const data = await response.json();
+            appendBlock(formatRows(Array.isArray(data.rows) ? data.rows : []));
+          }
+          appendLine('✓ Done', 'success');
+          setStatus('ready');
+        } catch (err) {
+          appendLine(`❌ ${err.message}`, 'error');
+          setStatus('error');
         }
-        return;
-      }
+      };
 
-      runSQL(input);
+      const handleSubmit = () => {
+        const value = input;
+        appendPrompt(value || '(empty)');
+        if (!value.trim()) {
+          appendLine('(empty)', 'muted');
+          setInput('');
+          return;
+        }
+        if (value.trim().startsWith('\\')) {
+          handleMeta(value);
+        } else {
+          const keyword = value.trim().split(/\s+/)[0]?.toLowerCase();
+          if (metaCommands.has(keyword)) {
+            handleMeta(value);
+          } else {
+            runSQL(value);
+          }
+        }
+        setInput('');
+      };
+
+      const onSubmit = (event) => {
+        event.preventDefault();
+        handleSubmit();
+      };
+
+      const onKeyDown = (event) => {
+        if (event.key === 'Enter' && !event.shiftKey) {
+          event.preventDefault();
+          handleSubmit();
+        } else if (event.key === 'ArrowUp') {
+          event.preventDefault();
+          if (historyRef.current.length === 0) return;
+          const nextIndex = Math.max(0, historyIndex - 1);
+          setHistoryIndex(nextIndex);
+          setInput(historyRef.current[nextIndex] || '');
+        } else if (event.key === 'ArrowDown') {
+          event.preventDefault();
+          if (historyRef.current.length === 0) return;
+          const nextIndex = Math.min(historyRef.current.length, historyIndex + 1);
+          setHistoryIndex(nextIndex);
+          setInput(historyRef.current[nextIndex] || '');
+        }
+      };
+
+      return (
+        <section className="terminal-wrapper">
+          <header className="terminal-header">
+            <div className="lights">
+              <span className="dot error" />
+              <span className="dot warn" />
+              <span className="dot" />
+            </div>
+            <span className="terminal-title">
+              <img src="rust-db.png" alt="QuillSQL logo" />
+              QUILLSQL TERMINAL
+            </span>
+            <span className={`status-chip ${status !== 'ready' ? status : ''}`}>{status}</span>
+          </header>
+          <div className="terminal-body" ref={logRef}>
+            {log.map((entry, idx) => {
+              if (entry.type === 'block') {
+                return <pre className="log-block" key={idx}>{entry.text}</pre>;
+              }
+              if (entry.type === 'prompt') {
+                return (
+                  <div className="log-line" key={idx}>
+                    <span className="log-prompt">quill@tty:~$</span>
+                    {entry.text}
+                  </div>
+                );
+              }
+              return (
+                <div className={`log-line ${entry.variant || ''}`} key={idx}>
+                  {entry.text}
+                </div>
+              );
+            })}
+          </div>
+          <div className="terminal-input">
+            <form onSubmit={onSubmit}>
+              <span className="prompt-label">quill@tty:~$</span>
+              <textarea
+                rows={1}
+                value={input}
+                onChange={(event) => setInput(event.target.value)}
+                onKeyDown={onKeyDown}
+                placeholder="Type SQL or \help · Enter to run · Shift+Enter for newline"
+              />
+            </form>
+            <div className="terminal-hint">
+              Commands: \help · \docs · \github · \profile · \history · \endpoint · Any other input executes SQL.
+            </div>
+          </div>
+        </section>
+      );
     }
 
-    formEl.addEventListener('submit', (event) => {
-      event.preventDefault();
-      const value = cmdEl.value;
-      const normalized = value.replace(/\s+$/g, '');
-      appendPrompt(normalized || value);
-      if (value.trim()) {
-        commandHistory.push(value.trim());
-        historyIndex = commandHistory.length;
-        handleCommand(value);
-      } else {
-        appendLine('(empty)', 'muted');
-      }
-      cmdEl.value = '';
-      cmdEl.style.height = '22px';
-    });
+    function App() {
+      return (
+        <>
+          <Hero />
+          <FeatureTabs />
+          <DemoShowcase />
+          <Terminal />
+        </>
+      );
+    }
 
-    cmdEl.addEventListener('keydown', (event) => {
-      if (event.key === 'Enter' && !event.shiftKey) {
-        event.preventDefault();
-        formEl.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
-      } else if (event.key === 'ArrowUp') {
-        event.preventDefault();
-        if (commandHistory.length === 0) return;
-        historyIndex = Math.max(0, historyIndex - 1);
-        cmdEl.value = commandHistory[historyIndex] || '';
-        cmdEl.dispatchEvent(new Event('input'));
-      } else if (event.key === 'ArrowDown') {
-        event.preventDefault();
-        if (commandHistory.length === 0) return;
-        historyIndex = Math.min(commandHistory.length, historyIndex + 1);
-        cmdEl.value = commandHistory[historyIndex] || '';
-        cmdEl.dispatchEvent(new Event('input'));
-      }
-    });
-
-    cmdEl.addEventListener('input', () => {
-      cmdEl.style.height = '22px';
-      cmdEl.style.height = `${cmdEl.scrollHeight}px`;
-    });
-
-    openGithubBtn.addEventListener('click', () => {
-      openExternal(GITHUB_URL);
-    });
-
-    openProfileBtn.addEventListener('click', () => {
-      openExternal(PROFILE_URL);
-    });
-
-    appendLine('Welcome to QUILLSQL Terminal. Type `help` to get started.', 'muted');
-    appendLine(`Current SQL endpoint: ${getApiBase()}`, 'muted');
-    cmdEl.focus();
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
   </script>
 </body>
 
