@@ -73,7 +73,7 @@ async fn debug_buffer_stats(
 
 async fn debug_locks_snapshot(
     State(state): State<AppState>,
-) -> Result<Json<quill_sql::transaction::lock_manager::LockDebugSnapshot>, (StatusCode, String)> {
+) -> Result<Json<quill_sql::transaction::LockDebugSnapshot>, (StatusCode, String)> {
     let db = state
         .db
         .lock()
@@ -152,7 +152,7 @@ async fn debug_wal_segments(
 
 async fn debug_txns(
     State(state): State<AppState>,
-) -> Result<Json<quill_sql::transaction::transaction_manager::TxnDebugSnapshot>, (StatusCode, String)>
+) -> Result<Json<quill_sql::transaction::TxnDebugSnapshot>, (StatusCode, String)>
 {
     let db = state
         .db
