@@ -28,6 +28,19 @@ fn rebuild_db(opts: &DatabaseOptions) -> Database {
     db
 }
 
+fn lock_or_rebuild_db<'a>(
+    state: &'a AppState,
+) -> Result<std::sync::MutexGuard<'a, Database>, (StatusCode, String)> {
+    match state.db.lock() {
+        Ok(guard) => Ok(guard),
+        Err(poisoned) => {
+            let mut guard = poisoned.into_inner();
+            *guard = rebuild_db(&state.options);
+            Ok(guard)
+        }
+    }
+}
+
 /// Request payload for /api/sql
 #[derive(Deserialize)]
 struct SqlRequest {
@@ -64,20 +77,14 @@ fn strip_sql_comments(input: &str) -> String {
 async fn debug_wal_head(
     State(state): State<AppState>,
 ) -> Result<Json<quill_sql::recovery::wal::WalHeadDebug>, (StatusCode, String)> {
-    let db_guard = state
-        .db
-        .lock()
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "DB poisoned".to_string()))?;
+    let db_guard = lock_or_rebuild_db(&state)?;
     Ok(Json(db_guard.debug_wal_head()))
 }
 
 async fn debug_buffer_stats(
     State(state): State<AppState>,
 ) -> Result<Json<quill_sql::database::BufferDebugStats>, (StatusCode, String)> {
-    let db_guard = state
-        .db
-        .lock()
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "DB poisoned".to_string()))?;
+    let db_guard = lock_or_rebuild_db(&state)?;
     Ok(Json(db_guard.debug_buffer_stats()))
 }
 
@@ -94,10 +101,7 @@ async fn debug_locks_snapshot(
 async fn debug_trace_last(
     State(state): State<AppState>,
 ) -> Result<Json<quill_sql::database::DebugTrace>, (StatusCode, String)> {
-    let db_guard = state
-        .db
-        .lock()
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "DB poisoned".to_string()))?;
+    let db_guard = lock_or_rebuild_db(&state)?;
     match db_guard.debug_last_trace() {
         Some(trace) => Ok(Json(trace)),
         None => Err((StatusCode::NOT_FOUND, "no query executed yet".to_string())),
@@ -107,10 +111,7 @@ async fn debug_trace_last(
 async fn debug_plan_last(
     State(state): State<AppState>,
 ) -> Result<Json<quill_sql::database::DebugPlanSnapshot>, (StatusCode, String)> {
-    let db_guard = state
-        .db
-        .lock()
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "DB poisoned".to_string()))?;
+    let db_guard = lock_or_rebuild_db(&state)?;
     match db_guard.debug_last_plan() {
         Some(plan) => Ok(Json(plan)),
         None => Err((StatusCode::NOT_FOUND, "no query executed yet".to_string())),
@@ -126,20 +127,7 @@ async fn debug_wal_peek(
     State(state): State<AppState>,
     Query(q): Query<LimitQuery>,
 ) -> Result<Json<Vec<quill_sql::recovery::wal::WalPeekDebug>>, (StatusCode, String)> {
-    let db = state.db.lock().ok();
-    let db = match db {
-        Some(guard) => guard,
-        None => {
-            // Attempt to rebuild database if poisoned
-            let rebuilt = rebuild_db(&state.options);
-            let mut db_lock = state
-                .db
-                .lock()
-                .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "DB poisoned".to_string()))?;
-            *db_lock = rebuilt;
-            db_lock
-        }
-    };
+    let db = lock_or_rebuild_db(&state)?;
     let limit = q.limit.unwrap_or(10).min(500);
     db.debug_wal_peek(limit)
         .map(Json)
@@ -149,19 +137,7 @@ async fn debug_wal_peek(
 async fn debug_mvcc_versions(
     State(state): State<AppState>,
 ) -> Result<Json<quill_sql::database::MvccVersionsDebug>, (StatusCode, String)> {
-    let db = state.db.lock().ok();
-    let db = match db {
-        Some(guard) => guard,
-        None => {
-            let rebuilt = rebuild_db(&state.options);
-            let mut db_lock = state
-                .db
-                .lock()
-                .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "DB poisoned".to_string()))?;
-            *db_lock = rebuilt;
-            db_lock
-        }
-    };
+    let db = lock_or_rebuild_db(&state)?;
     db.debug_mvcc_versions()
         .map(Json)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))
@@ -170,10 +146,7 @@ async fn debug_mvcc_versions(
 async fn debug_wal_segments(
     State(state): State<AppState>,
 ) -> Result<Json<quill_sql::database::WalSegmentsDebug>, (StatusCode, String)> {
-    let db = state
-        .db
-        .lock()
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "DB poisoned".to_string()))?;
+    let db = lock_or_rebuild_db(&state)?;
     db.debug_wal_segments()
         .map(Json)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))
@@ -182,19 +155,7 @@ async fn debug_wal_segments(
 async fn debug_txns(
     State(state): State<AppState>,
 ) -> Result<Json<quill_sql::transaction::TxnDebugSnapshot>, (StatusCode, String)> {
-    let db = state.db.lock().ok();
-    let db = match db {
-        Some(guard) => guard,
-        None => {
-            let rebuilt = rebuild_db(&state.options);
-            let mut db_lock = state
-                .db
-                .lock()
-                .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "DB poisoned".to_string()))?;
-            *db_lock = rebuilt;
-            db_lock
-        }
-    };
+    let db = lock_or_rebuild_db(&state)?;
     Ok(Json(db.debug_txn_snapshot()))
 }
 
@@ -275,10 +236,7 @@ async fn api_sql(
     State(state): State<AppState>,
     Json(req): Json<SqlRequest>,
 ) -> Result<Json<SqlResponse>, (StatusCode, String)> {
-    let mut db = state
-        .db
-        .lock()
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "DB poisoned".to_string()))?;
+    let mut db = lock_or_rebuild_db(&state)?;
     let cleaned = strip_sql_comments(&req.sql);
     let tuples = db
         .run(&cleaned)
@@ -295,10 +253,7 @@ async fn api_sql_batch(
     State(state): State<AppState>,
     Json(req): Json<SqlRequest>,
 ) -> Result<Json<SqlBatchResponse>, (StatusCode, String)> {
-    let mut db = state
-        .db
-        .lock()
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "DB poisoned".to_string()))?;
+    let mut db = lock_or_rebuild_db(&state)?;
     let cleaned = strip_sql_comments(&req.sql);
     let statements = cleaned
         .split(';')
