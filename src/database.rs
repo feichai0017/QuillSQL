@@ -1,5 +1,4 @@
 use crate::background::{self, BackgroundWorkers};
-use crate::buffer::page::INVALID_PAGE_ID;
 use log::{debug, warn};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -31,6 +30,7 @@ use crate::{
         DefaultStorageEngine, StorageEngine,
     },
     transaction::{CommandId, IsolationLevel, TransactionManager},
+    storage::page::INVALID_PAGE_ID,
 };
 use crate::{
     transaction::lock_manager::LockDebugSnapshot,
@@ -330,7 +330,22 @@ impl Database {
             return Ok(result);
         }
 
-        self.execute_physical_plan(session, physical_plan)
+        let result = self.execute_physical_plan(session, physical_plan)?;
+
+        let elapsed = start.elapsed().as_millis();
+        let rows = result.len();
+        if let Ok(mut guard) = self.debug_trace.lock() {
+            *guard = Some(DebugTrace {
+                logical_plan: logical_plan_str,
+                physical_plan: physical_plan_str,
+                logical_tree,
+                physical_tree,
+                rows,
+                duration_ms: elapsed,
+            });
+        }
+
+        Ok(result)
     }
 
     pub fn default_isolation(&self) -> IsolationLevel {
@@ -454,19 +469,6 @@ impl Database {
         self.debug_trace
             .lock()
             .ok()
-            .as_ref()
-            .and_then(|opt| opt.clone())
-            .map(|trace| DebugPlanSnapshot {
-                logical: trace.logical_tree,
-                physical: trace.physical_tree,
-            })
-    }
-
-    pub fn debug_last_plan(&self) -> Option<DebugPlanSnapshot> {
-        self.debug_trace
-            .lock()
-            .ok()
-            .as_ref()
             .and_then(|opt| opt.clone())
             .map(|trace| DebugPlanSnapshot {
                 logical: trace.logical_tree,
