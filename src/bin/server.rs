@@ -152,8 +152,7 @@ async fn debug_wal_segments(
 
 async fn debug_txns(
     State(state): State<AppState>,
-) -> Result<Json<quill_sql::transaction::TxnDebugSnapshot>, (StatusCode, String)>
-{
+) -> Result<Json<quill_sql::transaction::TxnDebugSnapshot>, (StatusCode, String)> {
     let db = state
         .db
         .lock()
