@@ -116,6 +116,85 @@
       z-index: 1;
     }
 
+    .navbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 18px 0 12px;
+    }
+
+    .navbar .brand {
+      letter-spacing: 0.5em;
+      text-transform: uppercase;
+      font-size: 0.85rem;
+      color: var(--muted);
+    }
+
+    .stats-bar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      align-items: center;
+      margin-top: 8px;
+    }
+
+    .stat-pill {
+      border: 1px solid rgba(126, 247, 199, 0.35);
+      border-radius: 999px;
+      padding: 6px 14px;
+      font-size: 0.75rem;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--accent);
+      background: rgba(3, 8, 12, 0.8);
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .nav-links {
+      display: inline-flex;
+      gap: 12px;
+    }
+
+    .nav-links button {
+      border: 1px solid rgba(126, 247, 199, 0.25);
+      background: rgba(3, 8, 12, 0.7);
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.18em;
+      font-size: 0.7rem;
+      padding: 8px 14px;
+      border-radius: 999px;
+      cursor: pointer;
+      transition: border-color 0.2s ease, color 0.2s ease, background 0.2s ease;
+    }
+
+    .nav-links button.active {
+      color: var(--accent);
+      border-color: rgba(126, 247, 199, 0.6);
+      background: rgba(126, 247, 199, 0.12);
+    }
+
+    .page-section {
+      animation: fadeIn 0.6s ease;
+      display: flex;
+      flex-direction: column;
+      gap: 28px;
+    }
+
+    @keyframes fadeIn {
+      from {
+        opacity: 0;
+        transform: translateY(12px);
+      }
+
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+
     .hero {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
@@ -125,7 +204,7 @@
     }
 
     .hero-card {
-      background: var(--card);
+      background: radial-gradient(circle at 25% 25%, rgba(36, 247, 160, 0.2), transparent 60%), var(--card);
       border: 1px solid var(--border);
       border-radius: 24px;
       padding: 36px;
@@ -140,29 +219,22 @@
       content: "";
       position: absolute;
       inset: 0;
-      background: radial-gradient(circle at 30% 20%, rgba(126, 247, 199, 0.25), transparent 60%),
-        radial-gradient(circle at 70% 80%, rgba(63, 182, 255, 0.15), transparent 60%);
-      opacity: 0.45;
-      animation: aurora 14s ease-in-out infinite alternate;
+      background: linear-gradient(130deg, rgba(126, 247, 199, 0.15), transparent 60%);
+      opacity: 0.6;
     }
 
     .hero-card::after {
       content: "";
       position: absolute;
-      inset: 0;
-      background: conic-gradient(from 90deg, rgba(126, 247, 199, 0.2), transparent 40%, rgba(63, 182, 255, 0.2));
-      filter: blur(60px);
-      opacity: 0.4;
-      animation: parallaxDrift 20s ease-in-out infinite alternate;
+      inset: -20%;
+      background: radial-gradient(circle, rgba(126, 247, 199, 0.18), transparent 55%);
+      filter: blur(40px);
+      opacity: 0.35;
     }
 
     .hero-card:hover {
       transform: translateY(-8px) scale(1.03);
       box-shadow: 0 40px 120px rgba(0, 0, 0, 0.65), 0 0 45px rgba(126, 247, 199, 0.25);
-    }
-
-    .hero-card:hover::before {
-      opacity: 0.5;
     }
 
     .hero-copy {
@@ -221,6 +293,7 @@
       position: relative;
       overflow: hidden;
       box-shadow: 0 25px 70px rgba(0, 0, 0, 0.55);
+      transition: transform 0.5s ease, box-shadow 0.5s ease;
     }
 
     .info-panel::before {
@@ -229,6 +302,11 @@
       inset: 0;
       background: radial-gradient(circle at top right, rgba(126, 247, 199, 0.18), transparent 60%);
       opacity: 0.5;
+    }
+
+    .info-panel:hover {
+      transform: translateY(-6px);
+      box-shadow: 0 35px 90px rgba(0, 0, 0, 0.6), 0 0 30px rgba(126, 247, 199, 0.2);
     }
 
     .info-panel ul {
@@ -247,6 +325,11 @@
       grid-template-columns: 56px 1fr;
       align-items: center;
       gap: 16px;
+      padding: 14px 16px;
+      border-radius: 18px;
+      background: rgba(3, 9, 14, 0.55);
+      border: 1px solid rgba(255, 255, 255, 0.04);
+      transition: transform 0.35s ease, border-color 0.3s ease;
     }
 
     .info-icon {
@@ -258,7 +341,23 @@
       display: flex;
       align-items: center;
       justify-content: center;
-      font-size: 1.4rem;
+      position: relative;
+      overflow: hidden;
+      color: var(--accent);
+    }
+
+    .info-icon svg {
+      width: 32px;
+      height: 32px;
+      stroke: currentColor;
+      stroke-width: 1.6;
+      fill: none;
+      opacity: 0.85;
+    }
+
+    .info-row:hover {
+      transform: translateX(6px);
+      border-color: rgba(126, 247, 199, 0.3);
     }
 
     .info-meta h3 {
@@ -564,6 +663,44 @@
 
     .plan-node:last-child::after {
       display: none;
+    }
+
+    .blog-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 18px;
+    }
+
+    .blog-card {
+      background: rgba(5, 14, 20, 0.75);
+      border: 1px solid rgba(126, 247, 199, 0.2);
+      border-radius: 18px;
+      padding: 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      box-shadow: 0 18px 55px rgba(0, 0, 0, 0.4);
+    }
+
+    .blog-card h4 {
+      margin: 0;
+      font-size: 1.1rem;
+      letter-spacing: 0.1em;
+      color: var(--accent);
+      text-transform: uppercase;
+    }
+
+    .blog-card p {
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.5;
+      flex: 1;
+    }
+
+    .blog-card small {
+      color: rgba(255, 255, 255, 0.6);
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
     }
 
     .plan-node h6 {
@@ -924,11 +1061,60 @@
     const DEFAULT_ENDPOINT = '/api/sql';
 
     const HERO_STATS = [
-      { label: 'Isolation', value: 'MVCC ×4', detail: 'read-uncommitted → serializable', icon: '🌀', progress: 100 },
-      { label: 'Storage', value: 'Heap + B+Tree', detail: 'WAL + checkpoints, buffer pool', icon: '💾', progress: 92 },
-      { label: 'Executor', value: 'Volcano', detail: 'physical planner & runtime', icon: '🧠', progress: 88 },
-      { label: 'Tests', value: 'sqllogictest', detail: 'suite-backed demo scripts', icon: '✅', progress: 80 },
+      { label: 'Isolation', value: 'MVCC + 2PL', detail: 'read-uncommitted → serializable', icon: 'mvcc', progress: 100 },
+      { label: 'Storage', value: 'Heap + B+Tree', detail: 'WAL + checkpoints, buffer pool', icon: 'storage', progress: 92 },
+      { label: 'Executor', value: 'Volcano', detail: 'physical planner & runtime', icon: 'executor', progress: 88 },
+      { label: 'Tests', value: 'sqllogictest', detail: 'suite-backed demo scripts', icon: 'tests', progress: 80 },
     ];
+
+    const HERO_ICONS = {
+      mvcc: (
+        <svg viewBox="0 0 32 32">
+          <circle cx="16" cy="16" r="10" opacity="0.4" />
+          <circle cx="16" cy="16" r="6" opacity="0.8" />
+          <path d="M8 16h16" />
+          <path d="M16 8v16" />
+        </svg>
+      ),
+      storage: (
+        <svg viewBox="0 0 32 32">
+          <rect x="8" y="8" width="16" height="6" rx="2" />
+          <rect x="8" y="15" width="16" height="6" rx="2" />
+          <rect x="8" y="22" width="16" height="6" rx="2" />
+        </svg>
+      ),
+      executor: (
+        <svg viewBox="0 0 32 32">
+          <circle cx="16" cy="10" r="3" />
+          <circle cx="10" cy="22" r="3" />
+          <circle cx="22" cy="22" r="3" />
+          <path d="M16 13v4" />
+          <path d="M16 17l-6 3" />
+          <path d="M16 17l6 3" />
+        </svg>
+      ),
+      tests: (
+        <svg viewBox="0 0 32 32">
+          <path d="M6 10h20" />
+          <path d="M6 16h14" />
+          <path d="M6 22h10" />
+          <polyline points="20 20 23 23 28 16" />
+        </svg>
+      ),
+    };
+
+    const formatNumber = (value) => {
+      if (value === null || value === undefined) {
+        return '––';
+      }
+      if (value >= 1_000_000) {
+        return `${(value / 1_000_000).toFixed(1)}M`;
+      }
+      if (value >= 1_000) {
+        return `${(value / 1_000).toFixed(1)}K`;
+      }
+      return String(value);
+    };
 
     const FEATURE_SECTIONS = {
       transactions: {
@@ -1013,6 +1199,34 @@
       },
     ];
 
+    const BLOG_POSTS = [
+      {
+        title: 'Async Disk & io_uring',
+        excerpt: 'We rolled out a dedicated disk scheduler backed by io_uring, SQPOLL, and fixed buffer pools to keep QuillSQL’s I/O path non-blocking.',
+        date: '2025-10-03',
+      },
+      {
+        title: 'MVCC + 2PL Rollout',
+        excerpt: 'The storage/transaction layers now expose full MVCC snapshots plus lock-manager integrations, making isolation-level experiments far easier.',
+        date: '2025-11-18',
+      },
+      {
+        title: 'ARIES-style WAL Revamp',
+        excerpt: 'Index WAL payloads, refined redo/undo phases, and refreshed docs bring QuillSQL’s durability story closer to production-grade systems.',
+        date: '2025-11-21',
+      },
+      {
+        title: 'Optimizer & Executor Notes',
+        excerpt: 'We expanded the rule-based optimizer (filter/limit pushes, merge limit) and polished Volcano operators so students can instrument execution paths quickly.',
+        date: '2025-11-10',
+      },
+      {
+        title: 'Teaching-Friendly Tooling',
+        excerpt: 'New mdBook docs, cli/web shells, and sqllogictest-driven demos help instructors drop QuillSQL into lab exercises without extra scaffolding.',
+        date: '2025-12-01',
+      },
+    ];
+
     const HELP_TEXT = [
       'Built-in commands:',
       '  \\help               Show this message',
@@ -1088,7 +1302,7 @@
             <ul>
               {HERO_STATS.map((stat) => (
                 <li className="info-row" key={stat.label}>
-                  <div className="info-icon">{stat.icon}</div>
+                  <div className="info-icon">{HERO_ICONS[stat.icon]}</div>
                   <div className="info-meta">
                     <h3>{stat.label}</h3>
                     <strong>{stat.value}</strong>
@@ -1473,13 +1687,121 @@
       );
     }
 
-    function App() {
+    function HomePage() {
       return (
-        <>
+        <div className="page-section">
           <Hero />
           <FeatureTabs />
+        </div>
+      );
+    }
+
+    const GITHUB_API_HEADERS = {
+      Accept: 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+    };
+
+    function StatsBar() {
+      const [stars, setStars] = useState(null);
+      const [downloads, setDownloads] = useState(null);
+
+      useEffect(() => {
+        fetch('https://api.github.com/repos/feichai0017/QuillSQL', {
+          headers: GITHUB_API_HEADERS,
+        })
+          .then((res) => {
+            if (!res.ok) {
+              throw new Error('github');
+            }
+            return res.json();
+          })
+          .then((data) => setStars(data.stargazers_count))
+          .catch(() => setStars(null));
+
+        fetch('https://crates.io/api/v1/crates/quill-sql')
+          .then((res) => {
+            if (!res.ok) {
+              throw new Error('crates');
+            }
+            return res.json();
+          })
+          .then((data) => setDownloads(data.crate?.downloads))
+          .catch(() => setDownloads(null));
+      }, []);
+
+      return (
+        <div className="stats-bar">
+          <span className="stat-pill">
+            GitHub ⭐ {formatNumber(stars)}
+          </span>
+          <span className="stat-pill">
+            Crates ⬇ {formatNumber(downloads)}
+          </span>
+        </div>
+      );
+    }
+
+    function DemoPage() {
+      return (
+        <div className="page-section">
           <DemoShowcase />
           <Terminal />
+        </div>
+      );
+    }
+
+    function BlogPage() {
+      return (
+        <div className="page-section">
+          <section>
+            <h2
+              style={{
+                letterSpacing: '0.3em',
+                textTransform: 'uppercase',
+                fontSize: '0.95rem',
+                color: 'var(--muted)',
+                margin: '0 0 16px'
+              }}
+            >
+              Blog & Updates
+            </h2>
+            <div className="blog-grid">
+              {BLOG_POSTS.map((post) => (
+                <article className="blog-card" key={post.title}>
+                  <small>{post.date}</small>
+                  <h4>{post.title}</h4>
+                  <p>{post.excerpt}</p>
+                </article>
+              ))}
+            </div>
+          </section>
+        </div>
+      );
+    }
+
+    function App() {
+      const [page, setPage] = useState('home');
+
+      return (
+        <>
+          <nav className="navbar">
+            <div className="brand">QUILLSQL</div>
+            <div className="nav-links">
+              <button className={page === 'home' ? 'active' : ''} onClick={() => setPage('home')}>
+                Home
+              </button>
+              <button className={page === 'demo' ? 'active' : ''} onClick={() => setPage('demo')}>
+                Demo
+              </button>
+              <button className={page === 'blog' ? 'active' : ''} onClick={() => setPage('blog')}>
+                Blog
+              </button>
+            </div>
+          </nav>
+          <StatsBar />
+          {page === 'home' && <HomePage />}
+          {page === 'demo' && <DemoPage />}
+          {page === 'blog' && <BlogPage />}
         </>
       );
     }
