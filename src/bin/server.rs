@@ -12,10 +12,20 @@ use quill_sql::database::{Database, DatabaseOptions};
 use quill_sql::transaction::IsolationLevel;
 use std::str::FromStr;
 
-/// Shared app state holding a Database protected by a mutex
+/// Shared app state holding a Database protected by a mutex.
 #[derive(Clone)]
 struct AppState {
     db: Arc<std::sync::Mutex<Database>>,
+    options: DatabaseOptions,
+}
+
+fn rebuild_db(opts: &DatabaseOptions) -> Database {
+    let db = if let Ok(path) = std::env::var("QUILL_DB_FILE") {
+        Database::new_on_disk_with_options(&path, opts.clone()).expect("open db file")
+    } else {
+        Database::new_temp_with_options(opts.clone()).expect("open temp db")
+    };
+    db
 }
 
 /// Request payload for /api/sql
@@ -54,41 +64,41 @@ fn strip_sql_comments(input: &str) -> String {
 async fn debug_wal_head(
     State(state): State<AppState>,
 ) -> Result<Json<quill_sql::recovery::wal::WalHeadDebug>, (StatusCode, String)> {
-    let db = state
+    let db_guard = state
         .db
         .lock()
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "DB poisoned".to_string()))?;
-    Ok(Json(db.debug_wal_head()))
+    Ok(Json(db_guard.debug_wal_head()))
 }
 
 async fn debug_buffer_stats(
     State(state): State<AppState>,
 ) -> Result<Json<quill_sql::database::BufferDebugStats>, (StatusCode, String)> {
-    let db = state
+    let db_guard = state
         .db
         .lock()
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "DB poisoned".to_string()))?;
-    Ok(Json(db.debug_buffer_stats()))
+    Ok(Json(db_guard.debug_buffer_stats()))
 }
 
 async fn debug_locks_snapshot(
     State(state): State<AppState>,
 ) -> Result<Json<quill_sql::transaction::LockDebugSnapshot>, (StatusCode, String)> {
-    let db = state
+    let db_guard = state
         .db
         .lock()
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "DB poisoned".to_string()))?;
-    Ok(Json(db.debug_lock_snapshot()))
+    Ok(Json(db_guard.debug_lock_snapshot()))
 }
 
 async fn debug_trace_last(
     State(state): State<AppState>,
 ) -> Result<Json<quill_sql::database::DebugTrace>, (StatusCode, String)> {
-    let db = state
+    let db_guard = state
         .db
         .lock()
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "DB poisoned".to_string()))?;
-    match db.debug_last_trace() {
+    match db_guard.debug_last_trace() {
         Some(trace) => Ok(Json(trace)),
         None => Err((StatusCode::NOT_FOUND, "no query executed yet".to_string())),
     }
@@ -97,11 +107,11 @@ async fn debug_trace_last(
 async fn debug_plan_last(
     State(state): State<AppState>,
 ) -> Result<Json<quill_sql::database::DebugPlanSnapshot>, (StatusCode, String)> {
-    let db = state
+    let db_guard = state
         .db
         .lock()
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "DB poisoned".to_string()))?;
-    match db.debug_last_plan() {
+    match db_guard.debug_last_plan() {
         Some(plan) => Ok(Json(plan)),
         None => Err((StatusCode::NOT_FOUND, "no query executed yet".to_string())),
     }
@@ -116,10 +126,20 @@ async fn debug_wal_peek(
     State(state): State<AppState>,
     Query(q): Query<LimitQuery>,
 ) -> Result<Json<Vec<quill_sql::recovery::wal::WalPeekDebug>>, (StatusCode, String)> {
-    let db = state
-        .db
-        .lock()
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "DB poisoned".to_string()))?;
+    let db = state.db.lock().ok();
+    let db = match db {
+        Some(guard) => guard,
+        None => {
+            // Attempt to rebuild database if poisoned
+            let rebuilt = rebuild_db(&state.options);
+            let mut db_lock = state
+                .db
+                .lock()
+                .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "DB poisoned".to_string()))?;
+            *db_lock = rebuilt;
+            db_lock
+        }
+    };
     let limit = q.limit.unwrap_or(10).min(500);
     db.debug_wal_peek(limit)
         .map(Json)
@@ -129,10 +149,19 @@ async fn debug_wal_peek(
 async fn debug_mvcc_versions(
     State(state): State<AppState>,
 ) -> Result<Json<quill_sql::database::MvccVersionsDebug>, (StatusCode, String)> {
-    let db = state
-        .db
-        .lock()
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "DB poisoned".to_string()))?;
+    let db = state.db.lock().ok();
+    let db = match db {
+        Some(guard) => guard,
+        None => {
+            let rebuilt = rebuild_db(&state.options);
+            let mut db_lock = state
+                .db
+                .lock()
+                .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "DB poisoned".to_string()))?;
+            *db_lock = rebuilt;
+            db_lock
+        }
+    };
     db.debug_mvcc_versions()
         .map(Json)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))
@@ -153,10 +182,19 @@ async fn debug_wal_segments(
 async fn debug_txns(
     State(state): State<AppState>,
 ) -> Result<Json<quill_sql::transaction::TxnDebugSnapshot>, (StatusCode, String)> {
-    let db = state
-        .db
-        .lock()
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "DB poisoned".to_string()))?;
+    let db = state.db.lock().ok();
+    let db = match db {
+        Some(guard) => guard,
+        None => {
+            let rebuilt = rebuild_db(&state.options);
+            let mut db_lock = state
+                .db
+                .lock()
+                .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "DB poisoned".to_string()))?;
+            *db_lock = rebuilt;
+            db_lock
+        }
+    };
     Ok(Json(db.debug_txn_snapshot()))
 }
 
@@ -184,6 +222,7 @@ async fn main() {
 
     let state = AppState {
         db: Arc::new(std::sync::Mutex::new(db)),
+        options: db_options,
     };
 
     // Static services
@@ -194,6 +233,7 @@ async fn main() {
     let app = Router::new()
         .route("/api/sql", post(api_sql))
         .route("/api/sql_batch", post(api_sql_batch))
+        .route("/admin/rebuild", post(rebuild))
         .route("/debug/wal/head", get(debug_wal_head))
         .route("/debug/wal/peek", get(debug_wal_peek))
         .route("/debug/wal/segments", get(debug_wal_segments))

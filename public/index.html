@@ -1715,6 +1715,9 @@
             <div className="insight-card">
               <h4>WAL</h4>
               <pre>{JSON.stringify(wal, null, 2)}</pre>
+              <button onClick={() => fetch('/admin/rebuild', { method: 'POST' }).then(() => window.location.reload())}>
+                Rebuild DB
+              </button>
               <pre>{JSON.stringify(walPeek, null, 2)}</pre>
               <pre>{JSON.stringify(walSegments, null, 2)}</pre>
             </div>
