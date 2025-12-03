@@ -21,7 +21,7 @@ use crate::utils::{
     util::{pretty_format_logical_plan, pretty_format_physical_plan},
 };
 use crate::{
-    buffer::page::INVALID_PAGE_ID,
+    buffer::INVALID_PAGE_ID,
     catalog::Catalog,
     execution::ExecutionEngine,
     plan::{LogicalPlanner, PlannerContext},
