@@ -133,7 +133,6 @@ EXPLAIN SELECT id, COUNT(*) FROM t GROUP BY id ORDER BY id;
 - Not yet supported: `ALTER`, predicate locking.
 - Not implemented: outer joins (Left/Right/Full), arithmetic expressions, table/subquery aliases
 - `ORDER BY` `DESC` / `NULLS FIRST|LAST` currently affects sorting only (not storage layout)
-- Storage uses Linux `io_uring`; non-Linux platforms currently require a fallback backend (planned).
 
 ## 🧪 Testing
 
