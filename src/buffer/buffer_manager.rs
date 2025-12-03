@@ -6,7 +6,7 @@ use bytes::Bytes;
 use dashmap::{DashMap, DashSet};
 use parking_lot::{Mutex, RwLock};
 
-use crate::buffer::buffer_pool::{BufferPool, FrameId};
+use crate::buffer::buffer_pool::{BufferPool, FrameId, FrameMetaSnapshot};
 use crate::buffer::page::{self, PageId, ReadPageGuard, WritePageGuard, INVALID_PAGE_ID};
 use crate::catalog::SchemaRef;
 use crate::config::BufferPoolConfig;
@@ -83,6 +83,10 @@ impl BufferManager {
 
     pub fn wal_manager(&self) -> Option<Arc<WalManager>> {
         self.wal_manager.read().clone()
+    }
+
+    pub fn frame_meta_snapshot(&self) -> Vec<FrameMetaSnapshot> {
+        self.pool.frame_meta_snapshot()
     }
 
     pub fn dirty_page_ids(&self) -> Vec<PageId> {

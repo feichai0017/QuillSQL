@@ -489,12 +489,6 @@
       box-shadow: inset 0 0 45px rgba(0, 0, 0, 0.5);
     }
 
-    .micro-graphic canvas,
-    .micro-graphic .timeline {
-      width: 100%;
-      height: 100%;
-    }
-
     .mvcc-timeline {
       display: flex;
       flex-direction: column;
@@ -717,18 +711,53 @@
       font-size: 0.9rem;
     }
 
-    .feature-card h4 {
-      margin: 0 0 8px;
-      color: var(--accent);
-      letter-spacing: 0.1em;
-      text-transform: uppercase;
-      font-size: 0.88rem;
+    .insights-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 12px;
+      margin-top: 12px;
     }
 
-    .feature-card p {
+    .insight-card {
+      background: rgba(5, 12, 18, 0.82);
+      border: 1px solid rgba(126, 247, 199, 0.18);
+      border-radius: 14px;
+      padding: 12px 14px;
+      box-shadow: 0 12px 30px rgba(0, 0, 0, 0.4);
+    }
+
+    .insight-card h4 {
+      margin: 0 0 8px;
+      font-size: 0.9rem;
+      letter-spacing: 0.15em;
+      color: var(--accent);
+      text-transform: uppercase;
+    }
+
+    .insight-card pre {
+      margin: 6px 0 0;
+      background: rgba(2, 6, 10, 0.7);
+      border: 1px solid rgba(126, 247, 199, 0.12);
+      border-radius: 10px;
+      padding: 8px;
+      font-family: 'Source Code Pro', monospace;
+      font-size: 0.8rem;
+      color: var(--text);
+      overflow-x: auto;
+      white-space: pre-wrap;
+    }
+
+    .tree {
+      list-style: none;
+      padding-left: 14px;
       margin: 0;
+      border-left: 1px solid rgba(126, 247, 199, 0.2);
+    }
+
+    .tree li {
+      margin: 4px 0;
       color: var(--muted);
-      line-height: 1.4;
+      font-size: 0.88rem;
     }
 
     .terminal-wrapper {
@@ -814,7 +843,7 @@
     }
 
     .terminal-body {
-      height: 560px;
+      height: 680px;
       overflow-y: auto;
       padding: 22px 26px;
       font-family: 'Source Code Pro', monospace;
@@ -1483,6 +1512,7 @@
       ]));
       const [input, setInput] = useState('');
       const [status, setStatus] = useState('ready');
+      const [insights, setInsights] = useState(null);
       const historyRef = useRef([]);
       const [historyIndex, setHistoryIndex] = useState(0);
       const logRef = useRef(null);
@@ -1555,6 +1585,34 @@
         }
       };
 
+      const fetchDebugJson = async (path) => {
+        const res = await fetch(path);
+        if (!res.ok) {
+          const text = await res.text();
+          throw new Error(text || `HTTP ${res.status}`);
+        }
+        return res.json();
+      };
+
+      const pullDebugInsights = async () => {
+        try {
+          const [wal, walPeek, walSegments, buffer, locks, txns, mvcc, trace, plan] = await Promise.all([
+            fetchDebugJson('/debug/wal/head'),
+            fetchDebugJson('/debug/wal/peek?limit=12'),
+            fetchDebugJson('/debug/wal/segments'),
+            fetchDebugJson('/debug/buffer/stats'),
+            fetchDebugJson('/debug/locks/snapshot'),
+            fetchDebugJson('/debug/txns'),
+            fetchDebugJson('/debug/mvcc/versions'),
+            fetchDebugJson('/debug/trace/last'),
+            fetchDebugJson('/debug/plan/last'),
+          ]);
+          setInsights({ wal, walPeek, walSegments, buffer, locks, txns, mvcc, trace, plan });
+        } catch (err) {
+          appendLine(`debug fetch failed: ${err.message}`, 'muted');
+        }
+      };
+
       const runSQL = async (sqlText) => {
         const statements = splitStatements(sqlText);
         if (!statements.length) {
@@ -1582,6 +1640,7 @@
             appendBlock(formatRows(Array.isArray(data.rows) ? data.rows : []));
           }
           appendLine('✓ Done', 'success');
+          await pullDebugInsights();
           setStatus('ready');
         } catch (err) {
           appendLine(`❌ ${err.message}`, 'error');
@@ -1634,56 +1693,116 @@
         }
       };
 
-      return (
-        <section className="terminal-wrapper">
-          <header className="terminal-header">
-            <div className="lights">
-              <span className="dot error" />
-              <span className="dot warn" />
-              <span className="dot" />
+      const renderTree = (node) => {
+        if (!node) return null;
+        return (
+          <ul className="tree">
+            <li>
+              {node.op}
+              {node.children?.map((child, idx) => (
+                <div key={idx}>{renderTree(child)}</div>
+              ))}
+            </li>
+          </ul>
+        );
+      };
+
+      const renderInsightCards = () => {
+        if (!insights) return null;
+        const { wal, walPeek, walSegments, buffer, locks, txns, mvcc, trace, plan } = insights;
+        return (
+          <div className="insights-grid">
+            <div className="insight-card">
+              <h4>WAL</h4>
+              <pre>{JSON.stringify(wal, null, 2)}</pre>
+              <pre>{JSON.stringify(walPeek, null, 2)}</pre>
+              <pre>{JSON.stringify(walSegments, null, 2)}</pre>
             </div>
-            <span className="terminal-title">
-              <img src="rust-db.png" alt="QuillSQL logo" />
-              QUILLSQL TERMINAL
-            </span>
-            <span className={`status-chip ${status !== 'ready' ? status : ''}`}>{status}</span>
-          </header>
-          <div className="terminal-body" ref={logRef}>
-            {log.map((entry, idx) => {
-              if (entry.type === 'block') {
-                return <pre className="log-block" key={idx}>{entry.text}</pre>;
-              }
-              if (entry.type === 'prompt') {
+            <div className="insight-card">
+              <h4>Buffer</h4>
+              <pre>{JSON.stringify(buffer, null, 2)}</pre>
+            </div>
+            <div className="insight-card">
+              <h4>Locks</h4>
+              <pre>{JSON.stringify(locks, null, 2)}</pre>
+            </div>
+            <div className="insight-card">
+              <h4>Txns</h4>
+              <pre>{JSON.stringify(txns, null, 2)}</pre>
+            </div>
+            <div className="insight-card">
+              <h4>MVCC</h4>
+              <pre>{JSON.stringify(mvcc, null, 2)}</pre>
+            </div>
+            <div className="insight-card">
+              <h4>Trace</h4>
+              <pre>{JSON.stringify(trace, null, 2)}</pre>
+            </div>
+            <div className="insight-card" style={{ gridColumn: 'span 2' }}>
+              <h4>Logical Plan</h4>
+              {renderTree(plan?.logical)}
+            </div>
+            <div className="insight-card" style={{ gridColumn: 'span 2' }}>
+              <h4>Physical Plan</h4>
+              {renderTree(plan?.physical)}
+            </div>
+          </div>
+        );
+      };
+
+      return (
+        <>
+          <section className="terminal-wrapper">
+            <header className="terminal-header">
+              <div className="lights">
+                <span className="dot error" />
+                <span className="dot warn" />
+                <span className="dot" />
+              </div>
+              <span className="terminal-title">
+                <img src="rust-db.png" alt="QuillSQL logo" />
+                QUILLSQL TERMINAL
+              </span>
+              <span className={`status-chip ${status !== 'ready' ? status : ''}`}>{status}</span>
+            </header>
+            <div className="terminal-body" ref={logRef}>
+              {log.map((entry, idx) => {
+                if (entry.type === 'block') {
+                  return <pre className="log-block" key={idx}>{entry.text}</pre>;
+                }
+                if (entry.type === 'prompt') {
+                  return (
+                    <div className="log-line" key={idx}>
+                      <span className="log-prompt">quill@tty:~$</span>
+                      {entry.text}
+                    </div>
+                  );
+                }
                 return (
-                  <div className="log-line" key={idx}>
-                    <span className="log-prompt">quill@tty:~$</span>
+                  <div className={`log-line ${entry.variant || ''}`} key={idx}>
                     {entry.text}
                   </div>
                 );
-              }
-              return (
-                <div className={`log-line ${entry.variant || ''}`} key={idx}>
-                  {entry.text}
-                </div>
-              );
-            })}
-          </div>
-          <div className="terminal-input">
-            <form onSubmit={onSubmit}>
-              <span className="prompt-label">quill@tty:~$</span>
-              <textarea
-                rows={1}
-                value={input}
-                onChange={(event) => setInput(event.target.value)}
-                onKeyDown={onKeyDown}
-                placeholder="Type SQL or \help · Enter to run · Shift+Enter for newline"
-              />
-            </form>
-            <div className="terminal-hint">
-              Commands: \help · \docs · \github · \profile · \history · \endpoint · Any other input executes SQL.
+              })}
             </div>
-          </div>
-        </section>
+            <div className="terminal-input">
+              <form onSubmit={onSubmit}>
+                <span className="prompt-label">quill@tty:~$</span>
+                <textarea
+                  rows={1}
+                  value={input}
+                  onChange={(event) => setInput(event.target.value)}
+                  onKeyDown={onKeyDown}
+                  placeholder="Type SQL or \\help · Enter to run · Shift+Enter for newline"
+                />
+              </form>
+              <div className="terminal-hint">
+                Commands: \help · \docs · \github · \profile · \history · \endpoint · Any other input executes SQL.
+              </div>
+            </div>
+          </section>
+          {renderInsightCards()}
+        </>
       );
     }
 
@@ -1744,7 +1863,6 @@
     function DemoPage() {
       return (
         <div className="page-section">
-          <DemoShowcase />
           <Terminal />
         </div>
       );

@@ -13,6 +13,7 @@ use crate::transaction::{
 };
 use crate::utils::table_ref::TableReference;
 use dashmap::{DashMap, DashSet};
+use serde::Serialize;
 use sqlparser::ast::TransactionAccessMode;
 
 #[derive(Debug, Default)]
@@ -30,6 +31,21 @@ pub struct TransactionManager {
     lock_manager: Arc<LockManager>,
     held_locks: DashMap<TransactionId, HeldLocks>,
     txn_statuses: DashMap<TransactionId, TransactionStatus>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TxnDebugEntry {
+    pub txn_id: TransactionId,
+    pub status: TransactionStatus,
+    pub held_tables: usize,
+    pub held_rows: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TxnDebugSnapshot {
+    pub active: Vec<TxnDebugEntry>,
+    pub oldest_active: Option<TransactionId>,
+    pub next_txn_id: TransactionId,
 }
 
 impl TransactionManager {
@@ -279,6 +295,29 @@ impl TransactionManager {
 
     pub fn next_txn_id_hint(&self) -> TransactionId {
         self.next_txn_id.load(Ordering::SeqCst)
+    }
+
+    pub fn debug_snapshot(&self) -> TxnDebugSnapshot {
+        let active_ids = self.active_transactions();
+        let mut active = Vec::with_capacity(active_ids.len());
+        for txn_id in active_ids {
+            let status = self.transaction_status(txn_id);
+            let held = self.held_locks.get(&txn_id);
+            let (held_tables, held_rows) = held
+                .map(|locks| (locks.tables.len(), locks.rows.len()))
+                .unwrap_or((0, 0));
+            active.push(TxnDebugEntry {
+                txn_id,
+                status,
+                held_tables,
+                held_rows,
+            });
+        }
+        TxnDebugSnapshot {
+            active,
+            oldest_active: self.oldest_active_txn(),
+            next_txn_id: self.next_txn_id_hint(),
+        }
     }
 
     fn finish_commit(&self, txn: &Transaction, lsn: Lsn) -> QuillSQLResult<()> {

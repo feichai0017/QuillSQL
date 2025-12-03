@@ -1,12 +1,10 @@
 use axum::{
-    extract::State,
+    extract::{Query, State},
     http::StatusCode,
     routing::{get, post},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::fs;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -53,46 +51,114 @@ fn strip_sql_comments(input: &str) -> String {
     out
 }
 
-async fn api_examples() -> Result<Json<HashMap<String, String>>, (StatusCode, String)> {
-    const EXAMPLE_DIR: &str = "src/tests/sql_example/";
-    let mut examples = HashMap::new();
+async fn debug_wal_head(
+    State(state): State<AppState>,
+) -> Result<Json<quill_sql::recovery::wal::WalHeadDebug>, (StatusCode, String)> {
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "DB poisoned".to_string()))?;
+    Ok(Json(db.debug_wal_head()))
+}
 
-    match fs::read_dir(EXAMPLE_DIR) {
-        Ok(entries) => {
-            for entry in entries {
-                if let Ok(entry) = entry {
-                    let path = entry.path();
-                    if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("slt") {
-                        if let Some(name) = path.file_stem().and_then(|s| s.to_str()) {
-                            match fs::read_to_string(&path) {
-                                Ok(content) => {
-                                    examples.insert(name.to_string(), content);
-                                }
-                                Err(e) => {
-                                    return Err((
-                                        StatusCode::INTERNAL_SERVER_ERROR,
-                                        format!(
-                                            "Failed to read example file {}: {}",
-                                            path.display(),
-                                            e
-                                        ),
-                                    ));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        Err(e) => {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to read examples directory {}: {}", EXAMPLE_DIR, e),
-            ));
-        }
+async fn debug_buffer_stats(
+    State(state): State<AppState>,
+) -> Result<Json<quill_sql::database::BufferDebugStats>, (StatusCode, String)> {
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "DB poisoned".to_string()))?;
+    Ok(Json(db.debug_buffer_stats()))
+}
+
+async fn debug_locks_snapshot(
+    State(state): State<AppState>,
+) -> Result<Json<quill_sql::transaction::lock_manager::LockDebugSnapshot>, (StatusCode, String)> {
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "DB poisoned".to_string()))?;
+    Ok(Json(db.debug_lock_snapshot()))
+}
+
+async fn debug_trace_last(
+    State(state): State<AppState>,
+) -> Result<Json<quill_sql::database::DebugTrace>, (StatusCode, String)> {
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "DB poisoned".to_string()))?;
+    match db.debug_last_trace() {
+        Some(trace) => Ok(Json(trace)),
+        None => Err((StatusCode::NOT_FOUND, "no query executed yet".to_string())),
     }
+}
 
-    Ok(Json(examples))
+async fn debug_plan_last(
+    State(state): State<AppState>,
+) -> Result<Json<quill_sql::database::DebugPlanSnapshot>, (StatusCode, String)> {
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "DB poisoned".to_string()))?;
+    match db.debug_last_plan() {
+        Some(plan) => Ok(Json(plan)),
+        None => Err((StatusCode::NOT_FOUND, "no query executed yet".to_string())),
+    }
+}
+
+#[derive(Deserialize)]
+struct LimitQuery {
+    limit: Option<usize>,
+}
+
+async fn debug_wal_peek(
+    State(state): State<AppState>,
+    Query(q): Query<LimitQuery>,
+) -> Result<Json<Vec<quill_sql::recovery::wal::WalPeekDebug>>, (StatusCode, String)> {
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "DB poisoned".to_string()))?;
+    let limit = q.limit.unwrap_or(10).min(500);
+    db.debug_wal_peek(limit)
+        .map(Json)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))
+}
+
+async fn debug_mvcc_versions(
+    State(state): State<AppState>,
+) -> Result<Json<quill_sql::database::MvccVersionsDebug>, (StatusCode, String)> {
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "DB poisoned".to_string()))?;
+    db.debug_mvcc_versions()
+        .map(Json)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))
+}
+
+async fn debug_wal_segments(
+    State(state): State<AppState>,
+) -> Result<Json<quill_sql::database::WalSegmentsDebug>, (StatusCode, String)> {
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "DB poisoned".to_string()))?;
+    db.debug_wal_segments()
+        .map(Json)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))
+}
+
+async fn debug_txns(
+    State(state): State<AppState>,
+) -> Result<Json<quill_sql::transaction::transaction_manager::TxnDebugSnapshot>, (StatusCode, String)>
+{
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "DB poisoned".to_string()))?;
+    Ok(Json(db.debug_txn_snapshot()))
 }
 
 #[tokio::main]
@@ -129,7 +195,15 @@ async fn main() {
     let app = Router::new()
         .route("/api/sql", post(api_sql))
         .route("/api/sql_batch", post(api_sql_batch))
-        .route("/api/examples", get(api_examples))
+        .route("/debug/wal/head", get(debug_wal_head))
+        .route("/debug/wal/peek", get(debug_wal_peek))
+        .route("/debug/wal/segments", get(debug_wal_segments))
+        .route("/debug/buffer/stats", get(debug_buffer_stats))
+        .route("/debug/locks/snapshot", get(debug_locks_snapshot))
+        .route("/debug/txns", get(debug_txns))
+        .route("/debug/trace/last", get(debug_trace_last))
+        .route("/debug/mvcc/versions", get(debug_mvcc_versions))
+        .route("/debug/plan/last", get(debug_plan_last))
         .nest_service("/docs", docs_service)
         .fallback_service(static_service)
         .with_state(state);

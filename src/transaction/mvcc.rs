@@ -1,7 +1,8 @@
 use crate::storage::page::TupleMeta;
 use crate::transaction::{CommandId, TransactionId, INVALID_COMMAND_ID};
+use serde::Serialize;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum TransactionStatus {
     InProgress,
     Committed,

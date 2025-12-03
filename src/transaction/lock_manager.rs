@@ -3,12 +3,13 @@ use crate::transaction::{Transaction, TransactionId};
 use crate::utils::table_ref::TableReference;
 use log::{trace, warn};
 use parking_lot::{Condvar, Mutex};
+use serde::Serialize;
 use std::collections::{hash_map::Entry, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum LockMode {
     Shared,
     Exclusive,
@@ -59,6 +60,34 @@ pub struct LockManager {
     request_id: AtomicU64,
     wait_for: Mutex<HashMap<TransactionId, HashSet<TransactionId>>>,
     deadlock_timeout: Duration,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LockGraphEdge {
+    pub from: TransactionId,
+    pub to: TransactionId,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LockRequestDebug {
+    pub txn_id: TransactionId,
+    pub mode: LockMode,
+    pub granted: bool,
+    pub table: String,
+    pub rid: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LockResourceDebug {
+    pub resource: String,
+    pub requests: Vec<LockRequestDebug>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LockDebugSnapshot {
+    pub wait_for: Vec<LockGraphEdge>,
+    pub tables: Vec<LockResourceDebug>,
+    pub rows: Vec<LockResourceDebug>,
 }
 
 impl LockManager {
@@ -164,6 +193,75 @@ impl LockManager {
                 resource.condvar.notify_all();
             }
             map.clear();
+        }
+    }
+
+    pub fn debug_snapshot(&self) -> LockDebugSnapshot {
+        let wait_for = {
+            let guard = self.wait_for.lock();
+            guard
+                .iter()
+                .flat_map(|(from, blocked)| {
+                    blocked.iter().map(move |to| LockGraphEdge {
+                        from: *from,
+                        to: *to,
+                    })
+                })
+                .collect()
+        };
+
+        let table_resources = {
+            let map = self.table_lock_map.lock();
+            map.iter()
+                .map(|(table_ref, resource)| {
+                    let state = resource.state.lock();
+                    let requests = state
+                        .requests
+                        .iter()
+                        .map(|req| LockRequestDebug {
+                            txn_id: req.txn_id,
+                            mode: req.mode,
+                            granted: req.granted,
+                            table: req.table_ref.to_string(),
+                            rid: req.rid.map(|rid| rid.to_string()),
+                        })
+                        .collect();
+                    LockResourceDebug {
+                        resource: table_ref.to_string(),
+                        requests,
+                    }
+                })
+                .collect()
+        };
+
+        let row_resources = {
+            let map = self.row_lock_map.lock();
+            map.iter()
+                .map(|((table_ref, rid), resource)| {
+                    let state = resource.state.lock();
+                    let requests = state
+                        .requests
+                        .iter()
+                        .map(|req| LockRequestDebug {
+                            txn_id: req.txn_id,
+                            mode: req.mode,
+                            granted: req.granted,
+                            table: req.table_ref.to_string(),
+                            rid: req.rid.map(|rid| rid.to_string()),
+                        })
+                        .collect();
+                    LockResourceDebug {
+                        resource: format!("{}#{}", table_ref, rid),
+                        requests,
+                    }
+                })
+                .collect()
+        };
+
+        LockDebugSnapshot {
+            wait_for,
+            tables: table_resources,
+            rows: row_resources,
         }
     }
 

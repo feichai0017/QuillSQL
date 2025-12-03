@@ -180,6 +180,12 @@ impl BufferPool {
         self.locks.len()
     }
 
+    pub fn frame_meta_snapshot(&self) -> Vec<FrameMetaSnapshot> {
+        (0..self.capacity())
+            .map(|frame_id| self.meta[frame_id].snapshot())
+            .collect()
+    }
+
     pub fn frame_lock(&self, frame_id: FrameId) -> &RwLock<()> {
         &self.locks[frame_id]
     }

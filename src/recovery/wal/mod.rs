@@ -23,8 +23,8 @@ use crate::config::WalConfig;
 use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::recovery::control_file::{ControlFileManager, WalInitState};
 use crate::recovery::wal::codec::{
-    decode_frame, encode_body, encode_frame, CheckpointPayload, PageWritePayload, WalFrame,
-    WAL_CRC_LEN, WAL_HEADER_LEN,
+    decode_frame, encode_body, encode_frame, CheckpointPayload, PageWritePayload,
+    ResourceManagerId, WalFrame, WAL_CRC_LEN, WAL_HEADER_LEN,
 };
 use crate::recovery::wal::page::{WalPage, WalPageFragmentKind, WAL_PAGE_SIZE};
 use crate::recovery::wal_record::WalRecordPayload;
@@ -32,6 +32,7 @@ use crate::storage::disk_manager::DiskManager;
 use crate::storage::disk_scheduler::DiskScheduler;
 use bytes::Bytes;
 use dashmap::DashSet;
+use serde::Serialize;
 
 use buffer::WalBuffer;
 use io::{DiskSchedulerWalSink, WalSink};
@@ -74,6 +75,32 @@ pub struct WalManager {
     flush_cond: Condvar,
     checkpoint_redo_start: AtomicU64,
     touched_pages: DashSet<PageId>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct WalHeadDebug {
+    pub durable_lsn: Lsn,
+    pub max_assigned_lsn: Lsn,
+    pub last_checkpoint_lsn: Lsn,
+    pub pending_records: usize,
+    pub pending_bytes: usize,
+    pub has_background_writer: bool,
+    pub flush_coalesce_bytes: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct WalSegmentDebug {
+    pub id: u64,
+    pub size_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct WalPeekDebug {
+    pub lsn: Lsn,
+    pub prev_lsn: Lsn,
+    pub rmid: String,
+    pub info: u8,
+    pub body_len: usize,
 }
 
 pub struct WalWriterHandle {
@@ -179,6 +206,60 @@ impl WalManager {
     #[inline]
     pub fn durable_lsn(&self) -> Lsn {
         self.durable_lsn.load(Ordering::Acquire)
+    }
+
+    pub fn debug_head(&self) -> WalHeadDebug {
+        let pending = self.pending_records();
+        let pending_bytes: usize = pending.iter().map(|rec| rec.payload.len()).sum();
+        WalHeadDebug {
+            durable_lsn: self.durable_lsn(),
+            max_assigned_lsn: self.max_assigned_lsn(),
+            last_checkpoint_lsn: self.last_checkpoint_lsn(),
+            pending_records: pending.len(),
+            pending_bytes,
+            has_background_writer: self.has_background_writer(),
+            flush_coalesce_bytes: self.flush_coalesce_bytes,
+        }
+    }
+
+    pub fn debug_segments(&self) -> QuillSQLResult<Vec<WalSegmentDebug>> {
+        let guard = self.state.lock();
+        let directory = guard.storage.directory_path();
+        drop(guard);
+        let mut info = Vec::new();
+        for id in list_segments(&directory)? {
+            let path = segment_path(&directory, id);
+            let size_bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            info.push(WalSegmentDebug { id, size_bytes });
+        }
+        Ok(info)
+    }
+
+    pub fn debug_peek(&self, limit: usize) -> QuillSQLResult<Vec<WalPeekDebug>> {
+        let mut reader = self.reader()?;
+        let mut frames = Vec::new();
+        while let Some(frame) = reader.next_frame()? {
+            frames.push(frame);
+        }
+        let start = frames.len().saturating_sub(limit);
+        Ok(frames[start..]
+            .iter()
+            .map(|frame| WalPeekDebug {
+                lsn: frame.lsn,
+                prev_lsn: frame.prev_lsn,
+                rmid: match frame.rmid {
+                    ResourceManagerId::Page => "Page",
+                    ResourceManagerId::Transaction => "Transaction",
+                    ResourceManagerId::Heap => "Heap",
+                    ResourceManagerId::Index => "Index",
+                    ResourceManagerId::Checkpoint => "Checkpoint",
+                    ResourceManagerId::Clr => "Clr",
+                }
+                .to_string(),
+                info: frame.info,
+                body_len: frame.body.len(),
+            })
+            .collect())
     }
 
     pub fn append_record_with<F>(&self, mut build: F) -> QuillSQLResult<WalAppendResult>

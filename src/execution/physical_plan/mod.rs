@@ -98,6 +98,29 @@ impl PhysicalPlan {
             | PhysicalPlan::Analyze(_) => vec![],
         }
     }
+
+    pub fn display_name(&self) -> String {
+        match self {
+            PhysicalPlan::Empty(_) => "Empty".to_string(),
+            PhysicalPlan::Values(_) => "Values".to_string(),
+            PhysicalPlan::SeqScan(_) => "SeqScan".to_string(),
+            PhysicalPlan::IndexScan(_) => "IndexScan".to_string(),
+            PhysicalPlan::Limit(_) => "Limit".to_string(),
+            PhysicalPlan::Sort(_) => "Sort".to_string(),
+            PhysicalPlan::Update(_) => "Update".to_string(),
+            PhysicalPlan::Delete(_) => "Delete".to_string(),
+            PhysicalPlan::Insert(_) => "Insert".to_string(),
+            PhysicalPlan::Project(_) => "Project".to_string(),
+            PhysicalPlan::Filter(_) => "Filter".to_string(),
+            PhysicalPlan::NestedLoopJoin(_) => "NestedLoopJoin".to_string(),
+            PhysicalPlan::Aggregate(_) => "Aggregate".to_string(),
+            PhysicalPlan::Analyze(_) => "Analyze".to_string(),
+            PhysicalPlan::CreateTable(_) => "CreateTable".to_string(),
+            PhysicalPlan::CreateIndex(_) => "CreateIndex".to_string(),
+            PhysicalPlan::DropTable(_) => "DropTable".to_string(),
+            PhysicalPlan::DropIndex(_) => "DropIndex".to_string(),
+        }
+    }
 }
 
 impl VolcanoExecutor for PhysicalPlan {

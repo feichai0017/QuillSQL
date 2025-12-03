@@ -1,8 +1,10 @@
 use crate::background::{self, BackgroundWorkers};
+use crate::buffer::page::INVALID_PAGE_ID;
 use log::{debug, warn};
+use serde::Serialize;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 use crate::buffer::{BufferManager, BUFFER_POOL_SIZE};
@@ -23,11 +25,16 @@ use crate::{
     catalog::Catalog,
     execution::ExecutionEngine,
     plan::{LogicalPlanner, PlannerContext},
+    recovery::wal::{WalHeadDebug, WalSegmentDebug},
     storage::{
         disk_manager::DiskManager, disk_scheduler::DiskScheduler, tuple::Tuple,
         DefaultStorageEngine, StorageEngine,
     },
-    transaction::{IsolationLevel, TransactionManager},
+    transaction::{CommandId, IsolationLevel, TransactionManager},
+};
+use crate::{
+    transaction::lock_manager::LockDebugSnapshot,
+    transaction::transaction_manager::TxnDebugSnapshot,
 };
 use sqlparser::ast::TransactionAccessMode;
 
@@ -89,11 +96,87 @@ pub struct Database {
     default_isolation: IsolationLevel,
     storage_engine: Arc<dyn StorageEngine>,
     _table_registry: Arc<TableRegistry>,
+    debug_trace: Arc<Mutex<Option<DebugTrace>>>,
 }
 
 struct PreparedStatement {
     optimized_logical_plan: LogicalPlan,
     physical_plan: PhysicalPlan,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DebugTrace {
+    pub logical_plan: String,
+    pub physical_plan: String,
+    pub rows: usize,
+    pub duration_ms: u128,
+    pub logical_tree: DebugPlanNode,
+    pub physical_tree: DebugPlanNode,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BufferDebugStats {
+    pub capacity: usize,
+    pub free_frames: usize,
+    pub pinned_frames: usize,
+    pub dirty_frames: usize,
+    pub dirty_page_table: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct WalSegmentsDebug {
+    pub segments: Vec<WalSegmentDebug>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DebugPlanNode {
+    pub op: String,
+    pub children: Vec<DebugPlanNode>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DebugPlanSnapshot {
+    pub logical: DebugPlanNode,
+    pub physical: DebugPlanNode,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MvccVersionSample {
+    pub table: String,
+    pub rid: String,
+    pub insert_txn: u64,
+    pub delete_txn: u64,
+    pub visible: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MvccVersionsDebug {
+    pub samples: Vec<MvccVersionSample>,
+    pub note: String,
+}
+
+impl DebugPlanNode {
+    pub fn from_physical(plan: &PhysicalPlan) -> Self {
+        Self {
+            op: plan.display_name(),
+            children: plan
+                .inputs()
+                .iter()
+                .map(|child| Self::from_physical(child))
+                .collect(),
+        }
+    }
+
+    pub fn from_logical(plan: &LogicalPlan) -> Self {
+        Self {
+            op: plan.to_string(),
+            children: plan
+                .inputs()
+                .iter()
+                .map(|child| Self::from_logical(child))
+                .collect(),
+        }
+    }
 }
 impl Database {
     pub fn new_on_disk(db_path: &str) -> QuillSQLResult<Self> {
@@ -217,6 +300,7 @@ impl Database {
                 .unwrap_or(IsolationLevel::ReadUncommitted),
             storage_engine,
             _table_registry: table_registry,
+            debug_trace: Arc::new(Mutex::new(None)),
         };
         load_catalog_data(&mut db)?;
         Ok(db)
@@ -232,10 +316,15 @@ impl Database {
         session: &mut SessionContext,
         sql: &str,
     ) -> QuillSQLResult<Vec<Tuple>> {
+        let start = Instant::now();
         let PreparedStatement {
             optimized_logical_plan,
             physical_plan,
         } = self.plan_statement(sql)?;
+        let logical_plan_str = pretty_format_logical_plan(&optimized_logical_plan);
+        let physical_plan_str = pretty_format_physical_plan(&physical_plan);
+        let logical_tree = DebugPlanNode::from_logical(&optimized_logical_plan);
+        let physical_tree = DebugPlanNode::from_physical(&physical_plan);
 
         if let Some(result) = self.execute_transaction_control(session, &optimized_logical_plan)? {
             return Ok(result);
@@ -275,6 +364,114 @@ impl Database {
         let _ = self.wal_manager.flush_until(target)?;
         self.wal_manager.persist_control_file()?;
         self.buffer_pool.flush_all_pages()
+    }
+
+    pub fn debug_last_trace(&self) -> Option<DebugTrace> {
+        self.debug_trace.lock().ok().and_then(|guard| guard.clone())
+    }
+
+    pub fn debug_wal_head(&self) -> WalHeadDebug {
+        self.wal_manager.debug_head()
+    }
+
+    pub fn debug_wal_segments(&self) -> QuillSQLResult<WalSegmentsDebug> {
+        Ok(WalSegmentsDebug {
+            segments: self.wal_manager.debug_segments()?,
+        })
+    }
+
+    pub fn debug_wal_peek(
+        &self,
+        limit: usize,
+    ) -> QuillSQLResult<Vec<crate::recovery::wal::WalPeekDebug>> {
+        self.wal_manager.debug_peek(limit)
+    }
+
+    pub fn debug_lock_snapshot(&self) -> LockDebugSnapshot {
+        self.transaction_manager.lock_manager_arc().debug_snapshot()
+    }
+
+    pub fn debug_buffer_stats(&self) -> BufferDebugStats {
+        let frames = self.buffer_pool.frame_meta_snapshot();
+        let free_frames = frames
+            .iter()
+            .filter(|meta| meta.page_id == INVALID_PAGE_ID)
+            .count();
+        let pinned_frames = frames.iter().filter(|meta| meta.pin_count > 0).count();
+        let dirty_frames = frames.iter().filter(|meta| meta.is_dirty).count();
+        let dirty_page_table = self.buffer_pool.dirty_page_table_snapshot().len();
+        BufferDebugStats {
+            capacity: frames.len(),
+            free_frames,
+            pinned_frames,
+            dirty_frames,
+            dirty_page_table,
+        }
+    }
+
+    pub fn debug_txn_snapshot(&self) -> TxnDebugSnapshot {
+        self.transaction_manager.debug_snapshot()
+    }
+
+    pub fn debug_mvcc_versions(&self) -> QuillSQLResult<MvccVersionsDebug> {
+        let mut samples = Vec::new();
+        let max_samples = 20usize;
+        let snapshot = self
+            .transaction_manager
+            .snapshot(self.transaction_manager.next_txn_id_hint());
+
+        for (table_ref, heap) in self._table_registry.iter_tables() {
+            let mut current = heap.get_first_rid()?;
+            while let Some(rid) = current {
+                if samples.len() >= max_samples {
+                    break;
+                }
+                let meta = heap.tuple_meta(rid)?;
+                let visible = snapshot.is_visible(&meta, 0 as CommandId, |tid| {
+                    self.transaction_manager.transaction_status(tid)
+                });
+                samples.push(MvccVersionSample {
+                    table: table_ref.to_string(),
+                    rid: rid.to_string(),
+                    insert_txn: meta.insert_txn_id,
+                    delete_txn: meta.delete_txn_id,
+                    visible,
+                });
+                current = heap.get_next_rid(rid)?;
+            }
+            if samples.len() >= max_samples {
+                break;
+            }
+        }
+
+        Ok(MvccVersionsDebug {
+            samples,
+            note: format!("sampled up to {} tuples", max_samples),
+        })
+    }
+
+    pub fn debug_last_plan(&self) -> Option<DebugPlanSnapshot> {
+        self.debug_trace
+            .lock()
+            .ok()
+            .as_ref()
+            .and_then(|opt| opt.clone())
+            .map(|trace| DebugPlanSnapshot {
+                logical: trace.logical_tree,
+                physical: trace.physical_tree,
+            })
+    }
+
+    pub fn debug_last_plan(&self) -> Option<DebugPlanSnapshot> {
+        self.debug_trace
+            .lock()
+            .ok()
+            .as_ref()
+            .and_then(|opt| opt.clone())
+            .map(|trace| DebugPlanSnapshot {
+                logical: trace.logical_tree,
+                physical: trace.physical_tree,
+            })
     }
 
     pub fn table_statistics(
@@ -394,6 +591,19 @@ impl Database {
                 self.transaction_manager.commit(txn)?;
             }
             session.clear_active_transaction();
+        }
+
+        let elapsed = start.elapsed().as_millis();
+        let rows = result.len();
+        if let Ok(mut guard) = self.debug_trace.lock() {
+            *guard = Some(DebugTrace {
+                logical_plan: logical_plan_str,
+                physical_plan: physical_plan_str,
+                logical_tree,
+                physical_tree,
+                rows,
+                duration_ms: elapsed,
+            });
         }
 
         Ok(result)
