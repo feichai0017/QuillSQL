@@ -593,19 +593,6 @@ impl Database {
             session.clear_active_transaction();
         }
 
-        let elapsed = start.elapsed().as_millis();
-        let rows = result.len();
-        if let Ok(mut guard) = self.debug_trace.lock() {
-            *guard = Some(DebugTrace {
-                logical_plan: logical_plan_str,
-                physical_plan: physical_plan_str,
-                logical_tree,
-                physical_tree,
-                rows,
-                duration_ms: elapsed,
-            });
-        }
-
         Ok(result)
     }
 }
