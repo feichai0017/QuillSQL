@@ -21,6 +21,7 @@ use crate::utils::{
     util::{pretty_format_logical_plan, pretty_format_physical_plan},
 };
 use crate::{
+    buffer::page::INVALID_PAGE_ID,
     catalog::Catalog,
     execution::ExecutionEngine,
     plan::{LogicalPlanner, PlannerContext},
@@ -29,7 +30,9 @@ use crate::{
         disk_manager::DiskManager, disk_scheduler::DiskScheduler, tuple::Tuple,
         DefaultStorageEngine, StorageEngine,
     },
-    transaction::{CommandId, IsolationLevel, LockDebugSnapshot, TransactionManager, TxnDebugSnapshot},
+    transaction::{
+        CommandId, IsolationLevel, LockDebugSnapshot, TransactionManager, TxnDebugSnapshot,
+    },
 };
 use sqlparser::ast::TransactionAccessMode;
 
@@ -405,7 +408,7 @@ impl Database {
         let frames = self.buffer_pool.frame_meta_snapshot();
         let free_frames = frames
             .iter()
-            .filter(|meta| meta.page_id == u32::MAX)
+            .filter(|meta| meta.page_id == INVALID_PAGE_ID)
             .count();
         let pinned_frames = frames.iter().filter(|meta| meta.pin_count > 0).count();
         let dirty_frames = frames.iter().filter(|meta| meta.is_dirty).count();
