@@ -41,7 +41,9 @@ fn lock_or_rebuild_db<'a>(
     }
 }
 
-async fn rebuild(State(state): State<AppState>) -> Result<Json<&'static str>, (StatusCode, String)> {
+async fn rebuild(
+    State(state): State<AppState>,
+) -> Result<Json<&'static str>, (StatusCode, String)> {
     let new_db = rebuild_db(&state.options);
     let mut db_guard = state
         .db
