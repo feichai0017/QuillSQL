@@ -41,6 +41,16 @@ fn lock_or_rebuild_db<'a>(
     }
 }
 
+async fn rebuild(State(state): State<AppState>) -> Result<Json<&'static str>, (StatusCode, String)> {
+    let new_db = rebuild_db(&state.options);
+    let mut db_guard = state
+        .db
+        .lock()
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "DB poisoned".to_string()))?;
+    *db_guard = new_db;
+    Ok(Json("rebuilt"))
+}
+
 /// Request payload for /api/sql
 #[derive(Deserialize)]
 struct SqlRequest {
