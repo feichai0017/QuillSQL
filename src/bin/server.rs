@@ -190,7 +190,7 @@ async fn main() {
     let db = if let Ok(path) = std::env::var("QUILL_DB_FILE") {
         Database::new_on_disk_with_options(&path, db_options.clone()).expect("open db file")
     } else {
-        Database::new_temp_with_options(db_options).expect("open temp db")
+        Database::new_temp_with_options(db_options.clone()).expect("open temp db")
     };
 
     let state = AppState {
