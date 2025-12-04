@@ -845,6 +845,25 @@
       font-size: 0.88rem;
     }
 
+    .plan-grid {
+      grid-column: 1 / -1;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 12px;
+    }
+
+    .plan-card {
+      min-height: 260px;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .plan-card .tree {
+      flex: 1;
+      overflow: auto;
+      padding-left: 8px;
+    }
+
     .terminal-wrapper {
       margin-top: 12px;
       padding: 0;
@@ -1930,7 +1949,7 @@
                 </tbody>
               </table>
             </div>
-            <div className="insight-card">
+            <div className="insight-card" style={{ gridColumn: 'span 2' }}>
               <h4>MVCC</h4>
               <table className="table-compact">
                 <thead>
@@ -1955,7 +1974,7 @@
                 </tbody>
               </table>
             </div>
-            <div className="insight-card">
+            <div className="insight-card" style={{ gridColumn: 'span 2' }}>
               <h4>Trace</h4>
               <div className="insight-grid-row">
                 <div className="stat">
@@ -1968,13 +1987,15 @@
                 </div>
               </div>
             </div>
-            <div className="insight-card" style={{ gridColumn: 'span 2' }}>
-              <h4>Logical Plan</h4>
-              {renderTree(plan?.logical)}
-            </div>
-            <div className="insight-card" style={{ gridColumn: 'span 2' }}>
-              <h4>Physical Plan</h4>
-              {renderTree(plan?.physical)}
+            <div className="plan-grid">
+              <div className="insight-card plan-card">
+                <h4>Logical Plan</h4>
+                {renderTree(plan?.logical)}
+              </div>
+              <div className="insight-card plan-card">
+                <h4>Physical Plan</h4>
+                {renderTree(plan?.physical)}
+              </div>
             </div>
           </div>
         );
