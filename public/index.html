@@ -713,9 +713,9 @@
 
     .insights-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-      gap: 12px;
-      margin-top: 12px;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 14px;
+      margin-top: 16px;
     }
 
     .insight-card {
@@ -732,6 +732,91 @@
       letter-spacing: 0.15em;
       color: var(--accent);
       text-transform: uppercase;
+    }
+
+    .insight-grid-row {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+      margin: 8px 0;
+    }
+
+    .stat {
+      background: rgba(2, 6, 10, 0.8);
+      border: 1px solid rgba(126, 247, 199, 0.12);
+      border-radius: 10px;
+      padding: 6px 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      font-size: 0.85rem;
+      color: var(--muted);
+    }
+
+    .stat strong {
+      color: var(--text);
+      font-size: 1rem;
+    }
+
+    .chip {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 999px;
+      border: 1px solid rgba(126, 247, 199, 0.2);
+      font-size: 0.75rem;
+      color: var(--accent);
+      background: rgba(126, 247, 199, 0.08);
+    }
+
+    .table-compact {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.82rem;
+      color: var(--text);
+    }
+
+    .table-compact th,
+    .table-compact td {
+      border-bottom: 1px solid rgba(126, 247, 199, 0.12);
+      padding: 4px 6px;
+      text-align: left;
+    }
+
+    .table-compact th {
+      color: var(--muted);
+      font-weight: 600;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      font-size: 0.75rem;
+    }
+
+    .tree {
+      list-style: none;
+      padding-left: 14px;
+      margin: 0;
+      border-left: 1px solid rgba(126, 247, 199, 0.2);
+    }
+
+    .tree li {
+      margin: 4px 0;
+      color: var(--muted);
+      font-size: 0.88rem;
+    }
+
+    .debug-bar {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin: 10px 0 0;
+    }
+
+    .debug-bar button {
+      border: 1px solid rgba(126, 247, 199, 0.3);
+      background: rgba(126, 247, 199, 0.1);
+      color: var(--accent);
+      border-radius: 10px;
+      padding: 6px 10px;
+      cursor: pointer;
     }
 
     .insight-card pre {
@@ -1537,6 +1622,8 @@
         ]);
       };
 
+      const [debugEnabled, setDebugEnabled] = useState(true);
+
       const handleMeta = (raw) => {
         const trimmed = raw.trim().replace(/^\\/, '');
         const [cmd, ...rest] = trimmed.split(/\s+/);
@@ -1595,6 +1682,7 @@
       };
 
       const pullDebugInsights = async () => {
+        if (!debugEnabled) return;
         try {
           const [wal, walPeek, walSegments, buffer, locks, txns, mvcc, trace, plan] = await Promise.all([
             fetchDebugJson('/debug/wal/head'),
@@ -1714,32 +1802,171 @@
           <div className="insights-grid">
             <div className="insight-card">
               <h4>WAL</h4>
-              <pre>{JSON.stringify(wal, null, 2)}</pre>
-              <button onClick={() => fetch('/admin/rebuild', { method: 'POST' }).then(() => window.location.reload())}>
-                Rebuild DB
-              </button>
-              <pre>{JSON.stringify(walPeek, null, 2)}</pre>
-              <pre>{JSON.stringify(walSegments, null, 2)}</pre>
+              <div className="insight-grid-row">
+                <div className="stat">
+                  <span>Durable</span>
+                  <strong>{wal.durable_lsn}</strong>
+                </div>
+                <div className="stat">
+                  <span>Max</span>
+                  <strong>{wal.max_assigned_lsn}</strong>
+                </div>
+                <div className="stat">
+                  <span>Pending</span>
+                  <strong>{wal.pending_records} rec / {wal.pending_bytes}B</strong>
+                </div>
+                <div className="stat">
+                  <span>Checkpoint</span>
+                  <strong>{wal.last_checkpoint_lsn}</strong>
+                </div>
+              </div>
+              <table className="table-compact">
+                <thead>
+                  <tr>
+                    <th>LSN</th>
+                    <th>Prev</th>
+                    <th>RMID</th>
+                    <th>Info</th>
+                    <th>Len</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {walPeek?.map((row, idx) => (
+                    <tr key={idx}>
+                      <td>{row.lsn}</td>
+                      <td>{row.prev_lsn}</td>
+                      <td>{row.rmid}</td>
+                      <td>{row.info}</td>
+                      <td>{row.body_len}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <table className="table-compact">
+                <thead>
+                  <tr>
+                    <th>Segment</th>
+                    <th>Size</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {walSegments?.segments?.map((seg) => (
+                    <tr key={seg.id}>
+                      <td>{seg.id}</td>
+                      <td>{seg.size_bytes}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
             <div className="insight-card">
               <h4>Buffer</h4>
-              <pre>{JSON.stringify(buffer, null, 2)}</pre>
+              <div className="insight-grid-row">
+                <div className="stat">
+                  <span>Capacity</span>
+                  <strong>{buffer.capacity}</strong>
+                </div>
+                <div className="stat">
+                  <span>Free</span>
+                  <strong>{buffer.free_frames}</strong>
+                </div>
+                <div className="stat">
+                  <span>Pinned</span>
+                  <strong>{buffer.pinned_frames}</strong>
+                </div>
+                <div className="stat">
+                  <span>Dirty</span>
+                  <strong>{buffer.dirty_frames} ({buffer.dirty_page_table} map)</strong>
+                </div>
+              </div>
             </div>
             <div className="insight-card">
               <h4>Locks</h4>
-              <pre>{JSON.stringify(locks, null, 2)}</pre>
+              <table className="table-compact">
+                <thead>
+                  <tr>
+                    <th>From</th>
+                    <th>To</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {locks.wait_for?.map((edge, idx) => (
+                    <tr key={idx}>
+                      <td>{edge.from}</td>
+                      <td>{edge.to}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
             <div className="insight-card">
               <h4>Txns</h4>
-              <pre>{JSON.stringify(txns, null, 2)}</pre>
+              <div className="stat">
+                <span>Oldest</span>
+                <strong>{txns.oldest_active ?? '–'}</strong>
+              </div>
+              <div className="stat">
+                <span>Next</span>
+                <strong>{txns.next_txn_id}</strong>
+              </div>
+              <table className="table-compact">
+                <thead>
+                  <tr>
+                    <th>Txn</th>
+                    <th>Status</th>
+                    <th>Tables</th>
+                    <th>Rows</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {txns.active?.map((t) => (
+                    <tr key={t.txn_id}>
+                      <td>{t.txn_id}</td>
+                      <td>{t.status}</td>
+                      <td>{t.held_tables}</td>
+                      <td>{t.held_rows}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
             <div className="insight-card">
               <h4>MVCC</h4>
-              <pre>{JSON.stringify(mvcc, null, 2)}</pre>
+              <table className="table-compact">
+                <thead>
+                  <tr>
+                    <th>Table</th>
+                    <th>RID</th>
+                    <th>Ins</th>
+                    <th>Del</th>
+                    <th>Vis</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {mvcc.samples?.map((s, idx) => (
+                    <tr key={idx}>
+                      <td>{s.table}</td>
+                      <td>{s.rid}</td>
+                      <td>{s.insert_txn}</td>
+                      <td>{s.delete_txn}</td>
+                      <td>{s.visible ? '✓' : '✗'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
             <div className="insight-card">
               <h4>Trace</h4>
-              <pre>{JSON.stringify(trace, null, 2)}</pre>
+              <div className="insight-grid-row">
+                <div className="stat">
+                  <span>Rows</span>
+                  <strong>{trace?.rows ?? '–'}</strong>
+                </div>
+                <div className="stat">
+                  <span>Duration</span>
+                  <strong>{trace?.duration_ms ?? '–'} ms</strong>
+                </div>
+              </div>
             </div>
             <div className="insight-card" style={{ gridColumn: 'span 2' }}>
               <h4>Logical Plan</h4>
@@ -1796,11 +2023,24 @@
                   value={input}
                   onChange={(event) => setInput(event.target.value)}
                   onKeyDown={onKeyDown}
-                  placeholder="Type SQL or \\help · Enter to run · Shift+Enter for newline"
+                  placeholder={"Type SQL or \\help · Enter to run · Shift+Enter for newline"}
                 />
               </form>
               <div className="terminal-hint">
                 Commands: \help · \docs · \github · \profile · \history · \endpoint · Any other input executes SQL.
+              </div>
+              <div className="debug-bar">
+                <label style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  <input
+                    type="checkbox"
+                    checked={debugEnabled}
+                    onChange={(e) => setDebugEnabled(e.target.checked)}
+                  />
+                  Debug mode
+                </label>
+                <button onClick={() => fetch('/admin/rebuild', { method: 'POST' }).then(() => window.location.reload())}>
+                  Rebuild DB
+                </button>
               </div>
             </div>
           </section>
