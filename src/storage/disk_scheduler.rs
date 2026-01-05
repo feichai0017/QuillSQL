@@ -11,7 +11,7 @@ use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::thread;
 
 #[cfg(not(target_os = "linux"))]
-use crate::storage::io::blocking;
+use crate::storage::io::block_io;
 #[cfg(target_os = "linux")]
 use crate::storage::io::io_uring;
 
@@ -186,7 +186,7 @@ impl DiskScheduler {
 
         #[cfg(not(target_os = "linux"))]
         let (request_sender, worker_threads) =
-            blocking::spawn_runtime(disk_manager.clone(), config.clone());
+            block_io::spawn_runtime(disk_manager.clone(), config.clone());
 
         DiskScheduler {
             request_sender,
