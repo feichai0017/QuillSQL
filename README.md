@@ -141,7 +141,6 @@ EXPLAIN SELECT id, COUNT(*) FROM t GROUP BY id ORDER BY id;
 cargo test -q
 ```
 
-
 ## ⚙️ Configuration
 
 Minimal environment variables (runtime only)
@@ -166,7 +165,6 @@ docker run --rm -p 8080:8080 quillsql:latest
 docker run --rm -p 8080:8080 -e QUILL_DB_FILE=/data/my.db -v $(pwd)/data:/data quillsql:latest
 ```
 
-
 Includes sqllogictest-based cases:
 
 - `src/tests/sql_example/create_table.slt`
@@ -179,3 +177,17 @@ Includes sqllogictest-based cases:
 
 - [BustubX](https://github.com/systemxlabs/bustubx)
 - [CMU 15-445/645 Database Systems](https://15445.courses.cs.cmu.edu/)
+
+## <img src="https://cdn.simpleicons.org/discord/5865F2" height="20" /> Community
+
+**Build. Break. Benchmark. Repeat.**  
+QuillSQL has a Discord server for discussions, support, and *experimental* DB hacking.
+
+**What you can do here:**
+- 🧩 **Design discussions** — parser / executor / storage architecture
+- 🧪 **Experiments & prototypes** — new operators, indexes, optimizer ideas, wild hacks
+- 📈 **Benchmarks & profiling** — perf numbers, flamegraphs, regression hunts
+- 📚 **Research notes** — papers, learning resources, implementation notes
+- 🤝 **Contributing help** — “good first issue”, PR reviews, roadmap brainstorming
+
+**Join:** https://discord.gg/dJqa4RYW65
