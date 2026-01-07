@@ -1,9 +1,9 @@
 
 [package]
 name = "quill-sql"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
-description = "A tiny yet serious SQL database in Rust with ARIES-style WAL, 2PL, and B+Tree indexes."
+description = "An educational Rust relational database (RDBMS) inspired by CMU 15445"
 license = "MIT"
 repository = "https://github.com/feichai0017/quillsql"
 readme = "README.md"
