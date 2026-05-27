@@ -21,6 +21,12 @@ pub struct FilterProjectKernel {
     schema: ArrowSchemaRef,
 }
 
+#[derive(Debug, Clone)]
+pub struct FilterSumKernel {
+    predicate: JitExpr,
+    measure: JitExpr,
+}
+
 impl FilterProjectKernel {
     pub fn try_new(
         predicate: JitExpr,
@@ -92,5 +98,60 @@ impl FilterProjectKernel {
             .collect::<JitResult<Vec<_>>>()?;
         RecordBatch::try_new(Arc::clone(&self.schema), arrays)
             .map_err(|err| JitError::Backend(err.to_string()))
+    }
+}
+
+impl FilterSumKernel {
+    pub fn try_new(predicate: JitExpr, measure: JitExpr) -> JitResult<Self> {
+        if predicate.ty() != JitType::Bool {
+            return Err(JitError::UnsupportedExpr(format!(
+                "filter predicate must be bool, got {:?}",
+                predicate.ty()
+            )));
+        }
+        if measure.ty() != JitType::Float64 {
+            return Err(JitError::UnsupportedExpr(format!(
+                "sum measure must be f64, got {:?}",
+                measure.ty()
+            )));
+        }
+        ensure_supported_expr(&predicate)?;
+        ensure_supported_expr(&measure)?;
+        Ok(Self { predicate, measure })
+    }
+
+    pub fn predicate(&self) -> &JitExpr {
+        &self.predicate
+    }
+
+    pub fn measure(&self) -> &JitExpr {
+        &self.measure
+    }
+
+    pub fn execute(&self, batch: &RecordBatch) -> JitResult<Option<f64>> {
+        let view = BatchView::try_new(batch)?;
+        let mut sum = 0.0_f64;
+        let mut has_value = false;
+
+        for row in 0..batch.num_rows() {
+            if !eval_expr(&self.predicate, &view, row)?.is_filter_true()? {
+                continue;
+            }
+            match eval_expr(&self.measure, &view, row)? {
+                self::value::Scalar::Float64(Some(value)) => {
+                    sum += value;
+                    has_value = true;
+                }
+                self::value::Scalar::Float64(None) => {}
+                other => {
+                    return Err(JitError::Backend(format!(
+                        "sum measure produced non-f64 value {:?}",
+                        other.ty()
+                    )));
+                }
+            }
+        }
+
+        Ok(has_value.then_some(sum))
     }
 }

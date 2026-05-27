@@ -6,11 +6,12 @@ QuillSQL uses benchmarks to separate three different claims:
 - DataFusion execution cost: how the current DataFusion path behaves on Arrow
   batches or Parquet datasets.
 - Compiled-node cost: how the rewritten filter/project physical island behaves
-  before and after native MLIR function pointers are enabled.
+  before and after compiled MLIR function pointers are enabled.
 
 The current code has a real `CompiledFilterProjectExec` in the DataFusion hot
 path, and its execution body uses QuillSQL's fixed-width Arrow batch kernel.
-Native MLIR kernel speedups are intentionally not claimed yet.
+Compiled MLIR kernel speedups are intentionally not claimed as end-to-end query
+speedups yet.
 
 ## Microbenchmarks
 
@@ -27,12 +28,15 @@ Benchmarks:
 | `jit_ir/fuse_filter_project` | `PipelineIR` prefix fusion into `KernelIR::FilterProject`. |
 | `mlir/compile_filter` | JIT expression to MLIR module generation for a filter. |
 | `mlir/compile_filter_project` | Fused filter/project MLIR module generation. |
-| `mlir_native/compile_i64_filter` | MLIR parse/lower/JIT cost for the first native fixed-width filter kernel. Requires `jit-mlir`. |
-| `mlir_native/compile_i64_filter_project` | MLIR parse/lower/JIT cost for the first native fixed-width filter/project kernel. Requires `jit-mlir`. |
-| `mlir_native/filter_64k` | Native MLIR i64 filter execution over a 64K-row values vector, writing a byte selection mask. Requires `jit-mlir`. |
-| `mlir_native/filter_project_64k` | Native MLIR i64 filter/project execution over 64K rows, compacting one projected i64 column. Requires `jit-mlir`. |
+| `mlir_compiled/compile_i64_filter` | MLIR parse/lower/JIT cost for the first compiled fixed-width filter kernel. Requires `jit-mlir`. |
+| `mlir_compiled/compile_i64_filter_project` | MLIR parse/lower/JIT cost for the first compiled fixed-width filter/project kernel. Requires `jit-mlir`. |
+| `mlir_compiled/compile_f64_filter_sum` | MLIR parse/lower/JIT cost for the first compiled fixed-width filter/sum kernel. Requires `jit-mlir`. |
+| `mlir_compiled/filter_64k` | Compiled MLIR i64 filter execution over a 64K-row values vector, writing a byte selection mask. Requires `jit-mlir`. |
+| `mlir_compiled/filter_project_64k` | Compiled MLIR i64 filter/project execution over 64K rows, compacting one projected i64 column. Requires `jit-mlir`. |
+| `mlir_compiled/filter_sum_64k` | Compiled MLIR f64 filter/sum execution over 64K rows. Requires `jit-mlir`. |
 | `quill_kernel/filter_project_64k` | Direct fixed-width Arrow kernel execution outside DataFusion planning. |
 | `datafusion/sql_filter_project_64k` | DataFusion SQL planning/execution over a 64K-row in-memory Arrow table, including the compiled filter/project physical node when the pattern matches. |
+| `datafusion/sql_filter_sum_64k` | DataFusion SQL planning/execution over a 64K-row in-memory Arrow table, including the compiled filter/sum physical node when the pattern matches. |
 
 Without `jit-mlir`, MLIR verification is a no-op. With `jit-mlir`, the same
 benchmark includes `melior` parse and verifier cost:
@@ -99,5 +103,5 @@ When reporting results, include:
 - CPU, memory, OS, Rust version, and LLVM/MLIR version if `jit-mlir` is enabled
 - TPC-H scale factor and data format
 - whether file-system cache was warm
-- whether the number is JIT lowering, DataFusion end-to-end, or future native
+- whether the number is JIT lowering, DataFusion end-to-end, or compiled
   kernel execution

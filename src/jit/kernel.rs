@@ -46,6 +46,7 @@ pub enum KernelKind {
     Filter,
     Projection,
     FilterProject,
+    FilterSum,
 }
 
 #[derive(Debug, Clone)]

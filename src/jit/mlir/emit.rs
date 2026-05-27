@@ -67,7 +67,7 @@ pub(super) fn lower_filter_project(
 }
 
 pub(super) fn lower_i64_predicate(predicate: &JitExpr) -> JitResult<MlirModule> {
-    ensure_single_i64_predicate(predicate, "native predicate wrapper")?;
+    ensure_single_i64_predicate(predicate, "compiled predicate wrapper")?;
     let symbol = next_symbol("quill_i64_predicate");
     let expr_symbol = format!("{symbol}_expr");
     let mut text = start_module();
@@ -89,7 +89,7 @@ pub(super) fn lower_i64_predicate(predicate: &JitExpr) -> JitResult<MlirModule> 
 }
 
 pub(super) fn lower_i64_filter(predicate: &JitExpr) -> JitResult<MlirModule> {
-    ensure_single_i64_predicate(predicate, "native filter kernel")?;
+    ensure_single_i64_predicate(predicate, "compiled filter kernel")?;
     let symbol = next_symbol("quill_i64_filter");
     let expr_symbol = format!("{symbol}_expr");
     let mut text = start_module();
@@ -127,8 +127,8 @@ pub(super) fn lower_i64_filter_project(
     predicate: &JitExpr,
     projections: &[JitProjection],
 ) -> JitResult<MlirModule> {
-    ensure_single_i64_predicate(predicate, "native filter-project kernel")?;
-    ensure_single_i64_projection(projections, "native filter-project kernel")?;
+    ensure_single_i64_predicate(predicate, "compiled filter-project kernel")?;
+    ensure_single_i64_projection(projections, "compiled filter-project kernel")?;
 
     let symbol = next_symbol("quill_i64_filter_project");
     let predicate_symbol = format!("{symbol}_predicate");
@@ -175,6 +175,64 @@ pub(super) fn lower_i64_filter_project(
     text.push_str("      scf.yield %next_count : i64\n");
     text.push_str("    }\n");
     text.push_str("    llvm.store %final_count, %out_len : i64, !llvm.ptr\n");
+    text.push_str("    %ok = arith.constant 0 : i32\n");
+    text.push_str("    return %ok : i32\n");
+    text.push_str("  }\n}\n");
+    Ok(MlirModule { symbol, text })
+}
+
+pub(super) fn lower_f64_filter_sum(
+    predicate: &JitExpr,
+    measure: &JitExpr,
+) -> JitResult<MlirModule> {
+    ensure_single_i64_predicate(predicate, "compiled filter-sum kernel")?;
+    ensure_f64_measure_pair(measure, "compiled filter-sum kernel")?;
+
+    let symbol = next_symbol("quill_f64_filter_sum");
+    let predicate_symbol = format!("{symbol}_predicate");
+    let measure_symbol = format!("{symbol}_measure");
+    let mut text = start_module();
+    text.push_str(&scalar_function(&predicate_symbol, predicate)?);
+    text.push_str(&scalar_function(&measure_symbol, measure)?);
+    let _ = writeln!(
+        text,
+        "  func.func @{symbol}(%len: i64, %pred_values: !llvm.ptr, %left_values: !llvm.ptr, %right_values: !llvm.ptr, %out_sum: !llvm.ptr) -> i32 attributes {{ llvm.emit_c_interface }} {{"
+    );
+    text.push_str("    %c0_i64 = arith.constant 0 : i64\n");
+    text.push_str("    %c1_i64 = arith.constant 1 : i64\n");
+    text.push_str("    %zero_f64 = arith.constant 0.000000e+00 : f64\n");
+    text.push_str(
+        "    %final_sum = scf.for unsigned %i = %c0_i64 to %len step %c1_i64 iter_args(%sum = %zero_f64) -> (f64) : i64 {\n",
+    );
+    text.push_str(
+        "      %pred_ptr = llvm.getelementptr %pred_values[%i] : (!llvm.ptr, i64) -> !llvm.ptr, i64\n",
+    );
+    text.push_str("      %pred_value = llvm.load %pred_ptr : !llvm.ptr -> i64\n");
+    let _ = writeln!(
+        text,
+        "      %pred = func.call @{predicate_symbol}(%pred_value) : (i64) -> i1"
+    );
+    text.push_str("      %next_sum = scf.if %pred -> (f64) {\n");
+    text.push_str(
+        "        %left_ptr = llvm.getelementptr %left_values[%i] : (!llvm.ptr, i64) -> !llvm.ptr, f64\n",
+    );
+    text.push_str("        %left = llvm.load %left_ptr : !llvm.ptr -> f64\n");
+    text.push_str(
+        "        %right_ptr = llvm.getelementptr %right_values[%i] : (!llvm.ptr, i64) -> !llvm.ptr, f64\n",
+    );
+    text.push_str("        %right = llvm.load %right_ptr : !llvm.ptr -> f64\n");
+    let _ = writeln!(
+        text,
+        "        %measure = func.call @{measure_symbol}(%left, %right) : (f64, f64) -> f64"
+    );
+    text.push_str("        %new_sum = arith.addf %sum, %measure : f64\n");
+    text.push_str("        scf.yield %new_sum : f64\n");
+    text.push_str("      } else {\n");
+    text.push_str("        scf.yield %sum : f64\n");
+    text.push_str("      }\n");
+    text.push_str("      scf.yield %next_sum : f64\n");
+    text.push_str("    }\n");
+    text.push_str("    llvm.store %final_sum, %out_sum : f64, !llvm.ptr\n");
     text.push_str("    %ok = arith.constant 0 : i32\n");
     text.push_str("    return %ok : i32\n");
     text.push_str("  }\n}\n");
@@ -277,6 +335,24 @@ fn ensure_single_i64_projection(projections: &[JitProjection], context: &str) ->
     }
 
     ensure_single_i64_input(expr, context)?;
+    Ok(())
+}
+
+fn ensure_f64_measure_pair(expr: &JitExpr, context: &str) -> JitResult<()> {
+    if expr.ty() != JitType::Float64 {
+        return Err(JitError::UnsupportedExpr(format!(
+            "{context} requires f64 aggregate input, got {}",
+            mlir_type(expr.ty())
+        )));
+    }
+
+    let mut columns = BTreeMap::new();
+    collect_columns(expr, &mut columns);
+    if columns.len() != 2 || !columns.values().all(|ty| *ty == JitType::Float64) {
+        return Err(JitError::UnsupportedExpr(format!(
+            "{context} currently supports exactly two f64 measure input columns"
+        )));
+    }
     Ok(())
 }
 

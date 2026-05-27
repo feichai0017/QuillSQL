@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use datafusion::arrow::array::Int64Array;
+use datafusion::arrow::array::{Array, Float64Array, Int64Array};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::dataframe::DataFrameWriteOptions;
@@ -110,6 +110,54 @@ async fn debug_trace_reports_jit_candidates() {
             .iter()
             .any(|candidate| candidate.kernel == KernelKind::FilterProject
                 || candidate.kernel == KernelKind::Filter),
+        "{:?}",
+        trace.jit_candidates
+    );
+}
+
+#[tokio::test]
+async fn debug_trace_reports_filter_sum_candidate() {
+    let db = Database::new_temp().expect("database");
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("v", DataType::Int64, false),
+        Field::new("price", DataType::Float64, false),
+        Field::new("discount", DataType::Float64, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![
+            Arc::new(Int64Array::from(vec![9, 11, 12])),
+            Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0])),
+            Arc::new(Float64Array::from(vec![0.1, 0.2, 0.3])),
+        ],
+    )
+    .expect("batch");
+    db.register_batches("t", schema, vec![batch])
+        .expect("table");
+
+    let output = db
+        .run("select sum(price * discount) from t where v > 10")
+        .await
+        .expect("query");
+    let values = output.batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .expect("f64 sum");
+    assert_eq!(values.len(), 1);
+    assert!((values.value(0) - 13.0).abs() < 0.000_001);
+
+    let trace = db.debug_last_trace().expect("trace");
+    assert!(
+        trace.physical_plan.contains("CompiledFilterSumExec"),
+        "{}",
+        trace.physical_plan
+    );
+    assert!(
+        trace
+            .jit_candidates
+            .iter()
+            .any(|candidate| candidate.kernel == KernelKind::FilterSum),
         "{:?}",
         trace.jit_candidates
     );

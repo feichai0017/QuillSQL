@@ -1,10 +1,13 @@
 use std::sync::Arc;
 
+use datafusion::arrow::datatypes::{DataType as ArrowDataType, Schema as ArrowSchema};
 use datafusion::common::config::ConfigOptions;
 use datafusion::common::tree_node::{Transformed, TreeNode};
 use datafusion::common::Result;
 use datafusion::physical_expr::Partitioning;
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
+use datafusion::physical_plan::aggregates::{AggregateExec, AggregateMode};
+use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::filter::FilterExec;
 use datafusion::physical_plan::projection::ProjectionExec;
 use datafusion::physical_plan::repartition::RepartitionExec;
@@ -12,8 +15,8 @@ use datafusion::physical_plan::ExecutionPlan;
 use serde::Serialize;
 
 use crate::jit::{
-    CompiledFilterProjectExec, FilterProjectKernel, JitExpr, JitProjection, KernelBackend,
-    KernelKind, MlirBackend,
+    CompiledFilterProjectExec, CompiledFilterSumExec, CompiledKernel, FilterProjectKernel,
+    FilterSumKernel, JitExpr, JitProjection, KernelBackend, KernelKind, MlirBackend,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -55,6 +58,15 @@ impl MlirJitRule {
         if let Some(compiled) = plan.as_any().downcast_ref::<CompiledFilterProjectExec>() {
             return Some(JitCandidate {
                 node: "CompiledFilterProjectExec",
+                kernel: compiled.kernel().kind,
+                backend: "mlir",
+                executable: compiled.kernel().executable,
+            });
+        }
+
+        if let Some(compiled) = plan.as_any().downcast_ref::<CompiledFilterSumExec>() {
+            return Some(JitCandidate {
+                node: "CompiledFilterSumExec",
                 kernel: compiled.kernel().kind,
                 backend: "mlir",
                 executable: compiled.kernel().executable,
@@ -152,6 +164,13 @@ impl MlirJitRule {
         &self,
         plan: Arc<dyn ExecutionPlan>,
     ) -> Result<Transformed<Arc<dyn ExecutionPlan>>> {
+        if let Some(aggregate) = plan.as_any().downcast_ref::<AggregateExec>() {
+            if let Some(compiled) = self.compile_filter_sum(aggregate)? {
+                return Ok(Transformed::yes(compiled));
+            }
+            return Ok(Transformed::no(plan));
+        }
+
         let Some(projection) = plan.as_any().downcast_ref::<ProjectionExec>() else {
             return Ok(Transformed::no(plan));
         };
@@ -228,5 +247,163 @@ impl MlirJitRule {
             kernel,
         )?;
         Ok(Some(Arc::new(compiled) as Arc<dyn ExecutionPlan>))
+    }
+
+    fn compile_filter_sum(
+        &self,
+        aggregate: &AggregateExec,
+    ) -> Result<Option<Arc<dyn ExecutionPlan>>> {
+        if *aggregate.mode() != AggregateMode::Final
+            || !aggregate.group_expr().is_true_no_grouping()
+            || aggregate.aggr_expr().len() != 1
+            || aggregate.filter_expr().iter().any(Option::is_some)
+            || aggregate.schema().fields().len() != 1
+            || aggregate.schema().field(0).data_type() != &ArrowDataType::Float64
+        {
+            return Ok(None);
+        }
+
+        let Some(coalesce) = aggregate
+            .input()
+            .as_any()
+            .downcast_ref::<CoalescePartitionsExec>()
+        else {
+            return Ok(None);
+        };
+        let Some(partial) = coalesce.input().as_any().downcast_ref::<AggregateExec>() else {
+            return Ok(None);
+        };
+        if *partial.mode() != AggregateMode::Partial
+            || !partial.group_expr().is_true_no_grouping()
+            || partial.aggr_expr().len() != 1
+            || partial.filter_expr().iter().any(Option::is_some)
+        {
+            return Ok(None);
+        }
+
+        let partial_input = strip_round_robin_repartition(partial.input());
+        let Some(filter) = partial_input.as_any().downcast_ref::<FilterExec>() else {
+            return Ok(None);
+        };
+        if filter.fetch().is_some() {
+            return Ok(None);
+        }
+
+        let predicate =
+            match JitExpr::from_physical(filter.predicate(), filter.input().schema().as_ref()) {
+                Ok(predicate) => predicate,
+                Err(_) => return Ok(None),
+            };
+        let measure = match lower_sum_measure(partial, partial.input().schema().as_ref()) {
+            Some(measure) => measure,
+            None => return Ok(None),
+        };
+        let measure = match remap_projection_columns(
+            &measure,
+            filter.projection().as_ref().map(AsRef::as_ref),
+            filter.input().schema().as_ref(),
+        ) {
+            Some(measure) => measure,
+            None => return Ok(None),
+        };
+
+        let module = match self.backend.lower_f64_filter_sum(&predicate, &measure) {
+            Ok(module) => module,
+            Err(_) => return Ok(None),
+        };
+        if self.backend.verify_module(&module).is_err() {
+            return Ok(None);
+        }
+
+        let runtime = match FilterSumKernel::try_new(predicate, measure) {
+            Ok(runtime) => runtime,
+            Err(_) => return Ok(None),
+        };
+        let kernel = CompiledKernel::new(
+            module.symbol,
+            KernelKind::FilterSum,
+            self.backend.name(),
+            module.text,
+            false,
+        );
+        let compiled = CompiledFilterSumExec::try_new(
+            Arc::clone(filter.input()),
+            runtime,
+            aggregate.schema(),
+            kernel,
+        )?;
+        Ok(Some(Arc::new(compiled) as Arc<dyn ExecutionPlan>))
+    }
+}
+
+fn strip_round_robin_repartition(input: &Arc<dyn ExecutionPlan>) -> &Arc<dyn ExecutionPlan> {
+    let Some(repartition) = input.as_any().downcast_ref::<RepartitionExec>() else {
+        return input;
+    };
+    if matches!(repartition.partitioning(), Partitioning::RoundRobinBatch(_)) {
+        repartition.input()
+    } else {
+        input
+    }
+}
+
+fn lower_sum_measure(aggregate: &AggregateExec, input_schema: &ArrowSchema) -> Option<JitExpr> {
+    let aggregate_expr = aggregate.aggr_expr().first()?;
+    if !aggregate_expr.fun().name().eq_ignore_ascii_case("sum")
+        || aggregate_expr.is_distinct()
+        || !aggregate_expr.order_bys().is_empty()
+    {
+        return None;
+    }
+    let expressions = aggregate_expr.expressions();
+    if expressions.len() != 1 {
+        return None;
+    }
+    JitExpr::from_physical(&expressions[0], input_schema).ok()
+}
+
+fn remap_projection_columns(
+    expr: &JitExpr,
+    projection: Option<&[usize]>,
+    input_schema: &ArrowSchema,
+) -> Option<JitExpr> {
+    match expr {
+        JitExpr::Column {
+            index,
+            name: _,
+            ty,
+            nullable,
+        } => {
+            let source_index = match projection {
+                Some(projection) => *projection.get(*index)?,
+                None => *index,
+            };
+            let field = input_schema.field(source_index);
+            Some(JitExpr::Column {
+                index: source_index,
+                name: field.name().to_string(),
+                ty: *ty,
+                nullable: *nullable,
+            })
+        }
+        JitExpr::Literal(value) => Some(JitExpr::Literal(value.clone())),
+        JitExpr::Binary {
+            op,
+            left,
+            right,
+            ty,
+            nullable,
+        } => Some(JitExpr::Binary {
+            op: *op,
+            left: Box::new(remap_projection_columns(left, projection, input_schema)?),
+            right: Box::new(remap_projection_columns(right, projection, input_schema)?),
+            ty: *ty,
+            nullable: *nullable,
+        }),
+        JitExpr::IsNull(arg) => Some(JitExpr::IsNull(Box::new(remap_projection_columns(
+            arg,
+            projection,
+            input_schema,
+        )?))),
     }
 }

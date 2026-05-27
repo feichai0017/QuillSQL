@@ -1,5 +1,5 @@
+mod compiled;
 mod emit;
-mod native;
 #[cfg(test)]
 mod tests;
 mod verify;
@@ -18,7 +18,7 @@ pub struct MlirModule {
 pub struct MlirBackend;
 
 #[cfg(feature = "jit-mlir")]
-pub use native::{NativeI64Filter, NativeI64FilterProject};
+pub use compiled::{CompiledF64FilterSum, CompiledI64Filter, CompiledI64FilterProject};
 
 impl MlirBackend {
     pub fn new() -> Self {
@@ -61,29 +61,48 @@ impl MlirBackend {
         emit::lower_i64_filter_project(predicate, projections)
     }
 
+    pub fn lower_f64_filter_sum(
+        &self,
+        predicate: &JitExpr,
+        measure: &JitExpr,
+    ) -> JitResult<MlirModule> {
+        emit::lower_f64_filter_sum(predicate, measure)
+    }
+
     #[cfg(feature = "jit-mlir")]
     pub fn invoke_i64_predicate(&self, predicate: &JitExpr, value: i64) -> JitResult<bool> {
         let module = self.lower_i64_predicate(predicate)?;
         self.verify_module(&module)?;
-        native::invoke_i64_predicate(&module, value)
+        compiled::invoke_i64_predicate(&module, value)
     }
 
     #[cfg(feature = "jit-mlir")]
-    pub fn compile_native_i64_filter(&self, predicate: &JitExpr) -> JitResult<NativeI64Filter> {
+    pub fn compile_i64_filter(&self, predicate: &JitExpr) -> JitResult<CompiledI64Filter> {
         let module = self.lower_i64_filter(predicate)?;
         self.verify_module(&module)?;
-        native::compile_i64_filter(&module)
+        compiled::compile_i64_filter(&module)
     }
 
     #[cfg(feature = "jit-mlir")]
-    pub fn compile_native_i64_filter_project(
+    pub fn compile_i64_filter_project(
         &self,
         predicate: &JitExpr,
         projections: &[JitProjection],
-    ) -> JitResult<NativeI64FilterProject> {
+    ) -> JitResult<CompiledI64FilterProject> {
         let module = self.lower_i64_filter_project(predicate, projections)?;
         self.verify_module(&module)?;
-        native::compile_i64_filter_project(&module)
+        compiled::compile_i64_filter_project(&module)
+    }
+
+    #[cfg(feature = "jit-mlir")]
+    pub fn compile_f64_filter_sum(
+        &self,
+        predicate: &JitExpr,
+        measure: &JitExpr,
+    ) -> JitResult<CompiledF64FilterSum> {
+        let module = self.lower_f64_filter_sum(predicate, measure)?;
+        self.verify_module(&module)?;
+        compiled::compile_f64_filter_sum(&module)
     }
 
     pub fn verify_module(&self, module: &MlirModule) -> JitResult<()> {

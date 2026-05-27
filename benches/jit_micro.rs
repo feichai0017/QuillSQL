@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use datafusion::arrow::array::Int64Array;
+use datafusion::arrow::array::{Float64Array, Int64Array};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
 use quill_sql::database::Database;
@@ -14,6 +14,14 @@ fn schema() -> Arc<Schema> {
     Arc::new(Schema::new(vec![
         Field::new("id", DataType::Int64, false),
         Field::new("v", DataType::Int64, false),
+    ]))
+}
+
+fn sum_schema() -> Arc<Schema> {
+    Arc::new(Schema::new(vec![
+        Field::new("v", DataType::Int64, false),
+        Field::new("price", DataType::Float64, false),
+        Field::new("discount", DataType::Float64, false),
     ]))
 }
 
@@ -48,6 +56,27 @@ fn projections() -> Vec<JitProjection> {
         },
         "next_id",
     )]
+}
+
+#[cfg(feature = "jit-mlir")]
+fn measure() -> JitExpr {
+    JitExpr::Binary {
+        op: JitBinaryOp::Mul,
+        left: Box::new(JitExpr::Column {
+            index: 0,
+            name: "price".to_string(),
+            ty: JitType::Float64,
+            nullable: false,
+        }),
+        right: Box::new(JitExpr::Column {
+            index: 1,
+            name: "discount".to_string(),
+            ty: JitType::Float64,
+            nullable: false,
+        }),
+        ty: JitType::Float64,
+        nullable: false,
+    }
 }
 
 fn bench_jit_ir_and_mlir(c: &mut Criterion) {
@@ -91,26 +120,35 @@ fn bench_jit_ir_and_mlir(c: &mut Criterion) {
     });
 
     #[cfg(feature = "jit-mlir")]
-    c.bench_function("mlir_native/compile_i64_filter", |b| {
+    c.bench_function("mlir_compiled/compile_i64_filter", |b| {
         b.iter(|| {
             black_box(
                 backend
-                    .compile_native_i64_filter(black_box(&predicate))
-                    .expect("compile native i64 filter"),
+                    .compile_i64_filter(black_box(&predicate))
+                    .expect("compile i64 filter"),
             )
         });
     });
 
     #[cfg(feature = "jit-mlir")]
-    c.bench_function("mlir_native/compile_i64_filter_project", |b| {
+    c.bench_function("mlir_compiled/compile_i64_filter_project", |b| {
         b.iter(|| {
             black_box(
                 backend
-                    .compile_native_i64_filter_project(
-                        black_box(&predicate),
-                        black_box(&projections),
-                    )
-                    .expect("compile native i64 filter-project"),
+                    .compile_i64_filter_project(black_box(&predicate), black_box(&projections))
+                    .expect("compile i64 filter-project"),
+            )
+        });
+    });
+
+    #[cfg(feature = "jit-mlir")]
+    c.bench_function("mlir_compiled/compile_f64_filter_sum", |b| {
+        let measure = measure();
+        b.iter(|| {
+            black_box(
+                backend
+                    .compile_f64_filter_sum(black_box(&predicate), black_box(&measure))
+                    .expect("compile f64 filter-sum"),
             )
         });
     });
@@ -151,6 +189,49 @@ fn bench_datafusion_filter_project(c: &mut Criterion) {
     });
 }
 
+fn bench_datafusion_filter_sum(c: &mut Criterion) {
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let db = Database::new_temp().expect("database");
+    let input_schema = sum_schema();
+    let row_count = 65_536_i64;
+    let values = (0..row_count)
+        .map(|value| value % 1_000)
+        .collect::<Vec<_>>();
+    let prices = (0..row_count)
+        .map(|value| 100.0 + (value % 10) as f64)
+        .collect::<Vec<_>>();
+    let discounts = (0..row_count)
+        .map(|value| 0.01 * ((value % 7) as f64))
+        .collect::<Vec<_>>();
+    let batch = RecordBatch::try_new(
+        Arc::clone(&input_schema),
+        vec![
+            Arc::new(Int64Array::from(values)),
+            Arc::new(Float64Array::from(prices)),
+            Arc::new(Float64Array::from(discounts)),
+        ],
+    )
+    .expect("record batch");
+    db.register_batches("t", input_schema, vec![batch])
+        .expect("register table");
+
+    runtime
+        .block_on(db.run("select sum(price * discount) from t where v > 500"))
+        .expect("warmup");
+
+    c.bench_function("datafusion/sql_filter_sum_64k", |b| {
+        b.iter(|| {
+            black_box(
+                runtime
+                    .block_on(db.run(black_box(
+                        "select sum(price * discount) from t where v > 500",
+                    )))
+                    .expect("query"),
+            )
+        });
+    });
+}
+
 fn bench_quill_filter_project_kernel(c: &mut Criterion) {
     let input_schema = schema();
     let output_schema = Arc::new(Schema::new(vec![Field::new(
@@ -180,28 +261,28 @@ fn bench_quill_filter_project_kernel(c: &mut Criterion) {
 }
 
 #[cfg(feature = "jit-mlir")]
-fn bench_native_i64_filter_kernel(c: &mut Criterion) {
+fn bench_compiled_i64_filter_kernel(c: &mut Criterion) {
     let row_count = 65_536_i64;
     let values = (0..row_count)
         .map(|value| value % 1_000)
         .collect::<Vec<_>>();
     let mut output = vec![0_u8; values.len()];
     let kernel = MlirBackend::new()
-        .compile_native_i64_filter(&predicate())
-        .expect("native i64 filter");
+        .compile_i64_filter(&predicate())
+        .expect("compiled i64 filter");
 
-    c.bench_function("mlir_native/filter_64k", |b| {
+    c.bench_function("mlir_compiled/filter_64k", |b| {
         b.iter(|| {
             kernel
                 .invoke(black_box(&values), black_box(&mut output))
-                .expect("execute native filter");
+                .expect("execute compiled filter");
             black_box(&output);
         });
     });
 }
 
 #[cfg(feature = "jit-mlir")]
-fn bench_native_i64_filter_project_kernel(c: &mut Criterion) {
+fn bench_compiled_i64_filter_project_kernel(c: &mut Criterion) {
     let row_count = 65_536_i64;
     let ids = (0..row_count).collect::<Vec<_>>();
     let values = (0..row_count)
@@ -209,16 +290,47 @@ fn bench_native_i64_filter_project_kernel(c: &mut Criterion) {
         .collect::<Vec<_>>();
     let mut output = vec![0_i64; values.len()];
     let kernel = MlirBackend::new()
-        .compile_native_i64_filter_project(&predicate(), &projections())
-        .expect("native i64 filter-project");
+        .compile_i64_filter_project(&predicate(), &projections())
+        .expect("compiled i64 filter-project");
 
-    c.bench_function("mlir_native/filter_project_64k", |b| {
+    c.bench_function("mlir_compiled/filter_project_64k", |b| {
         b.iter(|| {
             let output_len = kernel
                 .invoke(black_box(&values), black_box(&ids), black_box(&mut output))
-                .expect("execute native filter-project");
+                .expect("execute compiled filter-project");
             black_box(output_len);
             black_box(&output[..output_len]);
+        });
+    });
+}
+
+#[cfg(feature = "jit-mlir")]
+fn bench_compiled_f64_filter_sum_kernel(c: &mut Criterion) {
+    let row_count = 65_536_i64;
+    let predicate_values = (0..row_count)
+        .map(|value| value % 1_000)
+        .collect::<Vec<_>>();
+    let prices = (0..row_count)
+        .map(|value| 100.0 + (value % 10) as f64)
+        .collect::<Vec<_>>();
+    let discounts = (0..row_count)
+        .map(|value| 0.01 * ((value % 7) as f64))
+        .collect::<Vec<_>>();
+    let kernel = MlirBackend::new()
+        .compile_f64_filter_sum(&predicate(), &measure())
+        .expect("compiled f64 filter-sum");
+
+    c.bench_function("mlir_compiled/filter_sum_64k", |b| {
+        b.iter(|| {
+            black_box(
+                kernel
+                    .invoke(
+                        black_box(&predicate_values),
+                        black_box(&prices),
+                        black_box(&discounts),
+                    )
+                    .expect("execute compiled filter-sum"),
+            );
         });
     });
 }
@@ -228,16 +340,19 @@ criterion_group!(
     benches,
     bench_jit_ir_and_mlir,
     bench_quill_filter_project_kernel,
-    bench_datafusion_filter_project
+    bench_datafusion_filter_project,
+    bench_datafusion_filter_sum
 );
 
 #[cfg(feature = "jit-mlir")]
 criterion_group!(
     benches,
     bench_jit_ir_and_mlir,
-    bench_native_i64_filter_kernel,
-    bench_native_i64_filter_project_kernel,
+    bench_compiled_i64_filter_kernel,
+    bench_compiled_i64_filter_project_kernel,
+    bench_compiled_f64_filter_sum_kernel,
     bench_quill_filter_project_kernel,
-    bench_datafusion_filter_project
+    bench_datafusion_filter_project,
+    bench_datafusion_filter_sum
 );
 criterion_main!(benches);

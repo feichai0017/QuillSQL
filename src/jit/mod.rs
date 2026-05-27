@@ -6,18 +6,18 @@ mod mlir;
 mod rule;
 mod runtime;
 
-pub use exec::CompiledFilterProjectExec;
+pub use exec::{CompiledFilterProjectExec, CompiledFilterSumExec};
 pub use expr::{JitBinaryOp, JitExpr, JitProjection, JitScalar, JitType};
 pub use ir::{KernelIr, PipelineIr, PipelineOp, PipelineSink, PipelineSource};
 pub use kernel::{
     ArrowArrayView, ArrowMutableArrayView, CompiledKernel, FilterKernelFn, JitTypeTag,
     KernelBackend, KernelKind, ProjectionKernelFn,
 };
-pub use mlir::{MlirBackend, MlirModule};
 #[cfg(feature = "jit-mlir")]
-pub use mlir::{NativeI64Filter, NativeI64FilterProject};
+pub use mlir::{CompiledF64FilterSum, CompiledI64Filter, CompiledI64FilterProject};
+pub use mlir::{MlirBackend, MlirModule};
 pub use rule::{JitCandidate, MlirJitRule};
-pub use runtime::FilterProjectKernel;
+pub use runtime::{FilterProjectKernel, FilterSumKernel};
 
 use datafusion::common::DataFusionError;
 use thiserror::Error;

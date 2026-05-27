@@ -4,22 +4,27 @@ use crate::jit::{JitError, JitResult, MlirModule};
 
 use melior::{ir::Module, pass, ExecutionEngine};
 
-pub(super) struct NativeI64Predicate {
+pub(super) struct CompiledI64Predicate {
     symbol: String,
     engine: ExecutionEngine,
 }
 
-pub struct NativeI64Filter {
+pub struct CompiledI64Filter {
     symbol: String,
     engine: ExecutionEngine,
 }
 
-pub struct NativeI64FilterProject {
+pub struct CompiledI64FilterProject {
     symbol: String,
     engine: ExecutionEngine,
 }
 
-impl NativeI64Predicate {
+pub struct CompiledF64FilterSum {
+    symbol: String,
+    engine: ExecutionEngine,
+}
+
+impl CompiledI64Predicate {
     pub(super) fn invoke(&self, value: i64) -> JitResult<bool> {
         let mut argument = value;
         let mut result = -1_i32;
@@ -38,11 +43,11 @@ impl NativeI64Predicate {
     }
 }
 
-impl NativeI64Filter {
+impl CompiledI64Filter {
     pub fn invoke(&self, values: &[i64], output: &mut [u8]) -> JitResult<()> {
         if output.len() < values.len() {
             return Err(JitError::Backend(format!(
-                "native filter output len {} is smaller than input len {}",
+                "compiled filter output len {} is smaller than input len {}",
                 output.len(),
                 values.len()
             )));
@@ -69,13 +74,13 @@ impl NativeI64Filter {
             Ok(())
         } else {
             Err(JitError::Backend(format!(
-                "native filter returned status {result}"
+                "compiled filter returned status {result}"
             )))
         }
     }
 }
 
-impl NativeI64FilterProject {
+impl CompiledI64FilterProject {
     pub fn invoke(
         &self,
         predicate_values: &[i64],
@@ -84,14 +89,14 @@ impl NativeI64FilterProject {
     ) -> JitResult<usize> {
         if projection_values.len() != predicate_values.len() {
             return Err(JitError::Backend(format!(
-                "native filter-project projection len {} does not match predicate len {}",
+                "compiled filter-project projection len {} does not match predicate len {}",
                 projection_values.len(),
                 predicate_values.len()
             )));
         }
         if output.len() < predicate_values.len() {
             return Err(JitError::Backend(format!(
-                "native filter-project output len {} is smaller than input len {}",
+                "compiled filter-project output len {} is smaller than input len {}",
                 output.len(),
                 predicate_values.len()
             )));
@@ -121,20 +126,73 @@ impl NativeI64FilterProject {
         }
         if result != 0 {
             return Err(JitError::Backend(format!(
-                "native filter-project returned status {result}"
+                "compiled filter-project returned status {result}"
             )));
         }
         if output_len < 0 || output_len as usize > output.len() {
             return Err(JitError::Backend(format!(
-                "native filter-project returned invalid output len {output_len}"
+                "compiled filter-project returned invalid output len {output_len}"
             )));
         }
         Ok(output_len as usize)
     }
 }
 
-pub(super) fn compile_i64_predicate(compiled: &MlirModule) -> JitResult<NativeI64Predicate> {
-    Ok(NativeI64Predicate {
+impl CompiledF64FilterSum {
+    pub fn invoke(
+        &self,
+        predicate_values: &[i64],
+        left_values: &[f64],
+        right_values: &[f64],
+    ) -> JitResult<f64> {
+        if left_values.len() != predicate_values.len() {
+            return Err(JitError::Backend(format!(
+                "compiled filter-sum left len {} does not match predicate len {}",
+                left_values.len(),
+                predicate_values.len()
+            )));
+        }
+        if right_values.len() != predicate_values.len() {
+            return Err(JitError::Backend(format!(
+                "compiled filter-sum right len {} does not match predicate len {}",
+                right_values.len(),
+                predicate_values.len()
+            )));
+        }
+
+        let mut len = predicate_values.len() as i64;
+        let mut predicate_ptr = predicate_values.as_ptr();
+        let mut left_ptr = left_values.as_ptr();
+        let mut right_ptr = right_values.as_ptr();
+        let mut output_sum = 0.0_f64;
+        let mut output_sum_ptr = &mut output_sum as *mut f64;
+        let mut result = -1_i32;
+        unsafe {
+            self.engine
+                .invoke_packed(
+                    &self.symbol,
+                    &mut [
+                        &mut len as *mut i64 as *mut (),
+                        &mut predicate_ptr as *mut *const i64 as *mut (),
+                        &mut left_ptr as *mut *const f64 as *mut (),
+                        &mut right_ptr as *mut *const f64 as *mut (),
+                        &mut output_sum_ptr as *mut *mut f64 as *mut (),
+                        &mut result as *mut i32 as *mut (),
+                    ],
+                )
+                .map_err(|err| JitError::Backend(format!("MLIR invocation failed: {err:?}")))?;
+        }
+        if result != 0 {
+            return Err(JitError::Backend(format!(
+                "compiled filter-sum returned status {result}"
+            )));
+        }
+        Ok(output_sum)
+    }
+}
+
+pub(super) fn compile_i64_predicate(compiled: &MlirModule) -> JitResult<CompiledI64Predicate> {
+    Ok(CompiledI64Predicate {
         symbol: compiled.symbol.clone(),
         engine: compile_engine(compiled)?,
     })
@@ -144,15 +202,22 @@ pub(super) fn invoke_i64_predicate(compiled: &MlirModule, value: i64) -> JitResu
     compile_i64_predicate(compiled)?.invoke(value)
 }
 
-pub fn compile_i64_filter(compiled: &MlirModule) -> JitResult<NativeI64Filter> {
-    Ok(NativeI64Filter {
+pub fn compile_i64_filter(compiled: &MlirModule) -> JitResult<CompiledI64Filter> {
+    Ok(CompiledI64Filter {
         symbol: compiled.symbol.clone(),
         engine: compile_engine(compiled)?,
     })
 }
 
-pub fn compile_i64_filter_project(compiled: &MlirModule) -> JitResult<NativeI64FilterProject> {
-    Ok(NativeI64FilterProject {
+pub fn compile_i64_filter_project(compiled: &MlirModule) -> JitResult<CompiledI64FilterProject> {
+    Ok(CompiledI64FilterProject {
+        symbol: compiled.symbol.clone(),
+        engine: compile_engine(compiled)?,
+    })
+}
+
+pub fn compile_f64_filter_sum(compiled: &MlirModule) -> JitResult<CompiledF64FilterSum> {
+    Ok(CompiledF64FilterSum {
         symbol: compiled.symbol.clone(),
         engine: compile_engine(compiled)?,
     })

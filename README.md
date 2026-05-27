@@ -18,7 +18,7 @@ engine.
 
 - DataFusion is the only SQL path: parsing, binding, logical optimization,
   physical optimization, and physical execution all go through DataFusion.
-- Storage is DataFusion-native: in-memory tables for interactive work and
+- Storage is DataFusion-backed: in-memory tables for interactive work and
   Parquet/Arrow datasets for persistent analytical workloads.
 - QuillSQL no longer ships a page store, buffer pool, legacy index manager, WAL,
   SQL transaction layer, external KV adapter, or compatibility storage engine.
@@ -68,21 +68,24 @@ The JIT package is intentionally separate from the DataFusion wrapper:
   filter/project islands.
 - `src/jit/ir.rs` defines `KernelIR` and `PipelineIR`, including the first
   `FilterProject` fusion pattern.
-- `src/jit/mlir/` owns MLIR emission, verification, and native invocation. The
-  current native path covers narrow fixed-width `i64` ExecutionEngine kernels.
+- `src/jit/mlir/` owns MLIR emission, verification, and compiled kernel
+  invocation. The current compiled path covers narrow fixed-width
+  ExecutionEngine kernels.
 - `src/jit/rule.rs` is the DataFusion physical optimizer rule that rewrites
   supported filter/project islands.
 - `src/jit/runtime/` is the fixed-width Arrow batch kernel runtime used until
-  MLIR native function pointers are enabled.
+  compiled MLIR function pointers are wired into DataFusion execution nodes.
 
 Current scope: MLIR is parsed and verified, and the DataFusion optimizer rule
-replaces supported filter/project islands with `CompiledFilterProjectExec`.
-That node executes through QuillSQL's fixed-width Arrow kernel runtime while
-carrying the MLIR kernel descriptor. Native scalar MLIR invocation is wired for
-the first `i64 -> bool` probe. The native batch path now includes an `i64`
-filter kernel that emits a byte selection mask and an `i64` filter/project
-kernel that compacts one projected column. Native DataFusion physical-node
-dispatch is the next step.
+replaces supported filter/project islands with `CompiledFilterProjectExec` and
+supported plain `SUM` pipelines with `CompiledFilterSumExec`. Those nodes
+execute through QuillSQL's fixed-width Arrow kernel runtime while carrying MLIR
+kernel descriptors. Compiled scalar MLIR invocation is wired for the first
+`i64 -> bool` probe. The compiled batch path now includes an `i64` filter
+kernel that emits a byte selection mask, an `i64` filter/project kernel that
+compacts one projected column, and an `f64` filter/sum kernel for the first
+scan/filter/plain-aggregate path. Direct DataFusion execution-node dispatch to
+compiled MLIR function pointers is the next step.
 
 Run the MLIR path with:
 
@@ -125,7 +128,7 @@ Generated data is ignored by git. Set `QUILL_TPCH_SF=1` for SF1, and set
 `QUILL_TPCH_DIR` is set, it should contain either `<table>.parquet` files or
 table directories named like `lineitem`, `orders`, and `customer`. TPC-H timings
 are DataFusion end-to-end timings through `Database::run`; they are not yet
-native MLIR kernel timings.
+compiled MLIR kernel timings.
 
 ## Testing
 
