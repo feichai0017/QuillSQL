@@ -123,6 +123,64 @@ pub(super) fn lower_i64_filter(predicate: &JitExpr) -> JitResult<MlirModule> {
     Ok(MlirModule { symbol, text })
 }
 
+pub(super) fn lower_i64_filter_project(
+    predicate: &JitExpr,
+    projections: &[JitProjection],
+) -> JitResult<MlirModule> {
+    ensure_single_i64_predicate(predicate, "native filter-project kernel")?;
+    ensure_single_i64_projection(projections, "native filter-project kernel")?;
+
+    let symbol = next_symbol("quill_i64_filter_project");
+    let predicate_symbol = format!("{symbol}_predicate");
+    let projection_symbol = format!("{symbol}_project_0");
+    let projection = &projections[0];
+    let mut text = start_module();
+    text.push_str(&scalar_function(&predicate_symbol, predicate)?);
+    text.push_str(&scalar_function(&projection_symbol, &projection.expr)?);
+    let _ = writeln!(
+        text,
+        "  func.func @{symbol}(%len: i64, %pred_values: !llvm.ptr, %proj_values: !llvm.ptr, %out_values: !llvm.ptr, %out_len: !llvm.ptr) -> i32 attributes {{ llvm.emit_c_interface }} {{"
+    );
+    text.push_str("    %c0_i64 = arith.constant 0 : i64\n");
+    text.push_str("    %c1_i64 = arith.constant 1 : i64\n");
+    text.push_str(
+        "    %final_count = scf.for unsigned %i = %c0_i64 to %len step %c1_i64 iter_args(%count = %c0_i64) -> (i64) : i64 {\n",
+    );
+    text.push_str(
+        "      %pred_ptr = llvm.getelementptr %pred_values[%i] : (!llvm.ptr, i64) -> !llvm.ptr, i64\n",
+    );
+    text.push_str("      %pred_value = llvm.load %pred_ptr : !llvm.ptr -> i64\n");
+    let _ = writeln!(
+        text,
+        "      %pred = func.call @{predicate_symbol}(%pred_value) : (i64) -> i1"
+    );
+    text.push_str("      %next_count = scf.if %pred -> (i64) {\n");
+    text.push_str(
+        "        %proj_ptr = llvm.getelementptr %proj_values[%i] : (!llvm.ptr, i64) -> !llvm.ptr, i64\n",
+    );
+    text.push_str("        %proj_value = llvm.load %proj_ptr : !llvm.ptr -> i64\n");
+    let _ = writeln!(
+        text,
+        "        %out_value = func.call @{projection_symbol}(%proj_value) : (i64) -> i64"
+    );
+    text.push_str(
+        "        %out_ptr = llvm.getelementptr %out_values[%count] : (!llvm.ptr, i64) -> !llvm.ptr, i64\n",
+    );
+    text.push_str("        llvm.store %out_value, %out_ptr : i64, !llvm.ptr\n");
+    text.push_str("        %inc = arith.addi %count, %c1_i64 : i64\n");
+    text.push_str("        scf.yield %inc : i64\n");
+    text.push_str("      } else {\n");
+    text.push_str("        scf.yield %count : i64\n");
+    text.push_str("      }\n");
+    text.push_str("      scf.yield %next_count : i64\n");
+    text.push_str("    }\n");
+    text.push_str("    llvm.store %final_count, %out_len : i64, !llvm.ptr\n");
+    text.push_str("    %ok = arith.constant 0 : i32\n");
+    text.push_str("    return %ok : i32\n");
+    text.push_str("  }\n}\n");
+    Ok(MlirModule { symbol, text })
+}
+
 fn next_symbol(prefix: &str) -> String {
     let id = NEXT_KERNEL_ID.fetch_add(1, Ordering::Relaxed);
     format!("{prefix}_{id}")
@@ -200,8 +258,31 @@ fn ensure_single_i64_predicate(predicate: &JitExpr, context: &str) -> JitResult<
         )));
     }
 
+    ensure_single_i64_input(predicate, context)?;
+    Ok(())
+}
+
+fn ensure_single_i64_projection(projections: &[JitProjection], context: &str) -> JitResult<()> {
+    if projections.len() != 1 {
+        return Err(JitError::UnsupportedExpr(format!(
+            "{context} currently supports exactly one projection"
+        )));
+    }
+    let expr = &projections[0].expr;
+    if expr.ty() != JitType::Int64 {
+        return Err(JitError::UnsupportedExpr(format!(
+            "{context} requires i64 projection output, got {}",
+            mlir_type(expr.ty())
+        )));
+    }
+
+    ensure_single_i64_input(expr, context)?;
+    Ok(())
+}
+
+fn ensure_single_i64_input(expr: &JitExpr, context: &str) -> JitResult<()> {
     let mut columns = BTreeMap::new();
-    collect_columns(predicate, &mut columns);
+    collect_columns(expr, &mut columns);
     if columns.len() != 1 || !columns.values().all(|ty| *ty == JitType::Int64) {
         return Err(JitError::UnsupportedExpr(format!(
             "{context} currently supports exactly one i64 input column"

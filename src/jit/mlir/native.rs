@@ -14,6 +14,11 @@ pub struct NativeI64Filter {
     engine: ExecutionEngine,
 }
 
+pub struct NativeI64FilterProject {
+    symbol: String,
+    engine: ExecutionEngine,
+}
+
 impl NativeI64Predicate {
     pub(super) fn invoke(&self, value: i64) -> JitResult<bool> {
         let mut argument = value;
@@ -70,6 +75,64 @@ impl NativeI64Filter {
     }
 }
 
+impl NativeI64FilterProject {
+    pub fn invoke(
+        &self,
+        predicate_values: &[i64],
+        projection_values: &[i64],
+        output: &mut [i64],
+    ) -> JitResult<usize> {
+        if projection_values.len() != predicate_values.len() {
+            return Err(JitError::Backend(format!(
+                "native filter-project projection len {} does not match predicate len {}",
+                projection_values.len(),
+                predicate_values.len()
+            )));
+        }
+        if output.len() < predicate_values.len() {
+            return Err(JitError::Backend(format!(
+                "native filter-project output len {} is smaller than input len {}",
+                output.len(),
+                predicate_values.len()
+            )));
+        }
+
+        let mut len = predicate_values.len() as i64;
+        let mut predicate_ptr = predicate_values.as_ptr();
+        let mut projection_ptr = projection_values.as_ptr();
+        let mut output_ptr = output.as_mut_ptr();
+        let mut output_len = -1_i64;
+        let mut output_len_ptr = &mut output_len as *mut i64;
+        let mut result = -1_i32;
+        unsafe {
+            self.engine
+                .invoke_packed(
+                    &self.symbol,
+                    &mut [
+                        &mut len as *mut i64 as *mut (),
+                        &mut predicate_ptr as *mut *const i64 as *mut (),
+                        &mut projection_ptr as *mut *const i64 as *mut (),
+                        &mut output_ptr as *mut *mut i64 as *mut (),
+                        &mut output_len_ptr as *mut *mut i64 as *mut (),
+                        &mut result as *mut i32 as *mut (),
+                    ],
+                )
+                .map_err(|err| JitError::Backend(format!("MLIR invocation failed: {err:?}")))?;
+        }
+        if result != 0 {
+            return Err(JitError::Backend(format!(
+                "native filter-project returned status {result}"
+            )));
+        }
+        if output_len < 0 || output_len as usize > output.len() {
+            return Err(JitError::Backend(format!(
+                "native filter-project returned invalid output len {output_len}"
+            )));
+        }
+        Ok(output_len as usize)
+    }
+}
+
 pub(super) fn compile_i64_predicate(compiled: &MlirModule) -> JitResult<NativeI64Predicate> {
     Ok(NativeI64Predicate {
         symbol: compiled.symbol.clone(),
@@ -83,6 +146,13 @@ pub(super) fn invoke_i64_predicate(compiled: &MlirModule, value: i64) -> JitResu
 
 pub fn compile_i64_filter(compiled: &MlirModule) -> JitResult<NativeI64Filter> {
     Ok(NativeI64Filter {
+        symbol: compiled.symbol.clone(),
+        engine: compile_engine(compiled)?,
+    })
+}
+
+pub fn compile_i64_filter_project(compiled: &MlirModule) -> JitResult<NativeI64FilterProject> {
+    Ok(NativeI64FilterProject {
         symbol: compiled.symbol.clone(),
         engine: compile_engine(compiled)?,
     })

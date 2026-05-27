@@ -13,9 +13,9 @@ pub use kernel::{
     ArrowArrayView, ArrowMutableArrayView, CompiledKernel, FilterKernelFn, JitTypeTag,
     KernelBackend, KernelKind, ProjectionKernelFn,
 };
-#[cfg(feature = "jit-mlir")]
-pub use mlir::NativeI64Filter;
 pub use mlir::{MlirBackend, MlirModule};
+#[cfg(feature = "jit-mlir")]
+pub use mlir::{NativeI64Filter, NativeI64FilterProject};
 pub use rule::{JitCandidate, MlirJitRule};
 pub use runtime::FilterProjectKernel;
 

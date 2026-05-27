@@ -18,7 +18,7 @@ pub struct MlirModule {
 pub struct MlirBackend;
 
 #[cfg(feature = "jit-mlir")]
-pub use native::NativeI64Filter;
+pub use native::{NativeI64Filter, NativeI64FilterProject};
 
 impl MlirBackend {
     pub fn new() -> Self {
@@ -53,6 +53,14 @@ impl MlirBackend {
         emit::lower_i64_filter(predicate)
     }
 
+    pub fn lower_i64_filter_project(
+        &self,
+        predicate: &JitExpr,
+        projections: &[JitProjection],
+    ) -> JitResult<MlirModule> {
+        emit::lower_i64_filter_project(predicate, projections)
+    }
+
     #[cfg(feature = "jit-mlir")]
     pub fn invoke_i64_predicate(&self, predicate: &JitExpr, value: i64) -> JitResult<bool> {
         let module = self.lower_i64_predicate(predicate)?;
@@ -65,6 +73,17 @@ impl MlirBackend {
         let module = self.lower_i64_filter(predicate)?;
         self.verify_module(&module)?;
         native::compile_i64_filter(&module)
+    }
+
+    #[cfg(feature = "jit-mlir")]
+    pub fn compile_native_i64_filter_project(
+        &self,
+        predicate: &JitExpr,
+        projections: &[JitProjection],
+    ) -> JitResult<NativeI64FilterProject> {
+        let module = self.lower_i64_filter_project(predicate, projections)?;
+        self.verify_module(&module)?;
+        native::compile_i64_filter_project(&module)
     }
 
     pub fn verify_module(&self, module: &MlirModule) -> JitResult<()> {

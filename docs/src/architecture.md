@@ -47,10 +47,11 @@ The MLIR backend then emits scalar `arith` functions and verifies them through
 filter/project islands with `CompiledFilterProjectExec`; the current executable
 node runs a fixed-width Arrow batch kernel implemented in QuillSQL while carrying
 the MLIR kernel descriptor. A narrow native `i64 -> bool` MLIR ExecutionEngine
-probe validates scalar invocation, and the first native fixed-width filter kernel
-writes a byte selection mask. Native Arrow-batch filter/project function pointers
-are the next step, so unsupported expressions fall back to the normal DataFusion
-plan.
+probe validates scalar invocation. The native fixed-width path now has an `i64`
+filter kernel that writes a byte selection mask and an `i64` filter/project
+kernel that compacts one projected column. Wiring those function pointers into
+the DataFusion physical node is the next step, so unsupported expressions fall
+back to the normal DataFusion plan.
 
 ## IR And Fusion
 

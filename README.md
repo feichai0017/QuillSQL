@@ -69,7 +69,7 @@ The JIT package is intentionally separate from the DataFusion wrapper:
 - `src/jit/ir.rs` defines `KernelIR` and `PipelineIR`, including the first
   `FilterProject` fusion pattern.
 - `src/jit/mlir/` owns MLIR emission, verification, and native invocation. The
-  current native path is a narrow `i64 -> bool` ExecutionEngine smoke test.
+  current native path covers narrow fixed-width `i64` ExecutionEngine kernels.
 - `src/jit/rule.rs` is the DataFusion physical optimizer rule that rewrites
   supported filter/project islands.
 - `src/jit/runtime/` is the fixed-width Arrow batch kernel runtime used until
@@ -79,9 +79,10 @@ Current scope: MLIR is parsed and verified, and the DataFusion optimizer rule
 replaces supported filter/project islands with `CompiledFilterProjectExec`.
 That node executes through QuillSQL's fixed-width Arrow kernel runtime while
 carrying the MLIR kernel descriptor. Native scalar MLIR invocation is wired for
-the first `i64 -> bool` probe, and the first native batch filter kernel emits a
-byte selection mask. Native Arrow-batch filter/project dispatch is the next
-step.
+the first `i64 -> bool` probe. The native batch path now includes an `i64`
+filter kernel that emits a byte selection mask and an `i64` filter/project
+kernel that compacts one projected column. Native DataFusion physical-node
+dispatch is the next step.
 
 Run the MLIR path with:
 

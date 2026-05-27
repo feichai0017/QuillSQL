@@ -71,6 +71,22 @@ fn emits_i64_filter_module() {
     MlirBackend::new().verify_module(&module).unwrap();
 }
 
+#[test]
+fn emits_i64_filter_project_module() {
+    let predicate = i64_gt_ten(false);
+    let projections = vec![i64_plus_one_projection(0)];
+
+    let module = MlirBackend::new()
+        .lower_i64_filter_project(&predicate, &projections)
+        .unwrap();
+    assert!(module.text.contains("func.func @quill_i64_filter_project_"));
+    assert!(module.text.contains("scf.for unsigned"));
+    assert!(module.text.contains("scf.if"));
+    assert!(module.text.contains("llvm.load"));
+    assert!(module.text.contains("llvm.store"));
+    MlirBackend::new().verify_module(&module).unwrap();
+}
+
 #[cfg(feature = "jit-mlir")]
 #[test]
 fn invokes_i64_predicate_with_execution_engine() {
@@ -134,6 +150,37 @@ fn invokes_native_i64_filter_with_nonzero_column_index() {
     assert_eq!(output, [0, 1, 1]);
 }
 
+#[cfg(feature = "jit-mlir")]
+#[test]
+fn invokes_native_i64_filter_project_kernel() {
+    let predicate = JitExpr::Binary {
+        op: JitBinaryOp::Gt,
+        left: Box::new(JitExpr::Column {
+            index: 1,
+            name: "v".to_string(),
+            ty: JitType::Int64,
+            nullable: false,
+        }),
+        right: Box::new(JitExpr::Literal(JitScalar::Int64(10))),
+        ty: JitType::Bool,
+        nullable: false,
+    };
+    let projections = vec![i64_plus_one_projection(0)];
+    let native = MlirBackend::new()
+        .compile_native_i64_filter_project(&predicate, &projections)
+        .unwrap();
+    let predicate_values = [9_i64, 11, 12];
+    let projection_values = [100_i64, 200, 300];
+    let mut output = [0_i64; 3];
+
+    let output_len = native
+        .invoke(&predicate_values, &projection_values, &mut output)
+        .unwrap();
+
+    assert_eq!(output_len, 2);
+    assert_eq!(&output[..output_len], [201, 301]);
+}
+
 fn i64_gt_ten(nullable: bool) -> JitExpr {
     JitExpr::Binary {
         op: JitBinaryOp::Gt,
@@ -147,4 +194,22 @@ fn i64_gt_ten(nullable: bool) -> JitExpr {
         ty: JitType::Bool,
         nullable,
     }
+}
+
+fn i64_plus_one_projection(index: usize) -> JitProjection {
+    JitProjection::new(
+        JitExpr::Binary {
+            op: JitBinaryOp::Add,
+            left: Box::new(JitExpr::Column {
+                index,
+                name: format!("c{index}"),
+                ty: JitType::Int64,
+                nullable: false,
+            }),
+            right: Box::new(JitExpr::Literal(JitScalar::Int64(1))),
+            ty: JitType::Int64,
+            nullable: false,
+        },
+        "plus_one",
+    )
 }

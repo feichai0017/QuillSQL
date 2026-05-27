@@ -100,6 +100,20 @@ fn bench_jit_ir_and_mlir(c: &mut Criterion) {
             )
         });
     });
+
+    #[cfg(feature = "jit-mlir")]
+    c.bench_function("mlir_native/compile_i64_filter_project", |b| {
+        b.iter(|| {
+            black_box(
+                backend
+                    .compile_native_i64_filter_project(
+                        black_box(&predicate),
+                        black_box(&projections),
+                    )
+                    .expect("compile native i64 filter-project"),
+            )
+        });
+    });
 }
 
 fn bench_datafusion_filter_project(c: &mut Criterion) {
@@ -186,6 +200,29 @@ fn bench_native_i64_filter_kernel(c: &mut Criterion) {
     });
 }
 
+#[cfg(feature = "jit-mlir")]
+fn bench_native_i64_filter_project_kernel(c: &mut Criterion) {
+    let row_count = 65_536_i64;
+    let ids = (0..row_count).collect::<Vec<_>>();
+    let values = (0..row_count)
+        .map(|value| value % 1_000)
+        .collect::<Vec<_>>();
+    let mut output = vec![0_i64; values.len()];
+    let kernel = MlirBackend::new()
+        .compile_native_i64_filter_project(&predicate(), &projections())
+        .expect("native i64 filter-project");
+
+    c.bench_function("mlir_native/filter_project_64k", |b| {
+        b.iter(|| {
+            let output_len = kernel
+                .invoke(black_box(&values), black_box(&ids), black_box(&mut output))
+                .expect("execute native filter-project");
+            black_box(output_len);
+            black_box(&output[..output_len]);
+        });
+    });
+}
+
 #[cfg(not(feature = "jit-mlir"))]
 criterion_group!(
     benches,
@@ -199,6 +236,7 @@ criterion_group!(
     benches,
     bench_jit_ir_and_mlir,
     bench_native_i64_filter_kernel,
+    bench_native_i64_filter_project_kernel,
     bench_quill_filter_project_kernel,
     bench_datafusion_filter_project
 );
