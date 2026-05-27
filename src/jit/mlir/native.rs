@@ -5,7 +5,7 @@ use crate::jit::{JitError, JitResult, MlirModule};
 use melior::{ir::Module, pass, ExecutionEngine};
 
 pub(super) fn invoke_i64_predicate(compiled: &MlirModule, value: i64) -> JitResult<bool> {
-    let context = super::mlir_context();
+    let context = super::verify::mlir_context();
     let mut module = Module::parse(&context, &compiled.text)
         .ok_or_else(|| JitError::Backend("MLIR parser rejected generated module".to_string()))?;
 

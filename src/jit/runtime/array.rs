@@ -1,0 +1,134 @@
+use std::sync::Arc;
+
+use datafusion::arrow::array::{
+    Array, ArrayRef, BooleanArray, BooleanBuilder, Float64Array, Float64Builder, Int32Array,
+    Int32Builder, Int64Array, Int64Builder,
+};
+use datafusion::arrow::datatypes::DataType as ArrowDataType;
+use datafusion::arrow::record_batch::RecordBatch;
+
+use crate::jit::{JitError, JitResult, JitType};
+
+use super::value::Scalar;
+
+pub(super) struct BatchView<'a> {
+    columns: Vec<ColumnView<'a>>,
+}
+
+impl<'a> BatchView<'a> {
+    pub(super) fn try_new(batch: &'a RecordBatch) -> JitResult<Self> {
+        let columns = batch
+            .columns()
+            .iter()
+            .map(|array| ColumnView::try_new(array.as_ref()))
+            .collect::<JitResult<Vec<_>>>()?;
+        Ok(Self { columns })
+    }
+
+    pub(super) fn value(&self, index: usize, row: usize) -> JitResult<Scalar> {
+        let column = self
+            .columns
+            .get(index)
+            .ok_or_else(|| JitError::Backend(format!("column index {index} out of bounds")))?;
+        column.value(row)
+    }
+}
+
+enum ColumnView<'a> {
+    Bool(&'a BooleanArray),
+    Int32(&'a Int32Array),
+    Int64(&'a Int64Array),
+    Float64(&'a Float64Array),
+}
+
+impl<'a> ColumnView<'a> {
+    fn try_new(array: &'a dyn Array) -> JitResult<Self> {
+        match array.data_type() {
+            ArrowDataType::Boolean => array
+                .as_any()
+                .downcast_ref::<BooleanArray>()
+                .map(Self::Bool)
+                .ok_or_else(|| JitError::UnsupportedType("Boolean".to_string())),
+            ArrowDataType::Int32 => array
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .map(Self::Int32)
+                .ok_or_else(|| JitError::UnsupportedType("Int32".to_string())),
+            ArrowDataType::Int64 => array
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .map(Self::Int64)
+                .ok_or_else(|| JitError::UnsupportedType("Int64".to_string())),
+            ArrowDataType::Float64 => array
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .map(Self::Float64)
+                .ok_or_else(|| JitError::UnsupportedType("Float64".to_string())),
+            other => Err(JitError::UnsupportedType(format!("{other:?}"))),
+        }
+    }
+
+    fn value(&self, row: usize) -> JitResult<Scalar> {
+        match self {
+            Self::Bool(array) => Ok(Scalar::Bool(array.is_valid(row).then(|| array.value(row)))),
+            Self::Int32(array) => Ok(Scalar::Int32(array.is_valid(row).then(|| array.value(row)))),
+            Self::Int64(array) => Ok(Scalar::Int64(array.is_valid(row).then(|| array.value(row)))),
+            Self::Float64(array) => Ok(Scalar::Float64(
+                array.is_valid(row).then(|| array.value(row)),
+            )),
+        }
+    }
+}
+
+pub(super) enum OutputBuilder {
+    Bool(BooleanBuilder),
+    Int32(Int32Builder),
+    Int64(Int64Builder),
+    Float64(Float64Builder),
+}
+
+impl OutputBuilder {
+    pub(super) fn with_capacity(ty: JitType, capacity: usize) -> Self {
+        match ty {
+            JitType::Bool => Self::Bool(BooleanBuilder::with_capacity(capacity)),
+            JitType::Int32 => Self::Int32(Int32Builder::with_capacity(capacity)),
+            JitType::Int64 => Self::Int64(Int64Builder::with_capacity(capacity)),
+            JitType::Float64 => Self::Float64(Float64Builder::with_capacity(capacity)),
+        }
+    }
+
+    pub(super) fn append(&mut self, value: Scalar) -> JitResult<()> {
+        match (self, value) {
+            (Self::Bool(builder), Scalar::Bool(value)) => builder.append_option(value),
+            (Self::Int32(builder), Scalar::Int32(value)) => builder.append_option(value),
+            (Self::Int64(builder), Scalar::Int64(value)) => builder.append_option(value),
+            (Self::Float64(builder), Scalar::Float64(value)) => builder.append_option(value),
+            (_, value) => {
+                return Err(JitError::Backend(format!(
+                    "cannot append {:?} into output builder",
+                    value.ty()
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn finish(mut self) -> JitResult<ArrayRef> {
+        let array = match &mut self {
+            Self::Bool(builder) => Arc::new(builder.finish()) as ArrayRef,
+            Self::Int32(builder) => Arc::new(builder.finish()) as ArrayRef,
+            Self::Int64(builder) => Arc::new(builder.finish()) as ArrayRef,
+            Self::Float64(builder) => Arc::new(builder.finish()) as ArrayRef,
+        };
+        Ok(array)
+    }
+}
+
+pub(super) fn arrow_type(ty: JitType) -> ArrowDataType {
+    match ty {
+        JitType::Bool => ArrowDataType::Boolean,
+        JitType::Int32 => ArrowDataType::Int32,
+        JitType::Int64 => ArrowDataType::Int64,
+        JitType::Float64 => ArrowDataType::Float64,
+    }
+}

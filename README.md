@@ -68,12 +68,11 @@ The JIT package is intentionally separate from the DataFusion wrapper:
   filter/project islands.
 - `src/jit/ir.rs` defines `KernelIR` and `PipelineIR`, including the first
   `FilterProject` fusion pattern.
-- `src/jit/mlir/` lowers that IR to MLIR `arith` scalar functions, verifies the
-  generated module with `melior` when `jit-mlir` is enabled, and carries the
-  first native `i64 -> bool` ExecutionEngine smoke path.
+- `src/jit/mlir/` owns MLIR emission, verification, and native invocation. The
+  current native path is a narrow `i64 -> bool` ExecutionEngine smoke test.
 - `src/jit/rule.rs` is the DataFusion physical optimizer rule that rewrites
   supported filter/project islands.
-- `src/jit/runtime.rs` is the fixed-width Arrow batch kernel runtime used until
+- `src/jit/runtime/` is the fixed-width Arrow batch kernel runtime used until
   MLIR native function pointers are enabled.
 
 Current scope: MLIR is parsed and verified, and the DataFusion optimizer rule
