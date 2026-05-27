@@ -1,2 +1,5 @@
 [files]
 extend-exclude = ["docs/mermaid.min.js", "docs/mermaid-init.js"]
+
+[default.extend-words]
+olt = "olt"
