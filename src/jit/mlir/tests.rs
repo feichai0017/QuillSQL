@@ -69,6 +69,18 @@ fn invokes_i64_predicate_with_execution_engine() {
     assert!(backend.invoke_i64_predicate(&predicate, 11).unwrap());
 }
 
+#[cfg(feature = "jit-mlir")]
+#[test]
+fn reuses_native_i64_predicate_artifact() {
+    let predicate = i64_gt_ten(false);
+    let module = MlirBackend::new().lower_i64_predicate(&predicate).unwrap();
+    let native = super::native::compile_i64_predicate(&module).unwrap();
+
+    assert!(!native.invoke(9).unwrap());
+    assert!(!native.invoke(10).unwrap());
+    assert!(native.invoke(11).unwrap());
+}
+
 fn i64_gt_ten(nullable: bool) -> JitExpr {
     JitExpr::Binary {
         op: JitBinaryOp::Gt,
