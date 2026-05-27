@@ -3,31 +3,24 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use datafusion::arrow::array::ArrayRef;
-use datafusion::arrow::compute::filter_record_batch;
 use datafusion::arrow::datatypes::SchemaRef as ArrowSchemaRef;
 use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::common::cast::as_boolean_array;
 use datafusion::common::{DataFusionError, Result};
 use datafusion::execution::context::TaskContext;
-use datafusion::logical_expr::ColumnarValue;
 use datafusion::physical_expr::EquivalenceProperties;
 use datafusion::physical_expr::Partitioning;
-use datafusion::physical_expr::PhysicalExpr;
-use datafusion::physical_plan::projection::ProjectionExpr;
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, RecordBatchStream,
     SendableRecordBatchStream,
 };
 use futures::{ready, Stream, StreamExt};
 
-use crate::jit::{CompiledKernel, KernelKind};
+use crate::jit::{CompiledKernel, FilterProjectKernel, KernelKind};
 
 #[derive(Debug, Clone)]
 pub struct CompiledFilterProjectExec {
     input: Arc<dyn ExecutionPlan>,
-    predicate: Arc<dyn PhysicalExpr>,
-    projections: Vec<ProjectionExpr>,
+    runtime: FilterProjectKernel,
     kernel: CompiledKernel,
     schema: ArrowSchemaRef,
     cache: Arc<PlanProperties>,
@@ -36,8 +29,7 @@ pub struct CompiledFilterProjectExec {
 impl CompiledFilterProjectExec {
     pub fn try_new(
         input: Arc<dyn ExecutionPlan>,
-        predicate: Arc<dyn PhysicalExpr>,
-        projections: Vec<ProjectionExpr>,
+        runtime: FilterProjectKernel,
         schema: ArrowSchemaRef,
         kernel: CompiledKernel,
     ) -> Result<Self> {
@@ -57,8 +49,7 @@ impl CompiledFilterProjectExec {
 
         Ok(Self {
             input,
-            predicate,
-            projections,
+            runtime,
             kernel,
             schema,
             cache,
@@ -73,21 +64,12 @@ impl CompiledFilterProjectExec {
         &self.kernel
     }
 
-    pub fn projections(&self) -> &[ProjectionExpr] {
-        &self.projections
-    }
-
-    pub fn predicate(&self) -> &Arc<dyn PhysicalExpr> {
-        &self.predicate
+    pub fn runtime(&self) -> &FilterProjectKernel {
+        &self.runtime
     }
 
     fn execute_batch(&self, batch: RecordBatch) -> Result<RecordBatch> {
-        execute_filter_project(
-            &batch,
-            self.predicate(),
-            self.projections(),
-            Arc::clone(&self.schema),
-        )
+        self.runtime.execute(&batch).map_err(Into::into)
     }
 }
 
@@ -96,15 +78,19 @@ impl DisplayAs for CompiledFilterProjectExec {
         match t {
             DisplayFormatType::Default | DisplayFormatType::Verbose => {
                 let projections = self
-                    .projections
+                    .runtime
+                    .projections()
                     .iter()
-                    .map(ToString::to_string)
+                    .map(|projection| projection.alias.clone())
                     .collect::<Vec<_>>()
                     .join(", ");
                 write!(
                     f,
-                    "CompiledFilterProjectExec: backend={}, executable={}, predicate={}, expr=[{}]",
-                    self.kernel.backend, self.kernel.executable, self.predicate, projections
+                    "CompiledFilterProjectExec: backend={}, executable={}, predicate={:?}, expr=[{}]",
+                    self.kernel.backend,
+                    self.kernel.executable,
+                    self.runtime.predicate(),
+                    projections
                 )
             }
             DisplayFormatType::TreeRender => {
@@ -113,9 +99,9 @@ impl DisplayAs for CompiledFilterProjectExec {
                     "backend={}, executable={}",
                     self.kernel.backend, self.kernel.executable
                 )?;
-                writeln!(f, "predicate={}", self.predicate)?;
-                for (index, projection) in self.projections.iter().enumerate() {
-                    writeln!(f, "expr{index}={projection}")?;
+                writeln!(f, "predicate={:?}", self.runtime.predicate())?;
+                for (index, projection) in self.runtime.projections().iter().enumerate() {
+                    writeln!(f, "expr{index}={}", projection.alias)?;
                 }
                 Ok(())
             }
@@ -161,8 +147,7 @@ impl ExecutionPlan for CompiledFilterProjectExec {
 
         Self::try_new(
             children.swap_remove(0),
-            Arc::clone(&self.predicate),
-            self.projections.clone(),
+            self.runtime.clone(),
             Arc::clone(&self.schema),
             self.kernel.clone(),
         )
@@ -203,29 +188,5 @@ impl Stream for CompiledFilterProjectStream {
 impl RecordBatchStream for CompiledFilterProjectStream {
     fn schema(&self) -> ArrowSchemaRef {
         Arc::clone(&self.schema)
-    }
-}
-
-fn execute_filter_project(
-    batch: &RecordBatch,
-    predicate: &Arc<dyn PhysicalExpr>,
-    projections: &[ProjectionExpr],
-    schema: ArrowSchemaRef,
-) -> Result<RecordBatch> {
-    let predicate = predicate.evaluate(batch)?.into_array(batch.num_rows())?;
-    let filter = as_boolean_array(&predicate)?;
-    let filtered = filter_record_batch(batch, filter)?;
-
-    let columns = projections
-        .iter()
-        .map(|projection| evaluate_projection(projection, &filtered))
-        .collect::<Result<Vec<_>>>()?;
-    RecordBatch::try_new(schema, columns).map_err(Into::into)
-}
-
-fn evaluate_projection(projection: &ProjectionExpr, batch: &RecordBatch) -> Result<ArrayRef> {
-    match projection.expr.evaluate(batch)? {
-        ColumnarValue::Array(array) => Ok(array),
-        ColumnarValue::Scalar(value) => value.to_array_of_size(batch.num_rows()),
     }
 }

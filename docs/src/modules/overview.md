@@ -22,6 +22,7 @@ Parquet dataset as a DataFusion table.
 | `kernel.rs` | Defines the future Arrow kernel ABI and compiled-kernel descriptor. |
 | `mlir/` | MLIR-first backend that emits and verifies `arith` scalar functions. |
 | `rule.rs` | DataFusion physical optimizer rule that rewrites supported filter/project islands. |
+| `runtime.rs` | Fixed-width Arrow batch kernel runtime for compiled filter/project execution. |
 
 The JIT package is not a storage adapter and not a second SQL engine. It is the
 research boundary for replacing selected DataFusion physical operators with

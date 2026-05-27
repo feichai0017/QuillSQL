@@ -4,6 +4,7 @@ mod ir;
 mod kernel;
 mod mlir;
 mod rule;
+mod runtime;
 
 pub use exec::CompiledFilterProjectExec;
 pub use expr::{JitBinaryOp, JitExpr, JitProjection, JitScalar, JitType};
@@ -14,6 +15,7 @@ pub use kernel::{
 };
 pub use mlir::{MlirBackend, MlirModule};
 pub use rule::{JitCandidate, MlirJitRule};
+pub use runtime::FilterProjectKernel;
 
 use datafusion::common::DataFusionError;
 use thiserror::Error;

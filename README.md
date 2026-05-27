@@ -72,11 +72,14 @@ The JIT package is intentionally separate from the DataFusion wrapper:
   the generated module with `melior` when `jit-mlir` is enabled.
 - `src/jit/rule.rs` is the DataFusion physical optimizer rule that rewrites
   supported filter/project islands.
+- `src/jit/runtime.rs` is the fixed-width Arrow batch kernel runtime used until
+  MLIR native function pointers are enabled.
 
 Current scope: MLIR is parsed and verified, and the DataFusion optimizer rule
 replaces supported filter/project islands with `CompiledFilterProjectExec`.
-That node still evaluates with DataFusion/Arrow kernels while carrying the MLIR
-kernel descriptor. Native machine-code kernel dispatch is the next step.
+That node executes through QuillSQL's fixed-width Arrow kernel runtime while
+carrying the MLIR kernel descriptor. Native machine-code kernel dispatch is the
+next step.
 
 Run the MLIR path with:
 

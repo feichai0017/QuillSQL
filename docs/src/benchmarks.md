@@ -9,7 +9,7 @@ QuillSQL uses benchmarks to separate three different claims:
   before and after native MLIR function pointers are enabled.
 
 The current code has a real `CompiledFilterProjectExec` in the DataFusion hot
-path, but its execution body still uses DataFusion/Arrow expression kernels.
+path, and its execution body uses QuillSQL's fixed-width Arrow batch kernel.
 Native MLIR kernel speedups are intentionally not claimed yet.
 
 ## Microbenchmarks
@@ -27,6 +27,7 @@ Benchmarks:
 | `jit_ir/fuse_filter_project` | `PipelineIR` prefix fusion into `KernelIR::FilterProject`. |
 | `mlir/compile_filter` | JIT expression to MLIR module generation for a filter. |
 | `mlir/compile_filter_project` | Fused filter/project MLIR module generation. |
+| `quill_kernel/filter_project_64k` | Direct fixed-width Arrow kernel execution outside DataFusion planning. |
 | `datafusion/sql_filter_project_64k` | DataFusion SQL planning/execution over a 64K-row in-memory Arrow table, including the compiled filter/project physical node when the pattern matches. |
 
 Without `jit-mlir`, MLIR verification is a no-op. With `jit-mlir`, the same

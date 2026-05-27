@@ -12,7 +12,8 @@ use datafusion::physical_plan::ExecutionPlan;
 use serde::Serialize;
 
 use crate::jit::{
-    CompiledFilterProjectExec, JitExpr, JitProjection, KernelBackend, KernelKind, MlirBackend,
+    CompiledFilterProjectExec, FilterProjectKernel, JitExpr, JitProjection, KernelBackend,
+    KernelKind, MlirBackend,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -215,10 +216,14 @@ impl MlirJitRule {
             Err(_) => return Ok(None),
         };
 
+        let runtime =
+            match FilterProjectKernel::try_new(predicate, projections, projection.schema()) {
+                Ok(runtime) => runtime,
+                Err(_) => return Ok(None),
+            };
         let compiled = CompiledFilterProjectExec::try_new(
             Arc::clone(filter.input()),
-            Arc::clone(filter.predicate()),
-            projection.expr().to_vec(),
+            runtime,
             projection.schema(),
             kernel,
         )?;
