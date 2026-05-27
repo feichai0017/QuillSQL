@@ -217,10 +217,11 @@ supported <code>FilterExec</code> and <code>ProjectionExec</code> expressions in
 filter/project islands with <code>CompiledFilterProjectExec</code>; the current executable
 node runs a fixed-width Arrow batch kernel implemented in QuillSQL while carrying
 the MLIR kernel descriptor. A narrow native <code>i64 -&gt; bool</code> MLIR ExecutionEngine
-probe validates scalar invocation, and the first native fixed-width filter kernel
-writes a byte selection mask. Native Arrow-batch filter/project function pointers
-are the next step, so unsupported expressions fall back to the normal DataFusion
-plan.</p>
+probe validates scalar invocation. The native fixed-width path now has an <code>i64</code>
+filter kernel that writes a byte selection mask and an <code>i64</code> filter/project
+kernel that compacts one projected column. Wiring those function pointers into
+the DataFusion physical node is the next step, so unsupported expressions fall
+back to the normal DataFusion plan.</p>
 <h2 id="ir-and-fusion"><a class="header" href="#ir-and-fusion">IR And Fusion</a></h2>
 <p>QuillSQL keeps two JIT-level IRs:</p>
 <ul>
@@ -384,7 +385,9 @@ Native MLIR kernel speedups are intentionally not claimed yet.</p>
 <tr><td><code>mlir/compile_filter</code></td><td>JIT expression to MLIR module generation for a filter.</td></tr>
 <tr><td><code>mlir/compile_filter_project</code></td><td>Fused filter/project MLIR module generation.</td></tr>
 <tr><td><code>mlir_native/compile_i64_filter</code></td><td>MLIR parse/lower/JIT cost for the first native fixed-width filter kernel. Requires <code>jit-mlir</code>.</td></tr>
+<tr><td><code>mlir_native/compile_i64_filter_project</code></td><td>MLIR parse/lower/JIT cost for the first native fixed-width filter/project kernel. Requires <code>jit-mlir</code>.</td></tr>
 <tr><td><code>mlir_native/filter_64k</code></td><td>Native MLIR i64 filter execution over a 64K-row values vector, writing a byte selection mask. Requires <code>jit-mlir</code>.</td></tr>
+<tr><td><code>mlir_native/filter_project_64k</code></td><td>Native MLIR i64 filter/project execution over 64K rows, compacting one projected i64 column. Requires <code>jit-mlir</code>.</td></tr>
 <tr><td><code>quill_kernel/filter_project_64k</code></td><td>Direct fixed-width Arrow kernel execution outside DataFusion planning.</td></tr>
 <tr><td><code>datafusion/sql_filter_project_64k</code></td><td>DataFusion SQL planning/execution over a 64K-row in-memory Arrow table, including the compiled filter/project physical node when the pattern matches.</td></tr>
 </tbody>
