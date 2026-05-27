@@ -6,15 +6,14 @@ typed tuple handling.
 
 ## SQL Front-End (`src/sql`)
 
-Parses SQL through `sqlparser` plus QuillSQL-specific DDL options. The parser keeps the
-AST SQL-shaped so later stages can make binding and planning decisions explicitly.
+Parses SQL through `sqlparser`. The parser keeps the AST SQL-shaped so later stages can
+make binding and planning decisions explicitly.
 
 ## Planning (`src/plan`)
 
 `LogicalPlanner` binds table and column names, checks types, and produces `LogicalPlan`.
-`PhysicalPlanner` lowers optimized logical plans into Volcano operators. DDL supports
-Holt-only storage: omitted `ENGINE`/`USING` defaults to Holt, while non-Holt choices are
-rejected.
+`PhysicalPlanner` lowers optimized logical plans into Volcano operators. DDL does not
+accept storage backend clauses; tables and indexes are Holt-backed by definition.
 
 ## Optimizer (`src/optimizer`)
 
@@ -26,7 +25,7 @@ simple equality/range predicates.
 
 Every physical operator implements `VolcanoExecutor` with `init` and `next`. Operators
 receive an `ExecutionContext`, which provides catalog access, expression evaluation,
-transaction helpers, and the `HoltStorageEngine` facade.
+transaction helpers, and `HoltStorage`.
 
 ## Catalog (`src/catalog`)
 
@@ -40,7 +39,7 @@ The storage module contains:
 
 | File | Role |
 | ---- | ---- |
-| `engine.rs` | Object-safe table/index traits and the Holt-only storage engine. |
+| `engine.rs` | Object-safe table/index traits and the Holt storage entrypoint. |
 | `holt.rs` | Holt table/index handles, descriptor persistence, ordered index codec, and transaction status persistence. |
 | `record.rs` | `RecordId` and `TupleMeta`, kept as SQL-layer MVCC metadata. |
 | `tuple.rs`, `codec/` | Tuple and scalar encoding utilities. |

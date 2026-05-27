@@ -22,7 +22,7 @@ flowchart LR
     TxnCtx --> Txn
     TxnCtx --> Locks
 
-    Ctx --> Engine["HoltStorageEngine"]
+    Ctx --> Engine["HoltStorage"]
     Engine --> Table["HoltTableHandle"]
     Engine --> Index["HoltIndexHandle"]
     Table --> Holt["holt::DB"]

@@ -23,9 +23,9 @@ fn first_column(rows: Vec<Tuple>) -> Vec<i32> {
 #[test]
 fn holt_table_insert_update_delete_and_rollback() {
     let mut db = Database::new_temp().expect("database");
-    db.run("create table ht(id int, v int) engine=holt")
+    db.run("create table ht(id int, v int)")
         .expect("create holt table");
-    db.run("create index ht_idx on ht using holt (id)")
+    db.run("create index ht_idx on ht(id)")
         .expect("create holt index");
     db.run("insert into ht values (1, 10), (2, 20), (3, 30)")
         .expect("insert rows");
@@ -62,7 +62,7 @@ fn holt_table_reopens_committed_rows() {
 
     {
         let mut db = Database::new_on_disk(&db_path).expect("open database");
-        db.run("create table ht(id int, v int) engine=holt")
+        db.run("create table ht(id int, v int)")
             .expect("create holt table");
         db.run("insert into ht values (1, 10), (2, 20)")
             .expect("insert rows");
@@ -92,9 +92,9 @@ fn temp_database_drops_after_holt_store_shutdown() {
 #[test]
 fn holt_index_range_scan_returns_matching_rows() {
     let mut db = Database::new_temp().expect("database");
-    db.run("create table ht(id int, v int) engine=holt")
+    db.run("create table ht(id int, v int)")
         .expect("create holt table");
-    db.run("create index ht_idx on ht using holt (id)")
+    db.run("create index ht_idx on ht(id)")
         .expect("create holt index");
     db.run("insert into ht values (1, 10), (2, 20), (3, 30), (4, 40)")
         .expect("insert rows");
@@ -127,23 +127,23 @@ fn holt_index_range_scan_returns_matching_rows() {
 }
 
 #[test]
-fn non_holt_storage_options_are_rejected() {
+fn storage_backend_clauses_are_rejected() {
     let mut db = Database::new_temp().expect("database");
     let err = db
-        .run("create table bt(id int, v int) engine=btree")
-        .expect_err("BTree storage engine should be removed");
+        .run("create table ht(id int, v int) engine=holt")
+        .expect_err("table engine clause should be removed");
     assert!(
-        err.to_string().contains("only ENGINE=HOLT is supported"),
+        err.to_string().contains("ENGINE=holt is not supported"),
         "{err:?}"
     );
 
     db.run("create table ht(id int, v int)")
         .expect("create default Holt table");
     let err = db
-        .run("create index ht_btree_idx on ht using btree (id)")
-        .expect_err("BTree indexes should be removed");
+        .run("create index ht_idx on ht using holt (id)")
+        .expect_err("index using clause should be removed");
     assert!(
-        err.to_string().contains("only USING HOLT is supported"),
+        err.to_string().contains("USING holt is not supported"),
         "{err:?}"
     );
 }
@@ -151,11 +151,11 @@ fn non_holt_storage_options_are_rejected() {
 #[test]
 fn sql_uses_holt_index_for_range_predicate_after_backfill() {
     let mut db = Database::new_temp().expect("database");
-    db.run("create table ht(id int, v int) engine=holt")
+    db.run("create table ht(id int, v int)")
         .expect("create holt table");
     db.run("insert into ht values (1, 10), (2, 20), (3, 30), (4, 40)")
         .expect("insert rows before index");
-    db.run("create index ht_idx on ht using holt (id)")
+    db.run("create index ht_idx on ht(id)")
         .expect("create holt index");
 
     let rows = db
@@ -174,11 +174,11 @@ fn sql_uses_holt_index_for_range_predicate_after_backfill() {
 #[test]
 fn sql_uses_composite_holt_index_for_full_equality() {
     let mut db = Database::new_temp().expect("database");
-    db.run("create table ht(a int, b int, v int) engine=holt")
+    db.run("create table ht(a int, b int, v int)")
         .expect("create holt table");
     db.run("insert into ht values (1, 1, 10), (1, 2, 20), (2, 1, 30)")
         .expect("insert rows before index");
-    db.run("create index ht_ab_idx on ht using holt (a, b)")
+    db.run("create index ht_ab_idx on ht(a, b)")
         .expect("create composite holt index");
 
     let rows = db

@@ -82,20 +82,20 @@ EXPLAIN SELECT id, COUNT(*) FROM t GROUP BY id ORDER BY id;
 
 - **CREATE TABLE**
   - Column options: `NOT NULL` | `DEFAULT <literal>`
-  - Storage: Holt is the only supported engine. `ENGINE=HOLT` is accepted, and omitted `ENGINE` defaults to Holt.
+  - Storage: Holt is the only storage engine; `ENGINE=...` clauses are not supported.
   - Example:
     ```sql
     CREATE TABLE t(
       id INT64 NOT NULL,
       v  INT32 DEFAULT 0
-    ) ENGINE=HOLT;
+    );
     ```
 
 - **CREATE INDEX**
-  - Index storage: Holt is the only supported backend. `USING HOLT` is accepted, and omitted `USING` defaults to Holt.
+  - Index storage: Holt is implicit; `USING ...` clauses are not supported.
   - Example:
     ```sql
-    CREATE INDEX idx_t_id ON t USING HOLT (id);
+    CREATE INDEX idx_t_id ON t(id);
     ```
 
 - **DROP**

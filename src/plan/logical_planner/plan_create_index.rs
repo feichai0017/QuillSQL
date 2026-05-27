@@ -23,7 +23,12 @@ impl<'a> LogicalPlanner<'a> {
             let col_expr = self.bind_order_by_expr(col)?;
             columns_expr.push(col_expr);
         }
-        validate_index_engine(using)?;
+        if let Some(using) = using {
+            return Err(QuillSQLError::NotSupport(format!(
+                "CREATE INDEX USING {} is not supported; Holt indexes are implicit",
+                using.value
+            )));
+        }
         let table_schema = self.context.catalog.table_schema(&table)?;
         Ok(LogicalPlan::CreateIndex(CreateIndex {
             index_name,
@@ -31,17 +36,5 @@ impl<'a> LogicalPlanner<'a> {
             table_schema,
             columns: columns_expr,
         }))
-    }
-}
-
-fn validate_index_engine(using: Option<&sqlparser::ast::Ident>) -> QuillSQLResult<()> {
-    let Some(using) = using else {
-        return Ok(());
-    };
-    match using.value.to_ascii_lowercase().as_str() {
-        "holt" => Ok(()),
-        other => Err(QuillSQLError::NotSupport(format!(
-            "index backend {other} is not supported; only USING HOLT is supported"
-        ))),
     }
 }
