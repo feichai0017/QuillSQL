@@ -16,14 +16,16 @@ Parquet dataset as a DataFusion table.
 
 | File | Role |
 | ---- | ---- |
+| `exec.rs` | DataFusion physical execution node for compiled filter/project islands. |
 | `expr.rs` | Lowers supported DataFusion physical expressions into QuillSQL's small JIT IR. |
 | `ir.rs` | Defines `KernelIR`, `PipelineIR`, and the initial filter/project fusion boundary. |
 | `kernel.rs` | Defines the future Arrow kernel ABI and compiled-kernel descriptor. |
 | `mlir/` | MLIR-first backend that emits and verifies `arith` scalar functions. |
-| `rule.rs` | DataFusion physical optimizer rule that discovers `FilterExec` and `ProjectionExec` candidates. |
+| `rule.rs` | DataFusion physical optimizer rule that rewrites supported filter/project islands. |
 
-The JIT package is not a storage adapter and not a second executor. It is the
-research boundary for replacing selected DataFusion physical operators later.
+The JIT package is not a storage adapter and not a second SQL engine. It is the
+research boundary for replacing selected DataFusion physical operators with
+compiled kernels.
 
 ## Front Ends (`src/bin`)
 

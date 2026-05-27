@@ -3083,6 +3083,7 @@ dependencies = [
  "criterion",
  "datafusion",
  "env_logger",
+ "futures",
  "melior",
  "rustyline",
  "serde",

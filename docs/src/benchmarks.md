@@ -5,11 +5,12 @@ QuillSQL uses benchmarks to separate three different claims:
 - JIT lowering cost: how much time QuillSQL spends building JIT IR and MLIR.
 - DataFusion execution cost: how the current DataFusion path behaves on Arrow
   batches or Parquet datasets.
-- Future compiled-kernel cost: how fast native MLIR kernels are once they replace
-  selected DataFusion physical operators.
+- Compiled-node cost: how the rewritten filter/project physical island behaves
+  before and after native MLIR function pointers are enabled.
 
-The current code covers the first two. Native kernel execution is intentionally
-not claimed yet.
+The current code has a real `CompiledFilterProjectExec` in the DataFusion hot
+path, but its execution body still uses DataFusion/Arrow expression kernels.
+Native MLIR kernel speedups are intentionally not claimed yet.
 
 ## Microbenchmarks
 
@@ -26,7 +27,7 @@ Benchmarks:
 | `jit_ir/fuse_filter_project` | `PipelineIR` prefix fusion into `KernelIR::FilterProject`. |
 | `mlir/compile_filter` | JIT expression to MLIR module generation for a filter. |
 | `mlir/compile_filter_project` | Fused filter/project MLIR module generation. |
-| `datafusion/sql_filter_project_64k` | DataFusion SQL planning/execution over a 64K-row in-memory Arrow table. |
+| `datafusion/sql_filter_project_64k` | DataFusion SQL planning/execution over a 64K-row in-memory Arrow table, including the compiled filter/project physical node when the pattern matches. |
 
 Without `jit-mlir`, MLIR verification is a no-op. With `jit-mlir`, the same
 benchmark includes `melior` parse and verifier cost:

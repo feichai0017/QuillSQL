@@ -14,11 +14,12 @@ flowchart LR
     DF --> Logical["DataFusion LogicalPlan"]
     Logical --> Optimized["DataFusion optimizers"]
     Optimized --> Physical["DataFusion ExecutionPlan"]
-    Physical --> Arrow["Arrow RecordBatch output"]
+    Physical --> JITRule["MlirJitRule physical rewrite"]
+    JITRule --> CompiledExec["CompiledFilterProjectExec"]
+    CompiledExec --> Arrow["Arrow RecordBatch output"]
 
     Parquet["Parquet / Arrow datasets"] --> DF
     Memory["DataFusion memory tables"] --> DF
-    Physical --> JITRule["MlirJitRule candidate discovery"]
     JITRule --> MLIR["MLIR arith module verification"]
 ```
 
@@ -42,9 +43,11 @@ interface. `MlirJitRule` walks DataFusion physical plans and tries to lower
 supported `FilterExec` and `ProjectionExec` expressions into a small JIT IR.
 
 The MLIR backend then emits scalar `arith` functions and verifies them through
-`melior` when `jit-mlir` is enabled. Native kernel execution is the next step;
-the current rule is discovery and verification only, so unsupported expressions
-fall back to DataFusion without a parallel executor.
+`melior` when `jit-mlir` is enabled. The physical optimizer can replace
+filter/project islands with `CompiledFilterProjectExec`; the current executable
+node still evaluates through DataFusion/Arrow expression kernels while carrying
+the MLIR kernel descriptor. Native MLIR function pointers are the next step, so
+unsupported expressions fall back to the normal DataFusion plan.
 
 ## IR And Fusion
 
@@ -61,5 +64,8 @@ Filter -> Projection
   => KernelIR::FilterProject
 ```
 
-This lets the project measure a real operator boundary before taking on joins,
-aggregates, repartitioning, or whole-query pipeline lowering.
+The rule also handles the common DataFusion shape where a round-robin
+`RepartitionExec` sits between the filter and projection by placing the compiled
+node below the repartition. This lets the project measure a real operator
+boundary before taking on joins, aggregates, hash repartitioning, or whole-query
+pipeline lowering.

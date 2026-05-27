@@ -64,16 +64,19 @@ The JIT package is intentionally separate from the DataFusion wrapper:
 
 - `src/jit/expr.rs` lowers supported DataFusion physical expressions to a small
   JIT expression IR.
+- `src/jit/exec.rs` provides the DataFusion physical node for compiled
+  filter/project islands.
 - `src/jit/ir.rs` defines `KernelIR` and `PipelineIR`, including the first
   `FilterProject` fusion pattern.
 - `src/jit/mlir/` lowers that IR to MLIR `arith` scalar functions and verifies
   the generated module with `melior` when `jit-mlir` is enabled.
-- `src/jit/rule.rs` is the DataFusion physical optimizer rule that discovers
-  compilable `FilterExec` and `ProjectionExec` candidates.
+- `src/jit/rule.rs` is the DataFusion physical optimizer rule that rewrites
+  supported filter/project islands.
 
 Current scope: MLIR is parsed and verified, and the DataFusion optimizer rule
-finds candidates. QuillSQL does not yet replace DataFusion execution nodes with
-native machine-code kernels.
+replaces supported filter/project islands with `CompiledFilterProjectExec`.
+That node still evaluates with DataFusion/Arrow kernels while carrying the MLIR
+kernel descriptor. Native machine-code kernel dispatch is the next step.
 
 Run the MLIR path with:
 

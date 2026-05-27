@@ -86,11 +86,24 @@ async fn debug_trace_reports_jit_candidates() {
     db.register_batches("t", schema, vec![batch])
         .expect("table");
 
-    db.run("select id + 1 as next_id from t where v > 10")
-        .await
-        .expect("query");
+    let mut output_rows = rows(
+        db.run("select id + 1 as next_id from t where v > 10")
+            .await
+            .expect("query"),
+    );
+    output_rows.sort();
+    assert_eq!(
+        output_rows,
+        vec![vec!["3".to_string()], vec!["4".to_string()]]
+    );
+
     let trace = db.debug_last_trace().expect("trace");
 
+    assert!(
+        trace.physical_plan.contains("CompiledFilterProjectExec"),
+        "{}",
+        trace.physical_plan
+    );
     assert!(
         trace
             .jit_candidates
