@@ -30,8 +30,8 @@ transaction helpers, and `HoltStorage`.
 ## Catalog (`src/catalog`)
 
 The catalog keeps an in-memory projection of schemas, tables, indexes, and statistics.
-Durable descriptors are stored in Holt. `information_schema` is also represented as Holt
-system tables so SQL can query metadata using normal scans.
+Durable descriptors are stored in Holt. `information_schema` is a virtual table family
+generated from the in-memory catalog at scan time.
 
 ## Storage Facade (`src/storage`)
 

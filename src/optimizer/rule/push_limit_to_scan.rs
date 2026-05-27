@@ -61,6 +61,10 @@ impl LogicalOptimizerRule for PushLimitIntoScan {
 }
 
 fn maybe_attach_limit(scan: &TableScan, required_rows: usize) -> Option<TableScan> {
+    if !scan.filters.is_empty() {
+        return None;
+    }
+
     let mut new_scan = scan.clone();
     let new_limit = match new_scan.limit {
         Some(existing) => existing.min(required_rows),

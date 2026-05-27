@@ -5,7 +5,7 @@ use std::sync::Arc;
 use crate::catalog::{Catalog, SchemaRef};
 use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::storage::holt::{HoltIndexHandle, HoltStore, HoltTableHandle};
-use crate::storage::record::{RecordId, TupleMeta};
+use crate::storage::record::{RecordId, TupleMeta, EMPTY_TUPLE_META};
 use crate::storage::tuple::Tuple;
 use crate::transaction::{TransactionId, TxnContext};
 use crate::utils::table_ref::TableReference;
@@ -98,6 +98,13 @@ impl HoltStorage {
     }
 
     pub fn table(&self, catalog: &Catalog, table: &TableReference) -> QuillSQLResult<TableBinding> {
+        if let Some(rows) = catalog.virtual_table_rows(table)? {
+            let schema = catalog.table_schema(table)?;
+            let handle: Arc<dyn TableHandle> =
+                Arc::new(VirtualTableHandle::new(table.clone(), schema, rows));
+            return Ok(TableBinding::new(handle, Vec::new()));
+        }
+
         let table_id = catalog.table_id(table)?;
         let schema = catalog.table_schema(table)?;
         let handle: Arc<dyn TableHandle> = Arc::new(HoltTableHandle::new(
@@ -119,6 +126,128 @@ impl HoltStorage {
             })
             .collect::<QuillSQLResult<Vec<_>>>()?;
         Ok(TableBinding::new(handle, index_handles))
+    }
+}
+
+#[derive(Clone)]
+struct VirtualTableHandle {
+    table_ref: TableReference,
+    schema: SchemaRef,
+    rows: Arc<Vec<Tuple>>,
+}
+
+impl VirtualTableHandle {
+    fn new(table_ref: TableReference, schema: SchemaRef, rows: Vec<Tuple>) -> Self {
+        Self {
+            table_ref,
+            schema,
+            rows: Arc::new(rows),
+        }
+    }
+
+    fn read_only_error(&self, operation: &str) -> QuillSQLError {
+        QuillSQLError::Execution(format!(
+            "{operation} is not supported on virtual table {}",
+            self.table_ref.to_log_string()
+        ))
+    }
+}
+
+impl TableHandle for VirtualTableHandle {
+    fn table_ref(&self) -> &TableReference {
+        &self.table_ref
+    }
+
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
+    }
+
+    fn full_scan(&self) -> QuillSQLResult<Box<dyn TupleStream>> {
+        Ok(Box::new(VirtualTupleStream {
+            rows: self.rows.clone(),
+            offset: 0,
+        }))
+    }
+
+    fn full_tuple(&self, rid: RecordId) -> QuillSQLResult<(TupleMeta, Tuple)> {
+        let Some(tuple) = self.rows.get(rid.slot_num as usize) else {
+            return Err(QuillSQLError::Storage(format!(
+                "virtual tuple {} not found in {}",
+                rid,
+                self.table_ref.to_log_string()
+            )));
+        };
+        Ok((EMPTY_TUPLE_META, tuple.clone()))
+    }
+
+    fn insert(
+        &self,
+        _txn: &mut TxnContext<'_>,
+        _tuple: &Tuple,
+        _indexes: &[Arc<dyn IndexHandle>],
+    ) -> QuillSQLResult<()> {
+        Err(self.read_only_error("INSERT"))
+    }
+
+    fn delete(
+        &self,
+        _txn: &mut TxnContext<'_>,
+        _rid: RecordId,
+        _prev_meta: TupleMeta,
+        _prev_tuple: Tuple,
+        _indexes: &[Arc<dyn IndexHandle>],
+    ) -> QuillSQLResult<()> {
+        Err(self.read_only_error("DELETE"))
+    }
+
+    fn update(
+        &self,
+        _txn: &mut TxnContext<'_>,
+        _rid: RecordId,
+        _new_tuple: Tuple,
+        _prev_meta: TupleMeta,
+        _prev_tuple: Tuple,
+        _indexes: &[Arc<dyn IndexHandle>],
+    ) -> QuillSQLResult<RecordId> {
+        Err(self.read_only_error("UPDATE"))
+    }
+
+    fn prepare_row_for_write(
+        &self,
+        _txn: &mut TxnContext<'_>,
+        _rid: RecordId,
+        _observed_meta: &TupleMeta,
+    ) -> QuillSQLResult<Option<(TupleMeta, Tuple)>> {
+        Err(self.read_only_error("WRITE"))
+    }
+
+    fn undo_insert(&self, _rid: RecordId, _txn_id: TransactionId) -> QuillSQLResult<()> {
+        Err(self.read_only_error("UNDO"))
+    }
+
+    fn undo_delete(
+        &self,
+        _rid: RecordId,
+        _prev_meta: TupleMeta,
+        _prev_tuple: Tuple,
+    ) -> QuillSQLResult<()> {
+        Err(self.read_only_error("UNDO"))
+    }
+}
+
+struct VirtualTupleStream {
+    rows: Arc<Vec<Tuple>>,
+    offset: usize,
+}
+
+impl TupleStream for VirtualTupleStream {
+    fn next(&mut self) -> QuillSQLResult<Option<(RecordId, TupleMeta, Tuple)>> {
+        let Some(tuple) = self.rows.get(self.offset) else {
+            return Ok(None);
+        };
+        let rid = RecordId::new(0, self.offset as u32);
+        self.offset += 1;
+        Ok(Some((rid, EMPTY_TUPLE_META, tuple.clone())))
     }
 }
 

@@ -62,7 +62,7 @@ clear: QuillSQL decides SQL semantics; Holt owns durable bytes and its own loggi
 ## Important Invariants
 
 - A table descriptor in Holt is the durable source of truth for a table id and schema.
-- `information_schema` is a SQL-visible projection backed by Holt system tables.
+- `information_schema` is a SQL-visible virtual projection generated from the in-memory catalog.
 - Row values are stored as encoded `TupleMeta + Tuple`.
 - Index keys use order-preserving SQL encoding plus RID tie-breakers, so Holt byte order
   matches SQL range-scan order.

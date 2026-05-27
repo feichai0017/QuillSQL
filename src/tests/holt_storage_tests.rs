@@ -20,6 +20,15 @@ fn first_column(rows: Vec<Tuple>) -> Vec<i32> {
     rows.iter().map(|row| value_as_i32(&row.data[0])).collect()
 }
 
+fn first_column_as_text(rows: Vec<Tuple>) -> Vec<String> {
+    rows.iter()
+        .map(|row| match &row.data[0] {
+            ScalarValue::Varchar(Some(value)) => value.clone(),
+            other => panic!("expected Varchar(Some(_)), got {:?}", other),
+        })
+        .collect()
+}
+
 #[test]
 fn holt_table_insert_update_delete_and_rollback() {
     let mut db = Database::new_temp().expect("database");
@@ -195,6 +204,19 @@ fn sql_uses_composite_holt_index_for_full_equality() {
 }
 
 #[test]
+fn limit_after_filter_returns_rows_after_predicate() {
+    let mut db = Database::new_temp().expect("database");
+    db.run("create table lt(id int)").expect("create table");
+    db.run("insert into lt values (1), (2), (3), (4), (5), (6), (7)")
+        .expect("insert rows");
+
+    let rows = db
+        .run("select id from lt where id > 5 limit 2")
+        .expect("filtered limit query");
+    assert_eq!(first_column(rows), vec![6, 7]);
+}
+
+#[test]
 fn default_table_engine_is_holt() {
     let mut db = Database::new_temp().expect("database");
     db.run("create table dt(id int, v int)")
@@ -225,14 +247,23 @@ fn default_table_engine_is_holt() {
 }
 
 #[test]
-fn information_schema_tables_are_holt_projection_tables() {
-    let db = Database::new_temp().expect("database");
+fn information_schema_tables_are_virtual() {
+    let mut db = Database::new_temp().expect("database");
     let table_ref = TableReference::Full {
         catalog: "quillsql".to_string(),
         schema: "information_schema".to_string(),
         table: "tables".to_string(),
     };
-    assert!(db.catalog.table_id(&table_ref).expect("table id") > 0);
+    db.catalog
+        .table_id(&table_ref)
+        .expect_err("information_schema should not have a Holt table id");
+
+    db.run("create table visible_t(id int)")
+        .expect("create table");
+    let rows = db
+        .run("select table_name from information_schema.tables where table_name = 'visible_t'")
+        .expect("query virtual information_schema table");
+    assert_eq!(first_column_as_text(rows), vec!["visible_t".to_string()]);
 }
 
 #[test]

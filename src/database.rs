@@ -270,6 +270,9 @@ impl Database {
                 continue;
             }
             for (table_name, table) in &schema.tables {
+                let Some(table_id) = table.table_id() else {
+                    continue;
+                };
                 let table_ref = TableReference::Full {
                     catalog: crate::catalog::DEFAULT_CATALOG_NAME.to_string(),
                     schema: schema_name.clone(),
@@ -278,7 +281,7 @@ impl Database {
                 let handle = HoltTableHandle::new(
                     table_ref.clone(),
                     table.schema.clone(),
-                    table.table_id,
+                    table_id,
                     self.holt_store.clone(),
                 );
                 let mut stream = handle.full_scan()?;

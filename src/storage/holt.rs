@@ -213,42 +213,6 @@ impl HoltStore {
         Ok(rid)
     }
 
-    pub fn insert_system_row(&self, table_id: u64, tuple: &Tuple) -> QuillSQLResult<RecordId> {
-        let (rid, next_rid) = self.reserve_rid()?;
-        let table_tree = Self::table_tree_name(table_id);
-        let row_key = encode_rid(rid);
-        let row_value = encode_row(TupleMeta::new(0, 0), tuple);
-        self.db
-            .atomic(|batch| {
-                batch.put(CATALOG_TREE, NEXT_RID, &encode_u64(next_rid));
-                batch.put(&table_tree, &row_key, &row_value);
-            })
-            .map_err(map_holt_err)
-            .and_then(committed)?;
-        Ok(rid)
-    }
-
-    pub fn mark_system_row_deleted(
-        &self,
-        table_id: u64,
-        schema: SchemaRef,
-        rid: RecordId,
-    ) -> QuillSQLResult<()> {
-        let table_tree = Self::table_tree_name(table_id);
-        let tree = self.db.open_tree(&table_tree).map_err(map_holt_err)?;
-        let row_key = encode_rid(rid);
-        let Some(raw) = tree.get(&row_key).map_err(map_holt_err)? else {
-            return Ok(());
-        };
-        let (mut meta, tuple) = decode_row(&raw, schema)?;
-        if meta.is_deleted {
-            return Ok(());
-        }
-        meta.mark_deleted(0, 0);
-        tree.put(&row_key, &encode_row(meta, &tuple))
-            .map_err(map_holt_err)
-    }
-
     pub fn reserve_rid(&self) -> QuillSQLResult<(RecordId, u64)> {
         let raw = self.next_rid.fetch_add(1, AtomicOrdering::SeqCst);
         let next = raw

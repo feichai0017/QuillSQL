@@ -18,7 +18,7 @@
 - **Holt storage backend**: table rows, indexes, catalog descriptors, and transaction status are persisted through `holt::DB`
 - **Holt ordered indexes**: point/range scans use order-preserving SQL key encoding with RID tie-breakers
 - **Streaming scans**: executors consume storage through object-safe table/index handles, not page-heap internals
-- **Information schema**: `information_schema.schemas`, `tables`, `columns`, `indexes`
+- **Virtual information schema**: `information_schema.schemas`, `tables`, `columns`, `indexes`
 - **Docs**: 📖 **[Read the Book Online](https://feichai0017.github.io/QuillSQL/)** 
 
 ---
