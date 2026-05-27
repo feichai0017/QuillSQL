@@ -7,7 +7,6 @@ use datafusion::physical_optimizer::PhysicalOptimizerRule;
 use datafusion::physical_plan::filter::FilterExec;
 use datafusion::physical_plan::projection::ProjectionExec;
 use datafusion::physical_plan::ExecutionPlan;
-use log::debug;
 
 use crate::jit::{JitExpr, JitProjection, KernelBackend, MlirBackend};
 
@@ -93,13 +92,7 @@ impl PhysicalOptimizerRule for MlirJitRule {
         plan: Arc<dyn ExecutionPlan>,
         _config: &ConfigOptions,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        let candidates = self.inspect_plan(Arc::clone(&plan));
-        if !candidates.is_empty() {
-            debug!(
-                "mlir jit identified {} candidate physical node(s); executable replacement is not enabled yet",
-                candidates.len()
-            );
-        }
+        let _candidates = self.inspect_plan(Arc::clone(&plan));
         Ok(plan)
     }
 

@@ -1,70 +1,47 @@
 # QuillSQL Architecture
 
-QuillSQL is a SQL research layer over Holt. DataFusion owns SQL parsing, binding,
-logical optimization, physical optimization, and physical execution. QuillSQL owns the
-Holt catalog/table/index adapter, MVCC metadata, transaction status recovery, and the
-CLI/server surfaces.
+QuillSQL is a thin SQL research shell around DataFusion. It does not implement
+its own parser, binder, optimizer, executor, page store, WAL, SQL catalog, or
+index manager. The storage path is DataFusion-native: memory tables for local
+experiments and Arrow/Parquet datasets for persistent analytical data.
 
 ## End-to-End Pipeline
 
 ```mermaid
 flowchart LR
-    SQL["SQL text"] --> DF["DataFusion SessionContext"]
+    SQL["SQL text"] --> DB["Database::run"]
+    DB --> DF["DataFusion SessionContext"]
     DF --> Logical["DataFusion LogicalPlan"]
-    Logical --> Optimized["DataFusion Optimizers"]
+    Logical --> Optimized["DataFusion optimizers"]
     Optimized --> Physical["DataFusion ExecutionPlan"]
-    Physical --> Scan["HoltScanExec"]
-    Scan --> Table["Holt table tree"]
-    Scan --> Index["Holt index tree"]
-    Table --> Holt["holt::DB"]
-    Index --> Holt
+    Physical --> Arrow["Arrow RecordBatch output"]
 
-    Catalog["HoltCatalogProvider"] --> DF
-    Catalog --> Descriptors["Holt catalog tree"]
-    Txn["TransactionManager"] --> Status["Holt txn tree"]
+    Parquet["Parquet / Arrow datasets"] --> DF
+    Memory["DataFusion memory tables"] --> DF
+    Physical --> JITRule["MlirJitRule candidate discovery"]
+    JITRule --> MLIR["MLIR arith module verification"]
 ```
-
-DDL is the main place where QuillSQL intercepts DataFusion: `CREATE TABLE`,
-`CREATE INDEX`, and `DROP TABLE` update Holt descriptors and refresh the in-memory
-catalog projection. DML uses DataFusion table-provider hooks and writes through Holt.
 
 ## Storage Boundary
 
-```mermaid
-flowchart TD
-    subgraph QuillSQL
-        Provider["HoltTableProvider"]
-        ScanExec["HoltScanExec"]
-        TxnMeta["TupleMeta / MVCC"]
-    end
+There is no QuillSQL-owned storage engine after the cleanup.
 
-    Provider --> RowTree["table/<table_id>"]
-    Provider --> IndexTree["index/<index_id>"]
-    Provider --> CatalogTree["catalog"]
-    TxnMeta --> TxnTree["txn"]
+- Temporary or interactive data uses DataFusion's in-memory tables.
+- Durable data should be registered as Parquet/Arrow datasets.
+- DataFusion's catalog and file-source integrations define table visibility.
+- QuillSQL's `DatabaseOptions::data_dir` is scratch state, not a private database
+  file format.
 
-    RowTree --> DB["holt::DB"]
-    IndexTree --> DB
-    CatalogTree --> DB
-    TxnTree --> DB
-```
+This makes the project better suited to OLAP/query-compiler research than OLTP
+storage-engine research.
 
-There is no QuillSQL-owned page cache, heap file, B+Tree, storage scheduler, or
-SQL-data WAL. Holt owns durable bytes and its own logging. QuillSQL decides SQL/MVCC
-semantics and encodes row/index values into Holt trees.
+## JIT Boundary
 
-## Important Invariants
+The JIT boundary is the DataFusion physical plan plus Arrow `RecordBatch`
+interface. `MlirJitRule` walks DataFusion physical plans and tries to lower
+supported `FilterExec` and `ProjectionExec` expressions into a small JIT IR.
 
-- Holt descriptors are the durable source of truth for table ids, index ids, and schemas.
-- DataFusion `information_schema` is generated from the Holt catalog provider.
-- Row values are stored as encoded `TupleMeta + Tuple`.
-- Index keys use order-preserving SQL encoding plus RID tie-breakers.
-- Startup recovers transaction status from Holt before query execution.
-- In-progress or unknown row versions are not visible as committed data.
-
-## Query Compilation Boundary
-
-The JIT research boundary is the DataFusion `ExecutionPlan` and Arrow `RecordBatch`
-interface. The `jit-mlir` feature wires in an MLIR-named physical optimizer rule as the
-extension point; native DataFusion execution remains the fallback for unsupported
-expressions.
+The MLIR backend then emits scalar `arith` functions and verifies them through
+`melior` when `jit-mlir` is enabled. Native kernel execution is the next step;
+the current rule is discovery and verification only, so unsupported expressions
+fall back to DataFusion without a parallel executor.

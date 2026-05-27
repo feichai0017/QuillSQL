@@ -6,11 +6,10 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use quill_sql::database::{Database, DatabaseOptions};
-use quill_sql::transaction::IsolationLevel;
-use std::str::FromStr;
 use tokio::sync::{Mutex, MutexGuard};
 
 /// Shared app state holding a Database protected by a mutex.
@@ -21,10 +20,12 @@ struct AppState {
 }
 
 fn rebuild_db(opts: &DatabaseOptions) -> Database {
-    if let Ok(path) = std::env::var("QUILL_DB_FILE") {
-        Database::new_on_disk_with_options(&path, opts.clone()).expect("open db file")
-    } else {
-        Database::new_temp_with_options(opts.clone()).expect("open temp db")
+    Database::new(opts.clone()).expect("open database")
+}
+
+fn database_options_from_env() -> DatabaseOptions {
+    DatabaseOptions {
+        data_dir: std::env::var("QUILL_DATA_DIR").ok().map(PathBuf::from),
     }
 }
 
@@ -74,13 +75,6 @@ fn strip_sql_comments(input: &str) -> String {
     out
 }
 
-async fn debug_locks_snapshot(
-    State(state): State<AppState>,
-) -> Result<Json<quill_sql::transaction::LockDebugSnapshot>, (StatusCode, String)> {
-    let db_guard = lock_db(&state).await;
-    Ok(Json(db_guard.debug_lock_snapshot()))
-}
-
 async fn debug_trace_last(
     State(state): State<AppState>,
 ) -> Result<Json<quill_sql::database::DebugTrace>, (StatusCode, String)> {
@@ -101,43 +95,12 @@ async fn debug_plan_last(
     }
 }
 
-async fn debug_mvcc_versions(
-    State(state): State<AppState>,
-) -> Result<Json<quill_sql::database::MvccVersionsDebug>, (StatusCode, String)> {
-    let db = lock_db(&state).await;
-    db.debug_mvcc_versions()
-        .map(Json)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))
-}
-
-async fn debug_txns(
-    State(state): State<AppState>,
-) -> Result<Json<quill_sql::transaction::TxnDebugSnapshot>, (StatusCode, String)> {
-    let db = lock_db(&state).await;
-    Ok(Json(db.debug_txn_snapshot()))
-}
-
 #[tokio::main]
 async fn main() {
     env_logger::init();
 
-    // Build database (in-memory Holt temp by default).
-    let default_isolation_level = std::env::var("QUILL_DEFAULT_ISOLATION")
-        .ok()
-        .as_deref()
-        .map(IsolationLevel::from_str)
-        .transpose()
-        .unwrap_or_else(|e| panic!("invalid QUILL_DEFAULT_ISOLATION: {}", e));
-    let db_options = DatabaseOptions {
-        default_isolation_level,
-        ..DatabaseOptions::default()
-    };
-
-    let db = if let Ok(path) = std::env::var("QUILL_DB_FILE") {
-        Database::new_on_disk_with_options(&path, db_options.clone()).expect("open db file")
-    } else {
-        Database::new_temp_with_options(db_options.clone()).expect("open temp db")
-    };
+    let db_options = database_options_from_env();
+    let db = rebuild_db(&db_options);
 
     let state = AppState {
         db: Arc::new(Mutex::new(db)),
@@ -153,10 +116,7 @@ async fn main() {
         .route("/api/sql", post(api_sql))
         .route("/api/sql_batch", post(api_sql_batch))
         .route("/admin/rebuild", post(rebuild))
-        .route("/debug/locks/snapshot", get(debug_locks_snapshot))
-        .route("/debug/txns", get(debug_txns))
         .route("/debug/trace/last", get(debug_trace_last))
-        .route("/debug/mvcc/versions", get(debug_mvcc_versions))
         .route("/debug/plan/last", get(debug_plan_last))
         .nest_service("/docs", docs_service)
         .fallback_service(static_service)

@@ -1,13 +1,14 @@
 # Testing & Documentation
 
-The active tests focus on the current DataFusion + Holt architecture.
+The active tests focus on DataFusion execution, Parquet registration, and the
+MLIR JIT boundary.
 
 ## Test Suite
 
 | Location | Purpose |
 | -------- | ------- |
-| `tests/datafusion_holt.rs` | End-to-end SQL tests through DataFusion over Holt tables. |
-| module unit tests | Storage codecs, ordered index encoding, MVCC visibility, and lock-manager behavior. |
+| `tests/df_arrow_parquet.rs` | End-to-end SQL over DataFusion memory tables and registered Parquet datasets. |
+| `src/jit/*` unit tests | JIT expression lowering plus MLIR module generation and verification. |
 
 Common commands:
 
@@ -17,7 +18,17 @@ cargo test --features jit-mlir
 cargo clippy --all-targets -- -D warnings
 ```
 
+The `jit-mlir` feature requires local MLIR/LLVM libraries. On a Homebrew LLVM 22
+installation, set:
+
+```bash
+MLIR_SYS_220_PREFIX=/opt/homebrew/opt/llvm \
+LLVM_SYS_220_PREFIX=/opt/homebrew/opt/llvm \
+cargo test --features jit-mlir
+```
+
 ## Documentation
 
-The `docs/` directory is an mdBook. It documents the current DataFusion-fronted
-architecture rather than the removed teaching parser/planner/executor stack.
+The `docs/` directory is an mdBook. It tracks the current DataFusion +
+Arrow/Parquet + MLIR architecture and intentionally omits the removed teaching
+database storage stack.

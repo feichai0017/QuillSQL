@@ -13,21 +13,6 @@ pub enum QuillSQLError {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
-    #[error("Parser error: {0}")]
-    Parser(#[from] sqlparser::parser::ParserError),
-
-    #[error("Plan error: {0}")]
-    Plan(String),
-
     #[error("Execution error: {0}")]
     Execution(String),
-
-    #[error("Storage error: {0}")]
-    Storage(String),
-
-    #[error("Concurrent error: {0}")]
-    Concurrent(String),
-
-    #[error("Unwind")]
-    Unwind,
 }

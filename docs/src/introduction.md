@@ -4,19 +4,19 @@
 
 # QuillSQL Internals
 
-Welcome to the technical documentation for QuillSQL.
+QuillSQL is now a DataFusion, Arrow, Parquet, and MLIR query compiler research
+engine. DataFusion owns the SQL front end, optimizer, and physical execution
+framework. QuillSQL keeps the embedding API, CLI/server surfaces, debug views,
+and the JIT research boundary.
 
-This book documents QuillSQL as a DataFusion-fronted SQL research engine layered over
-Holt. It is intended for developers and contributors who want to understand the Holt
-storage adapter, DataFusion execution boundary, transaction semantics, and MLIR/JIT
-extension point without also maintaining a separate page store.
+The project deliberately does not carry a custom storage engine. Interactive
+queries use DataFusion memory tables; persistent analytical data should come
+from Arrow/Parquet datasets and DataFusion's file/object-store integrations.
 
----
+## Core Topics
 
-## Table of Contents
-
-*   [**Overall Architecture**](./architecture.md): A high-level overview of the entire system.
-
-*   **Core Modules**
-    *   [**Transaction Manager**](./modules/transaction.md): Concurrency control with MVCC and 2PL.
-    *   [**Catalog**](./modules/catalog.md): SQL metadata projection backed by Holt descriptors.
+- [Overall Architecture](./architecture.md): where DataFusion, Arrow/Parquet,
+  and MLIR meet.
+- [Module Overview](./modules/overview.md): current Rust package layout.
+- [Front-Ends](./modules/bin.md): CLI and HTTP entry points.
+- [Testing](./modules/tests.md): validation commands and test scope.

@@ -7,8 +7,7 @@ primary_region = "sin"
 [env]
   PORT = "8080"
   RUST_LOG = "info"
-  # QUILL_DB_FILE = "/data/quill.db"  
-  QUILL_DISABLE_DIRECT_IO = "1"
+  # QUILL_DATA_DIR = "/data"
 
 [http_service]
   internal_port = 8080

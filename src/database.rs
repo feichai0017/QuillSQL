@@ -1,45 +1,29 @@
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use datafusion::arrow::record_batch::RecordBatch;
+use datafusion::common::ScalarValue;
+use datafusion::datasource::file_format::options::ParquetReadOptions;
+use datafusion::execution::context::{SessionConfig, SessionContext};
+use datafusion::execution::session_state::SessionStateBuilder;
 use datafusion::logical_expr::LogicalPlan;
-use parking_lot::Mutex;
+use datafusion::physical_plan::displayable;
 use serde::Serialize;
-use sqlparser::ast::TransactionAccessMode;
 use tempfile::TempDir;
 
-use crate::catalog::{load_catalog_data, Catalog};
-use crate::df::{
-    execute_logical_plan, pretty_format_batches, record_batches_to_string_rows, EngineState,
-};
 use crate::error::{QuillSQLError, QuillSQLResult};
-use crate::storage::holt::{map_holt_err, HoltStore, HoltTableHandle};
-use crate::transaction::{
-    CommandId, IsolationLevel, LockDebugSnapshot, TransactionManager, TxnDebugSnapshot,
-};
 
 #[derive(Debug, Clone, Default)]
 pub struct DatabaseOptions {
-    pub holt: HoltOptions,
-    pub default_isolation_level: Option<IsolationLevel>,
-}
-
-#[derive(Debug, Default, Clone)]
-pub struct HoltOptions {
-    pub directory: Option<PathBuf>,
-}
-
-#[derive(Clone)]
-enum DatabaseLocation {
-    OnDisk(String),
-    Temporary,
+    pub data_dir: Option<PathBuf>,
 }
 
 pub struct Database {
-    state: EngineState,
+    ctx: SessionContext,
     debug_trace: Arc<Mutex<Option<DebugTrace>>>,
     _temp_dir: Option<TempDir>,
+    _data_dir: PathBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -87,21 +71,6 @@ pub struct DebugPlanSnapshot {
     pub physical: DebugPlanNode,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct MvccVersionSample {
-    pub table: String,
-    pub rid: String,
-    pub insert_txn: u64,
-    pub delete_txn: u64,
-    pub visible: bool,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct MvccVersionsDebug {
-    pub samples: Vec<MvccVersionSample>,
-    pub note: String,
-}
-
 impl DebugPlanNode {
     fn from_logical(plan: &LogicalPlan) -> Self {
         Self {
@@ -123,207 +92,107 @@ impl DebugPlanNode {
 }
 
 impl Database {
-    pub fn new_on_disk(db_path: &str) -> QuillSQLResult<Self> {
-        Self::new_on_disk_with_options(db_path, DatabaseOptions::default())
+    pub fn new(options: DatabaseOptions) -> QuillSQLResult<Self> {
+        match options.data_dir {
+            Some(data_dir) => Self::new_with_data_dir(data_dir),
+            None => Self::new_temp(),
+        }
     }
 
-    pub fn new_on_disk_with_options(
-        db_path: &str,
-        options: DatabaseOptions,
-    ) -> QuillSQLResult<Self> {
-        Self::new_with_location(DatabaseLocation::OnDisk(db_path.to_string()), options)
+    pub fn new_with_data_dir(data_dir: impl Into<PathBuf>) -> QuillSQLResult<Self> {
+        Self::open(data_dir.into(), None)
     }
 
     pub fn new_temp() -> QuillSQLResult<Self> {
-        Self::new_temp_with_options(DatabaseOptions::default())
+        let temp_dir = TempDir::new()?;
+        let data_dir = temp_dir.path().join("data");
+        Self::open(data_dir, Some(temp_dir))
     }
 
-    pub fn new_temp_with_options(options: DatabaseOptions) -> QuillSQLResult<Self> {
-        Self::new_with_location(DatabaseLocation::Temporary, options)
-    }
+    fn open(data_dir: PathBuf, temp_dir: Option<TempDir>) -> QuillSQLResult<Self> {
+        std::fs::create_dir_all(&data_dir)?;
 
-    fn new_with_location(
-        location: DatabaseLocation,
-        options: DatabaseOptions,
-    ) -> QuillSQLResult<Self> {
-        let (holt_dir, temp_dir) = holt_directory_for_location(&location, &options.holt)?;
-        let holt_store = Arc::new(HoltStore::open(holt_dir)?);
-        let transaction_manager = Arc::new(TransactionManager::new());
-        seed_holt_transaction_statuses(&holt_store, &transaction_manager)?;
-
-        let mut catalog = Catalog::new(holt_store.clone());
-        load_catalog_data(&mut catalog)?;
-
-        let state = EngineState {
-            catalog: Arc::new(Mutex::new(catalog)),
-            holt_store,
-            transaction_manager,
-            active_txn: Arc::new(Mutex::new(None)),
-            default_isolation: options
-                .default_isolation_level
-                .unwrap_or(IsolationLevel::ReadUncommitted),
-        };
+        let config = SessionConfig::new()
+            .with_information_schema(true)
+            .with_default_catalog_and_schema("datafusion", "public");
+        let state = SessionStateBuilder::new()
+            .with_config(config)
+            .with_default_features()
+            .with_physical_optimizer_rule(Arc::new(crate::jit::MlirJitRule::new()))
+            .build();
+        let ctx = SessionContext::new_with_state(state);
 
         Ok(Self {
-            state,
+            ctx,
             debug_trace: Arc::new(Mutex::new(None)),
             _temp_dir: temp_dir,
+            _data_dir: data_dir,
         })
     }
 
     pub async fn run(&self, sql: &str) -> QuillSQLResult<QueryOutput> {
         let start = Instant::now();
-        if self.try_run_transaction_control(sql)? {
-            self.record_trace(
-                "TransactionControl".to_string(),
-                "TransactionControl".to_string(),
-                0,
-                start.elapsed().as_millis(),
-                DebugPlanNode::leaf("TransactionControl"),
-            );
-            return Ok(QueryOutput::new(Vec::new()));
-        }
-
-        let ctx = self.state.session_context();
-        let logical_plan = ctx
+        let logical_plan = self
+            .ctx
             .state()
             .create_logical_plan(sql)
             .await
             .map_err(map_datafusion_err)?;
-        let logical_plan_str = logical_plan.display_indent().to_string();
         let logical_tree = DebugPlanNode::from_logical(&logical_plan);
+        let logical_plan_str = logical_plan.display_indent().to_string();
+        let physical_plan = self
+            .ctx
+            .state()
+            .create_physical_plan(&logical_plan)
+            .await
+            .ok();
+        let physical_plan_str = physical_plan
+            .as_ref()
+            .map(|plan| displayable(plan.as_ref()).indent(false).to_string())
+            .unwrap_or_else(|| "DataFusion physical plan unavailable for this statement".into());
 
-        let batches = execute_logical_plan(&self.state, logical_plan.clone()).await?;
+        let df = self
+            .ctx
+            .execute_logical_plan(logical_plan)
+            .await
+            .map_err(map_datafusion_err)?;
+        let batches = df.collect().await.map_err(map_datafusion_err)?;
         let rows = batches.iter().map(|batch| batch.num_rows()).sum();
         self.record_trace(
             logical_plan_str,
-            "DataFusion physical plan".to_string(),
+            physical_plan_str.clone(),
             rows,
             start.elapsed().as_millis(),
             logical_tree,
+            DebugPlanNode::leaf(physical_plan_str),
         );
         Ok(QueryOutput::new(batches))
     }
 
+    pub async fn register_parquet(&self, table: &str, path: &str) -> QuillSQLResult<()> {
+        self.ctx
+            .register_parquet(table, path, ParquetReadOptions::default())
+            .await
+            .map_err(map_datafusion_err)
+    }
+
     pub fn flush(&self) -> QuillSQLResult<()> {
-        self.state
-            .holt_store
-            .db()
-            .checkpoint()
-            .map_err(map_holt_err)
+        Ok(())
     }
 
     pub fn debug_last_trace(&self) -> Option<DebugTrace> {
-        self.debug_trace.lock().clone()
-    }
-
-    pub fn debug_lock_snapshot(&self) -> LockDebugSnapshot {
-        self.state
-            .transaction_manager
-            .lock_manager_arc()
-            .debug_snapshot()
-    }
-
-    pub fn debug_txn_snapshot(&self) -> TxnDebugSnapshot {
-        self.state.transaction_manager.debug_snapshot()
-    }
-
-    pub fn debug_mvcc_versions(&self) -> QuillSQLResult<MvccVersionsDebug> {
-        let snapshot = self
-            .state
-            .transaction_manager
-            .snapshot(self.state.transaction_manager.next_txn_id_hint());
-        let catalog = self.state.catalog.lock();
-        let mut samples = Vec::new();
-        let max_samples = 20usize;
-        for (schema_name, schema) in &catalog.schemas {
-            for (table_name, table) in &schema.tables {
-                let table_id = table.table_id;
-                let table_ref = crate::utils::table_ref::TableReference::Full {
-                    catalog: crate::catalog::DEFAULT_CATALOG_NAME.to_string(),
-                    schema: schema_name.clone(),
-                    table: table_name.clone(),
-                };
-                let handle = HoltTableHandle::new(
-                    table_ref.clone(),
-                    table.schema.clone(),
-                    table_id,
-                    self.state.holt_store.clone(),
-                );
-                let mut stream = crate::storage::TableHandle::full_scan(&handle)?;
-                while let Some((rid, meta, _tuple)) = stream.next()? {
-                    if samples.len() >= max_samples {
-                        break;
-                    }
-                    let visible = snapshot.is_visible(&meta, 0 as CommandId, |tid| {
-                        self.state.transaction_manager.transaction_status(tid)
-                    });
-                    samples.push(MvccVersionSample {
-                        table: table_ref.to_string(),
-                        rid: rid.to_string(),
-                        insert_txn: meta.insert_txn_id,
-                        delete_txn: meta.delete_txn_id,
-                        visible,
-                    });
-                }
-                if samples.len() >= max_samples {
-                    break;
-                }
-            }
-            if samples.len() >= max_samples {
-                break;
-            }
-        }
-
-        Ok(MvccVersionsDebug {
-            samples,
-            note: format!("sampled up to {} tuples from Holt tables", max_samples),
-        })
+        self.debug_trace.lock().expect("debug trace lock").clone()
     }
 
     pub fn debug_last_plan(&self) -> Option<DebugPlanSnapshot> {
         self.debug_trace
             .lock()
+            .expect("debug trace lock")
             .clone()
             .map(|trace| DebugPlanSnapshot {
                 logical: trace.logical_tree,
                 physical: trace.physical_tree,
             })
-    }
-
-    fn try_run_transaction_control(&self, sql: &str) -> QuillSQLResult<bool> {
-        let normalized = sql
-            .trim()
-            .trim_end_matches(';')
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ")
-            .to_ascii_lowercase();
-        match normalized.as_str() {
-            "begin" | "begin transaction" | "start transaction" => {
-                self.state.begin_transaction(
-                    self.state.default_isolation,
-                    TransactionAccessMode::ReadWrite,
-                )?;
-                Ok(true)
-            }
-            "begin read only" | "begin transaction read only" | "start transaction read only" => {
-                self.state.begin_transaction(
-                    self.state.default_isolation,
-                    TransactionAccessMode::ReadOnly,
-                )?;
-                Ok(true)
-            }
-            "commit" | "commit transaction" => {
-                self.state.commit_transaction()?;
-                Ok(true)
-            }
-            "rollback" | "rollback transaction" => {
-                self.state.rollback_transaction()?;
-                Ok(true)
-            }
-            _ => Ok(false),
-        }
     }
 
     fn record_trace(
@@ -333,46 +202,58 @@ impl Database {
         rows: usize,
         duration_ms: u128,
         logical_tree: DebugPlanNode,
+        physical_tree: DebugPlanNode,
     ) {
-        *self.debug_trace.lock() = Some(DebugTrace {
-            physical_tree: DebugPlanNode::leaf(physical_plan.clone()),
+        *self.debug_trace.lock().expect("debug trace lock") = Some(DebugTrace {
             logical_plan,
             physical_plan,
             rows,
             duration_ms,
             logical_tree,
+            physical_tree,
         });
     }
 }
 
-fn holt_directory_for_location(
-    location: &DatabaseLocation,
-    overrides: &HoltOptions,
-) -> QuillSQLResult<(PathBuf, Option<TempDir>)> {
-    if let Some(directory) = &overrides.directory {
-        return Ok((directory.clone(), None));
-    }
-    match location {
-        DatabaseLocation::OnDisk(path) => Ok((PathBuf::from(path), None)),
-        DatabaseLocation::Temporary => {
-            let temp_dir = TempDir::new()?;
-            let holt_dir = temp_dir.path().join("holt");
-            Ok((holt_dir, Some(temp_dir)))
+fn record_batches_to_string_rows(batches: &[RecordBatch]) -> Vec<Vec<String>> {
+    let mut rows = Vec::new();
+    for batch in batches {
+        for row_idx in 0..batch.num_rows() {
+            rows.push(
+                batch
+                    .columns()
+                    .iter()
+                    .map(
+                        |array| match ScalarValue::try_from_array(array.as_ref(), row_idx) {
+                            Ok(value) => value.to_string(),
+                            Err(err) => format!("<error: {err}>"),
+                        },
+                    )
+                    .collect(),
+            );
         }
     }
+    rows
 }
 
-fn seed_holt_transaction_statuses(
-    holt_store: &HoltStore,
-    transaction_manager: &TransactionManager,
-) -> QuillSQLResult<()> {
-    let mut next_txn_id = 1;
-    for (txn_id, status) in holt_store.recover_txn_statuses()? {
-        transaction_manager.record_recovered_status(txn_id, status);
-        next_txn_id = next_txn_id.max(txn_id.saturating_add(1));
+fn pretty_format_batches(batches: &[RecordBatch]) -> QuillSQLResult<comfy_table::Table> {
+    let mut table = comfy_table::Table::new();
+    table.load_preset("||--+-++|    ++++++");
+    let Some(first) = batches.first() else {
+        return Ok(table);
+    };
+    table.set_header(
+        first
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| comfy_table::Cell::new(field.name()))
+            .collect::<Vec<_>>(),
+    );
+    for row in record_batches_to_string_rows(batches) {
+        table.add_row(row);
     }
-    transaction_manager.ensure_next_txn_id_at_least(next_txn_id);
-    Ok(())
+    Ok(table)
 }
 
 fn map_datafusion_err(err: datafusion::error::DataFusionError) -> QuillSQLError {
