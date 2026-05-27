@@ -195,8 +195,10 @@ supported <code>FilterExec</code> and <code>ProjectionExec</code> expressions in
 filter/project islands with <code>CompiledFilterProjectExec</code>; the current executable
 node runs a fixed-width Arrow batch kernel implemented in QuillSQL while carrying
 the MLIR kernel descriptor. A narrow native <code>i64 -&gt; bool</code> MLIR ExecutionEngine
-probe validates real invocation. Native Arrow-batch function pointers are the
-next step, so unsupported expressions fall back to the normal DataFusion plan.</p>
+probe validates scalar invocation, and the first native fixed-width filter kernel
+writes a byte selection mask. Native Arrow-batch filter/project function pointers
+are the next step, so unsupported expressions fall back to the normal DataFusion
+plan.</p>
 <h2 id="ir-and-fusion"><a class="header" href="#ir-and-fusion">IR And Fusion</a></h2>
 <p>QuillSQL keeps two JIT-level IRs:</p>
 <ul>
