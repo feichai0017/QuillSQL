@@ -175,8 +175,8 @@ receive an <code>ExecutionContext</code>, which provides catalog access, express
 transaction helpers, and <code>HoltStorage</code>.</p>
 <h2 id="catalog-srccatalog"><a class="header" href="#catalog-srccatalog">Catalog (<code>src/catalog</code>)</a></h2>
 <p>The catalog keeps an in-memory projection of schemas, tables, indexes, and statistics.
-Durable descriptors are stored in Holt. <code>information_schema</code> is also represented as Holt
-system tables so SQL can query metadata using normal scans.</p>
+Durable descriptors are stored in Holt. <code>information_schema</code> is a virtual table family
+generated from the in-memory catalog at scan time.</p>
 <h2 id="storage-facade-srcstorage"><a class="header" href="#storage-facade-srcstorage">Storage Facade (<code>src/storage</code>)</a></h2>
 <p>The storage module contains:</p>
 <div class="table-wrapper">

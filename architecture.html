@@ -210,7 +210,7 @@ clear: QuillSQL decides SQL semantics; Holt owns durable bytes and its own loggi
 <h2 id="important-invariants"><a class="header" href="#important-invariants">Important Invariants</a></h2>
 <ul>
 <li>A table descriptor in Holt is the durable source of truth for a table id and schema.</li>
-<li><code>information_schema</code> is a SQL-visible projection backed by Holt system tables.</li>
+<li><code>information_schema</code> is a SQL-visible virtual projection generated from the in-memory catalog.</li>
 <li>Row values are stored as encoded <code>TupleMeta + Tuple</code>.</li>
 <li>Index keys use order-preserving SQL encoding plus RID tie-breakers, so Holt byte order
 matches SQL range-scan order.</li>
