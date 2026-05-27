@@ -29,11 +29,19 @@ DataFusion still applies residual filters, so pushdown remains correctness-first
 
 ## JIT (`src/jit`)
 
-The JIT layer is attached as a DataFusion physical optimizer rule. The current
-`jit-mlir` feature is intentionally toolchain-light: it enables the MLIR research
-extension point without requiring system MLIR in the default build. The next step
-is replacing eligible `FilterExec` and `ProjectionExec` nodes with compiled Arrow
-batch kernels.
+The JIT layer is attached as a DataFusion physical optimizer rule. Its current
+scope is a research skeleton:
+
+| File | Role |
+| ---- | ---- |
+| `expr.rs` | Small JIT expression IR lowered from DataFusion physical expressions. |
+| `kernel.rs` | Arrow batch kernel ABI and backend trait. |
+| `mlir/` | MLIR-first backend that emits textual MLIR-shaped modules. |
+| `rule.rs` | DataFusion physical optimizer rule that discovers `FilterExec` and `ProjectionExec` candidates. |
+
+The default behaviour is still correctness-first: candidates are inspected and
+lowered, but the rule does not replace DataFusion execution until executable
+kernels exist.
 
 ## Catalog (`src/catalog`)
 

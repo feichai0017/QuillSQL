@@ -23,7 +23,7 @@ and MLIR query compilation experiments.
 - **Holt ordered indexes**: simple indexed equality/range filters can narrow `HoltScanExec` while DataFusion keeps residual filters for correctness.
 - **Transaction control**: `BEGIN`, `COMMIT`, and `ROLLBACK` keep QuillSQL MVCC metadata and Holt transaction status aligned.
 - **DataFusion information schema**: `information_schema.tables` and `information_schema.columns` are provided by DataFusion over the Holt catalog provider.
-- **MLIR JIT hook**: a `jit-mlir` feature-gated physical optimizer rule is wired in as the extension point for compiled Arrow expression kernels.
+- **MLIR JIT research skeleton**: the JIT layer defines a small expression IR, Arrow kernel ABI, MLIR backend hook, and DataFusion candidate discovery for future compiled kernels.
 - **Docs**: 📖 **[Read the Book Online](https://feichai0017.github.io/QuillSQL/)** 
 
 ---
@@ -127,7 +127,7 @@ EXPLAIN SELECT id, COUNT(*) FROM t GROUP BY id ORDER BY id;
 ## ⚠️ Current Limitations
 
 - Not yet supported: `ALTER`, `DROP INDEX`, predicate locking.
-- MLIR compilation is an extension hook today; unsupported expressions execute through native DataFusion.
+- MLIR compilation is a research skeleton today: it lowers supported expressions to textual MLIR-shaped modules and identifies candidate `FilterExec` / `ProjectionExec` nodes, but it does not replace DataFusion execution yet.
 
 ## 🧪 Testing
 

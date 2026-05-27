@@ -1,50 +1,33 @@
-use std::sync::Arc;
+mod expr;
+mod kernel;
+mod mlir;
+mod rule;
 
-use datafusion::common::config::ConfigOptions;
-use datafusion::common::Result;
-use datafusion::physical_optimizer::PhysicalOptimizerRule;
-use datafusion::physical_plan::ExecutionPlan;
+pub use expr::{JitBinaryOp, JitExpr, JitProjection, JitScalar, JitType};
+pub use kernel::{
+    ArrowArrayView, ArrowMutableArrayView, CompiledKernel, FilterKernelFn, JitTypeTag,
+    KernelBackend, KernelKind, ProjectionKernelFn,
+};
+pub use mlir::{MlirBackend, MlirModule};
+pub use rule::{JitCandidate, MlirJitRule};
 
-#[derive(Debug, Default)]
-pub struct MlirJitRule;
+use datafusion::common::DataFusionError;
+use thiserror::Error;
 
-impl MlirJitRule {
-    pub fn new() -> Self {
-        Self
-    }
+pub type JitResult<T> = std::result::Result<T, JitError>;
 
-    pub fn enabled() -> bool {
-        cfg!(feature = "jit-mlir")
-    }
+#[derive(Debug, Error)]
+pub enum JitError {
+    #[error("unsupported JIT expression: {0}")]
+    UnsupportedExpr(String),
+    #[error("unsupported JIT type: {0}")]
+    UnsupportedType(String),
+    #[error("JIT backend error: {0}")]
+    Backend(String),
 }
 
-impl PhysicalOptimizerRule for MlirJitRule {
-    fn optimize(
-        &self,
-        plan: Arc<dyn ExecutionPlan>,
-        _config: &ConfigOptions,
-    ) -> Result<Arc<dyn ExecutionPlan>> {
-        Ok(plan)
-    }
-
-    fn name(&self) -> &str {
-        "mlir_jit_rule"
-    }
-
-    fn schema_check(&self) -> bool {
-        true
-    }
-}
-
-#[derive(Debug, Default)]
-pub struct MlirBackend;
-
-impl MlirBackend {
-    pub fn new() -> Self {
-        Self
-    }
-
-    pub fn is_available(&self) -> bool {
-        cfg!(feature = "jit-mlir")
+impl From<JitError> for DataFusionError {
+    fn from(value: JitError) -> Self {
+        DataFusionError::Execution(value.to_string())
     }
 }
