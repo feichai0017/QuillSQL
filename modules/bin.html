@@ -37,7 +37,7 @@
             const default_dark_theme = "navy";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="../toc-19071d45.js"></script>
+        <script src="../toc-1d3cbbe2.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -172,17 +172,20 @@
 <h2 id="cli-binclientrs"><a class="header" href="#cli-binclientrs">CLI (<code>bin/client.rs</code>)</a></h2>
 <ul>
 <li>Uses <code>rustyline</code> to provide history, multi-line editing, and familiar shell shortcuts.</li>
-<li>Each command calls <code>database.run(sql)</code> and formats the resulting <code>Vec&lt;Tuple&gt;</code>.</li>
-<li>Supports meta commands (e.g., <code>.tables</code>) that expose catalog metadata—great for
-teaching how logical objects map to physical handles.</li>
+<li>Each command awaits <code>database.run(sql)</code> and formats the resulting Arrow
+<code>RecordBatch</code>es as a table.</li>
+<li>Catalog introspection is regular SQL through DataFusion, for example
+<code>SELECT * FROM information_schema.tables</code>.</li>
 </ul>
 <h2 id="http-binserverrs"><a class="header" href="#http-binserverrs">HTTP (<code>bin/server.rs</code>)</a></h2>
 <ul>
 <li>Built with <code>axum</code>/<code>hyper</code> (depending on the current <code>Cargo.toml</code>), exposing endpoints such as:
 <ul>
-<li><code>POST /query</code> – run arbitrary SQL and return rows or an error payload.</li>
-<li>Health/metrics endpoints—which you can extend in labs to surface background worker
-status or buffer metrics.</li>
+<li><code>POST /api/sql</code> – run one SQL string and return stringified rows or an error payload.</li>
+<li><code>POST /api/sql_batch</code> – split a semicolon-delimited script and return one result set
+per statement.</li>
+<li><code>/debug/...</code> endpoints expose lock, transaction, MVCC, and last-plan snapshots for
+local demos.</li>
 </ul>
 </li>
 <li>Configuration comes from <code>QUILL_DB_FILE</code>, <code>QUILL_HTTP_ADDR</code>, <code>PORT</code>, etc., mirroring
@@ -192,8 +195,8 @@ how production services inject settings.</li>
 <h2 id="teaching-ideas"><a class="header" href="#teaching-ideas">Teaching Ideas</a></h2>
 <ul>
 <li>Extend the CLI with <code>\describe table</code> to practice catalog lookups.</li>
-<li>Add transaction endpoints (BEGIN/COMMIT) to the HTTP server to demonstrate how
-<code>SessionContext</code> scopes transactions per connection.</li>
+<li>Add per-connection HTTP sessions if you want long-running browser transactions
+instead of the current single database mutex.</li>
 <li>Combine CLI interaction with <code>RUST_LOG</code> tracing to walk through the entire query
 lifecycle.</li>
 </ul>

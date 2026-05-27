@@ -38,7 +38,7 @@
             const default_dark_theme = "navy";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-19071d45.js"></script>
+        <script src="toc-1d3cbbe2.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -161,10 +161,10 @@
 
 <h1 id="quillsql-internals"><a class="header" href="#quillsql-internals">QuillSQL Internals</a></h1>
 <p>Welcome to the technical documentation for QuillSQL.</p>
-<p>This book documents QuillSQL as a SQL engine layered over Holt. It is intended for
-developers and contributors who want to understand the parser, planner, optimizer,
-Volcano executor, catalog, and transaction semantics without also maintaining a separate
-page store.</p>
+<p>This book documents QuillSQL as a DataFusion-fronted SQL research engine layered over
+Holt. It is intended for developers and contributors who want to understand the Holt
+storage adapter, DataFusion execution boundary, transaction semantics, and MLIR/JIT
+extension point without also maintaining a separate page store.</p>
 <hr>
 <h2 id="table-of-contents"><a class="header" href="#table-of-contents">Table of Contents</a></h2>
 <ul>
@@ -175,143 +175,152 @@ page store.</p>
 <p><strong>Core Modules</strong></p>
 <ul>
 <li><a href="#transaction-module"><strong>Transaction Manager</strong></a>: Concurrency control with MVCC and 2PL.</li>
-<li><a href="#query-planner-module"><strong>Query Plan</strong></a>: The journey from SQL to an executable plan.</li>
-<li><a href="#optimizer-module"><strong>Query Optimizer</strong></a>: Rule-based plan transformations.</li>
-<li><a href="#execution-engine"><strong>Execution Engine</strong></a>: The Volcano (iterator) execution model.</li>
 <li><a href="#catalog-module"><strong>Catalog</strong></a>: SQL metadata projection backed by Holt descriptors.</li>
 </ul>
 </li>
 </ul>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="quillsql-architecture"><a class="header" href="#quillsql-architecture">QuillSQL Architecture</a></h1>
-<p>QuillSQL is now a SQL layer over Holt. The project owns parsing, logical planning,
-optimization, Volcano execution, catalog projection, transaction state, MVCC visibility,
-and lock management. Persistent rows, indexes, catalog descriptors, and recovered
-transaction status live in <code>holt::DB</code>.</p>
+<p>QuillSQL is a SQL research layer over Holt. DataFusion owns SQL parsing, binding,
+logical optimization, physical optimization, and physical execution. QuillSQL owns the
+Holt catalog/table/index adapter, MVCC metadata, transaction status recovery, and the
+CLI/server surfaces.</p>
 <h2 id="end-to-end-pipeline"><a class="header" href="#end-to-end-pipeline">End-to-End Pipeline</a></h2>
 <pre class="mermaid">flowchart LR
-    SQL["SQL text"] --&gt; Parser["sql::parser"]
-    Parser --&gt; Logical["LogicalPlanner"]
-    Logical --&gt; Optimizer["LogicalOptimizer"]
-    Optimizer --&gt; Physical["PhysicalPlanner"]
-    Physical --&gt; Exec["ExecutionEngine (Volcano)"]
-
-    Session["SessionContext"] --&gt; Txn["TransactionManager"]
-    Txn --&gt; Locks["LockManager"]
-    Exec --&gt; Ctx["ExecutionContext"]
-    Ctx --&gt; TxnCtx["TxnContext"]
-    TxnCtx --&gt; Txn
-    TxnCtx --&gt; Locks
-
-    Ctx --&gt; Engine["HoltStorage"]
-    Engine --&gt; Table["HoltTableHandle"]
-    Engine --&gt; Index["HoltIndexHandle"]
+    SQL["SQL text"] --&gt; DF["DataFusion SessionContext"]
+    DF --&gt; Logical["DataFusion LogicalPlan"]
+    Logical --&gt; Optimized["DataFusion Optimizers"]
+    Optimized --&gt; Physical["DataFusion ExecutionPlan"]
+    Physical --&gt; Scan["HoltScanExec"]
+    Scan --&gt; Table["Holt table tree"]
+    Scan --&gt; Index["Holt index tree"]
     Table --&gt; Holt["holt::DB"]
     Index --&gt; Holt
-    Catalog["Catalog"] --&gt; Holt
+
+    Catalog["HoltCatalogProvider"] --&gt; DF
+    Catalog --&gt; Descriptors["Holt catalog tree"]
+    Txn["TransactionManager"] --&gt; Status["Holt txn tree"]
 </pre>
 
-<p>The executor never touches Holt directly. It asks <code>ExecutionContext</code> for a
-<code>TableBinding</code>, then uses object-safe table/index handles for scans and writes.</p>
+<p>DDL is the main place where QuillSQL intercepts DataFusion: <code>CREATE TABLE</code>,
+<code>CREATE INDEX</code>, and <code>DROP TABLE</code> update Holt descriptors and refresh the in-memory
+catalog projection. DML uses DataFusion table-provider hooks and writes through Holt.</p>
 <h2 id="storage-boundary"><a class="header" href="#storage-boundary">Storage Boundary</a></h2>
 <pre class="mermaid">flowchart TD
     subgraph QuillSQL
-        Catalog["Catalog descriptors"]
-        TableHandle["TableHandle"]
-        IndexHandle["IndexHandle"]
-        TxnStatus["Transaction statuses"]
+        Provider["HoltTableProvider"]
+        ScanExec["HoltScanExec"]
+        TxnMeta["TupleMeta / MVCC"]
     end
 
-    Catalog --&gt; HCatalog["Holt tree: catalog"]
-    TableHandle --&gt; HTable["Holt tree: table/&lt;table_id&gt;"]
-    IndexHandle --&gt; HIndex["Holt tree: index/&lt;index_id&gt;"]
-    TxnStatus --&gt; HTxn["Holt tree: txn"]
+    Provider --&gt; RowTree["table/&lt;table_id&gt;"]
+    Provider --&gt; IndexTree["index/&lt;index_id&gt;"]
+    Provider --&gt; CatalogTree["catalog"]
+    TxnMeta --&gt; TxnTree["txn"]
 
-    HCatalog --&gt; DB["holt::DB"]
-    HTable --&gt; DB
-    HIndex --&gt; DB
-    HTxn --&gt; DB
+    RowTree --&gt; DB["holt::DB"]
+    IndexTree --&gt; DB
+    CatalogTree --&gt; DB
+    TxnTree --&gt; DB
 </pre>
 
-<p>Holt is the only durable storage engine. QuillSQL no longer contains an internal page
-heap, buffer pool, B+Tree, storage scheduler, or SQL-data WAL. This keeps the boundary
-clear: QuillSQL decides SQL semantics; Holt owns durable bytes and its own logging.</p>
+<p>There is no QuillSQL-owned page cache, heap file, B+Tree, storage scheduler, or
+SQL-data WAL. Holt owns durable bytes and its own logging. QuillSQL decides SQL/MVCC
+semantics and encodes row/index values into Holt trees.</p>
 <h2 id="important-invariants"><a class="header" href="#important-invariants">Important Invariants</a></h2>
 <ul>
-<li>A table descriptor in Holt is the durable source of truth for a table id and schema.</li>
-<li><code>information_schema</code> is a SQL-visible virtual projection generated from the in-memory catalog.</li>
+<li>Holt descriptors are the durable source of truth for table ids, index ids, and schemas.</li>
+<li>DataFusion <code>information_schema</code> is generated from the Holt catalog provider.</li>
 <li>Row values are stored as encoded <code>TupleMeta + Tuple</code>.</li>
-<li>Index keys use order-preserving SQL encoding plus RID tie-breakers, so Holt byte order
-matches SQL range-scan order.</li>
-<li>Commit and rollback write final transaction status into Holt. Startup recovers those
-statuses before planning or executing statements.</li>
+<li>Index keys use order-preserving SQL encoding plus RID tie-breakers.</li>
+<li>Startup recovers transaction status from Holt before query execution.</li>
+<li>In-progress or unknown row versions are not visible as committed data.</li>
 </ul>
-<h2 id="execution-contract"><a class="header" href="#execution-contract">Execution Contract</a></h2>
-<p><code>TableBinding</code> is the executor’s storage facade:</p>
-<pre><code class="language-text">scan()
-index_scan(name, range)
-insert(txn, tuple)
-delete(txn, rid, prev_meta, prev_tuple)
-update(txn, rid, new_tuple, prev_meta, prev_tuple)
-prepare_row_for_write(txn, rid, observed_meta)
-</code></pre>
-<p>Physical operators stay small because they only express SQL work: scan rows, evaluate
-expressions, ask <code>TxnContext</code> for visibility/locks, and call the table binding for
-mutations.</p>
-<h2 id="restart-behavior"><a class="header" href="#restart-behavior">Restart Behavior</a></h2>
-<p>On open, QuillSQL loads Holt catalog descriptors, reconstructs the in-memory catalog,
-loads transaction statuses, and advances the next transaction id past recovered ids.
-Unknown or in-progress row versions are not treated as committed by visibility checks.</p>
+<h2 id="query-compilation-boundary"><a class="header" href="#query-compilation-boundary">Query Compilation Boundary</a></h2>
+<p>The JIT research boundary is the DataFusion <code>ExecutionPlan</code> and Arrow <code>RecordBatch</code>
+interface. The <code>jit-mlir</code> feature wires in an MLIR-named physical optimizer rule as the
+extension point; native DataFusion execution remains the fallback for unsupported
+expressions.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="module-overview"><a class="header" href="#module-overview">Module Overview</a></h1>
-<p>QuillSQL is organized around the SQL stack. Holt is the only persistent storage
-backend, so the remaining modules focus on names, plans, operators, transactions, and
-typed tuple handling.</p>
-<h2 id="sql-front-end-srcsql"><a class="header" href="#sql-front-end-srcsql">SQL Front-End (<code>src/sql</code>)</a></h2>
-<p>Parses SQL through <code>sqlparser</code>. The parser keeps the AST SQL-shaped so later stages can
-make binding and planning decisions explicitly.</p>
-<h2 id="planning-srcplan"><a class="header" href="#planning-srcplan">Planning (<code>src/plan</code>)</a></h2>
-<p><code>LogicalPlanner</code> binds table and column names, checks types, and produces <code>LogicalPlan</code>.
-<code>PhysicalPlanner</code> lowers optimized logical plans into Volcano operators. DDL does not
-accept storage backend clauses; tables and indexes are Holt-backed by definition.</p>
-<h2 id="optimizer-srcoptimizer"><a class="header" href="#optimizer-srcoptimizer">Optimizer (<code>src/optimizer</code>)</a></h2>
-<p>The optimizer is a small rule pipeline. Rules are pure rewrites over <code>LogicalPlan</code>, which
-makes them easy to test and reason about. The planner can choose Holt index scans for
-simple equality/range predicates.</p>
-<h2 id="execution-srcexecution"><a class="header" href="#execution-srcexecution">Execution (<code>src/execution</code>)</a></h2>
-<p>Every physical operator implements <code>VolcanoExecutor</code> with <code>init</code> and <code>next</code>. Operators
-receive an <code>ExecutionContext</code>, which provides catalog access, expression evaluation,
-transaction helpers, and <code>HoltStorage</code>.</p>
-<h2 id="catalog-srccatalog"><a class="header" href="#catalog-srccatalog">Catalog (<code>src/catalog</code>)</a></h2>
-<p>The catalog keeps an in-memory projection of schemas, tables, indexes, and statistics.
-Durable descriptors are stored in Holt. <code>information_schema</code> is a virtual table family
-generated from the in-memory catalog at scan time.</p>
-<h2 id="storage-facade-srcstorage"><a class="header" href="#storage-facade-srcstorage">Storage Facade (<code>src/storage</code>)</a></h2>
-<p>The storage module contains:</p>
+<p>QuillSQL is now a DataFusion-fronted SQL research engine backed by Holt. The
+project keeps its own persistent storage adapter, MVCC metadata, transaction
+status handling, CLI, and server, while DataFusion owns SQL parsing, planning,
+optimization, and physical execution.</p>
+<h2 id="database-srcdatabasers"><a class="header" href="#database-srcdatabasers">Database (<code>src/database.rs</code>)</a></h2>
+<p><code>Database::run</code> is the only SQL entry point. It creates a DataFusion session,
+registers the Holt catalog provider, intercepts Holt-backed DDL, and returns
+Arrow <code>RecordBatch</code> output.</p>
+<h2 id="datafusion-adapter-srcdf"><a class="header" href="#datafusion-adapter-srcdf">DataFusion Adapter (<code>src/df</code>)</a></h2>
+<p>This package contains the DataFusion integration:</p>
 <div class="table-wrapper">
 <table>
 <thead>
 <tr><th>File</th><th>Role</th></tr>
 </thead>
 <tbody>
-<tr><td><code>engine.rs</code></td><td>Object-safe table/index traits and the Holt storage entrypoint.</td></tr>
+<tr><td><code>mod.rs</code></td><td>Shared adapter state and transaction/session boundary.</td></tr>
+<tr><td><code>provider.rs</code></td><td>DataFusion catalog, schema, and table providers.</td></tr>
+<tr><td><code>exec.rs</code></td><td><code>HoltScanExec</code> and DML result execution nodes.</td></tr>
+<tr><td><code>ddl.rs</code></td><td>Holt-backed DDL handling.</td></tr>
+<tr><td><code>filter.rs</code></td><td>Indexed filter recognition and residual filter evaluation.</td></tr>
+<tr><td><code>arrow.rs</code></td><td>Arrow/Quill row conversion and result formatting.</td></tr>
+</tbody>
+</table>
+</div>
+<p>Simple single-column indexed equality/range predicates can narrow the Holt scan.
+DataFusion still applies residual filters, so pushdown remains correctness-first.</p>
+<h2 id="jit-srcjit"><a class="header" href="#jit-srcjit">JIT (<code>src/jit</code>)</a></h2>
+<p>The JIT layer is attached as a DataFusion physical optimizer rule. Its current
+scope is a research skeleton:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>File</th><th>Role</th></tr>
+</thead>
+<tbody>
+<tr><td><code>expr.rs</code></td><td>Small JIT expression IR lowered from DataFusion physical expressions.</td></tr>
+<tr><td><code>kernel.rs</code></td><td>Arrow batch kernel ABI and backend trait.</td></tr>
+<tr><td><code>mlir/</code></td><td>MLIR-first backend that emits textual MLIR-shaped modules.</td></tr>
+<tr><td><code>rule.rs</code></td><td>DataFusion physical optimizer rule that discovers <code>FilterExec</code> and <code>ProjectionExec</code> candidates.</td></tr>
+</tbody>
+</table>
+</div>
+<p>The default behaviour is still correctness-first: candidates are inspected and
+lowered, but the rule does not replace DataFusion execution until executable
+kernels exist.</p>
+<h2 id="catalog-srccatalog"><a class="header" href="#catalog-srccatalog">Catalog (<code>src/catalog</code>)</a></h2>
+<p>The catalog is an in-memory projection of Holt descriptors. Holt is the source of
+truth for table and index ids, schemas, and descriptor recovery. DataFusion
+provides <code>information_schema</code> from the catalog provider; QuillSQL no longer stores
+or scans system-table rows itself.</p>
+<h2 id="storage-srcstorage"><a class="header" href="#storage-srcstorage">Storage (<code>src/storage</code>)</a></h2>
+<p>The storage module is the Holt adapter and private row codec:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>File</th><th>Role</th></tr>
+</thead>
+<tbody>
+<tr><td><code>engine.rs</code></td><td>Object-safe table/index handles used by the Holt adapter.</td></tr>
 <tr><td><code>holt.rs</code></td><td>Holt table/index handles, descriptor persistence, ordered index codec, and transaction status persistence.</td></tr>
 <tr><td><code>record.rs</code></td><td><code>RecordId</code> and <code>TupleMeta</code>, kept as SQL-layer MVCC metadata.</td></tr>
-<tr><td><code>tuple.rs</code>, <code>codec/</code></td><td>Tuple and scalar encoding utilities.</td></tr>
+<tr><td><code>tuple.rs</code>, <code>codec/</code></td><td>Private tuple/scalar encoding utilities for Holt row values and index keys.</td></tr>
 </tbody>
 </table>
 </div>
 <p>There is no QuillSQL-owned page cache, heap file, B+Tree, or WAL path.</p>
 <h2 id="transactions-srctransaction"><a class="header" href="#transactions-srctransaction">Transactions (<code>src/transaction</code>)</a></h2>
-<p><code>TransactionManager</code> assigns ids, tracks statuses, releases locks, and drives undo on
-abort. <code>TxnContext</code> gives operators snapshot visibility and locking helpers. Holt stores
-the recovered transaction status table; QuillSQL keeps MVCC semantics in <code>TupleMeta</code>.</p>
-<h2 id="front-ends-srcbin"><a class="header" href="#front-ends-srcbin">Front-Ends (<code>src/bin</code>)</a></h2>
-<p><code>client</code> is the interactive SQL shell. <code>server</code> exposes HTTP endpoints for SQL execution
-and debug views over locks, transactions, plans, and MVCC samples.</p>
-<h2 id="tests-srctests"><a class="header" href="#tests-srctests">Tests (<code>src/tests</code>)</a></h2>
-<p>The integration tests cover SQL behavior, Holt persistence/reopen, Holt indexes,
-transaction isolation, rollback, and metadata projection.</p>
+<p><code>TransactionManager</code> assigns ids, tracks status, releases locks, and drives undo on
+abort. <code>TxnContext</code> provides snapshot visibility and write checks. Holt stores the
+recovered transaction status table; row versions keep MVCC state in <code>TupleMeta</code>.</p>
+<h2 id="front-ends-srcbin"><a class="header" href="#front-ends-srcbin">Front Ends (<code>src/bin</code>)</a></h2>
+<p><code>client</code> is the interactive SQL shell. <code>server</code> exposes HTTP endpoints for SQL
+execution and debug views over locks, transactions, plans, and MVCC samples.</p>
+<h2 id="tests-tests"><a class="header" href="#tests-tests">Tests (<code>tests</code>)</a></h2>
+<p>Integration tests cover DataFusion SQL over Holt tables, insert/update/delete,
+secondary indexes, persistence/reopen, DataFusion <code>information_schema</code>, and
+<code>EXPLAIN</code> output containing <code>HoltScanExec</code>.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="contributors-guide"><a class="header" href="#contributors-guide">Contributor’s Guide</a></h1>
 <p>Welcome, and thank you for your interest in contributing to QuillSQL! Whether you’re fixing a bug, adding a new feature, or improving the documentation, this guide will help you get started.</p>
@@ -415,83 +424,16 @@ cargo install mdbook-mermaid
 </li>
 </ol>
 <div style="break-before: page; page-break-before: always;"></div>
-<h1 id="sql-front-end"><a class="header" href="#sql-front-end">SQL Front-End</a></h1>
-<p>The SQL front-end lives in <code>src/sql/</code>. It turns raw UTF-8 query text into the abstract
-syntax trees (ASTs) consumed by planning, while layering Quill-specific name handling
-and diagnostics on top of <a href="https://docs.rs/sqlparser"><code>sqlparser</code></a>.</p>
-<hr>
+<h1 id="catalog-module"><a class="header" href="#catalog-module">Catalog Module</a></h1>
+<p><code>src/catalog/</code> is QuillSQL’s in-memory projection of Holt descriptors. Holt is the
+durable source of truth; the catalog is rebuilt from Holt on open and then exposed to
+DataFusion through <code>HoltCatalogProvider</code> and <code>HoltSchemaProvider</code>.</p>
 <h2 id="responsibilities"><a class="header" href="#responsibilities">Responsibilities</a></h2>
 <ul>
-<li>Parse SQL text into <code>sqlparser::ast::Statement</code> values.</li>
-<li>Record precise spans so error messages can highlight the exact byte range.</li>
-<li>Normalise identifiers (case folding, quoted names, multi-part paths).</li>
-<li>Provide helper traits so the logical planner can lower AST nodes without duplicating
-syntax checks.</li>
-</ul>
-<hr>
-<h2 id="directory-layout"><a class="header" href="#directory-layout">Directory Layout</a></h2>
-<div class="table-wrapper">
-<table>
-<thead>
-<tr><th>Path</th><th>Purpose</th><th>Key Types</th></tr>
-</thead>
-<tbody>
-<tr><td><code>lexer.rs</code></td><td>Token helpers that preserve offsets.</td><td><code>Token</code>, <code>TokenExt</code></td></tr>
-<tr><td><code>parser.rs</code></td><td>Single entry point used across the codebase.</td><td><code>parse_sql</code>, <code>SqlInput</code></td></tr>
-<tr><td><code>ast/mod.rs</code></td><td>Planner-facing helpers.</td><td><code>NormalizedIdent</code>, <code>ObjectNameExt</code></td></tr>
-<tr><td><code>error.rs</code></td><td>Span-aware parser errors.</td><td><code>SqlError</code>, <code>SqlSpan</code></td></tr>
-</tbody>
-</table>
-</div>
-<hr>
-<h2 id="parsing-pipeline"><a class="header" href="#parsing-pipeline">Parsing Pipeline</a></h2>
-<ol>
-<li><strong>Lexing</strong> – wrap sqlparser’s lexer so every token keeps start/end offsets.</li>
-<li><strong>AST generation</strong> – invoke sqlparser to produce standard <code>Statement</code> structs.</li>
-<li><strong>Normalisation</strong> – convert identifiers into <code>NormalizedIdent</code>, deal with schema
-qualifiers, and build pieces of <code>TableReference</code>.</li>
-<li><strong>Planner bridge</strong> – traits like <code>ColumnRefExt</code> expose methods such as <code>relation()</code> or
-<code>column()</code> so <code>LogicalPlanner</code> can treat different SQL syntaxes uniformly.</li>
-</ol>
-<hr>
-<h2 id="interactions"><a class="header" href="#interactions">Interactions</a></h2>
-<ul>
-<li><strong>Logical planner</strong> consumes the AST directly and relies on helper traits from this
-module to convert identifiers into catalog references.</li>
-<li><strong>Database / Session</strong> catch <code>SqlError</code> values, so both CLI and HTTP front-ends show
-consistent caret diagnostics.</li>
-<li><strong>Tests</strong> (<code>tests/sql_example/*.slt</code>, <code>tests/sql_parser.rs</code>) assert on parser output and
-error strings to keep teaching feedback stable.</li>
-</ul>
-<hr>
-<h2 id="implementation-notes"><a class="header" href="#implementation-notes">Implementation Notes</a></h2>
-<ul>
-<li><code>SqlSpan</code> stores byte offsets, which makes it trivial to slice the original SQL and
-render highlighted errors.</li>
-<li>Extended statements (e.g., <code>EXPLAIN</code>, <code>BEGIN TRANSACTION</code>) show how to Layer
-Quill-specific syntax without forking sqlparser entirely.</li>
-<li>We avoid desugaring at this stage so students can trace SQL → AST → logical plan step
-by step.</li>
-</ul>
-<hr>
-<h2 id="teaching-ideas"><a class="header" href="#teaching-ideas">Teaching Ideas</a></h2>
-<ul>
-<li>Add a new statement (<code>CREATE VIEW</code>, <code>ALTER TABLE ...</code>) and follow the AST through the
-pipeline.</li>
-<li>Improve error hints (“Did you forget FROM?”) to see how better diagnostics aid users.</li>
-<li>Write fuzz tests that round-trip SQL → AST → SQL to discuss parser determinism.</li>
-</ul>
-<div style="break-before: page; page-break-before: always;"></div>
-<h1 id="catalog-module"><a class="header" href="#catalog-module">Catalog Module</a></h1>
-<p><code>src/catalog/</code> is QuillSQL’s data dictionary. It maps SQL names to schemas, table ids,
-index ids, and statistics. Durable descriptors are stored in Holt; the in-memory catalog
-is rebuilt from those descriptors during startup.</p>
-<h2 id="responsibilities-1"><a class="header" href="#responsibilities-1">Responsibilities</a></h2>
-<ul>
-<li>Track schemas, tables, columns, indexes, and table statistics.</li>
+<li>Track schemas, tables, columns, indexes, and Holt ids.</li>
 <li>Create and drop Holt table/index descriptors during DDL.</li>
-<li>Generate SQL-visible <code>information_schema.schemas</code>, <code>tables</code>, <code>columns</code>, and <code>indexes</code>.</li>
-<li>Give the planner and executor stable <code>TableReference</code> and <code>Schema</code> lookups.</li>
+<li>Rebuild the in-memory catalog from Holt descriptors during startup.</li>
+<li>Provide table metadata to DataFusion’s catalog and <code>information_schema</code> support.</li>
 </ul>
 <h2 id="key-files"><a class="header" href="#key-files">Key Files</a></h2>
 <div class="table-wrapper">
@@ -501,10 +443,9 @@ is rebuilt from those descriptors during startup.</p>
 </thead>
 <tbody>
 <tr><td><code>core.rs</code></td><td>Main catalog types and DDL metadata mutation.</td></tr>
-<tr><td><code>information.rs</code></td><td>Startup loader and virtual <code>information_schema</code> row generation.</td></tr>
-<tr><td><code>schema.rs</code></td><td><code>Schema</code>, <code>SchemaRef</code>, and projection helpers.</td></tr>
+<tr><td><code>information.rs</code></td><td>Startup loader for Holt table/index descriptors.</td></tr>
+<tr><td><code>schema.rs</code></td><td><code>Schema</code>, <code>SchemaRef</code>, and projection helpers used by the private Holt row codec.</td></tr>
 <tr><td><code>column.rs</code>, <code>data_type.rs</code></td><td>Column metadata and SQL type mapping.</td></tr>
-<tr><td><code>stats.rs</code></td><td><code>ANALYZE</code> output and selectivity inputs.</td></tr>
 </tbody>
 </table>
 </div>
@@ -512,516 +453,10 @@ is rebuilt from those descriptors during startup.</p>
 <ol>
 <li>DDL creates or removes a Holt descriptor and updates the in-memory catalog.</li>
 <li>On reopen, QuillSQL rebuilds the in-memory catalog from Holt descriptors.</li>
-<li>Queries against <code>information_schema</code> scan virtual rows generated from that catalog.</li>
+<li>DataFusion reads catalog metadata through <code>HoltCatalogProvider</code>.</li>
+<li>DataFusion generates SQL-visible <code>information_schema</code> rows from that provider.</li>
 </ol>
-<p>This means Holt is the durable source of truth, while <code>information_schema</code> remains a
-normal SQL-visible view of metadata without storing duplicate system rows.</p>
-<div style="break-before: page; page-break-before: always;"></div>
-<h1 id="expression--scalar-evaluation"><a class="header" href="#expression--scalar-evaluation">Expression &amp; Scalar Evaluation</a></h1>
-<p>The expression subsystem (<code>src/expression/</code>) powers column computations, predicates, and
-UPDATE assignments. It keeps expression trees approachable while demonstrating how they
-are evaluated during execution.</p>
-<hr>
-<h2 id="responsibilities-2"><a class="header" href="#responsibilities-2">Responsibilities</a></h2>
-<ul>
-<li>Store planner-produced expression trees (<code>Expr</code>) in a serializable, traversable enum.</li>
-<li>Bind column references, constants, and built-in functions.</li>
-<li>Evaluate expressions against <code>Tuple</code>s at runtime, yielding <code>ScalarValue</code>.</li>
-<li>Provide type inference and casting so arithmetic/comparison operators remain well-typed.</li>
-</ul>
-<hr>
-<h2 id="directory-layout-1"><a class="header" href="#directory-layout-1">Directory Layout</a></h2>
-<div class="table-wrapper">
-<table>
-<thead>
-<tr><th>Path</th><th>Description</th><th>Key Types</th></tr>
-</thead>
-<tbody>
-<tr><td><code>mod.rs</code></td><td>Public API and core enum.</td><td><code>Expr</code>, <code>ExprTrait</code></td></tr>
-<tr><td><code>scalar.rs</code></td><td>Runtime scalar representation + conversions.</td><td><code>ScalarValue</code>, <code>DataType</code></td></tr>
-<tr><td><code>binder.rs</code></td><td>Helpers for the planner/SQL binder.</td><td><code>BoundExpr</code></td></tr>
-</tbody>
-</table>
-</div>
-<hr>
-<h2 id="concepts"><a class="header" href="#concepts">Concepts</a></h2>
-<h3 id="expr-enum"><a class="header" href="#expr-enum">Expr Enum</a></h3>
-<p>Expresses column refs, literals, comparisons, logical ops, arithmetic, and function
-invocations. Each variant implements <code>ExprTrait::evaluate(&amp;self, tuple)</code> and returns a
-<code>ScalarValue</code>.</p>
-<h3 id="scalarvalue"><a class="header" href="#scalarvalue">ScalarValue</a></h3>
-<p>Unified runtime value across types (int, bigint, bool, decimal, varchar, …). Includes
-<code>cast_to(DataType)</code> so results can be coerced to the target column type before writes.</p>
-<h3 id="type-inference"><a class="header" href="#type-inference">Type Inference</a></h3>
-<p>Planner code invokes <code>Expr::data_type(schema)</code> to predict result types. Execution then
-casts when needed—e.g., <code>UPDATE t SET a = b + 1</code> uses the column’s declared type for <code>a</code>.</p>
-<hr>
-<h2 id="interactions-1"><a class="header" href="#interactions-1">Interactions</a></h2>
-<ul>
-<li><strong>Planner</strong> – builds <code>Expr</code> trees with bound columns; execution reuses them verbatim.</li>
-<li><strong>ExecutionContext</strong> – exposes <code>eval_expr</code> and <code>eval_predicate</code>, wrapping expression
-evaluation plus boolean coercion (<code>NULL</code> becomes false for predicates).</li>
-<li><strong>Optimizer</strong> – rules like constant folding traverse <code>Expr</code> trees and reuse
-<code>ScalarValue</code> arithmetic helpers.</li>
-</ul>
-<hr>
-<h2 id="teaching-ideas-1"><a class="header" href="#teaching-ideas-1">Teaching Ideas</a></h2>
-<ul>
-<li>Add a simple built-in function (<code>length(expr)</code>) to follow the pipeline from parsing to
-evaluation.</li>
-<li>Implement short-circuiting or full three-valued boolean logic and validate with
-sqllogictest.</li>
-<li>Instrument <code>Expr::evaluate</code> with tracing to visualise expression evaluation inside
-physical operators.</li>
-</ul>
-<div style="break-before: page; page-break-before: always;"></div>
-<h1 id="query-planner-module"><a class="header" href="#query-planner-module">Query Planner Module</a></h1>
-<p><code>src/plan/</code> bridges parsed SQL and executable operators. It converts the AST into a
-logical plan, applies rewrites (via the optimizer), and finally emits a physical plan
-(<code>PhysicalPlan</code>) that the Volcano engine can run.</p>
-<hr>
-<h2 id="responsibilities-3"><a class="header" href="#responsibilities-3">Responsibilities</a></h2>
-<ol>
-<li><strong>LogicalPlanner</strong> – walks the AST, binds table/column names using <code>PlannerContext</code>,
-performs type checking, and builds a <code>LogicalPlan</code> tree.</li>
-<li><strong>PlannerContext</strong> – exposes catalog lookups plus scope information for CTEs, subqueries,
-and aliases.</li>
-<li><strong>PhysicalPlanner</strong> – lowers an optimized <code>LogicalPlan</code> into a tree of Volcano operators.</li>
-</ol>
-<hr>
-<h2 id="directory-layout-2"><a class="header" href="#directory-layout-2">Directory Layout</a></h2>
-<div class="table-wrapper">
-<table>
-<thead>
-<tr><th>Path</th><th>Description</th><th>Key Types</th></tr>
-</thead>
-<tbody>
-<tr><td><code>logical_plan.rs</code></td><td>Logical algebra nodes.</td><td><code>LogicalPlan</code>, <code>LogicalExpr</code>, <code>JoinType</code></td></tr>
-<tr><td><code>logical_planner.rs</code></td><td>AST → logical transformation.</td><td><code>LogicalPlanner</code></td></tr>
-<tr><td><code>physical_plan.rs</code></td><td><code>PhysicalPlan</code> enum definition.</td><td><code>PhysicalPlan</code>, <code>Physical*</code> structs</td></tr>
-<tr><td><code>physical_planner.rs</code></td><td>Logical → physical lowering.</td><td><code>PhysicalPlanner</code></td></tr>
-<tr><td><code>planner_context.rs</code></td><td>Catalog/scope abstraction.</td><td><code>PlannerContext</code></td></tr>
-</tbody>
-</table>
-</div>
-<hr>
-<h2 id="workflow"><a class="header" href="#workflow">Workflow</a></h2>
-<ol>
-<li><strong>Name binding</strong> – <code>LogicalPlanner</code> resolves table + column references, creates
-<code>TableReference</code>s, and validates schemas via the catalog.</li>
-<li><strong>Logical tree</strong> – each SQL clause becomes a logical node (FROM → <code>SeqScan</code>, WHERE →
-<code>Filter</code>, GROUP BY → <code>Aggregate</code>, etc.).</li>
-<li><strong>Physical selection</strong> – <code>PhysicalPlanner</code> picks concrete algorithms (sequential scan,
-index scan, nested-loop join, sort, limit …). Because every physical node implements
-<code>VolcanoExecutor</code>, the execution engine can pull tuples immediately.</li>
-</ol>
-<hr>
-<h2 id="interactions-2"><a class="header" href="#interactions-2">Interactions</a></h2>
-<ul>
-<li><strong>SQL front-end</strong> – provides the AST; helper traits (<code>NormalizedIdent</code>, etc.) keep name
-resolution consistent.</li>
-<li><strong>Catalog</strong> – <code>PlannerContext</code> relies on it to confirm table/index existence and fetch
-schemas.</li>
-<li><strong>Optimizer</strong> – operates purely on <code>LogicalPlan</code>; the planner must emit clean,
-traversable trees so rules can fire.</li>
-<li><strong>Execution</strong> – physical nodes carry <code>TableReference</code>, <code>SchemaRef</code>, and hints that the
-execution engine passes to the storage layer.</li>
-</ul>
-<hr>
-<h2 id="teaching-ideas-2"><a class="header" href="#teaching-ideas-2">Teaching Ideas</a></h2>
-<ul>
-<li>Implement a new logical operator (e.g., <code>LogicalDistinct</code>) and add the corresponding
-physical operator to trace the full lifecycle.</li>
-<li>Experiment with early projection inside the logical plan and observe its impact on
-downstream operators.</li>
-<li>Use <code>pretty_format_logical_plan</code>/<code>physical_plan</code> dumps to visualise rewrites before and
-after optimizer passes.</li>
-</ul>
-<hr>
-<p>Further reading: <a href="#the-lifecycle-of-a-query">The Lifecycle of a Query</a></p>
-<div style="break-before: page; page-break-before: always;"></div>
-<h1 id="the-lifecycle-of-a-query"><a class="header" href="#the-lifecycle-of-a-query">The Lifecycle of a Query</a></h1>
-<p>When you submit a SQL query to a database, it doesn’t just magically produce a result. The database undertakes a sophisticated, multi-stage process to translate the declarative SQL statement (which describes <em>what</em> data you want) into an imperative, efficient execution plan (which describes <em>how</em> to get that data). This entire process is the responsibility of the <strong>Query Planner</strong>.</p>
-<p>In QuillSQL, this process follows a classic, compiler-like pipeline, which is a cornerstone of modern database architecture as taught in courses like CMU 15-445.</p>
-<p>The journey from a SQL string to an executable plan involves several transformations:</p>
-<p><strong>SQL String</strong> -&gt; <strong>AST (Abstract Syntax Tree)</strong> -&gt; <strong>Logical Plan</strong> -&gt; <strong>Optimized Logical Plan</strong> -&gt; <strong>Physical Plan</strong></p>
-<p>Let’s break down each stage.</p>
-<h3 id="stage-1-parsing-sql---ast"><a class="header" href="#stage-1-parsing-sql---ast">Stage 1: Parsing (SQL -&gt; AST)</a></h3>
-<p>The first step is purely syntactic. The raw SQL query string is fed into a parser. QuillSQL uses the excellent <code>sqlparser</code> crate for this. The parser checks if the SQL conforms to valid grammar and, if so, converts it into an <strong>Abstract Syntax Tree (AST)</strong>.</p>
-<p>An AST is a direct tree representation of the SQL query’s structure. For example, <code>SELECT id FROM users WHERE age &gt; 30</code> would be parsed into a tree structure with nodes representing the <code>SELECT</code> clause, the table <code>users</code>, the <code>WHERE</code> clause, and the predicate <code>age &gt; 30</code>.</p>
-<h3 id="stage-2-logical-planning-ast---logical-plan"><a class="header" href="#stage-2-logical-planning-ast---logical-plan">Stage 2: Logical Planning (AST -&gt; Logical Plan)</a></h3>
-<p>Next, the <code>LogicalPlanner</code> (<code>plan/logical_planner.rs</code>) walks the AST and converts it into a <strong>Logical Plan</strong>.</p>
-<p>A Logical Plan is a tree of relational algebra operators. It describes the query in terms of high-level data operations, completely independent of how the data is stored or which algorithms will be used. It defines <em>what</em> to do, not <em>how</em> to do it.</p>
-<p>Key logical operators in QuillSQL (<code>plan/logical_plan/mod.rs</code>) include:</p>
-<ul>
-<li><strong><code>TableScan(users)</code></strong>: Represents reading the entire <code>users</code> table.</li>
-<li><strong><code>Filter(predicate: age &gt; 30)</code></strong>: Represents filtering rows based on a condition.</li>
-<li><strong><code>Projection(columns: [id])</code></strong>: Represents selecting specific columns.</li>
-<li><strong><code>Join</code></strong>: Represents joining two data sources.</li>
-<li><strong><code>Aggregate</code></strong>: Represents a <code>GROUP BY</code> operation.</li>
-<li><strong><code>Sort</code></strong>: Represents an <code>ORDER BY</code> operation.</li>
-</ul>
-<p>For our example query, the initial logical plan might look like this:</p>
-<pre><code>Projection(columns=[id])
-  └── Filter(predicate=age &gt; 30)
-        └── TableScan(users)
-</code></pre>
-<h3 id="stage-3-logical-optimization"><a class="header" href="#stage-3-logical-optimization">Stage 3: Logical Optimization</a></h3>
-<p>Before executing the plan, we have a crucial opportunity to make it more efficient. The <code>LogicalOptimizer</code> (<code>optimizer/logical_optimizer.rs</code>) takes the logical plan and applies a series of <strong>transformation rules</strong> to produce a new, equivalent logical plan that is expected to be faster.</p>
-<p>QuillSQL uses a simple but effective rule-based optimizer. A classic example of such a rule is <strong>Predicate Pushdown</strong>. Consider this query:</p>
-<p><code>SELECT name FROM (SELECT * FROM users JOIN cities ON users.city_id = cities.id) WHERE users.age &gt; 30;</code></p>
-<p>A naive logical plan would first perform a full <code>JOIN</code> between <code>users</code> and <code>cities</code> and <em>then</em> filter the massive result. Predicate pushdown is a rule that would rewrite the plan to apply the <code>age &gt; 30</code> filter <em>before</em> the join:</p>
-<p><strong>Before Optimization:</strong></p>
-<pre><code>Filter(users.age &gt; 30)
-  └── Join(users.city_id = cities.id)
-        ├── TableScan(users)
-        └── TableScan(cities)
-</code></pre>
-<p><strong>After Optimization (Predicate Pushdown):</strong></p>
-<pre><code>Join(users.city_id = cities.id)
-  ├── Filter(users.age &gt; 30)
-  │     └── TableScan(users)
-  └── TableScan(cities)
-</code></pre>
-<p>By filtering early, we dramatically reduce the number of rows that need to be processed by the expensive <code>Join</code> operator. QuillSQL implements similar rules, such as <code>PushDownLimit</code>, which pushes <code>LIMIT</code> clauses down the tree to reduce the amount of data processed.</p>
-<h3 id="stage-4-physical-planning-logical-plan---physical-plan"><a class="header" href="#stage-4-physical-planning-logical-plan---physical-plan">Stage 4: Physical Planning (Logical Plan -&gt; Physical Plan)</a></h3>
-<p>Finally, the <code>PhysicalPlanner</code> (<code>plan/physical_planner.rs</code>) converts the optimized logical plan into a <strong>Physical Plan</strong>.</p>
-<p>A Physical Plan describes exactly <em>how</em> the query will be executed. It maps each logical operator to a concrete algorithm or implementation.</p>
-<ul>
-<li>A <code>LogicalPlan::TableScan</code> becomes a <code>PhysicalSeqScan</code> (a sequential scan of the table heap).</li>
-<li>A <code>LogicalPlan::Filter</code> becomes a <code>PhysicalFilter</code>, which implements the filtering logic.</li>
-<li>A <code>LogicalPlan::Join</code> becomes a <code>PhysicalNestedLoopJoin</code>. This is where the database commits to a specific join algorithm. A more advanced database might have multiple options (e.g., <code>PhysicalHashJoin</code>, <code>PhysicalSortMergeJoin</code>) and would use a cost model to choose the best one. QuillSQL currently implements Nested Loop Join.</li>
-</ul>
-<p>Each node in the physical plan tree is an executor that the <a href="#execution-engine">Execution Engine</a> can run. This final plan is what gets executed to produce the query result.</p>
-<h2 id="conclusion"><a class="header" href="#conclusion">Conclusion</a></h2>
-<p>This layered approach—from syntax to a logical representation, then to an optimized logical representation, and finally to a concrete physical execution plan—is fundamental to database design. It provides a clear separation of concerns and, most importantly, creates a dedicated <strong>optimization stage</strong>, which is the key to achieving high performance on a wide variety of SQL queries.</p>
-<hr>
-<h2 id="for-study--discussion"><a class="header" href="#for-study--discussion">For Study &amp; Discussion</a></h2>
-<ol>
-<li>
-<p><strong>Logical vs. Physical</strong>: Why is the separation between logical and physical plans so important? What would be the disadvantages of a simpler system that converted the AST directly into a physical plan?</p>
-</li>
-<li>
-<p><strong>Join Algorithms</strong>: QuillSQL currently only implements <code>NestedLoopJoin</code>. What are two other common join algorithms? Describe how they work and in what scenarios they would be more performant than a nested loop join.</p>
-</li>
-<li>
-<p><strong>Programming Exercise (Advanced)</strong>: Implement a <code>PhysicalHashJoin</code> operator. This is a significant undertaking that involves:
-a.  Creating a <code>PhysicalHashJoin</code> struct that implements the <code>VolcanoExecutor</code> trait.
-b.  In the <code>init()</code> phase, it should consume the entire “build” side (typically the smaller, right-hand table) and build an in-memory hash table from its rows.
-c.  In the <code>next()</code> phase, it should read from the “probe” side (the left-hand table) one row at a time, probe the hash table for matches, and emit the joined tuples.
-d.  Modify the <code>PhysicalPlanner</code> to choose <code>PhysicalHashJoin</code> instead of <code>PhysicalNestedLoopJoin</code> for equi-joins.</p>
-</li>
-<li>
-<p><strong>Programming Exercise</strong>: Add support for the <code>UNION ALL</code> operator. This would involve:
-a.  Adding a <code>Union</code> variant to the <code>LogicalPlan</code> enum.
-b.  Updating the <code>LogicalPlanner</code> to recognize the <code>UNION</code> syntax in the AST and create a <code>LogicalPlan::Union</code> node.
-c.  Creating a <code>PhysicalUnion</code> executor that pulls tuples from its first child until it’s exhausted, and then pulls tuples from its second child.</p>
-</li>
-</ol>
-<div style="break-before: page; page-break-before: always;"></div>
-<h1 id="optimizer-module"><a class="header" href="#optimizer-module">Optimizer Module</a></h1>
-<p><code>src/optimizer/</code> contains a lightweight, teaching-friendly rule engine. It rewrites
-<code>LogicalPlan</code> trees into cheaper equivalents without requiring a full cost-based
-framework.</p>
-<hr>
-<h2 id="responsibilities-4"><a class="header" href="#responsibilities-4">Responsibilities</a></h2>
-<ul>
-<li>Define the <code>OptimizerRule</code> trait (“match → rewrite”).</li>
-<li>Ship built-in rules such as predicate pushdown, projection pruning, and limit pushdown.</li>
-<li>Provide a pipeline (<code>LogicalOptimizer</code>) that repeatedly applies rules until reaching a
-fixpoint, while remaining extensible for future cost models.</li>
-</ul>
-<hr>
-<h2 id="directory-layout-3"><a class="header" href="#directory-layout-3">Directory Layout</a></h2>
-<div class="table-wrapper">
-<table>
-<thead>
-<tr><th>Path</th><th>Description</th><th>Key Types</th></tr>
-</thead>
-<tbody>
-<tr><td><code>mod.rs</code></td><td>Optimizer entry point.</td><td><code>LogicalOptimizer</code></td></tr>
-<tr><td><code>rule.rs</code></td><td>Trait + shared helpers.</td><td><code>OptimizerRule</code></td></tr>
-<tr><td><code>rules/*</code></td><td>Concrete rewrites.</td><td><code>PushDownFilter</code>, <code>PushDownLimit</code>, …</td></tr>
-</tbody>
-</table>
-</div>
-<hr>
-<h2 id="how-it-works"><a class="header" href="#how-it-works">How It Works</a></h2>
-<ol>
-<li><code>LogicalOptimizer::optimize(plan)</code> iterates through the registered rule list.</li>
-<li>Each rule implements <code>fn apply(&amp;LogicalPlan) -&gt; Option&lt;LogicalPlan&gt;</code>. Returning <code>Some</code>
-means the rule fired; the pipeline restarts to reach a fixpoint.</li>
-<li>Rules are pure functions, which keeps them easy to unit test and reason about.</li>
-</ol>
-<p>Examples:</p>
-<ul>
-<li><strong>PushDownFilter</strong> moves filters below scans/joins to reduce input size sooner.</li>
-<li><strong>PushDownLimit</strong> applies LIMIT before expensive joins/sorts when safe.</li>
-<li><strong>PruneProjection</strong> removes unused columns so execution/storage decode less data.</li>
-</ul>
-<h3 id="extending-with-statistics"><a class="header" href="#extending-with-statistics">Extending With Statistics</a></h3>
-<p>The optimizer intentionally remains heuristics-only, and the physical planner sticks to
-simple sequential scans. For coursework, students can still read <code>TableStatistics</code> from
-the catalog to prototype their own cardinality estimates or cost heuristics (e.g., to
-experiment with when to prefer an index scan), but no estimator ships in-tree.</p>
-<hr>
-<h2 id="interactions-3"><a class="header" href="#interactions-3">Interactions</a></h2>
-<ul>
-<li><strong>LogicalPlan</strong> – the optimizer only sees logical nodes; physical/storage layers remain
-untouched.</li>
-<li><strong>Catalog / Statistics</strong> – current rules are heuristic, but <code>TableStatistics</code> remains
-available for students who want to prototype their own cost-based decisions.</li>
-<li><strong>Execution</strong> – leaner logical plans translate into simpler physical plans (e.g.,
-predicate pushdown allows <code>PhysicalSeqScan</code> to discard rows earlier).</li>
-</ul>
-<hr>
-<h2 id="teaching-ideas-3"><a class="header" href="#teaching-ideas-3">Teaching Ideas</a></h2>
-<ul>
-<li>Implement a new rule (join reordering, constant folding) and use <code>RUST_LOG=trace</code> to
-compare plan dumps before/after.</li>
-<li>Discuss pipeline ordering—swap rule order and observe different outcomes.</li>
-<li>Prototype a tiny cost estimator using row counts from <code>TableStatistics</code> to decide on
-index scans vs sequential scans.</li>
-</ul>
-<hr>
-<p>Further reading: <a href="#rule-based-optimization">Rule-Based Optimization</a></p>
-<div style="break-before: page; page-break-before: always;"></div>
-<h1 id="rule-based-optimization"><a class="header" href="#rule-based-optimization">Rule-Based Optimization</a></h1>
-<p>After the <code>LogicalPlanner</code> creates an initial <code>LogicalPlan</code>, it’s passed to the <strong><code>LogicalOptimizer</code></strong>. The initial plan is a direct, syntactically correct translation of the SQL query, but it’s often not the most efficient way to execute it. The optimizer’s job is to transform this plan into an equivalent, but more performant, logical plan.</p>
-<h2 id="the-optimizer-in-quillsql"><a class="header" href="#the-optimizer-in-quillsql">The Optimizer in QuillSQL</a></h2>
-<p>QuillSQL implements a <strong>Rule-Based Optimizer</strong>. This is a common and powerful approach where the optimizer is equipped with a set of predefined transformation rules. It repeatedly applies these rules to the logical plan tree until no more rules can be applied, or a maximum number of passes is reached.</p>
-<p>The main components are:</p>
-<ul>
-<li><strong><code>LogicalOptimizer</code> (<code>optimizer/logical_optimizer.rs</code>)</strong>: The main driver. It holds a list of rules and contains the logic to recursively walk the plan tree and apply them.</li>
-<li><strong><code>LogicalOptimizerRule</code> Trait</strong>: An interface that every optimization rule must implement. Its core method is <code>try_optimize</code>, which takes a plan node and attempts to return a rewritten, optimized version of that node.</li>
-</ul>
-<h2 id="deep-dive-the-pushdownlimit-rule"><a class="header" href="#deep-dive-the-pushdownlimit-rule">Deep Dive: The <code>PushDownLimit</code> Rule</a></h2>
-<p>One of the most classic and effective optimizations is “pushing down” operations as far as possible towards the data source. Let’s examine the <code>PushDownLimit</code> rule (<code>optimizer/rule/push_down_limit.rs</code>) to see this in action.</p>
-<p>Consider the following query:</p>
-<pre><code class="language-sql">SELECT * FROM users ORDER BY signup_date LIMIT 10;
-</code></pre>
-<h4 id="the-naive-plan"><a class="header" href="#the-naive-plan">The Naive Plan</a></h4>
-<p>A naive logical plan for this query would be:</p>
-<pre><code>Limit(10)
-  └── Sort(by: signup_date)
-        └── TableScan(users)
-</code></pre>
-<p>If executed directly, this plan would:</p>
-<ol>
-<li>Scan the <em>entire</em> <code>users</code> table.</li>
-<li>Sort the <em>entire</em> table by <code>signup_date</code>.</li>
-<li>Finally, discard all but the first 10 rows.</li>
-</ol>
-<p>This is incredibly inefficient, especially for a large table, as it involves a massive, memory-intensive sort operation.</p>
-<h4 id="the-optimization-rule"><a class="header" href="#the-optimization-rule">The Optimization Rule</a></h4>
-<p>The <code>PushDownLimit</code> rule is designed to recognize this specific pattern: a <code>Limit</code> operator directly on top of a <code>Sort</code> operator.</p>
-<p>When the optimizer applies this rule, the <code>try_optimize</code> method matches on the <code>Limit</code> node. It inspects its child and sees that it’s a <code>Sort</code> node. The rule then knows it can apply its logic.</p>
-<h4 id="the-rewritten-plan"><a class="header" href="#the-rewritten-plan">The Rewritten Plan</a></h4>
-<p>The rule rewrites the plan tree by “pushing” the limit information <em>into</em> the <code>Sort</code> node itself:</p>
-<pre><code>Limit(10)
-  └── Sort(by: signup_date, limit: 10)
-        └── TableScan(users)
-</code></pre>
-<p>Notice the new <code>limit: 10</code> property on the <code>Sort</code> node. This seemingly small change has a huge performance impact. When the <code>PhysicalSort</code> operator is created from this logical node, it now knows that it only needs to find the top 10 rows. Instead of performing a full sort, it can use a much more efficient algorithm, like a <strong>heap sort (using a min-heap of size 10)</strong>, to find the top 10 rows in a single pass over the data.</p>
-<p>This optimization avoids sorting the entire table, dramatically reducing both CPU and memory consumption.</p>
-<h2 id="other-rules"><a class="header" href="#other-rules">Other Rules</a></h2>
-<p>QuillSQL implements other simple but effective rules:</p>
-<ul>
-<li><strong><code>EliminateLimit</code></strong>: Removes a <code>LIMIT</code> clause if it provides no value (e.g., <code>LIMIT NULL</code>).</li>
-<li><strong><code>MergeLimit</code></strong>: If two <code>LIMIT</code> clauses are stacked on top of each other (which can happen after other rule transformations), this rule merges them into a single, more restrictive <code>LIMIT</code>.</li>
-</ul>
-<h2 id="conclusion-1"><a class="header" href="#conclusion-1">Conclusion</a></h2>
-<p>While QuillSQL’s optimizer is currently rule-based and relatively simple, it demonstrates the fundamental principles of query optimization. By separating the logical representation of a query from its physical execution and applying equivalence-preserving transformations, a database can achieve massive performance gains. More advanced systems build on this with a <strong>Cost-Based Optimizer</strong>, which uses table statistics to estimate the “cost” of different physical plans (e.g., choosing between a <code>NestedLoopJoin</code> and a <code>HashJoin</code>) and pick the cheapest one.</p>
-<hr>
-<h2 id="for-study--discussion-1"><a class="header" href="#for-study--discussion-1">For Study &amp; Discussion</a></h2>
-<ol>
-<li>
-<p><strong>Rule Ordering</strong>: The <code>LogicalOptimizer</code> applies its list of rules in a fixed order for a set number of passes. Can the order in which rules are applied affect the final, optimized plan? Can one rule’s transformation enable another rule to be applied in a subsequent pass?</p>
-</li>
-<li>
-<p><strong>Cost-Based vs. Rule-Based</strong>: What is the primary limitation of a purely rule-based optimizer? When would a rule-based optimizer make a poor decision that a cost-based optimizer (with accurate statistics) would get right? (Hint: consider join algorithm selection).</p>
-</li>
-<li>
-<p><strong>Programming Exercise</strong>: Implement the classic <strong>Predicate Pushdown</strong> rule. Your rule should look for a <code>Filter</code> operator whose child is a <code>Join</code>. If the filter’s predicate only uses columns from one side of the join, the rule should push the <code>Filter</code> node down to that side of the join, below the <code>Join</code> node. This is one of the most effective optimizations in any database.</p>
-</li>
-<li>
-<p><strong>Programming Exercise</strong>: Implement a <strong>Constant Folding</strong> rule. This rule would traverse expression trees and pre-compute constant expressions. For example:</p>
-<ul>
-<li>An expression <code>WHERE age = 10 + 5</code> would be rewritten to <code>WHERE age = 15</code>.</li>
-<li>An expression <code>WHERE 1 = 1</code> would be evaluated to <code>true</code>, and a smart optimizer could then potentially eliminate the <code>WHERE</code> clause entirely.</li>
-</ul>
-</li>
-</ol>
-<div style="break-before: page; page-break-before: always;"></div>
-<h1 id="execution-engine"><a class="header" href="#execution-engine">Execution Engine</a></h1>
-<p><code>src/execution/</code> drives <code>PhysicalPlan</code> trees using the Volcano (iterator) model. Every
-operator pulls tuples from its children, coordinating closely with transactions,
-storage, and expression evaluation.</p>
-<hr>
-<h2 id="core-components"><a class="header" href="#core-components">Core Components</a></h2>
-<div class="table-wrapper">
-<table>
-<thead>
-<tr><th>Component</th><th>Role</th></tr>
-</thead>
-<tbody>
-<tr><td><code>PhysicalPlan</code></td><td>Enum covering all physical operators; each implements <code>VolcanoExecutor</code>.</td></tr>
-<tr><td><code>ExecutionContext</code></td><td>Shared context carrying the catalog, <code>TxnContext</code>, storage engine, and expression helpers.</td></tr>
-<tr><td><code>TupleStream</code></td><td>Unified scan interface returned by table/index handles.</td></tr>
-</tbody>
-</table>
-</div>
-<hr>
-<h2 id="execution-flow"><a class="header" href="#execution-flow">Execution Flow</a></h2>
-<ol>
-<li><code>ExecutionEngine::execute</code> calls <code>init</code> on the root plan (and recursively on children).</li>
-<li>The engine loops calling <code>next</code>, with parents pulling tuples from children.</li>
-<li><code>ExecutionContext</code> supplies transaction snapshots, lock helpers, and expression
-evaluation per call.</li>
-<li>Once <code>next</code> returns <code>None</code>, the accumulated results are returned to the caller (CLI,
-HTTP API, or tests).</li>
-</ol>
-<hr>
-<h2 id="operator-examples"><a class="header" href="#operator-examples">Operator Examples</a></h2>
-<ul>
-<li><strong>PhysicalSeqScan</strong> – acquires a <code>table_stream</code> from the storage engine, uses
-<code>ScanPrefetch</code> for batching, and relies on <code>TxnContext::read_visible_tuple</code> for MVCC.</li>
-<li><strong>PhysicalIndexScan</strong> – uses <code>index_stream</code>, tracks <code>invisible_hits</code>, and notifies the
-catalog when garbage accumulates.</li>
-<li><strong>PhysicalUpdate/PhysicalDelete</strong> – call <code>prepare_row_for_write</code> to re-validate locks
-and the latest tuple before invoking <code>apply_update/delete</code>.</li>
-<li><strong>PhysicalNestedLoopJoin</strong> – showcases the parent/child pull loop and acts as a baseline
-for more advanced joins.</li>
-</ul>
-<hr>
-<h2 id="interactions-4"><a class="header" href="#interactions-4">Interactions</a></h2>
-<ul>
-<li><strong>StorageEngine</strong> – all data access goes through handles/streams, keeping execution
-storage-agnostic.</li>
-<li><strong>Transaction</strong> – <code>TxnContext</code> enforces locking, snapshots, and undo logging; operators
-never talk to <code>LockManager</code> directly.</li>
-<li><strong>Expression</strong> – <code>ExecutionContext::eval_expr</code> / <code>eval_predicate</code> evaluate expressions
-built by the planner.</li>
-<li><strong>Optimizer/Planner</strong> – execution honours the plan as-is; all structural choices happen
-upstream.</li>
-</ul>
-<hr>
-<h2 id="teaching-ideas-4"><a class="header" href="#teaching-ideas-4">Teaching Ideas</a></h2>
-<ul>
-<li>Implement a new operator (e.g., <code>PhysicalMergeJoin</code>) to see how <code>ExecutionContext</code>
-support generalises.</li>
-<li>Add adaptive prefetching inside <code>PhysicalSeqScan</code> to explore iterator hints.</li>
-<li>Enable <code>RUST_LOG=execution=trace</code> to watch the <code>init</code>/<code>next</code> call sequence during a
-query.</li>
-</ul>
-<hr>
-<p>Further reading: <a href="#the-volcano-execution-model">The Volcano Execution Model</a></p>
-<div style="break-before: page; page-break-before: always;"></div>
-<h1 id="the-volcano-execution-model"><a class="header" href="#the-volcano-execution-model">The Volcano Execution Model</a></h1>
-<p>Once the <a href="#query-planner-module">Query Planner</a> has produced an optimized <code>PhysicalPlan</code>, it’s the job of the <strong>Execution Engine</strong> to run it and produce results. The execution engine is the component that brings the plan to life, interacting with the transaction manager and storage layer to process data.</p>
-<p>QuillSQL uses the classic <strong>Volcano Model</strong>, also known as the <strong>Iterator Model</strong>. This is a pull-based execution model where each physical operator in the plan tree acts as an iterator that the parent operator can “pull” rows from.</p>
-<h2 id="1-the-volcanoexecutor-trait"><a class="header" href="#1-the-volcanoexecutor-trait">1. The <code>VolcanoExecutor</code> Trait</a></h2>
-<p>At the heart of the execution model is the <code>VolcanoExecutor</code> trait (<code>execution/mod.rs</code>). Every physical operator implements this simple trait:</p>
-<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
-</span><span class="boring">fn main() {
-</span>pub trait VolcanoExecutor {
-    fn init(&amp;self, context: &amp;mut ExecutionContext) -&gt; QuillSQLResult&lt;()&gt;;
-    fn next(&amp;self, context: &amp;mut ExecutionContext) -&gt; QuillSQLResult&lt;Option&lt;Tuple&gt;&gt;;
-    fn output_schema(&amp;self) -&gt; SchemaRef;
-}
-<span class="boring">}</span></code></pre>
-<ul>
-<li><strong><code>init()</code></strong>: This method is called once at the beginning of execution. It allows an operator to set up its initial state (e.g., a <code>SeqScan</code> operator would initialize its table iterator here).</li>
-<li><strong><code>next()</code></strong>: This is the core method. When called, the operator produces its next output tuple. It returns <code>Some(tuple)</code> if it has a row, or <code>None</code> if it has exhausted its data source. The top-level <code>ExecutionEngine</code> simply calls <code>next()</code> on the root of the plan tree in a loop until it receives <code>None</code>.</li>
-</ul>
-<h2 id="2-the-executioncontext"><a class="header" href="#2-the-executioncontext">2. The <code>ExecutionContext</code></a></h2>
-<p>Notice that both <code>init()</code> and <code>next()</code> take a mutable <code>ExecutionContext</code>. This object is the “world” in which the query runs. It is passed down the operator tree and exposes:</p>
-<ul>
-<li><strong><code>Catalog</code> + <code>StorageEngine</code></strong>: Operators call <code>context.table(&amp;table_ref)</code> to obtain a <code>TableBinding</code>. The binding encapsulates Holt row/index access (scan, insert, delete, update, prepare-row-for-write) so operators never touch durable storage internals directly.</li>
-<li><strong><code>TxnContext</code></strong>: Provides the current transaction, MVCC snapshot, and helper methods for row/table locks and visibility checks.</li>
-<li><strong>Expression helpers</strong>: <code>eval_expr</code> / <code>eval_predicate</code> evaluate AST expressions against a tuple without leaking <code>ScalarValue</code> plumbing into operators.</li>
-</ul>
-<p>Thanks to the binding abstraction, the operator code only expresses “what” should happen (scan/update/delete) while the binding implements “how” (MVCC metadata writes, undo tracking, and index maintenance).</p>
-<h2 id="3-anatomy-of-physical-operators"><a class="header" href="#3-anatomy-of-physical-operators">3. Anatomy of Physical Operators</a></h2>
-<p>Data flows <em>up</em> the tree from the leaves (scans) to the root. Let’s see how it works by examining a few key operators.</p>
-<h3 id="leaf-operator-physicalseqscan"><a class="header" href="#leaf-operator-physicalseqscan">Leaf Operator: <code>PhysicalSeqScan</code></a></h3>
-<p>A sequential scan sits at the leaf of a plan tree and streams tuples from a table binding.</p>
-<ul>
-<li><strong><code>init()</code></strong>:
-<ol>
-<li>Acquires an <code>IntentionShared</code> lock on the table via <code>TxnContext</code>.</li>
-<li>Requests a <code>TableBinding</code> (<code>context.table(&amp;table_ref)</code>) and calls <code>binding.scan(...)</code> to obtain a <code>TupleStream</code>. The binding hides the actual <code>TableIterator</code> implementation and any MVCC plumbing.</li>
-</ol>
-</li>
-<li><strong><code>next()</code></strong>:
-<ol>
-<li>Pops the next <code>(rid, meta, tuple)</code> from its prefetch buffer (which in turn pulls from the binding’s stream).</li>
-<li>Calls <code>TxnContext::read_visible_tuple</code> to perform the MVCC visibility check and acquire the required shared row lock.</li>
-<li>Returns the tuple if visible; otherwise, keep looping.</li>
-</ol>
-</li>
-</ul>
-<h3 id="unary-operator-physicalfilter"><a class="header" href="#unary-operator-physicalfilter">Unary Operator: <code>PhysicalFilter</code></a></h3>
-<p>A filter has one child operator (its <code>input</code>). It implements a <code>WHERE</code> clause.</p>
-<ul>
-<li><strong><code>next()</code></strong>: Its logic is a simple, tight loop:
-<ol>
-<li>It calls <code>self.input.next()</code> to get a tuple from its child.</li>
-<li>If the child returns <code>None</code>, the filter is also exhausted and returns <code>None</code>.</li>
-<li>If it receives a tuple, it evaluates its predicate expression (e.g., <code>age &gt; 30</code>) against the tuple.</li>
-<li>If the predicate evaluates to <code>true</code>, it returns the tuple. Otherwise, it loops back to step 1.</li>
-</ol>
-</li>
-</ul>
-<h3 id="binary-operator-physicalnestedloopjoin"><a class="header" href="#binary-operator-physicalnestedloopjoin">Binary Operator: <code>PhysicalNestedLoopJoin</code></a></h3>
-<p>A join has two children: a left (outer) and a right (inner).</p>
-<ul>
-<li><strong><code>next()</code></strong>: It implements the classic nested loop join algorithm:
-<ol>
-<li>Fetch one tuple from the <strong>outer</strong> (left) child and hold onto it.</li>
-<li>Enter a loop: fetch tuples one by one from the <strong>inner</strong> (right) child.</li>
-<li>For each inner tuple, combine it with the held outer tuple and evaluate the join condition. If it matches, return the combined tuple.</li>
-<li>When the inner child is exhausted, <strong>rewind it</strong> by calling <code>self.right_input.init()</code> again.</li>
-<li>Go back to step 1 to fetch the <em>next</em> tuple from the outer child.</li>
-<li>Repeat until the outer child is also exhausted.</li>
-</ol>
-</li>
-</ul>
-<h2 id="4-putting-it-all-together"><a class="header" href="#4-putting-it-all-together">4. Putting It All Together</a></h2>
-<p>Consider the query <code>SELECT name FROM users WHERE age &gt; 30</code>. The physical plan is <code>Projection -&gt; Filter -&gt; SeqScan</code>.</p>
-<ol>
-<li>The <code>ExecutionEngine</code> calls <code>next()</code> on the <code>Projection</code> operator.</li>
-<li>The <code>Projection</code> operator needs a tuple, so it calls <code>next()</code> on its child, <code>Filter</code>.</li>
-<li>The <code>Filter</code> operator needs a tuple, so it calls <code>next()</code> on its child, <code>SeqScan</code>.</li>
-<li>The <code>SeqScan</code> operator asks its <code>TableBinding</code> for the next tuple, and after the MVCC check finds a visible tuple for a user with <code>age = 25</code>.</li>
-<li><code>SeqScan</code> returns this tuple up to <code>Filter</code>.</li>
-<li><code>Filter</code> evaluates <code>age &gt; 30</code> on the tuple. It’s false, so it loops, calling <code>SeqScan.next()</code> again.</li>
-<li><code>SeqScan</code> pulls another visible tuple (this time <code>age = 40</code>, <code>name = 'Alice'</code>) through the binding.</li>
-<li><code>SeqScan</code> returns this tuple up to <code>Filter</code>.</li>
-<li><code>Filter</code> evaluates <code>age &gt; 30</code>. It’s true! It returns the tuple for Alice up to <code>Projection</code>.</li>
-<li><code>Projection</code> takes the full tuple for Alice, creates a new tuple containing only the <code>name</code> column (<code>'Alice'</code>), and returns this new tuple as the result.</li>
-</ol>
-<p>This process repeats, with tuples flowing up the tree one at a time, until the <code>SeqScan</code> operator runs out of pages and returns <code>None</code>, which then propagates up the tree, signaling the end of execution.</p>
-<hr>
-<h2 id="for-study--discussion-2"><a class="header" href="#for-study--discussion-2">For Study &amp; Discussion</a></h2>
-<ol>
-<li>
-<p><strong>Push vs. Pull Models</strong>: The Volcano model is a “pull-based” model. An alternative is a “push-based” model, where operators push their results to their parents as soon as they are ready. What are the potential advantages and disadvantages of each model, particularly concerning cache efficiency and control flow?</p>
-</li>
-<li>
-<p><strong>Blocking vs. Non-Blocking Operators</strong>: Some operators, like <code>PhysicalFilter</code>, can produce their first output row as soon as they receive their first input row. These are <strong>non-blocking</strong>. Other operators, like <code>PhysicalSort</code>, must consume their <em>entire</em> input before they can produce even a single row of output. These are <strong>blocking</strong>. What is the impact of blocking operators on query latency and memory usage?</p>
-</li>
-<li>
-<p><strong>Programming Exercise</strong>: The current <code>PhysicalNestedLoopJoin</code> is simple but can be inefficient as it re-scans the entire inner table for every outer row. Implement a <code>PhysicalBlockNestedLoopJoin</code> operator. This version would read a <em>block</em> (a small batch) of tuples from the outer table into an in-memory buffer, and then iterate through the inner table once for that entire block. This can significantly reduce the number of times the inner table needs to be scanned.</p>
-</li>
-<li>
-<p><strong>Programming Exercise</strong>: Implement the <code>PhysicalLimit</code> operator. Its <code>next()</code> method should:
-a.  Keep an internal counter.
-b.  If the counter is less than the <code>offset</code>, pull and discard tuples from its child.
-c.  If the counter is between <code>offset</code> and <code>offset + limit</code>, pull a tuple from its child and return it.
-d.  Once the limit is reached, it should stop pulling from its child and return <code>None</code> for all subsequent calls. This is important for efficiency, as it stops the execution of the entire sub-tree below it.</p>
-</li>
-</ol>
+<p>There are no stored QuillSQL system-table rows.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="transaction-module"><a class="header" href="#transaction-module">Transaction Module</a></h1>
 <p><code>src/transaction/</code> enforces the Atomicity and Isolation parts of ACID. It combines MVCC
@@ -1037,20 +472,22 @@ violating correctness.</p>
 <tbody>
 <tr><td><code>TransactionManager</code></td><td>Creates/commits/aborts transactions, assigns txn &amp; command ids, and tracks recovered status.</td></tr>
 <tr><td><code>Transaction</code></td><td>Stores state, held locks, undo chain, and cached snapshot.</td></tr>
-<tr><td><code>TxnContext</code> / <code>TxnRuntime</code></td><td>Execution-time wrapper exposing MVCC + locking helpers.</td></tr>
+<tr><td><code>TxnContext</code></td><td>Statement-time wrapper exposing MVCC + locking helpers to Holt table/index code.</td></tr>
 <tr><td><code>LockManager</code></td><td>Multi-granularity locking (IS/IX/S/SIX/X) with deadlock detection.</td></tr>
 <tr><td><code>TransactionSnapshot</code></td><td>Tracks <code>xmin/xmax/active_txns</code> for visibility checks.</td></tr>
 </tbody>
 </table>
 </div>
 <hr>
-<h2 id="workflow-1"><a class="header" href="#workflow-1">Workflow</a></h2>
+<h2 id="workflow"><a class="header" href="#workflow">Workflow</a></h2>
 <ol>
-<li><code>SessionContext</code> calls <code>TransactionManager::begin</code> to create a transaction.</li>
-<li>Each SQL statement builds a <code>TxnRuntime</code>, yielding a fresh command id and snapshot.</li>
-<li>Operators call <code>TxnContext::lock_table/lock_row</code> to obey strict 2PL.</li>
-<li><code>TableHandle::insert/delete/update</code> records undo, acquires locks, and writes through
-Holt handles.</li>
+<li><code>Database::run</code> intercepts transaction control statements and calls
+<code>TransactionManager::begin/commit/abort</code>.</li>
+<li>Each SQL statement that reaches the Holt provider builds a <code>TxnContext</code>, yielding a
+fresh command id and snapshot.</li>
+<li>DataFusion drives the physical plan; Holt scan/DML hooks call
+<code>TxnContext::lock_table/lock_row</code> to obey strict 2PL.</li>
+<li>Holt table and index handles record undo, acquire locks, and write through Holt.</li>
 <li>Commit: mark the transaction committed, persist final Holt txn status, and release
 locks.</li>
 <li>Abort: walk the undo list, restore row/index state through Holt handles, persist final
@@ -1082,17 +519,17 @@ victim (usually the longest waiter).</li>
 statement end, Serializable waits until commit.</li>
 </ul>
 <hr>
-<h2 id="interactions-5"><a class="header" href="#interactions-5">Interactions</a></h2>
+<h2 id="interactions"><a class="header" href="#interactions">Interactions</a></h2>
 <ul>
-<li><strong>ExecutionContext</strong> – all helpers (lock acquisition, visibility checks, undo logging)
-are exposed here, so physical operators never touch <code>LockManager</code> directly.</li>
-<li><strong>StorageEngine</strong> – handles call <code>TxnContext</code> before mutating Holt rows/indexes; MVCC
+<li><strong>DataFusion table provider</strong> – scans and DML enter QuillSQL through
+<code>HoltScanExec</code>, <code>insert_into</code>, <code>delete_from</code>, and <code>update</code>.</li>
+<li><strong>Holt handles</strong> – handles call <code>TxnContext</code> before mutating Holt rows/indexes; MVCC
 metadata lives in <code>TupleMeta</code>.</li>
 <li><strong>Holt</strong> – committed/aborted statuses are persisted in the Holt <code>txn</code> tree and recovered
 before execution resumes.</li>
 </ul>
 <hr>
-<h2 id="teaching-ideas-5"><a class="header" href="#teaching-ideas-5">Teaching Ideas</a></h2>
+<h2 id="teaching-ideas"><a class="header" href="#teaching-ideas">Teaching Ideas</a></h2>
 <ul>
 <li>Change <code>DatabaseOptions::default_isolation_level</code> and compare SELECT behaviour under
 RC vs RR.</li>
@@ -1103,7 +540,7 @@ an advanced exercise.</li>
 <h2 id="lab-walkthrough-à-la-cmu-15-445"><a class="header" href="#lab-walkthrough-à-la-cmu-15-445">Lab Walkthrough (à la CMU 15-445)</a></h2>
 <ol>
 <li><strong>Warm-up</strong> – Start two sessions, run <code>BEGIN; SELECT ...;</code> under RC vs RR, and trace
-which snapshot <code>TxnRuntime</code> installs by logging <code>txn.current_command_id()</code>.</li>
+which snapshot <code>TxnContext</code> installs by logging <code>txn.current_command_id()</code>.</li>
 <li><strong>MVCC visibility</strong> – Extend the <code>transaction_tests.rs</code> suite with a scenario where
 <code>txn1</code> updates a row while <code>txn2</code> reads it. Instrument <code>TupleMeta</code> printing so
 students see how <code>(insert_txn_id, delete_txn_id)</code> change as versions are linked.</li>
@@ -1178,7 +615,7 @@ encoded tuple. That metadata includes:</p>
 </ul>
 <p>This hybrid approach provides the best of both worlds: reads are fast and non-blocking, while write-write conflicts are safely prevented by the locking protocol.</p>
 <hr>
-<h2 id="for-study--discussion-3"><a class="header" href="#for-study--discussion-3">For Study &amp; Discussion</a></h2>
+<h2 id="for-study--discussion"><a class="header" href="#for-study--discussion">For Study &amp; Discussion</a></h2>
 <ol>
 <li>
 <p><strong>Isolation Levels</strong>: QuillSQL supports multiple SQL isolation levels. How does the behavior of MVCC snapshots and 2PL change between <code>ReadCommitted</code> and <code>RepeatableRead</code>? In <code>ReadCommitted</code>, a transaction gets a new snapshot for every statement, whereas in <code>RepeatableRead</code>, it uses the same snapshot for the entire transaction. What concurrency anomalies does this difference prevent?</p>
@@ -1212,36 +649,37 @@ encoded tuple. That metadata includes:</p>
 <h2 id="cli-binclientrs"><a class="header" href="#cli-binclientrs">CLI (<code>bin/client.rs</code>)</a></h2>
 <ul>
 <li>Uses <code>rustyline</code> to provide history, multi-line editing, and familiar shell shortcuts.</li>
-<li>Each command calls <code>database.run(sql)</code> and formats the resulting <code>Vec&lt;Tuple&gt;</code>.</li>
-<li>Supports meta commands (e.g., <code>.tables</code>) that expose catalog metadata—great for
-teaching how logical objects map to physical handles.</li>
+<li>Each command awaits <code>database.run(sql)</code> and formats the resulting Arrow
+<code>RecordBatch</code>es as a table.</li>
+<li>Catalog introspection is regular SQL through DataFusion, for example
+<code>SELECT * FROM information_schema.tables</code>.</li>
 </ul>
 <h2 id="http-binserverrs"><a class="header" href="#http-binserverrs">HTTP (<code>bin/server.rs</code>)</a></h2>
 <ul>
 <li>Built with <code>axum</code>/<code>hyper</code> (depending on the current <code>Cargo.toml</code>), exposing endpoints such as:
 <ul>
-<li><code>POST /query</code> – run arbitrary SQL and return rows or an error payload.</li>
-<li>Health/metrics endpoints—which you can extend in labs to surface background worker
-status or buffer metrics.</li>
+<li><code>POST /api/sql</code> – run one SQL string and return stringified rows or an error payload.</li>
+<li><code>POST /api/sql_batch</code> – split a semicolon-delimited script and return one result set
+per statement.</li>
+<li><code>/debug/...</code> endpoints expose lock, transaction, MVCC, and last-plan snapshots for
+local demos.</li>
 </ul>
 </li>
 <li>Configuration comes from <code>QUILL_DB_FILE</code>, <code>QUILL_HTTP_ADDR</code>, <code>PORT</code>, etc., mirroring
 how production services inject settings.</li>
 </ul>
 <hr>
-<h2 id="teaching-ideas-6"><a class="header" href="#teaching-ideas-6">Teaching Ideas</a></h2>
+<h2 id="teaching-ideas-1"><a class="header" href="#teaching-ideas-1">Teaching Ideas</a></h2>
 <ul>
 <li>Extend the CLI with <code>\describe table</code> to practice catalog lookups.</li>
-<li>Add transaction endpoints (BEGIN/COMMIT) to the HTTP server to demonstrate how
-<code>SessionContext</code> scopes transactions per connection.</li>
+<li>Add per-connection HTTP sessions if you want long-running browser transactions
+instead of the current single database mutex.</li>
 <li>Combine CLI interaction with <code>RUST_LOG</code> tracing to walk through the entire query
 lifecycle.</li>
 </ul>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="testing--documentation"><a class="header" href="#testing--documentation">Testing &amp; Documentation</a></h1>
-<p>QuillSQL is intended for teaching, so the repo invests heavily in examples and automated
-verification. The <code>tests/</code> tree and this mdBook work together to illustrate every module.</p>
-<hr>
+<p>The active tests focus on the current DataFusion + Holt architecture.</p>
 <h2 id="test-suite"><a class="header" href="#test-suite">Test Suite</a></h2>
 <div class="table-wrapper">
 <table>
@@ -1249,35 +687,19 @@ verification. The <code>tests/</code> tree and this mdBook work together to illu
 <tr><th>Location</th><th>Purpose</th></tr>
 </thead>
 <tbody>
-<tr><td><code>tests/sql_example/*.slt</code></td><td><a href="https://www.sqlite.org/sqllogictest.html">sqllogictest</a> suites covering DDL, DML, transactions, and indexes.</td></tr>
-<tr><td><code>tests/transaction_tests.rs</code></td><td>Rust unit tests that stress MVCC visibility, lock conflicts, and isolation semantics.</td></tr>
-<tr><td><code>tests/storage_*</code></td><td>Component tests for heap/index/buffer internals—perfect references for lab exercises.</td></tr>
+<tr><td><code>tests/datafusion_holt.rs</code></td><td>End-to-end SQL tests through DataFusion over Holt tables.</td></tr>
+<tr><td>module unit tests</td><td>Storage codecs, ordered index encoding, MVCC visibility, and lock-manager behavior.</td></tr>
 </tbody>
 </table>
 </div>
 <p>Common commands:</p>
-<pre><code class="language-bash">cargo test -q
-# focused run
-cargo test tests::transaction_tests::repeatable_read_sees_consistent_snapshot_after_update -- --nocapture
+<pre><code class="language-bash">cargo test
+cargo test --features jit-mlir
+cargo clippy --all-targets -- -D warnings
 </code></pre>
-<p>For long-running suites, wrap with <code>timeout</code> to guard against hangs.</p>
-<hr>
-<h2 id="documentation-mdbook"><a class="header" href="#documentation-mdbook">Documentation (mdBook)</a></h2>
-<ul>
-<li>The <code>docs/</code> directory is an mdBook; run <code>mdbook serve docs</code> to browse locally.</li>
-<li>Each module, including this page, has a dedicated chapter so instructors can teach
-subsystem by subsystem.</li>
-<li>Anchor chapters such as <code>architecture.md</code>, <code>transactions.md</code>, and <code>wal.md</code> walk through
-end-to-end flows and subsystem deep dives.</li>
-</ul>
-<hr>
-<h2 id="teaching-ideas-7"><a class="header" href="#teaching-ideas-7">Teaching Ideas</a></h2>
-<ul>
-<li>Require sqllogictest additions alongside code changes to reinforce “tests as docs”.</li>
-<li>Use the mdBook site during lectures to connect diagrams with source files.</li>
-<li>Assign “doc walk-through” tasks where students extend diagrams or add experiment
-instructions to existing chapters.</li>
-</ul>
+<h2 id="documentation"><a class="header" href="#documentation">Documentation</a></h2>
+<p>The <code>docs/</code> directory is an mdBook. It documents the current DataFusion-fronted
+architecture rather than the removed teaching parser/planner/executor stack.</p>
 
                     </main>
 

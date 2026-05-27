@@ -37,7 +37,7 @@
             const default_dark_theme = "navy";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-19071d45.js"></script>
+        <script src="toc-1d3cbbe2.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -160,10 +160,10 @@
 
 <h1 id="quillsql-internals"><a class="header" href="#quillsql-internals">QuillSQL Internals</a></h1>
 <p>Welcome to the technical documentation for QuillSQL.</p>
-<p>This book documents QuillSQL as a SQL engine layered over Holt. It is intended for
-developers and contributors who want to understand the parser, planner, optimizer,
-Volcano executor, catalog, and transaction semantics without also maintaining a separate
-page store.</p>
+<p>This book documents QuillSQL as a DataFusion-fronted SQL research engine layered over
+Holt. It is intended for developers and contributors who want to understand the Holt
+storage adapter, DataFusion execution boundary, transaction semantics, and MLIR/JIT
+extension point without also maintaining a separate page store.</p>
 <hr>
 <h2 id="table-of-contents"><a class="header" href="#table-of-contents">Table of Contents</a></h2>
 <ul>
@@ -174,9 +174,6 @@ page store.</p>
 <p><strong>Core Modules</strong></p>
 <ul>
 <li><a href="./modules/transaction.html"><strong>Transaction Manager</strong></a>: Concurrency control with MVCC and 2PL.</li>
-<li><a href="./modules/plan.html"><strong>Query Plan</strong></a>: The journey from SQL to an executable plan.</li>
-<li><a href="./modules/optimizer.html"><strong>Query Optimizer</strong></a>: Rule-based plan transformations.</li>
-<li><a href="./modules/execution.html"><strong>Execution Engine</strong></a>: The Volcano (iterator) execution model.</li>
 <li><a href="./modules/catalog.html"><strong>Catalog</strong></a>: SQL metadata projection backed by Holt descriptors.</li>
 </ul>
 </li>

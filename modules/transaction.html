@@ -37,7 +37,7 @@
             const default_dark_theme = "navy";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="../toc-19071d45.js"></script>
+        <script src="../toc-1d3cbbe2.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -168,7 +168,7 @@ violating correctness.</p>
 <tbody>
 <tr><td><code>TransactionManager</code></td><td>Creates/commits/aborts transactions, assigns txn &amp; command ids, and tracks recovered status.</td></tr>
 <tr><td><code>Transaction</code></td><td>Stores state, held locks, undo chain, and cached snapshot.</td></tr>
-<tr><td><code>TxnContext</code> / <code>TxnRuntime</code></td><td>Execution-time wrapper exposing MVCC + locking helpers.</td></tr>
+<tr><td><code>TxnContext</code></td><td>Statement-time wrapper exposing MVCC + locking helpers to Holt table/index code.</td></tr>
 <tr><td><code>LockManager</code></td><td>Multi-granularity locking (IS/IX/S/SIX/X) with deadlock detection.</td></tr>
 <tr><td><code>TransactionSnapshot</code></td><td>Tracks <code>xmin/xmax/active_txns</code> for visibility checks.</td></tr>
 </tbody>
@@ -177,11 +177,13 @@ violating correctness.</p>
 <hr>
 <h2 id="workflow"><a class="header" href="#workflow">Workflow</a></h2>
 <ol>
-<li><code>SessionContext</code> calls <code>TransactionManager::begin</code> to create a transaction.</li>
-<li>Each SQL statement builds a <code>TxnRuntime</code>, yielding a fresh command id and snapshot.</li>
-<li>Operators call <code>TxnContext::lock_table/lock_row</code> to obey strict 2PL.</li>
-<li><code>TableHandle::insert/delete/update</code> records undo, acquires locks, and writes through
-Holt handles.</li>
+<li><code>Database::run</code> intercepts transaction control statements and calls
+<code>TransactionManager::begin/commit/abort</code>.</li>
+<li>Each SQL statement that reaches the Holt provider builds a <code>TxnContext</code>, yielding a
+fresh command id and snapshot.</li>
+<li>DataFusion drives the physical plan; Holt scan/DML hooks call
+<code>TxnContext::lock_table/lock_row</code> to obey strict 2PL.</li>
+<li>Holt table and index handles record undo, acquire locks, and write through Holt.</li>
 <li>Commit: mark the transaction committed, persist final Holt txn status, and release
 locks.</li>
 <li>Abort: walk the undo list, restore row/index state through Holt handles, persist final
@@ -215,9 +217,9 @@ statement end, Serializable waits until commit.</li>
 <hr>
 <h2 id="interactions"><a class="header" href="#interactions">Interactions</a></h2>
 <ul>
-<li><strong>ExecutionContext</strong> – all helpers (lock acquisition, visibility checks, undo logging)
-are exposed here, so physical operators never touch <code>LockManager</code> directly.</li>
-<li><strong>StorageEngine</strong> – handles call <code>TxnContext</code> before mutating Holt rows/indexes; MVCC
+<li><strong>DataFusion table provider</strong> – scans and DML enter QuillSQL through
+<code>HoltScanExec</code>, <code>insert_into</code>, <code>delete_from</code>, and <code>update</code>.</li>
+<li><strong>Holt handles</strong> – handles call <code>TxnContext</code> before mutating Holt rows/indexes; MVCC
 metadata lives in <code>TupleMeta</code>.</li>
 <li><strong>Holt</strong> – committed/aborted statuses are persisted in the Holt <code>txn</code> tree and recovered
 before execution resumes.</li>
@@ -234,7 +236,7 @@ an advanced exercise.</li>
 <h2 id="lab-walkthrough-à-la-cmu-15-445"><a class="header" href="#lab-walkthrough-à-la-cmu-15-445">Lab Walkthrough (à la CMU 15-445)</a></h2>
 <ol>
 <li><strong>Warm-up</strong> – Start two sessions, run <code>BEGIN; SELECT ...;</code> under RC vs RR, and trace
-which snapshot <code>TxnRuntime</code> installs by logging <code>txn.current_command_id()</code>.</li>
+which snapshot <code>TxnContext</code> installs by logging <code>txn.current_command_id()</code>.</li>
 <li><strong>MVCC visibility</strong> – Extend the <code>transaction_tests.rs</code> suite with a scenario where
 <code>txn1</code> updates a row while <code>txn2</code> reads it. Instrument <code>TupleMeta</code> printing so
 students see how <code>(insert_txn_id, delete_txn_id)</code> change as versions are linked.</li>
@@ -251,7 +253,7 @@ inspect which <code>TupleMeta</code> versions are visible after Holt transaction
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
-                            <a rel="prev" href="../execution/volcano.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                            <a rel="prev" href="../modules/catalog.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                             </a>
 
@@ -265,7 +267,7 @@ inspect which <code>TupleMeta</code> versions are visible after Holt transaction
             </div>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
-                    <a rel="prev" href="../execution/volcano.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                    <a rel="prev" href="../modules/catalog.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                     </a>
 

@@ -37,7 +37,7 @@
             const default_dark_theme = "navy";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-19071d45.js"></script>
+        <script src="toc-1d3cbbe2.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -155,84 +155,66 @@
                 <div id="mdbook-content" class="content">
                     <main>
                         <h1 id="quillsql-architecture"><a class="header" href="#quillsql-architecture">QuillSQL Architecture</a></h1>
-<p>QuillSQL is now a SQL layer over Holt. The project owns parsing, logical planning,
-optimization, Volcano execution, catalog projection, transaction state, MVCC visibility,
-and lock management. Persistent rows, indexes, catalog descriptors, and recovered
-transaction status live in <code>holt::DB</code>.</p>
+<p>QuillSQL is a SQL research layer over Holt. DataFusion owns SQL parsing, binding,
+logical optimization, physical optimization, and physical execution. QuillSQL owns the
+Holt catalog/table/index adapter, MVCC metadata, transaction status recovery, and the
+CLI/server surfaces.</p>
 <h2 id="end-to-end-pipeline"><a class="header" href="#end-to-end-pipeline">End-to-End Pipeline</a></h2>
 <pre class="mermaid">flowchart LR
-    SQL["SQL text"] --&gt; Parser["sql::parser"]
-    Parser --&gt; Logical["LogicalPlanner"]
-    Logical --&gt; Optimizer["LogicalOptimizer"]
-    Optimizer --&gt; Physical["PhysicalPlanner"]
-    Physical --&gt; Exec["ExecutionEngine (Volcano)"]
-
-    Session["SessionContext"] --&gt; Txn["TransactionManager"]
-    Txn --&gt; Locks["LockManager"]
-    Exec --&gt; Ctx["ExecutionContext"]
-    Ctx --&gt; TxnCtx["TxnContext"]
-    TxnCtx --&gt; Txn
-    TxnCtx --&gt; Locks
-
-    Ctx --&gt; Engine["HoltStorage"]
-    Engine --&gt; Table["HoltTableHandle"]
-    Engine --&gt; Index["HoltIndexHandle"]
+    SQL["SQL text"] --&gt; DF["DataFusion SessionContext"]
+    DF --&gt; Logical["DataFusion LogicalPlan"]
+    Logical --&gt; Optimized["DataFusion Optimizers"]
+    Optimized --&gt; Physical["DataFusion ExecutionPlan"]
+    Physical --&gt; Scan["HoltScanExec"]
+    Scan --&gt; Table["Holt table tree"]
+    Scan --&gt; Index["Holt index tree"]
     Table --&gt; Holt["holt::DB"]
     Index --&gt; Holt
-    Catalog["Catalog"] --&gt; Holt
+
+    Catalog["HoltCatalogProvider"] --&gt; DF
+    Catalog --&gt; Descriptors["Holt catalog tree"]
+    Txn["TransactionManager"] --&gt; Status["Holt txn tree"]
 </pre>
 
-<p>The executor never touches Holt directly. It asks <code>ExecutionContext</code> for a
-<code>TableBinding</code>, then uses object-safe table/index handles for scans and writes.</p>
+<p>DDL is the main place where QuillSQL intercepts DataFusion: <code>CREATE TABLE</code>,
+<code>CREATE INDEX</code>, and <code>DROP TABLE</code> update Holt descriptors and refresh the in-memory
+catalog projection. DML uses DataFusion table-provider hooks and writes through Holt.</p>
 <h2 id="storage-boundary"><a class="header" href="#storage-boundary">Storage Boundary</a></h2>
 <pre class="mermaid">flowchart TD
     subgraph QuillSQL
-        Catalog["Catalog descriptors"]
-        TableHandle["TableHandle"]
-        IndexHandle["IndexHandle"]
-        TxnStatus["Transaction statuses"]
+        Provider["HoltTableProvider"]
+        ScanExec["HoltScanExec"]
+        TxnMeta["TupleMeta / MVCC"]
     end
 
-    Catalog --&gt; HCatalog["Holt tree: catalog"]
-    TableHandle --&gt; HTable["Holt tree: table/&lt;table_id&gt;"]
-    IndexHandle --&gt; HIndex["Holt tree: index/&lt;index_id&gt;"]
-    TxnStatus --&gt; HTxn["Holt tree: txn"]
+    Provider --&gt; RowTree["table/&lt;table_id&gt;"]
+    Provider --&gt; IndexTree["index/&lt;index_id&gt;"]
+    Provider --&gt; CatalogTree["catalog"]
+    TxnMeta --&gt; TxnTree["txn"]
 
-    HCatalog --&gt; DB["holt::DB"]
-    HTable --&gt; DB
-    HIndex --&gt; DB
-    HTxn --&gt; DB
+    RowTree --&gt; DB["holt::DB"]
+    IndexTree --&gt; DB
+    CatalogTree --&gt; DB
+    TxnTree --&gt; DB
 </pre>
 
-<p>Holt is the only durable storage engine. QuillSQL no longer contains an internal page
-heap, buffer pool, B+Tree, storage scheduler, or SQL-data WAL. This keeps the boundary
-clear: QuillSQL decides SQL semantics; Holt owns durable bytes and its own logging.</p>
+<p>There is no QuillSQL-owned page cache, heap file, B+Tree, storage scheduler, or
+SQL-data WAL. Holt owns durable bytes and its own logging. QuillSQL decides SQL/MVCC
+semantics and encodes row/index values into Holt trees.</p>
 <h2 id="important-invariants"><a class="header" href="#important-invariants">Important Invariants</a></h2>
 <ul>
-<li>A table descriptor in Holt is the durable source of truth for a table id and schema.</li>
-<li><code>information_schema</code> is a SQL-visible virtual projection generated from the in-memory catalog.</li>
+<li>Holt descriptors are the durable source of truth for table ids, index ids, and schemas.</li>
+<li>DataFusion <code>information_schema</code> is generated from the Holt catalog provider.</li>
 <li>Row values are stored as encoded <code>TupleMeta + Tuple</code>.</li>
-<li>Index keys use order-preserving SQL encoding plus RID tie-breakers, so Holt byte order
-matches SQL range-scan order.</li>
-<li>Commit and rollback write final transaction status into Holt. Startup recovers those
-statuses before planning or executing statements.</li>
+<li>Index keys use order-preserving SQL encoding plus RID tie-breakers.</li>
+<li>Startup recovers transaction status from Holt before query execution.</li>
+<li>In-progress or unknown row versions are not visible as committed data.</li>
 </ul>
-<h2 id="execution-contract"><a class="header" href="#execution-contract">Execution Contract</a></h2>
-<p><code>TableBinding</code> is the executor’s storage facade:</p>
-<pre><code class="language-text">scan()
-index_scan(name, range)
-insert(txn, tuple)
-delete(txn, rid, prev_meta, prev_tuple)
-update(txn, rid, new_tuple, prev_meta, prev_tuple)
-prepare_row_for_write(txn, rid, observed_meta)
-</code></pre>
-<p>Physical operators stay small because they only express SQL work: scan rows, evaluate
-expressions, ask <code>TxnContext</code> for visibility/locks, and call the table binding for
-mutations.</p>
-<h2 id="restart-behavior"><a class="header" href="#restart-behavior">Restart Behavior</a></h2>
-<p>On open, QuillSQL loads Holt catalog descriptors, reconstructs the in-memory catalog,
-loads transaction statuses, and advances the next transaction id past recovered ids.
-Unknown or in-progress row versions are not treated as committed by visibility checks.</p>
+<h2 id="query-compilation-boundary"><a class="header" href="#query-compilation-boundary">Query Compilation Boundary</a></h2>
+<p>The JIT research boundary is the DataFusion <code>ExecutionPlan</code> and Arrow <code>RecordBatch</code>
+interface. The <code>jit-mlir</code> feature wires in an MLIR-named physical optimizer rule as the
+extension point; native DataFusion execution remains the fallback for unsupported
+expressions.</p>
 
                     </main>
 
