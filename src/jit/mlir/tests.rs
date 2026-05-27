@@ -59,6 +59,18 @@ fn emits_i64_predicate_module() {
     MlirBackend::new().verify_module(&module).unwrap();
 }
 
+#[test]
+fn emits_i64_filter_module() {
+    let predicate = i64_gt_ten(false);
+
+    let module = MlirBackend::new().lower_i64_filter(&predicate).unwrap();
+    assert!(module.text.contains("func.func @quill_i64_filter_"));
+    assert!(module.text.contains("scf.for unsigned"));
+    assert!(module.text.contains("llvm.load"));
+    assert!(module.text.contains("llvm.store"));
+    MlirBackend::new().verify_module(&module).unwrap();
+}
+
 #[cfg(feature = "jit-mlir")]
 #[test]
 fn invokes_i64_predicate_with_execution_engine() {
@@ -79,6 +91,47 @@ fn reuses_native_i64_predicate_artifact() {
     assert!(!native.invoke(9).unwrap());
     assert!(!native.invoke(10).unwrap());
     assert!(native.invoke(11).unwrap());
+}
+
+#[cfg(feature = "jit-mlir")]
+#[test]
+fn invokes_native_i64_filter_kernel() {
+    let predicate = i64_gt_ten(false);
+    let native = MlirBackend::new()
+        .compile_native_i64_filter(&predicate)
+        .unwrap();
+    let input = [9_i64, 10, 11, 42];
+    let mut output = [255_u8; 4];
+
+    native.invoke(&input, &mut output).unwrap();
+
+    assert_eq!(output, [0, 0, 1, 1]);
+}
+
+#[cfg(feature = "jit-mlir")]
+#[test]
+fn invokes_native_i64_filter_with_nonzero_column_index() {
+    let predicate = JitExpr::Binary {
+        op: JitBinaryOp::Gt,
+        left: Box::new(JitExpr::Column {
+            index: 1,
+            name: "v".to_string(),
+            ty: JitType::Int64,
+            nullable: false,
+        }),
+        right: Box::new(JitExpr::Literal(JitScalar::Int64(10))),
+        ty: JitType::Bool,
+        nullable: false,
+    };
+    let native = MlirBackend::new()
+        .compile_native_i64_filter(&predicate)
+        .unwrap();
+    let input = [10_i64, 11, 12];
+    let mut output = [0_u8; 3];
+
+    native.invoke(&input, &mut output).unwrap();
+
+    assert_eq!(output, [0, 1, 1]);
 }
 
 fn i64_gt_ten(nullable: bool) -> JitExpr {

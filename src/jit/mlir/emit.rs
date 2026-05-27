@@ -67,7 +67,7 @@ pub(super) fn lower_filter_project(
 }
 
 pub(super) fn lower_i64_predicate(predicate: &JitExpr) -> JitResult<MlirModule> {
-    ensure_i64_predicate(predicate)?;
+    ensure_single_i64_predicate(predicate, "native predicate wrapper")?;
     let symbol = next_symbol("quill_i64_predicate");
     let expr_symbol = format!("{symbol}_expr");
     let mut text = start_module();
@@ -84,6 +84,41 @@ pub(super) fn lower_i64_predicate(predicate: &JitExpr) -> JitResult<MlirModule> 
     text.push_str("    %zero = arith.constant 0 : i32\n");
     text.push_str("    %out = arith.select %pred, %one, %zero : i32\n");
     text.push_str("    return %out : i32\n");
+    text.push_str("  }\n}\n");
+    Ok(MlirModule { symbol, text })
+}
+
+pub(super) fn lower_i64_filter(predicate: &JitExpr) -> JitResult<MlirModule> {
+    ensure_single_i64_predicate(predicate, "native filter kernel")?;
+    let symbol = next_symbol("quill_i64_filter");
+    let expr_symbol = format!("{symbol}_expr");
+    let mut text = start_module();
+    text.push_str(&scalar_function(&expr_symbol, predicate)?);
+    let _ = writeln!(
+        text,
+        "  func.func @{symbol}(%len: i64, %values: !llvm.ptr, %out: !llvm.ptr) -> i32 attributes {{ llvm.emit_c_interface }} {{"
+    );
+    text.push_str("    %c0_i64 = arith.constant 0 : i64\n");
+    text.push_str("    %c1_i64 = arith.constant 1 : i64\n");
+    text.push_str("    %false = arith.constant 0 : i8\n");
+    text.push_str("    %true = arith.constant 1 : i8\n");
+    text.push_str("    scf.for unsigned %i = %c0_i64 to %len step %c1_i64 : i64 {\n");
+    text.push_str(
+        "      %value_ptr = llvm.getelementptr %values[%i] : (!llvm.ptr, i64) -> !llvm.ptr, i64\n",
+    );
+    text.push_str("      %value = llvm.load %value_ptr : !llvm.ptr -> i64\n");
+    let _ = writeln!(
+        text,
+        "      %pred = func.call @{expr_symbol}(%value) : (i64) -> i1"
+    );
+    text.push_str("      %mask = arith.select %pred, %true, %false : i8\n");
+    text.push_str(
+        "      %out_ptr = llvm.getelementptr %out[%i] : (!llvm.ptr, i64) -> !llvm.ptr, i8\n",
+    );
+    text.push_str("      llvm.store %mask, %out_ptr : i8, !llvm.ptr\n");
+    text.push_str("    }\n");
+    text.push_str("    %ok = arith.constant 0 : i32\n");
+    text.push_str("    return %ok : i32\n");
     text.push_str("  }\n}\n");
     Ok(MlirModule { symbol, text })
 }
@@ -157,21 +192,20 @@ fn collect_columns(expr: &JitExpr, columns: &mut BTreeMap<usize, JitType>) {
     }
 }
 
-fn ensure_i64_predicate(predicate: &JitExpr) -> JitResult<()> {
+fn ensure_single_i64_predicate(predicate: &JitExpr, context: &str) -> JitResult<()> {
     if predicate.ty() != JitType::Bool {
         return Err(JitError::UnsupportedExpr(format!(
-            "native predicate wrapper requires bool output, got {}",
+            "{context} requires bool output, got {}",
             mlir_type(predicate.ty())
         )));
     }
 
     let mut columns = BTreeMap::new();
     collect_columns(predicate, &mut columns);
-    if columns.len() != 1 || columns.get(&0) != Some(&JitType::Int64) {
-        return Err(JitError::UnsupportedExpr(
-            "native predicate wrapper currently supports exactly one i64 column at index 0"
-                .to_string(),
-        ));
+    if columns.len() != 1 || !columns.values().all(|ty| *ty == JitType::Int64) {
+        return Err(JitError::UnsupportedExpr(format!(
+            "{context} currently supports exactly one i64 input column"
+        )));
     }
     Ok(())
 }

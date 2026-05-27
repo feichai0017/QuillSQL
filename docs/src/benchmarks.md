@@ -27,6 +27,8 @@ Benchmarks:
 | `jit_ir/fuse_filter_project` | `PipelineIR` prefix fusion into `KernelIR::FilterProject`. |
 | `mlir/compile_filter` | JIT expression to MLIR module generation for a filter. |
 | `mlir/compile_filter_project` | Fused filter/project MLIR module generation. |
+| `mlir_native/compile_i64_filter` | MLIR parse/lower/JIT cost for the first native fixed-width filter kernel. Requires `jit-mlir`. |
+| `mlir_native/filter_64k` | Native MLIR i64 filter execution over a 64K-row values vector, writing a byte selection mask. Requires `jit-mlir`. |
 | `quill_kernel/filter_project_64k` | Direct fixed-width Arrow kernel execution outside DataFusion planning. |
 | `datafusion/sql_filter_project_64k` | DataFusion SQL planning/execution over a 64K-row in-memory Arrow table, including the compiled filter/project physical node when the pattern matches. |
 

@@ -79,7 +79,8 @@ Current scope: MLIR is parsed and verified, and the DataFusion optimizer rule
 replaces supported filter/project islands with `CompiledFilterProjectExec`.
 That node executes through QuillSQL's fixed-width Arrow kernel runtime while
 carrying the MLIR kernel descriptor. Native scalar MLIR invocation is wired for
-the first `i64 -> bool` probe; native Arrow-batch kernel dispatch is the next
+the first `i64 -> bool` probe, and the first native batch filter kernel emits a
+byte selection mask. Native Arrow-batch filter/project dispatch is the next
 step.
 
 Run the MLIR path with:
