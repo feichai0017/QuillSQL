@@ -38,7 +38,7 @@
             const default_dark_theme = "navy";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-b5857736.js"></script>
+        <script src="toc-93d94c91.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -188,11 +188,12 @@ experiments and Arrow/Parquet datasets for persistent analytical data.</p>
     DF --&gt; Logical["DataFusion LogicalPlan"]
     Logical --&gt; Optimized["DataFusion optimizers"]
     Optimized --&gt; Physical["DataFusion ExecutionPlan"]
-    Physical --&gt; Arrow["Arrow RecordBatch output"]
+    Physical --&gt; JITRule["MlirJitRule physical rewrite"]
+    JITRule --&gt; CompiledExec["CompiledFilterProjectExec"]
+    CompiledExec --&gt; Arrow["Arrow RecordBatch output"]
 
     Parquet["Parquet / Arrow datasets"] --&gt; DF
     Memory["DataFusion memory tables"] --&gt; DF
-    Physical --&gt; JITRule["MlirJitRule candidate discovery"]
     JITRule --&gt; MLIR["MLIR arith module verification"]
 </pre>
 
@@ -212,9 +213,28 @@ storage-engine research.</p>
 interface. <code>MlirJitRule</code> walks DataFusion physical plans and tries to lower
 supported <code>FilterExec</code> and <code>ProjectionExec</code> expressions into a small JIT IR.</p>
 <p>The MLIR backend then emits scalar <code>arith</code> functions and verifies them through
-<code>melior</code> when <code>jit-mlir</code> is enabled. Native kernel execution is the next step;
-the current rule is discovery and verification only, so unsupported expressions
-fall back to DataFusion without a parallel executor.</p>
+<code>melior</code> when <code>jit-mlir</code> is enabled. The physical optimizer can replace
+filter/project islands with <code>CompiledFilterProjectExec</code>; the current executable
+node runs a fixed-width Arrow batch kernel implemented in QuillSQL while carrying
+the MLIR kernel descriptor. A narrow native <code>i64 -&gt; bool</code> MLIR ExecutionEngine
+probe validates real invocation. Native Arrow-batch function pointers are the
+next step, so unsupported expressions fall back to the normal DataFusion plan.</p>
+<h2 id="ir-and-fusion"><a class="header" href="#ir-and-fusion">IR And Fusion</a></h2>
+<p>QuillSQL keeps two JIT-level IRs:</p>
+<ul>
+<li><code>KernelIR</code>: a single compilable kernel such as filter, projection, or fused
+filter/project.</li>
+<li><code>PipelineIR</code>: a linear pipeline prefix from a DataFusion physical plan.</li>
+</ul>
+<p>The first fusion pattern is deliberately small:</p>
+<pre><code class="language-text">Filter -&gt; Projection
+  =&gt; KernelIR::FilterProject
+</code></pre>
+<p>The rule also handles the common DataFusion shape where a round-robin
+<code>RepartitionExec</code> sits between the filter and projection by placing the compiled
+node below the repartition. This lets the project measure a real operator
+boundary before taking on joins, aggregates, hash repartitioning, or whole-query
+pipeline lowering.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="module-overview"><a class="header" href="#module-overview">Module Overview</a></h1>
 <p>The current codebase is intentionally small. DataFusion provides the SQL engine;
@@ -232,15 +252,19 @@ Parquet dataset as a DataFusion table.</p>
 <tr><th>File</th><th>Role</th></tr>
 </thead>
 <tbody>
+<tr><td><code>exec.rs</code></td><td>DataFusion physical execution node for compiled filter/project islands.</td></tr>
 <tr><td><code>expr.rs</code></td><td>Lowers supported DataFusion physical expressions into QuillSQL’s small JIT IR.</td></tr>
+<tr><td><code>ir.rs</code></td><td>Defines <code>KernelIR</code>, <code>PipelineIR</code>, and the initial filter/project fusion boundary.</td></tr>
 <tr><td><code>kernel.rs</code></td><td>Defines the future Arrow kernel ABI and compiled-kernel descriptor.</td></tr>
-<tr><td><code>mlir/</code></td><td>MLIR-first backend that emits and verifies <code>arith</code> scalar functions.</td></tr>
-<tr><td><code>rule.rs</code></td><td>DataFusion physical optimizer rule that discovers <code>FilterExec</code> and <code>ProjectionExec</code> candidates.</td></tr>
+<tr><td><code>mlir/</code></td><td>MLIR-first backend that emits/verifies <code>arith</code> scalar functions and runs the first native scalar ExecutionEngine smoke path.</td></tr>
+<tr><td><code>rule.rs</code></td><td>DataFusion physical optimizer rule that rewrites supported filter/project islands.</td></tr>
+<tr><td><code>runtime.rs</code></td><td>Fixed-width Arrow batch kernel runtime for compiled filter/project execution.</td></tr>
 </tbody>
 </table>
 </div>
-<p>The JIT package is not a storage adapter and not a second executor. It is the
-research boundary for replacing selected DataFusion physical operators later.</p>
+<p>The JIT package is not a storage adapter and not a second SQL engine. It is the
+research boundary for replacing selected DataFusion physical operators with
+compiled kernels.</p>
 <h2 id="front-ends-srcbin"><a class="header" href="#front-ends-srcbin">Front Ends (<code>src/bin</code>)</a></h2>
 <p><code>client</code> is the interactive SQL shell. <code>server</code> exposes HTTP endpoints for SQL
 execution plus lightweight debug endpoints for the last DataFusion plan.</p>
@@ -306,9 +330,11 @@ MLIR JIT boundary.</p>
 <pre><code class="language-bash">cargo test
 cargo test --features jit-mlir
 cargo clippy --all-targets -- -D warnings
+cargo bench --no-run
 </code></pre>
-<p>The <code>jit-mlir</code> feature requires local MLIR/LLVM libraries. On a Homebrew LLVM 22
-installation, set:</p>
+<p>The <code>jit-mlir</code> feature requires local MLIR/LLVM libraries and also runs the
+native scalar ExecutionEngine smoke test. On a Homebrew LLVM 22 installation,
+set:</p>
 <pre><code class="language-bash">MLIR_SYS_220_PREFIX=/opt/homebrew/opt/llvm \
 LLVM_SYS_220_PREFIX=/opt/homebrew/opt/llvm \
 cargo test --features jit-mlir
@@ -317,6 +343,102 @@ cargo test --features jit-mlir
 <p>The <code>docs/</code> directory is an mdBook. It tracks the current DataFusion +
 Arrow/Parquet + MLIR architecture and intentionally omits the removed teaching
 database storage stack.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="benchmarking"><a class="header" href="#benchmarking">Benchmarking</a></h1>
+<p>QuillSQL uses benchmarks to separate three different claims:</p>
+<ul>
+<li>JIT lowering cost: how much time QuillSQL spends building JIT IR and MLIR.</li>
+<li>DataFusion execution cost: how the current DataFusion path behaves on Arrow
+batches or Parquet datasets.</li>
+<li>Compiled-node cost: how the rewritten filter/project physical island behaves
+before and after native MLIR function pointers are enabled.</li>
+</ul>
+<p>The current code has a real <code>CompiledFilterProjectExec</code> in the DataFusion hot
+path, and its execution body uses QuillSQL’s fixed-width Arrow batch kernel.
+Native MLIR kernel speedups are intentionally not claimed yet.</p>
+<h2 id="microbenchmarks"><a class="header" href="#microbenchmarks">Microbenchmarks</a></h2>
+<p><code>benches/jit_micro.rs</code> isolates small, repeatable paths:</p>
+<pre><code class="language-bash">cargo bench --bench jit_micro -- --sample-size 10
+</code></pre>
+<p>Benchmarks:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Name</th><th>Measures</th></tr>
+</thead>
+<tbody>
+<tr><td><code>jit_ir/fuse_filter_project</code></td><td><code>PipelineIR</code> prefix fusion into <code>KernelIR::FilterProject</code>.</td></tr>
+<tr><td><code>mlir/compile_filter</code></td><td>JIT expression to MLIR module generation for a filter.</td></tr>
+<tr><td><code>mlir/compile_filter_project</code></td><td>Fused filter/project MLIR module generation.</td></tr>
+<tr><td><code>quill_kernel/filter_project_64k</code></td><td>Direct fixed-width Arrow kernel execution outside DataFusion planning.</td></tr>
+<tr><td><code>datafusion/sql_filter_project_64k</code></td><td>DataFusion SQL planning/execution over a 64K-row in-memory Arrow table, including the compiled filter/project physical node when the pattern matches.</td></tr>
+</tbody>
+</table>
+</div>
+<p>Without <code>jit-mlir</code>, MLIR verification is a no-op. With <code>jit-mlir</code>, the same
+benchmark includes <code>melior</code> parse and verifier cost:</p>
+<pre><code class="language-bash">MLIR_SYS_220_PREFIX=/opt/homebrew/opt/llvm \
+LLVM_SYS_220_PREFIX=/opt/homebrew/opt/llvm \
+cargo bench --bench jit_micro --features jit-mlir -- --sample-size 10
+</code></pre>
+<h2 id="tpc-h"><a class="header" href="#tpc-h">TPC-H</a></h2>
+<p><code>benches/tpch.rs</code> is the end-to-end analytical benchmark harness. It expects
+Parquet data. By default it uses the pure Rust <code>tpchgen-cli</code> generator to create
+SF0.01 data inside the repository under <code>benchdata/tpch-sf0.01</code>.</p>
+<pre><code class="language-bash">cargo bench --bench tpch -- --sample-size 10
+scripts/bench_tpch.sh
+</code></pre>
+<p>Generated data is outside version control. Useful knobs:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Variable</th><th>Meaning</th></tr>
+</thead>
+<tbody>
+<tr><td><code>QUILL_TPCH_SF</code></td><td>Scale factor for generated data, default <code>0.01</code>.</td></tr>
+<tr><td><code>QUILL_TPCH_GEN_THREADS</code></td><td>Number of generator threads.</td></tr>
+<tr><td><code>QUILL_TPCH_REGENERATE=1</code></td><td>Delete and rebuild the generated data directory.</td></tr>
+<tr><td><code>QUILL_TPCH_DIR</code></td><td>Use an existing Parquet dataset instead of generating one.</td></tr>
+</tbody>
+</table>
+</div>
+<p>When <code>QUILL_TPCH_DIR</code> is set, the directory can contain either
+<code>&lt;table&gt;.parquet</code> files or table directories:</p>
+<pre><code class="language-text">tpch-parquet/
+  lineitem.parquet
+  orders.parquet
+  customer.parquet
+</code></pre>
+<p>or:</p>
+<pre><code class="language-text">tpch-parquet/
+  lineitem/
+  orders/
+  customer/
+</code></pre>
+<p>Current query ladder:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Query</th><th>Family</th><th>Why it is included</th></tr>
+</thead>
+<tbody>
+<tr><td>Q6</td><td>scan/filter/plain aggregate</td><td>First fixed-width baseline for filter and simple arithmetic.</td></tr>
+<tr><td>Q1</td><td>scan/filter/grouped aggregate/sort</td><td>Exercises aggregate state and result materialization.</td></tr>
+<tr><td>Q3</td><td>join-heavy aggregate</td><td>Adds multi-table build/probe pressure.</td></tr>
+</tbody>
+</table>
+</div>
+<h2 id="reporting-rules"><a class="header" href="#reporting-rules">Reporting Rules</a></h2>
+<p>When reporting results, include:</p>
+<ul>
+<li>exact git commit</li>
+<li>command line and feature flags</li>
+<li>CPU, memory, OS, Rust version, and LLVM/MLIR version if <code>jit-mlir</code> is enabled</li>
+<li>TPC-H scale factor and data format</li>
+<li>whether file-system cache was warm</li>
+<li>whether the number is JIT lowering, DataFusion end-to-end, or future native
+kernel execution</li>
+</ul>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="contributors-guide"><a class="header" href="#contributors-guide">Contributor’s Guide</a></h1>
 <p>Welcome, and thank you for your interest in contributing to QuillSQL! Whether you’re fixing a bug, adding a new feature, or improving the documentation, this guide will help you get started.</p>

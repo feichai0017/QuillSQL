@@ -37,7 +37,7 @@
             const default_dark_theme = "navy";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="../toc-b5857736.js"></script>
+        <script src="../toc-93d94c91.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -170,15 +170,19 @@ Parquet dataset as a DataFusion table.</p>
 <tr><th>File</th><th>Role</th></tr>
 </thead>
 <tbody>
+<tr><td><code>exec.rs</code></td><td>DataFusion physical execution node for compiled filter/project islands.</td></tr>
 <tr><td><code>expr.rs</code></td><td>Lowers supported DataFusion physical expressions into QuillSQL’s small JIT IR.</td></tr>
+<tr><td><code>ir.rs</code></td><td>Defines <code>KernelIR</code>, <code>PipelineIR</code>, and the initial filter/project fusion boundary.</td></tr>
 <tr><td><code>kernel.rs</code></td><td>Defines the future Arrow kernel ABI and compiled-kernel descriptor.</td></tr>
-<tr><td><code>mlir/</code></td><td>MLIR-first backend that emits and verifies <code>arith</code> scalar functions.</td></tr>
-<tr><td><code>rule.rs</code></td><td>DataFusion physical optimizer rule that discovers <code>FilterExec</code> and <code>ProjectionExec</code> candidates.</td></tr>
+<tr><td><code>mlir/</code></td><td>MLIR-first backend that emits/verifies <code>arith</code> scalar functions and runs the first native scalar ExecutionEngine smoke path.</td></tr>
+<tr><td><code>rule.rs</code></td><td>DataFusion physical optimizer rule that rewrites supported filter/project islands.</td></tr>
+<tr><td><code>runtime.rs</code></td><td>Fixed-width Arrow batch kernel runtime for compiled filter/project execution.</td></tr>
 </tbody>
 </table>
 </div>
-<p>The JIT package is not a storage adapter and not a second executor. It is the
-research boundary for replacing selected DataFusion physical operators later.</p>
+<p>The JIT package is not a storage adapter and not a second SQL engine. It is the
+research boundary for replacing selected DataFusion physical operators with
+compiled kernels.</p>
 <h2 id="front-ends-srcbin"><a class="header" href="#front-ends-srcbin">Front Ends (<code>src/bin</code>)</a></h2>
 <p><code>client</code> is the interactive SQL shell. <code>server</code> exposes HTTP endpoints for SQL
 execution plus lightweight debug endpoints for the last DataFusion plan.</p>

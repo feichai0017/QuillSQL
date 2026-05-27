@@ -3,8 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>Page not found - QuillSQL Internals</title>
-        <base href="/QuillSQL/">
+        <title>Benchmarking - QuillSQL Internals</title>
 
 
         <!-- Custom HTML head -->
@@ -155,14 +154,113 @@
 
                 <div id="mdbook-content" class="content">
                     <main>
-                        <h1 id="document-not-found-404"><a class="header" href="#document-not-found-404">Document not found (404)</a></h1>
-<p>This URL is invalid, sorry. Please use the navigation bar or search to continue.</p>
+                        <h1 id="benchmarking"><a class="header" href="#benchmarking">Benchmarking</a></h1>
+<p>QuillSQL uses benchmarks to separate three different claims:</p>
+<ul>
+<li>JIT lowering cost: how much time QuillSQL spends building JIT IR and MLIR.</li>
+<li>DataFusion execution cost: how the current DataFusion path behaves on Arrow
+batches or Parquet datasets.</li>
+<li>Compiled-node cost: how the rewritten filter/project physical island behaves
+before and after native MLIR function pointers are enabled.</li>
+</ul>
+<p>The current code has a real <code>CompiledFilterProjectExec</code> in the DataFusion hot
+path, and its execution body uses QuillSQL’s fixed-width Arrow batch kernel.
+Native MLIR kernel speedups are intentionally not claimed yet.</p>
+<h2 id="microbenchmarks"><a class="header" href="#microbenchmarks">Microbenchmarks</a></h2>
+<p><code>benches/jit_micro.rs</code> isolates small, repeatable paths:</p>
+<pre><code class="language-bash">cargo bench --bench jit_micro -- --sample-size 10
+</code></pre>
+<p>Benchmarks:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Name</th><th>Measures</th></tr>
+</thead>
+<tbody>
+<tr><td><code>jit_ir/fuse_filter_project</code></td><td><code>PipelineIR</code> prefix fusion into <code>KernelIR::FilterProject</code>.</td></tr>
+<tr><td><code>mlir/compile_filter</code></td><td>JIT expression to MLIR module generation for a filter.</td></tr>
+<tr><td><code>mlir/compile_filter_project</code></td><td>Fused filter/project MLIR module generation.</td></tr>
+<tr><td><code>quill_kernel/filter_project_64k</code></td><td>Direct fixed-width Arrow kernel execution outside DataFusion planning.</td></tr>
+<tr><td><code>datafusion/sql_filter_project_64k</code></td><td>DataFusion SQL planning/execution over a 64K-row in-memory Arrow table, including the compiled filter/project physical node when the pattern matches.</td></tr>
+</tbody>
+</table>
+</div>
+<p>Without <code>jit-mlir</code>, MLIR verification is a no-op. With <code>jit-mlir</code>, the same
+benchmark includes <code>melior</code> parse and verifier cost:</p>
+<pre><code class="language-bash">MLIR_SYS_220_PREFIX=/opt/homebrew/opt/llvm \
+LLVM_SYS_220_PREFIX=/opt/homebrew/opt/llvm \
+cargo bench --bench jit_micro --features jit-mlir -- --sample-size 10
+</code></pre>
+<h2 id="tpc-h"><a class="header" href="#tpc-h">TPC-H</a></h2>
+<p><code>benches/tpch.rs</code> is the end-to-end analytical benchmark harness. It expects
+Parquet data. By default it uses the pure Rust <code>tpchgen-cli</code> generator to create
+SF0.01 data inside the repository under <code>benchdata/tpch-sf0.01</code>.</p>
+<pre><code class="language-bash">cargo bench --bench tpch -- --sample-size 10
+scripts/bench_tpch.sh
+</code></pre>
+<p>Generated data is outside version control. Useful knobs:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Variable</th><th>Meaning</th></tr>
+</thead>
+<tbody>
+<tr><td><code>QUILL_TPCH_SF</code></td><td>Scale factor for generated data, default <code>0.01</code>.</td></tr>
+<tr><td><code>QUILL_TPCH_GEN_THREADS</code></td><td>Number of generator threads.</td></tr>
+<tr><td><code>QUILL_TPCH_REGENERATE=1</code></td><td>Delete and rebuild the generated data directory.</td></tr>
+<tr><td><code>QUILL_TPCH_DIR</code></td><td>Use an existing Parquet dataset instead of generating one.</td></tr>
+</tbody>
+</table>
+</div>
+<p>When <code>QUILL_TPCH_DIR</code> is set, the directory can contain either
+<code>&lt;table&gt;.parquet</code> files or table directories:</p>
+<pre><code class="language-text">tpch-parquet/
+  lineitem.parquet
+  orders.parquet
+  customer.parquet
+</code></pre>
+<p>or:</p>
+<pre><code class="language-text">tpch-parquet/
+  lineitem/
+  orders/
+  customer/
+</code></pre>
+<p>Current query ladder:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Query</th><th>Family</th><th>Why it is included</th></tr>
+</thead>
+<tbody>
+<tr><td>Q6</td><td>scan/filter/plain aggregate</td><td>First fixed-width baseline for filter and simple arithmetic.</td></tr>
+<tr><td>Q1</td><td>scan/filter/grouped aggregate/sort</td><td>Exercises aggregate state and result materialization.</td></tr>
+<tr><td>Q3</td><td>join-heavy aggregate</td><td>Adds multi-table build/probe pressure.</td></tr>
+</tbody>
+</table>
+</div>
+<h2 id="reporting-rules"><a class="header" href="#reporting-rules">Reporting Rules</a></h2>
+<p>When reporting results, include:</p>
+<ul>
+<li>exact git commit</li>
+<li>command line and feature flags</li>
+<li>CPU, memory, OS, Rust version, and LLVM/MLIR version if <code>jit-mlir</code> is enabled</li>
+<li>TPC-H scale factor and data format</li>
+<li>whether file-system cache was warm</li>
+<li>whether the number is JIT lowering, DataFusion end-to-end, or future native
+kernel execution</li>
+</ul>
 
                     </main>
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="modules/tests.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
+                            </a>
 
+                            <a rel="next prefetch" href="contributing.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
+                            </a>
 
                         <div style="clear: both"></div>
                     </nav>
@@ -170,7 +268,13 @@
             </div>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="modules/tests.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
+                    </a>
 
+                    <a rel="next prefetch" href="contributing.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
+                    </a>
             </nav>
 
         </div>

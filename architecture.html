@@ -37,7 +37,7 @@
             const default_dark_theme = "navy";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-b5857736.js"></script>
+        <script src="toc-93d94c91.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -166,11 +166,12 @@ experiments and Arrow/Parquet datasets for persistent analytical data.</p>
     DF --&gt; Logical["DataFusion LogicalPlan"]
     Logical --&gt; Optimized["DataFusion optimizers"]
     Optimized --&gt; Physical["DataFusion ExecutionPlan"]
-    Physical --&gt; Arrow["Arrow RecordBatch output"]
+    Physical --&gt; JITRule["MlirJitRule physical rewrite"]
+    JITRule --&gt; CompiledExec["CompiledFilterProjectExec"]
+    CompiledExec --&gt; Arrow["Arrow RecordBatch output"]
 
     Parquet["Parquet / Arrow datasets"] --&gt; DF
     Memory["DataFusion memory tables"] --&gt; DF
-    Physical --&gt; JITRule["MlirJitRule candidate discovery"]
     JITRule --&gt; MLIR["MLIR arith module verification"]
 </pre>
 
@@ -190,9 +191,28 @@ storage-engine research.</p>
 interface. <code>MlirJitRule</code> walks DataFusion physical plans and tries to lower
 supported <code>FilterExec</code> and <code>ProjectionExec</code> expressions into a small JIT IR.</p>
 <p>The MLIR backend then emits scalar <code>arith</code> functions and verifies them through
-<code>melior</code> when <code>jit-mlir</code> is enabled. Native kernel execution is the next step;
-the current rule is discovery and verification only, so unsupported expressions
-fall back to DataFusion without a parallel executor.</p>
+<code>melior</code> when <code>jit-mlir</code> is enabled. The physical optimizer can replace
+filter/project islands with <code>CompiledFilterProjectExec</code>; the current executable
+node runs a fixed-width Arrow batch kernel implemented in QuillSQL while carrying
+the MLIR kernel descriptor. A narrow native <code>i64 -&gt; bool</code> MLIR ExecutionEngine
+probe validates real invocation. Native Arrow-batch function pointers are the
+next step, so unsupported expressions fall back to the normal DataFusion plan.</p>
+<h2 id="ir-and-fusion"><a class="header" href="#ir-and-fusion">IR And Fusion</a></h2>
+<p>QuillSQL keeps two JIT-level IRs:</p>
+<ul>
+<li><code>KernelIR</code>: a single compilable kernel such as filter, projection, or fused
+filter/project.</li>
+<li><code>PipelineIR</code>: a linear pipeline prefix from a DataFusion physical plan.</li>
+</ul>
+<p>The first fusion pattern is deliberately small:</p>
+<pre><code class="language-text">Filter -&gt; Projection
+  =&gt; KernelIR::FilterProject
+</code></pre>
+<p>The rule also handles the common DataFusion shape where a round-robin
+<code>RepartitionExec</code> sits between the filter and projection by placing the compiled
+node below the repartition. This lets the project measure a real operator
+boundary before taking on joins, aggregates, hash repartitioning, or whole-query
+pipeline lowering.</p>
 
                     </main>
 
