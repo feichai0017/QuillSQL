@@ -46,8 +46,9 @@ The MLIR backend then emits scalar `arith` functions and verifies them through
 `melior` when `jit-mlir` is enabled. The physical optimizer can replace
 filter/project islands with `CompiledFilterProjectExec`; the current executable
 node runs a fixed-width Arrow batch kernel implemented in QuillSQL while carrying
-the MLIR kernel descriptor. Native MLIR function pointers are the next step, so
-unsupported expressions fall back to the normal DataFusion plan.
+the MLIR kernel descriptor. A narrow native `i64 -> bool` MLIR ExecutionEngine
+probe validates real invocation. Native Arrow-batch function pointers are the
+next step, so unsupported expressions fall back to the normal DataFusion plan.
 
 ## IR And Fusion
 

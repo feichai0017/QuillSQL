@@ -20,7 +20,7 @@ Parquet dataset as a DataFusion table.
 | `expr.rs` | Lowers supported DataFusion physical expressions into QuillSQL's small JIT IR. |
 | `ir.rs` | Defines `KernelIR`, `PipelineIR`, and the initial filter/project fusion boundary. |
 | `kernel.rs` | Defines the future Arrow kernel ABI and compiled-kernel descriptor. |
-| `mlir/` | MLIR-first backend that emits and verifies `arith` scalar functions. |
+| `mlir/` | MLIR-first backend that emits/verifies `arith` scalar functions and runs the first native scalar ExecutionEngine smoke path. |
 | `rule.rs` | DataFusion physical optimizer rule that rewrites supported filter/project islands. |
 | `runtime.rs` | Fixed-width Arrow batch kernel runtime for compiled filter/project execution. |
 

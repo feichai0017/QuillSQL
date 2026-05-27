@@ -1,3 +1,5 @@
+mod native;
+
 use std::collections::BTreeMap;
 use std::fmt::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -94,6 +96,35 @@ impl MlirBackend {
         text.push_str("    return %ok : i32\n");
         text.push_str("  }\n}\n");
         Ok(MlirModule { symbol, text })
+    }
+
+    pub fn lower_i64_predicate(&self, predicate: &JitExpr) -> JitResult<MlirModule> {
+        ensure_i64_predicate(predicate)?;
+        let symbol = next_symbol("quill_i64_predicate");
+        let expr_symbol = format!("{symbol}_expr");
+        let mut text = start_module();
+        text.push_str(&scalar_function(&expr_symbol, predicate)?);
+        let _ = writeln!(
+            text,
+            "  func.func @{symbol}(%c0: i64) -> i32 attributes {{ llvm.emit_c_interface }} {{"
+        );
+        let _ = writeln!(
+            text,
+            "    %pred = func.call @{expr_symbol}(%c0) : (i64) -> i1"
+        );
+        text.push_str("    %one = arith.constant 1 : i32\n");
+        text.push_str("    %zero = arith.constant 0 : i32\n");
+        text.push_str("    %out = arith.select %pred, %one, %zero : i32\n");
+        text.push_str("    return %out : i32\n");
+        text.push_str("  }\n}\n");
+        Ok(MlirModule { symbol, text })
+    }
+
+    #[cfg(feature = "jit-mlir")]
+    pub fn invoke_i64_predicate(&self, predicate: &JitExpr, value: i64) -> JitResult<bool> {
+        let module = self.lower_i64_predicate(predicate)?;
+        self.verify_module(&module)?;
+        native::invoke_i64_predicate(&module, value)
     }
 
     pub fn verify_module(&self, module: &MlirModule) -> JitResult<()> {
@@ -253,6 +284,25 @@ fn collect_columns(expr: &JitExpr, columns: &mut BTreeMap<usize, JitType>) {
         }
         JitExpr::IsNull(arg) => collect_columns(arg, columns),
     }
+}
+
+fn ensure_i64_predicate(predicate: &JitExpr) -> JitResult<()> {
+    if predicate.ty() != JitType::Bool {
+        return Err(JitError::UnsupportedExpr(format!(
+            "native predicate wrapper requires bool output, got {}",
+            mlir_type(predicate.ty())
+        )));
+    }
+
+    let mut columns = BTreeMap::new();
+    collect_columns(predicate, &mut columns);
+    if columns.len() != 1 || columns.get(&0) != Some(&JitType::Int64) {
+        return Err(JitError::UnsupportedExpr(
+            "native predicate wrapper currently supports exactly one i64 column at index 0"
+                .to_string(),
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -663,5 +713,47 @@ mod tests {
         assert!(module.text.contains("arith.cmpi sgt"));
         assert!(module.text.contains("arith.addi"));
         MlirBackend::new().verify_module(&module).unwrap();
+    }
+
+    #[test]
+    fn emits_i64_predicate_module() {
+        let predicate = JitExpr::Binary {
+            op: JitBinaryOp::Gt,
+            left: Box::new(JitExpr::Column {
+                index: 0,
+                name: "a".to_string(),
+                ty: JitType::Int64,
+                nullable: false,
+            }),
+            right: Box::new(JitExpr::Literal(JitScalar::Int64(10))),
+            ty: JitType::Bool,
+            nullable: false,
+        };
+
+        let module = MlirBackend::new().lower_i64_predicate(&predicate).unwrap();
+        assert!(module.text.contains("llvm.emit_c_interface"));
+        assert!(module.text.contains("arith.select"));
+        MlirBackend::new().verify_module(&module).unwrap();
+    }
+
+    #[cfg(feature = "jit-mlir")]
+    #[test]
+    fn invokes_i64_predicate_with_execution_engine() {
+        let predicate = JitExpr::Binary {
+            op: JitBinaryOp::Gt,
+            left: Box::new(JitExpr::Column {
+                index: 0,
+                name: "a".to_string(),
+                ty: JitType::Int64,
+                nullable: false,
+            }),
+            right: Box::new(JitExpr::Literal(JitScalar::Int64(10))),
+            ty: JitType::Bool,
+            nullable: false,
+        };
+
+        let backend = MlirBackend::new();
+        assert!(!backend.invoke_i64_predicate(&predicate, 10).unwrap());
+        assert!(backend.invoke_i64_predicate(&predicate, 11).unwrap());
     }
 }
