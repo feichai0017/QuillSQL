@@ -15,8 +15,8 @@
         <link rel="icon" href="../favicon-de23e50b.svg">
         <link rel="shortcut icon" href="../favicon-8114d1fc.png">
         <link rel="stylesheet" href="../css/variables-8adf115d.css">
-        <link rel="stylesheet" href="../css/general-2459343d.css">
-        <link rel="stylesheet" href="../css/chrome-ae938929.css">
+        <link rel="stylesheet" href="../css/general-0392ca55.css">
+        <link rel="stylesheet" href="../css/chrome-fc474251.css">
         <link rel="stylesheet" href="../css/print-9e4910d8.css" media="print">
 
         <!-- Fonts -->
@@ -37,7 +37,7 @@
             const default_dark_theme = "navy";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="../toc-458cad86.js"></script>
+        <script src="../toc-19071d45.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -165,11 +165,12 @@
 <h2 id="1-mvcc-reading-without-blocking"><a class="header" href="#1-mvcc-reading-without-blocking">1. MVCC: Reading without Blocking</a></h2>
 <p>The core idea of MVCC is <strong>“writers don’t block readers, and readers don’t block writers.”</strong> This is achieved by never overwriting data in-place. When a row is updated, the database creates a <em>new version</em> of that row, preserving the old one.</p>
 <h3 id="version-chains-and-tuplemeta"><a class="header" href="#version-chains-and-tuplemeta">Version Chains and <code>TupleMeta</code></a></h3>
-<p>As discussed in the <a href="../storage/table_heap.html">Storage Engine</a> chapter, every tuple on disk has associated metadata (<code>TupleMeta</code>) that includes:</p>
+<p>Every row value stored through Holt carries QuillSQL metadata (<code>TupleMeta</code>) alongside the
+encoded tuple. That metadata includes:</p>
 <ul>
 <li><code>insert_txn_id</code>: The ID of the transaction that created this version.</li>
 <li><code>delete_txn_id</code>: The ID of the transaction that marked this version as deleted.</li>
-<li><code>prev_version</code> / <code>next_version</code>: Pointers (RIDs) that form a linked list of versions for a single logical row, called the <strong>version chain</strong>.</li>
+<li>the <code>RecordId</code> of the stored version, used by execution and locking.</li>
 </ul>
 <h3 id="transaction-snapshots"><a class="header" href="#transaction-snapshots">Transaction Snapshots</a></h3>
 <p>When a transaction begins, it asks the <code>TransactionManager</code> for a <strong>snapshot</strong> of the database state. This snapshot, defined in <code>transaction/mvcc.rs</code>, contains three key pieces of information:</p>
@@ -227,7 +228,7 @@
 <p><strong>Deadlock Handling</strong>: QuillSQL detects deadlocks by building a waits-for graph and aborting a transaction. What is an alternative strategy for handling deadlocks? For example, what are the pros and cons of using lock timeouts instead of cycle detection?</p>
 </li>
 <li>
-<p><strong>Programming Exercise (Advanced)</strong>: A full implementation of <code>Serializable</code> isolation often requires index-range locking to prevent phantoms. Extend the <code>LockManager</code> to support locking a <em>range</em> of keys within a B+Tree index. This would require a new lock type and a way to check for overlapping ranges. When a <code>SELECT ... WHERE age &gt; 30</code> query runs, it would place a shared lock on the <code>(30, +∞)</code> range in the index on the <code>age</code> column, preventing any other transaction from inserting a new user with an age in that range.</p>
+<p><strong>Programming Exercise (Advanced)</strong>: A full implementation of <code>Serializable</code> isolation often requires predicate or index-range locking to prevent phantoms. Extend the <code>LockManager</code> to support locking an ordered Holt index range, then make overlapping inserts wait on that range.</p>
 </li>
 </ol>
 
@@ -239,7 +240,7 @@
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                             </a>
 
-                            <a rel="next prefetch" href="../modules/storage.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                            <a rel="next prefetch" href="../modules/bin.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                             </a>
 
@@ -253,7 +254,7 @@
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                     </a>
 
-                    <a rel="next prefetch" href="../modules/storage.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                    <a rel="next prefetch" href="../modules/bin.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                     </a>
             </nav>
@@ -276,7 +277,7 @@
 
         <script src="../clipboard-1626706a.min.js"></script>
         <script src="../highlight-abc7f01d.js"></script>
-        <script src="../book-a0b12cfe.js"></script>
+        <script src="../book-c22b7243.js"></script>
 
         <!-- Custom JS scripts -->
         <script src="../mermaid-eefea253.min.js"></script>

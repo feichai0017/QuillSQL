@@ -15,8 +15,8 @@
         <link rel="icon" href="../favicon-de23e50b.svg">
         <link rel="shortcut icon" href="../favicon-8114d1fc.png">
         <link rel="stylesheet" href="../css/variables-8adf115d.css">
-        <link rel="stylesheet" href="../css/general-2459343d.css">
-        <link rel="stylesheet" href="../css/chrome-ae938929.css">
+        <link rel="stylesheet" href="../css/general-0392ca55.css">
+        <link rel="stylesheet" href="../css/chrome-fc474251.css">
         <link rel="stylesheet" href="../css/print-9e4910d8.css" media="print">
 
         <!-- Fonts -->
@@ -37,7 +37,7 @@
             const default_dark_theme = "navy";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="../toc-458cad86.js"></script>
+        <script src="../toc-19071d45.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -174,11 +174,11 @@
 <h2 id="2-the-executioncontext"><a class="header" href="#2-the-executioncontext">2. The <code>ExecutionContext</code></a></h2>
 <p>Notice that both <code>init()</code> and <code>next()</code> take a mutable <code>ExecutionContext</code>. This object is the “world” in which the query runs. It is passed down the operator tree and exposes:</p>
 <ul>
-<li><strong><code>Catalog</code> + <code>StorageEngine</code></strong>: Operators call <code>context.table(&amp;table_ref)</code> to obtain a <code>TableBinding</code>. The binding encapsulates heap/index access (scan, insert, delete, update, prepare-row-for-write) so operators never touch <code>TableHeap</code> or <code>MvccHeap</code> directly.</li>
+<li><strong><code>Catalog</code> + <code>StorageEngine</code></strong>: Operators call <code>context.table(&amp;table_ref)</code> to obtain a <code>TableBinding</code>. The binding encapsulates Holt row/index access (scan, insert, delete, update, prepare-row-for-write) so operators never touch durable storage internals directly.</li>
 <li><strong><code>TxnContext</code></strong>: Provides the current transaction, MVCC snapshot, and helper methods for row/table locks and visibility checks.</li>
 <li><strong>Expression helpers</strong>: <code>eval_expr</code> / <code>eval_predicate</code> evaluate AST expressions against a tuple without leaking <code>ScalarValue</code> plumbing into operators.</li>
 </ul>
-<p>Thanks to the binding abstraction, the operator code only expresses “what” should happen (scan/update/delete) while the binding implements “how” (MVCC chain navigation, undo logging, index maintenance).</p>
+<p>Thanks to the binding abstraction, the operator code only expresses “what” should happen (scan/update/delete) while the binding implements “how” (MVCC metadata writes, undo tracking, and index maintenance).</p>
 <h2 id="3-anatomy-of-physical-operators"><a class="header" href="#3-anatomy-of-physical-operators">3. Anatomy of Physical Operators</a></h2>
 <p>Data flows <em>up</em> the tree from the leaves (scans) to the root. Let’s see how it works by examining a few key operators.</p>
 <h3 id="leaf-operator-physicalseqscan"><a class="header" href="#leaf-operator-physicalseqscan">Leaf Operator: <code>PhysicalSeqScan</code></a></h3>
@@ -305,7 +305,7 @@ d.  Once the limit is reached, it should stop pulling from its child and return 
 
         <script src="../clipboard-1626706a.min.js"></script>
         <script src="../highlight-abc7f01d.js"></script>
-        <script src="../book-a0b12cfe.js"></script>
+        <script src="../book-c22b7243.js"></script>
 
         <!-- Custom JS scripts -->
         <script src="../mermaid-eefea253.min.js"></script>

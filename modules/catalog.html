@@ -15,8 +15,8 @@
         <link rel="icon" href="../favicon-de23e50b.svg">
         <link rel="shortcut icon" href="../favicon-8114d1fc.png">
         <link rel="stylesheet" href="../css/variables-8adf115d.css">
-        <link rel="stylesheet" href="../css/general-2459343d.css">
-        <link rel="stylesheet" href="../css/chrome-ae938929.css">
+        <link rel="stylesheet" href="../css/general-0392ca55.css">
+        <link rel="stylesheet" href="../css/chrome-fc474251.css">
         <link rel="stylesheet" href="../css/print-9e4910d8.css" media="print">
 
         <!-- Fonts -->
@@ -37,7 +37,7 @@
             const default_dark_theme = "navy";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="../toc-458cad86.js"></script>
+        <script src="../toc-19071d45.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -155,72 +155,41 @@
                 <div id="mdbook-content" class="content">
                     <main>
                         <h1 id="catalog-module"><a class="header" href="#catalog-module">Catalog Module</a></h1>
-<p><code>src/catalog/</code> acts as QuillSQL’s data dictionary. It tracks schema/table/index metadata,
-statistics, and the mapping between logical names and physical storage objects such as
-<code>TableHeap</code> and <code>BPlusTreeIndex</code>. Every layer—planner, execution, background workers—uses
-the catalog to discover structure.</p>
-<hr>
+<p><code>src/catalog/</code> is QuillSQL’s data dictionary. It maps SQL names to schemas, table ids,
+index ids, and statistics. Durable descriptors are stored in Holt; the in-memory catalog
+is rebuilt from those descriptors and from Holt-backed <code>information_schema</code> tables during
+startup.</p>
 <h2 id="responsibilities"><a class="header" href="#responsibilities">Responsibilities</a></h2>
 <ul>
-<li>Persist definitions for schemas, tables, columns, indexes, and constraints.</li>
-<li>Map logical <code>TableReference</code>s to physical handles (heap files, index roots, file ids).</li>
-<li>Store table statistics (row counts, histograms) that drive ANALYZE and optimization.</li>
-<li>Manage the DDL lifecycle: creation and deletion update the in-memory registry and the
-on-disk metadata pages.</li>
+<li>Track schemas, tables, columns, indexes, and table statistics.</li>
+<li>Create and drop Holt table/index descriptors during DDL.</li>
+<li>Maintain SQL-visible <code>information_schema.schemas</code>, <code>tables</code>, <code>columns</code>, and <code>indexes</code>.</li>
+<li>Give the planner and executor stable <code>TableReference</code> and <code>Schema</code> lookups.</li>
 </ul>
-<hr>
-<h2 id="directory-layout"><a class="header" href="#directory-layout">Directory Layout</a></h2>
+<h2 id="key-files"><a class="header" href="#key-files">Key Files</a></h2>
 <div class="table-wrapper">
 <table>
 <thead>
-<tr><th>Path</th><th>Description</th><th>Key Types</th></tr>
+<tr><th>File</th><th>Role</th></tr>
 </thead>
 <tbody>
-<tr><td><code>mod.rs</code></td><td>Public API surface.</td><td><code>Catalog</code>, <code>TableHandleRef</code></td></tr>
-<tr><td><code>schema.rs</code></td><td>Schema objects and table references.</td><td><code>Schema</code>, <code>Column</code>, <code>TableReference</code></td></tr>
-<tr><td><code>registry/</code></td><td>Thread-safe registry for heaps (MVCC vacuum).</td><td><code>TableRegistry</code></td></tr>
-<tr><td><code>statistics.rs</code></td><td>ANALYZE output and helpers.</td><td><code>TableStatistics</code></td></tr>
-<tr><td><code>loader.rs</code></td><td>Boot-time metadata loader.</td><td><code>load_catalog_data</code></td></tr>
+<tr><td><code>catalog.rs</code></td><td>Main catalog types and DDL metadata mutation.</td></tr>
+<tr><td><code>information.rs</code></td><td>Startup loader and <code>information_schema</code> projection maintenance.</td></tr>
+<tr><td><code>schema.rs</code></td><td><code>Schema</code>, <code>SchemaRef</code>, and projection helpers.</td></tr>
+<tr><td><code>column.rs</code>, <code>data_type.rs</code></td><td>Column metadata and SQL type mapping.</td></tr>
+<tr><td><code>stats.rs</code></td><td><code>ANALYZE</code> output and selectivity inputs.</td></tr>
 </tbody>
 </table>
 </div>
-<hr>
-<h2 id="core-concepts"><a class="header" href="#core-concepts">Core Concepts</a></h2>
-<h3 id="tablereference"><a class="header" href="#tablereference">TableReference</a></h3>
-<p>Unified identifier (database, schema, table). Logical planner, execution, and transaction
-code all use it when requesting handles from the catalog.</p>
-<h3 id="registries"><a class="header" href="#registries">Registries</a></h3>
-<p><code>TableRegistry</code> maps internal IDs to <code>Arc&lt;TableHeap&gt;</code> plus logical names. It is used by
-the MVCC vacuum worker to iterate user tables without poking directly into catalog data.</p>
-<h3 id="schema--column"><a class="header" href="#schema--column">Schema &amp; Column</a></h3>
-<p><code>Schema</code> stores column definitions (type, default, nullability). Execution uses it when
-materialising tuples; the planner uses it to check expression types. <code>Schema::project</code>
-helps physical operators build projected outputs.</p>
-<h3 id="tablestatistics"><a class="header" href="#tablestatistics">TableStatistics</a></h3>
-<p><code>ANALYZE</code> writes row counts and histograms into the catalog. Optimizer rules and planner
-heuristics can consult these stats when deciding whether to push filters or pick indexes.
-Each column tracks null/non-null counts, min/max values, and a sample-based distinct
-estimate, enabling DuckDB-style selectivity heuristics (<code>1/distinct</code>, uniform ranges).</p>
-<hr>
-<h2 id="interactions"><a class="header" href="#interactions">Interactions</a></h2>
-<ul>
-<li><strong>SQL / Planner</strong> – DDL planning calls <code>Catalog::create_table</code> / <code>create_index</code>; name
-binding relies on <code>Schema</code>.</li>
-<li><strong>Execution</strong> – <code>ExecutionContext::table_handle</code> and <code>index_handle</code> fetch physical
-handles through the catalog, so scans never hard-code heap locations.</li>
-<li><strong>Background workers</strong> – MVCC and index vacuum iterate the registries via <code>Arc</code> clones.</li>
-<li><strong>Recovery</strong> – <code>load_catalog_data</code> rebuilds the in-memory catalog from control files and
-metadata pages during startup.</li>
-</ul>
-<hr>
-<h2 id="teaching-ideas"><a class="header" href="#teaching-ideas">Teaching Ideas</a></h2>
-<ul>
-<li>Extend the schema system with hidden or computed columns and teach the catalog to store
-the extra metadata.</li>
-<li>Add histogram bins to <code>TableStatistics</code> and demonstrate how a simple cost heuristic can
-choose better plans.</li>
-<li>Turn on <code>RUST_LOG=catalog=debug</code> to observe how DDL mutates the registries.</li>
-</ul>
+<h2 id="metadata-flow"><a class="header" href="#metadata-flow">Metadata Flow</a></h2>
+<ol>
+<li>DDL creates a Holt descriptor and updates the in-memory catalog.</li>
+<li>The catalog writes projection rows into Holt-backed <code>information_schema</code> tables.</li>
+<li>On reopen, QuillSQL loads <code>information_schema</code> rows and Holt descriptors, then
+refreshes the projection to remove stale entries.</li>
+</ol>
+<p>This means Holt is the durable source of truth, while <code>information_schema</code> remains a
+normal SQL view of metadata.</p>
 
                     </main>
 
@@ -267,7 +236,7 @@ choose better plans.</li>
 
         <script src="../clipboard-1626706a.min.js"></script>
         <script src="../highlight-abc7f01d.js"></script>
-        <script src="../book-a0b12cfe.js"></script>
+        <script src="../book-c22b7243.js"></script>
 
         <!-- Custom JS scripts -->
         <script src="../mermaid-eefea253.min.js"></script>

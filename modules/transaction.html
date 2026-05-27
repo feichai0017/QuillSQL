@@ -15,8 +15,8 @@
         <link rel="icon" href="../favicon-de23e50b.svg">
         <link rel="shortcut icon" href="../favicon-8114d1fc.png">
         <link rel="stylesheet" href="../css/variables-8adf115d.css">
-        <link rel="stylesheet" href="../css/general-2459343d.css">
-        <link rel="stylesheet" href="../css/chrome-ae938929.css">
+        <link rel="stylesheet" href="../css/general-0392ca55.css">
+        <link rel="stylesheet" href="../css/chrome-fc474251.css">
         <link rel="stylesheet" href="../css/print-9e4910d8.css" media="print">
 
         <!-- Fonts -->
@@ -37,7 +37,7 @@
             const default_dark_theme = "navy";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="../toc-458cad86.js"></script>
+        <script src="../toc-19071d45.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -166,7 +166,7 @@ violating correctness.</p>
 <tr><th>Type</th><th>Role</th></tr>
 </thead>
 <tbody>
-<tr><td><code>TransactionManager</code></td><td>Creates/commits/aborts transactions, assigns txn &amp; command ids, coordinates WAL.</td></tr>
+<tr><td><code>TransactionManager</code></td><td>Creates/commits/aborts transactions, assigns txn &amp; command ids, and tracks recovered status.</td></tr>
 <tr><td><code>Transaction</code></td><td>Stores state, held locks, undo chain, and cached snapshot.</td></tr>
 <tr><td><code>TxnContext</code> / <code>TxnRuntime</code></td><td>Execution-time wrapper exposing MVCC + locking helpers.</td></tr>
 <tr><td><code>LockManager</code></td><td>Multi-granularity locking (IS/IX/S/SIX/X) with deadlock detection.</td></tr>
@@ -180,11 +180,12 @@ violating correctness.</p>
 <li><code>SessionContext</code> calls <code>TransactionManager::begin</code> to create a transaction.</li>
 <li>Each SQL statement builds a <code>TxnRuntime</code>, yielding a fresh command id and snapshot.</li>
 <li>Operators call <code>TxnContext::lock_table/lock_row</code> to obey strict 2PL.</li>
-<li><code>TableHandle::insert/delete/update</code> records undo, acquires locks, and emits WAL via
-<code>TxnContext</code>.</li>
-<li>Commit: write a <code>Commit</code> record → flush depending on <code>synchronous_commit</code> → release
+<li><code>TableHandle::insert/delete/update</code> records undo, acquires locks, and writes through
+Holt handles.</li>
+<li>Commit: mark the transaction committed, persist final Holt txn status, and release
 locks.</li>
-<li>Abort: walk the undo list, write CLRs, restore heap/index state, release locks.</li>
+<li>Abort: walk the undo list, restore row/index state through Holt handles, persist final
+Holt txn status, and release locks.</li>
 </ol>
 <hr>
 <h2 id="mvcc-details"><a class="header" href="#mvcc-details">MVCC Details</a></h2>
@@ -216,12 +217,10 @@ statement end, Serializable waits until commit.</li>
 <ul>
 <li><strong>ExecutionContext</strong> – all helpers (lock acquisition, visibility checks, undo logging)
 are exposed here, so physical operators never touch <code>LockManager</code> directly.</li>
-<li><strong>StorageEngine</strong> – handles call <code>TxnContext</code> before mutating heaps/indexes; MVCC metadata
-lives in <code>TupleMeta</code>. Deletes and updates now push the affected index keys into the undo
-chain so heap/index WAL stay in lockstep.</li>
-<li><strong>Recovery</strong> – Begin/Commit/Abort records emitted here drive ARIES undo/redo.</li>
-<li><strong>Background</strong> – MVCC vacuum reads <code>TransactionManager::oldest_active_txn()</code> to compute
-<code>safe_xmin</code>.</li>
+<li><strong>StorageEngine</strong> – handles call <code>TxnContext</code> before mutating Holt rows/indexes; MVCC
+metadata lives in <code>TupleMeta</code>.</li>
+<li><strong>Holt</strong> – committed/aborted statuses are persisted in the Holt <code>txn</code> tree and recovered
+before execution resumes.</li>
 </ul>
 <hr>
 <h2 id="teaching-ideas"><a class="header" href="#teaching-ideas">Teaching Ideas</a></h2>
@@ -241,10 +240,9 @@ which snapshot <code>TxnRuntime</code> installs by logging <code>txn.current_com
 students see how <code>(insert_txn_id, delete_txn_id)</code> change as versions are linked.</li>
 <li><strong>Undo tracing</strong> – Force an abort after a multi-index UPDATE. Watch the undo stack
 entries unfold: <code>Insert</code> removes the new version + index entries, <code>Delete</code> restores
-the old version + keys. Map each step to the WAL records that are written.</li>
-<li><strong>Crash drill</strong> – Add <code>panic!()</code> right after <code>TransactionManager::commit</code> is called
-but before locks are released. Reboot, run recovery, and inspect the loser list;
-students can connect the dots between undo actions, CLRs, and ARIES theory.</li>
+the old version + keys.</li>
+<li><strong>Restart drill</strong> – Insert committed and rolled-back rows, reopen the database, and
+inspect which <code>TupleMeta</code> versions are visible after Holt transaction status recovery.</li>
 </ol>
 <hr>
 <p>Further reading: <a href="../transaction/mvcc_and_2pl.html">MVCC and 2PL</a></p>
@@ -294,7 +292,7 @@ students can connect the dots between undo actions, CLRs, and ARIES theory.</li>
 
         <script src="../clipboard-1626706a.min.js"></script>
         <script src="../highlight-abc7f01d.js"></script>
-        <script src="../book-a0b12cfe.js"></script>
+        <script src="../book-c22b7243.js"></script>
 
         <!-- Custom JS scripts -->
         <script src="../mermaid-eefea253.min.js"></script>
