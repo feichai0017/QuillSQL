@@ -45,3 +45,21 @@ The MLIR backend then emits scalar `arith` functions and verifies them through
 `melior` when `jit-mlir` is enabled. Native kernel execution is the next step;
 the current rule is discovery and verification only, so unsupported expressions
 fall back to DataFusion without a parallel executor.
+
+## IR And Fusion
+
+QuillSQL keeps two JIT-level IRs:
+
+- `KernelIR`: a single compilable kernel such as filter, projection, or fused
+  filter/project.
+- `PipelineIR`: a linear pipeline prefix from a DataFusion physical plan.
+
+The first fusion pattern is deliberately small:
+
+```text
+Filter -> Projection
+  => KernelIR::FilterProject
+```
+
+This lets the project measure a real operator boundary before taking on joins,
+aggregates, repartitioning, or whole-query pipeline lowering.

@@ -2,9 +2,10 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use datafusion::arrow::record_batch::RecordBatch;
+use datafusion::arrow::{datatypes::SchemaRef as ArrowSchemaRef, record_batch::RecordBatch};
 use datafusion::common::ScalarValue;
 use datafusion::datasource::file_format::options::ParquetReadOptions;
+use datafusion::datasource::MemTable;
 use datafusion::execution::context::{SessionConfig, SessionContext};
 use datafusion::execution::session_state::SessionStateBuilder;
 use datafusion::logical_expr::LogicalPlan;
@@ -13,6 +14,7 @@ use serde::Serialize;
 use tempfile::TempDir;
 
 use crate::error::{QuillSQLError, QuillSQLResult};
+use crate::jit::{JitCandidate, MlirJitRule};
 
 #[derive(Debug, Clone, Default)]
 pub struct DatabaseOptions {
@@ -53,6 +55,7 @@ impl QueryOutput {
 pub struct DebugTrace {
     pub logical_plan: String,
     pub physical_plan: String,
+    pub jit_candidates: Vec<JitCandidate>,
     pub rows: usize,
     pub duration_ms: u128,
     pub logical_tree: DebugPlanNode,
@@ -150,6 +153,10 @@ impl Database {
             .as_ref()
             .map(|plan| displayable(plan.as_ref()).indent(false).to_string())
             .unwrap_or_else(|| "DataFusion physical plan unavailable for this statement".into());
+        let jit_candidates = physical_plan
+            .as_ref()
+            .map(|plan| MlirJitRule::new().inspect_plan(Arc::clone(plan)))
+            .unwrap_or_default();
 
         let df = self
             .ctx
@@ -158,14 +165,15 @@ impl Database {
             .map_err(map_datafusion_err)?;
         let batches = df.collect().await.map_err(map_datafusion_err)?;
         let rows = batches.iter().map(|batch| batch.num_rows()).sum();
-        self.record_trace(
-            logical_plan_str,
-            physical_plan_str.clone(),
+        self.record_trace(DebugTrace {
+            logical_plan: logical_plan_str,
+            physical_plan: physical_plan_str.clone(),
+            jit_candidates,
             rows,
-            start.elapsed().as_millis(),
+            duration_ms: start.elapsed().as_millis(),
             logical_tree,
-            DebugPlanNode::leaf(physical_plan_str),
-        );
+            physical_tree: DebugPlanNode::leaf(physical_plan_str),
+        });
         Ok(QueryOutput::new(batches))
     }
 
@@ -173,6 +181,20 @@ impl Database {
         self.ctx
             .register_parquet(table, path, ParquetReadOptions::default())
             .await
+            .map_err(map_datafusion_err)
+    }
+
+    pub fn register_batches(
+        &self,
+        table: &str,
+        schema: ArrowSchemaRef,
+        batches: Vec<RecordBatch>,
+    ) -> QuillSQLResult<()> {
+        let table_provider =
+            MemTable::try_new(schema, vec![batches]).map_err(map_datafusion_err)?;
+        self.ctx
+            .register_table(table, Arc::new(table_provider))
+            .map(|_| ())
             .map_err(map_datafusion_err)
     }
 
@@ -195,23 +217,8 @@ impl Database {
             })
     }
 
-    fn record_trace(
-        &self,
-        logical_plan: String,
-        physical_plan: String,
-        rows: usize,
-        duration_ms: u128,
-        logical_tree: DebugPlanNode,
-        physical_tree: DebugPlanNode,
-    ) {
-        *self.debug_trace.lock().expect("debug trace lock") = Some(DebugTrace {
-            logical_plan,
-            physical_plan,
-            rows,
-            duration_ms,
-            logical_tree,
-            physical_tree,
-        });
+    fn record_trace(&self, trace: DebugTrace) {
+        *self.debug_trace.lock().expect("debug trace lock") = Some(trace);
     }
 }
 

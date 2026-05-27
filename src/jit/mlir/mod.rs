@@ -53,14 +53,35 @@ impl MlirBackend {
     pub fn lower_projection(&self, projections: &[JitProjection]) -> JitResult<MlirModule> {
         let symbol = next_symbol("quill_project");
         let mut text = start_module();
-        for (index, projection) in projections.iter().enumerate() {
-            text.push_str(&scalar_function(
-                &format!("{symbol}_expr_{index}"),
-                &projection.expr,
-            )?);
-        }
+        append_projection_scalar_functions(&mut text, &symbol, projections)?;
         append_abi_function_header(&mut text, &symbol);
         let _ = writeln!(text, "    // qjit.kind = projection");
+        for projection in projections {
+            let _ = writeln!(
+                text,
+                "    // qjit.project {} = {}",
+                projection.alias,
+                format_expr(&projection.expr)
+            );
+        }
+        text.push_str("    %ok = arith.constant 0 : i32\n");
+        text.push_str("    return %ok : i32\n");
+        text.push_str("  }\n}\n");
+        Ok(MlirModule { symbol, text })
+    }
+
+    pub fn lower_filter_project(
+        &self,
+        predicate: &JitExpr,
+        projections: &[JitProjection],
+    ) -> JitResult<MlirModule> {
+        let symbol = next_symbol("quill_filter_project");
+        let mut text = start_module();
+        text.push_str(&scalar_function(&format!("{symbol}_predicate"), predicate)?);
+        append_projection_scalar_functions(&mut text, &symbol, projections)?;
+        append_abi_function_header(&mut text, &symbol);
+        let _ = writeln!(text, "    // qjit.kind = filter_project");
+        let _ = writeln!(text, "    // qjit.predicate = {}", format_expr(predicate));
         for projection in projections {
             let _ = writeln!(
                 text,
@@ -116,6 +137,23 @@ impl KernelBackend for MlirBackend {
             false,
         ))
     }
+
+    fn compile_filter_project(
+        &self,
+        _input_schema: ArrowSchemaRef,
+        predicate: &JitExpr,
+        projections: &[JitProjection],
+    ) -> JitResult<CompiledKernel> {
+        let module = self.lower_filter_project(predicate, projections)?;
+        self.verify_module(&module)?;
+        Ok(CompiledKernel::new(
+            module.symbol,
+            KernelKind::FilterProject,
+            self.name(),
+            module.text,
+            false,
+        ))
+    }
 }
 
 #[cfg(feature = "jit-mlir")]
@@ -162,6 +200,20 @@ fn append_abi_function_header(text: &mut String, symbol: &str) {
         text,
         "  func.func @{symbol}(%len: index, %input: !llvm.ptr, %output: !llvm.ptr) -> i32 {{"
     );
+}
+
+fn append_projection_scalar_functions(
+    text: &mut String,
+    symbol: &str,
+    projections: &[JitProjection],
+) -> JitResult<()> {
+    for (index, projection) in projections.iter().enumerate() {
+        text.push_str(&scalar_function(
+            &format!("{symbol}_expr_{index}"),
+            &projection.expr,
+        )?);
+    }
+    Ok(())
 }
 
 fn scalar_function(symbol: &str, expr: &JitExpr) -> JitResult<String> {
@@ -571,6 +623,45 @@ mod tests {
         };
 
         let module = MlirBackend::new().lower_filter(&expr).unwrap();
+        MlirBackend::new().verify_module(&module).unwrap();
+    }
+
+    #[test]
+    fn emits_filter_project_module() {
+        let predicate = JitExpr::Binary {
+            op: JitBinaryOp::Gt,
+            left: Box::new(JitExpr::Column {
+                index: 0,
+                name: "a".to_string(),
+                ty: JitType::Int64,
+                nullable: true,
+            }),
+            right: Box::new(JitExpr::Literal(JitScalar::Int64(10))),
+            ty: JitType::Bool,
+            nullable: true,
+        };
+        let projection = crate::jit::JitProjection::new(
+            JitExpr::Binary {
+                op: JitBinaryOp::Add,
+                left: Box::new(JitExpr::Column {
+                    index: 0,
+                    name: "a".to_string(),
+                    ty: JitType::Int64,
+                    nullable: true,
+                }),
+                right: Box::new(JitExpr::Literal(JitScalar::Int64(1))),
+                ty: JitType::Int64,
+                nullable: true,
+            },
+            "a_plus_one",
+        );
+
+        let module = MlirBackend::new()
+            .lower_filter_project(&predicate, &[projection])
+            .unwrap();
+        assert!(module.text.contains("qjit.kind = filter_project"));
+        assert!(module.text.contains("arith.cmpi sgt"));
+        assert!(module.text.contains("arith.addi"));
         MlirBackend::new().verify_module(&module).unwrap();
     }
 }

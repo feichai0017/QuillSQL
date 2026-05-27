@@ -16,6 +16,7 @@ Common commands:
 cargo test
 cargo test --features jit-mlir
 cargo clippy --all-targets -- -D warnings
+cargo bench --no-run
 ```
 
 The `jit-mlir` feature requires local MLIR/LLVM libraries. On a Homebrew LLVM 22

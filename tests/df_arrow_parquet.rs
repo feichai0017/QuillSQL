@@ -1,6 +1,12 @@
+use std::sync::Arc;
+
+use datafusion::arrow::array::Int64Array;
+use datafusion::arrow::datatypes::{DataType, Field, Schema};
+use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::dataframe::DataFrameWriteOptions;
 use datafusion::execution::context::SessionContext;
 use quill_sql::database::{Database, QueryOutput};
+use quill_sql::jit::KernelKind;
 use tempfile::TempDir;
 
 fn rows(result: QueryOutput) -> Vec<Vec<String>> {
@@ -60,6 +66,40 @@ async fn explain_uses_datafusion_physical_plan() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(text.contains("ProjectionExec"), "{text}");
+}
+
+#[tokio::test]
+async fn debug_trace_reports_jit_candidates() {
+    let db = Database::new_temp().expect("database");
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int64, false),
+        Field::new("v", DataType::Int64, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![
+            Arc::new(Int64Array::from(vec![1, 2, 3])),
+            Arc::new(Int64Array::from(vec![10, 20, 30])),
+        ],
+    )
+    .expect("batch");
+    db.register_batches("t", schema, vec![batch])
+        .expect("table");
+
+    db.run("select id + 1 as next_id from t where v > 10")
+        .await
+        .expect("query");
+    let trace = db.debug_last_trace().expect("trace");
+
+    assert!(
+        trace
+            .jit_candidates
+            .iter()
+            .any(|candidate| candidate.kernel == KernelKind::FilterProject
+                || candidate.kernel == KernelKind::Filter),
+        "{:?}",
+        trace.jit_candidates
+    );
 }
 
 async fn write_people_parquet(path: &str) {

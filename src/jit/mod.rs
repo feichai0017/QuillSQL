@@ -1,9 +1,11 @@
 mod expr;
+mod ir;
 mod kernel;
 mod mlir;
 mod rule;
 
 pub use expr::{JitBinaryOp, JitExpr, JitProjection, JitScalar, JitType};
+pub use ir::{KernelIr, PipelineIr, PipelineOp, PipelineSink, PipelineSource};
 pub use kernel::{
     ArrowArrayView, ArrowMutableArrayView, CompiledKernel, FilterKernelFn, JitTypeTag,
     KernelBackend, KernelKind, ProjectionKernelFn,

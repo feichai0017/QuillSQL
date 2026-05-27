@@ -7,12 +7,14 @@ use datafusion::physical_optimizer::PhysicalOptimizerRule;
 use datafusion::physical_plan::filter::FilterExec;
 use datafusion::physical_plan::projection::ProjectionExec;
 use datafusion::physical_plan::ExecutionPlan;
+use serde::Serialize;
 
-use crate::jit::{JitExpr, JitProjection, KernelBackend, MlirBackend};
+use crate::jit::{JitExpr, JitProjection, KernelBackend, KernelKind, MlirBackend};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct JitCandidate {
     pub node: &'static str,
+    pub kernel: KernelKind,
     pub backend: &'static str,
     pub executable: bool,
 }
@@ -55,6 +57,7 @@ impl MlirJitRule {
                 .ok()?;
             return Some(JitCandidate {
                 node: "FilterExec",
+                kernel: KernelKind::Filter,
                 backend: "mlir",
                 executable: kernel.executable,
             });
@@ -62,21 +65,31 @@ impl MlirJitRule {
 
         if let Some(projection) = plan.as_any().downcast_ref::<ProjectionExec>() {
             let input_schema = projection.input().schema();
-            let projections = projection
-                .expr()
-                .iter()
-                .map(|expr| {
-                    JitExpr::from_physical(&expr.expr, input_schema.as_ref())
-                        .map(|jit_expr| JitProjection::new(jit_expr, expr.alias.clone()))
-                })
-                .collect::<crate::jit::JitResult<Vec<_>>>()
-                .ok()?;
+            let projections = lower_projection_exprs(projection, input_schema.as_ref())?;
+
+            if let Some(filter) = projection.input().as_any().downcast_ref::<FilterExec>() {
+                let predicate =
+                    JitExpr::from_physical(filter.predicate(), filter.input().schema().as_ref())
+                        .ok()?;
+                let kernel = self
+                    .backend
+                    .compile_filter_project(filter.input().schema(), &predicate, &projections)
+                    .ok()?;
+                return Some(JitCandidate {
+                    node: "FilterProjectExec",
+                    kernel: KernelKind::FilterProject,
+                    backend: "mlir",
+                    executable: kernel.executable,
+                });
+            }
+
             let kernel = self
                 .backend
                 .compile_projection(input_schema, &projections)
                 .ok()?;
             return Some(JitCandidate {
                 node: "ProjectionExec",
+                kernel: KernelKind::Projection,
                 backend: "mlir",
                 executable: kernel.executable,
             });
@@ -84,6 +97,21 @@ impl MlirJitRule {
 
         None
     }
+}
+
+fn lower_projection_exprs(
+    projection: &ProjectionExec,
+    input_schema: &datafusion::arrow::datatypes::Schema,
+) -> Option<Vec<JitProjection>> {
+    projection
+        .expr()
+        .iter()
+        .map(|expr| {
+            JitExpr::from_physical(&expr.expr, input_schema)
+                .map(|jit_expr| JitProjection::new(jit_expr, expr.alias.clone()))
+        })
+        .collect::<crate::jit::JitResult<Vec<_>>>()
+        .ok()
 }
 
 impl PhysicalOptimizerRule for MlirJitRule {

@@ -1,4 +1,5 @@
 use datafusion::arrow::datatypes::SchemaRef as ArrowSchemaRef;
+use serde::Serialize;
 
 use crate::jit::{JitExpr, JitProjection, JitResult};
 
@@ -40,10 +41,11 @@ pub type ProjectionKernelFn = unsafe extern "C" fn(
     output: *mut ArrowMutableArrayView,
 ) -> i32;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum KernelKind {
     Filter,
     Projection,
+    FilterProject,
 }
 
 #[derive(Debug, Clone)]
@@ -85,6 +87,13 @@ pub trait KernelBackend: Send + Sync {
     fn compile_projection(
         &self,
         input_schema: ArrowSchemaRef,
+        projections: &[JitProjection],
+    ) -> JitResult<CompiledKernel>;
+
+    fn compile_filter_project(
+        &self,
+        input_schema: ArrowSchemaRef,
+        predicate: &JitExpr,
         projections: &[JitProjection],
     ) -> JitResult<CompiledKernel>;
 }

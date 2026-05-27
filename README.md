@@ -64,6 +64,8 @@ The JIT package is intentionally separate from the DataFusion wrapper:
 
 - `src/jit/expr.rs` lowers supported DataFusion physical expressions to a small
   JIT expression IR.
+- `src/jit/ir.rs` defines `KernelIR` and `PipelineIR`, including the first
+  `FilterProject` fusion pattern.
 - `src/jit/mlir/` lowers that IR to MLIR `arith` scalar functions and verifies
   the generated module with `melior` when `jit-mlir` is enabled.
 - `src/jit/rule.rs` is the DataFusion physical optimizer rule that discovers
@@ -83,12 +85,46 @@ cargo test --features jit-mlir
 
 Adjust the prefixes for your local LLVM/MLIR installation.
 
+## Benchmarks
+
+QuillSQL keeps benchmark levels separate:
+
+- `jit_micro`: isolates JIT IR fusion, MLIR lowering, and a small DataFusion
+  filter/project SQL path over an in-memory Arrow table.
+- `tpch`: runs a small TPC-H ladder over external Parquet data. It currently
+  includes Q6, Q1, and Q3 to cover scan/filter/plain aggregate, grouped
+  aggregate/sort, and join-heavy execution.
+
+```bash
+# Compile all benchmark harnesses.
+cargo bench --no-run
+
+# Fast local smoke run.
+cargo bench --bench jit_micro -- --sample-size 10
+scripts/bench_jit_micro.sh
+
+# Run TPC-H. By default this generates SF0.01 data under benchdata/tpch-sf0.01.
+cargo bench --bench tpch -- --sample-size 10
+scripts/bench_tpch.sh
+
+# Or run TPC-H against an existing Parquet dataset.
+QUILL_TPCH_DIR=/path/to/tpch-parquet cargo bench --bench tpch
+```
+
+Generated data is ignored by git. Set `QUILL_TPCH_SF=1` for SF1, and set
+`QUILL_TPCH_REGENERATE=1` to rebuild the generated Parquet files. If
+`QUILL_TPCH_DIR` is set, it should contain either `<table>.parquet` files or
+table directories named like `lineitem`, `orders`, and `customer`. TPC-H timings
+are DataFusion end-to-end timings through `Database::run`; they are not yet
+native MLIR kernel timings.
+
 ## Testing
 
 ```bash
 cargo test
 cargo test --features jit-mlir
 cargo clippy --all-targets -- -D warnings
+cargo bench --no-run
 ```
 
 The integration tests cover DataFusion memory tables, Parquet registration, and
