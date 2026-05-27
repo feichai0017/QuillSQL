@@ -203,7 +203,7 @@ transaction status live in <code>holt::DB</code>.</p>
     TxnCtx --&gt; Txn
     TxnCtx --&gt; Locks
 
-    Ctx --&gt; Engine["HoltStorageEngine"]
+    Ctx --&gt; Engine["HoltStorage"]
     Engine --&gt; Table["HoltTableHandle"]
     Engine --&gt; Index["HoltIndexHandle"]
     Table --&gt; Holt["holt::DB"]
@@ -268,13 +268,12 @@ Unknown or in-progress row versions are not treated as committed by visibility c
 backend, so the remaining modules focus on names, plans, operators, transactions, and
 typed tuple handling.</p>
 <h2 id="sql-front-end-srcsql"><a class="header" href="#sql-front-end-srcsql">SQL Front-End (<code>src/sql</code>)</a></h2>
-<p>Parses SQL through <code>sqlparser</code> plus QuillSQL-specific DDL options. The parser keeps the
-AST SQL-shaped so later stages can make binding and planning decisions explicitly.</p>
+<p>Parses SQL through <code>sqlparser</code>. The parser keeps the AST SQL-shaped so later stages can
+make binding and planning decisions explicitly.</p>
 <h2 id="planning-srcplan"><a class="header" href="#planning-srcplan">Planning (<code>src/plan</code>)</a></h2>
 <p><code>LogicalPlanner</code> binds table and column names, checks types, and produces <code>LogicalPlan</code>.
-<code>PhysicalPlanner</code> lowers optimized logical plans into Volcano operators. DDL supports
-Holt-only storage: omitted <code>ENGINE</code>/<code>USING</code> defaults to Holt, while non-Holt choices are
-rejected.</p>
+<code>PhysicalPlanner</code> lowers optimized logical plans into Volcano operators. DDL does not
+accept storage backend clauses; tables and indexes are Holt-backed by definition.</p>
 <h2 id="optimizer-srcoptimizer"><a class="header" href="#optimizer-srcoptimizer">Optimizer (<code>src/optimizer</code>)</a></h2>
 <p>The optimizer is a small rule pipeline. Rules are pure rewrites over <code>LogicalPlan</code>, which
 makes them easy to test and reason about. The planner can choose Holt index scans for
@@ -282,7 +281,7 @@ simple equality/range predicates.</p>
 <h2 id="execution-srcexecution"><a class="header" href="#execution-srcexecution">Execution (<code>src/execution</code>)</a></h2>
 <p>Every physical operator implements <code>VolcanoExecutor</code> with <code>init</code> and <code>next</code>. Operators
 receive an <code>ExecutionContext</code>, which provides catalog access, expression evaluation,
-transaction helpers, and the <code>HoltStorageEngine</code> facade.</p>
+transaction helpers, and <code>HoltStorage</code>.</p>
 <h2 id="catalog-srccatalog"><a class="header" href="#catalog-srccatalog">Catalog (<code>src/catalog</code>)</a></h2>
 <p>The catalog keeps an in-memory projection of schemas, tables, indexes, and statistics.
 Durable descriptors are stored in Holt. <code>information_schema</code> is also represented as Holt
@@ -295,7 +294,7 @@ system tables so SQL can query metadata using normal scans.</p>
 <tr><th>File</th><th>Role</th></tr>
 </thead>
 <tbody>
-<tr><td><code>engine.rs</code></td><td>Object-safe table/index traits and the Holt-only storage engine.</td></tr>
+<tr><td><code>engine.rs</code></td><td>Object-safe table/index traits and the Holt storage entrypoint.</td></tr>
 <tr><td><code>holt.rs</code></td><td>Holt table/index handles, descriptor persistence, ordered index codec, and transaction status persistence.</td></tr>
 <tr><td><code>record.rs</code></td><td><code>RecordId</code> and <code>TupleMeta</code>, kept as SQL-layer MVCC metadata.</td></tr>
 <tr><td><code>tuple.rs</code>, <code>codec/</code></td><td>Tuple and scalar encoding utilities.</td></tr>

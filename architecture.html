@@ -174,7 +174,7 @@ transaction status live in <code>holt::DB</code>.</p>
     TxnCtx --&gt; Txn
     TxnCtx --&gt; Locks
 
-    Ctx --&gt; Engine["HoltStorageEngine"]
+    Ctx --&gt; Engine["HoltStorage"]
     Engine --&gt; Table["HoltTableHandle"]
     Engine --&gt; Index["HoltIndexHandle"]
     Table --&gt; Holt["holt::DB"]
