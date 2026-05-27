@@ -1,93 +1,70 @@
 # QuillSQL Architecture
 
-QuillSQL is now a SQL layer over Holt. The project owns parsing, logical planning,
-optimization, Volcano execution, catalog projection, transaction state, MVCC visibility,
-and lock management. Persistent rows, indexes, catalog descriptors, and recovered
-transaction status live in `holt::DB`.
+QuillSQL is a SQL research layer over Holt. DataFusion owns SQL parsing, binding,
+logical optimization, physical optimization, and physical execution. QuillSQL owns the
+Holt catalog/table/index adapter, MVCC metadata, transaction status recovery, and the
+CLI/server surfaces.
 
 ## End-to-End Pipeline
 
 ```mermaid
 flowchart LR
-    SQL["SQL text"] --> Parser["sql::parser"]
-    Parser --> Logical["LogicalPlanner"]
-    Logical --> Optimizer["LogicalOptimizer"]
-    Optimizer --> Physical["PhysicalPlanner"]
-    Physical --> Exec["ExecutionEngine (Volcano)"]
-
-    Session["SessionContext"] --> Txn["TransactionManager"]
-    Txn --> Locks["LockManager"]
-    Exec --> Ctx["ExecutionContext"]
-    Ctx --> TxnCtx["TxnContext"]
-    TxnCtx --> Txn
-    TxnCtx --> Locks
-
-    Ctx --> Engine["HoltStorage"]
-    Engine --> Table["HoltTableHandle"]
-    Engine --> Index["HoltIndexHandle"]
+    SQL["SQL text"] --> DF["DataFusion SessionContext"]
+    DF --> Logical["DataFusion LogicalPlan"]
+    Logical --> Optimized["DataFusion Optimizers"]
+    Optimized --> Physical["DataFusion ExecutionPlan"]
+    Physical --> Scan["HoltScanExec"]
+    Scan --> Table["Holt table tree"]
+    Scan --> Index["Holt index tree"]
     Table --> Holt["holt::DB"]
     Index --> Holt
-    Catalog["Catalog"] --> Holt
+
+    Catalog["HoltCatalogProvider"] --> DF
+    Catalog --> Descriptors["Holt catalog tree"]
+    Txn["TransactionManager"] --> Status["Holt txn tree"]
 ```
 
-The executor never touches Holt directly. It asks `ExecutionContext` for a
-`TableBinding`, then uses object-safe table/index handles for scans and writes.
+DDL is the main place where QuillSQL intercepts DataFusion: `CREATE TABLE`,
+`CREATE INDEX`, and `DROP TABLE` update Holt descriptors and refresh the in-memory
+catalog projection. DML uses DataFusion table-provider hooks and writes through Holt.
 
 ## Storage Boundary
 
 ```mermaid
 flowchart TD
     subgraph QuillSQL
-        Catalog["Catalog descriptors"]
-        TableHandle["TableHandle"]
-        IndexHandle["IndexHandle"]
-        TxnStatus["Transaction statuses"]
+        Provider["HoltTableProvider"]
+        ScanExec["HoltScanExec"]
+        TxnMeta["TupleMeta / MVCC"]
     end
 
-    Catalog --> HCatalog["Holt tree: catalog"]
-    TableHandle --> HTable["Holt tree: table/<table_id>"]
-    IndexHandle --> HIndex["Holt tree: index/<index_id>"]
-    TxnStatus --> HTxn["Holt tree: txn"]
+    Provider --> RowTree["table/<table_id>"]
+    Provider --> IndexTree["index/<index_id>"]
+    Provider --> CatalogTree["catalog"]
+    TxnMeta --> TxnTree["txn"]
 
-    HCatalog --> DB["holt::DB"]
-    HTable --> DB
-    HIndex --> DB
-    HTxn --> DB
+    RowTree --> DB["holt::DB"]
+    IndexTree --> DB
+    CatalogTree --> DB
+    TxnTree --> DB
 ```
 
-Holt is the only durable storage engine. QuillSQL no longer contains an internal page
-heap, buffer pool, B+Tree, storage scheduler, or SQL-data WAL. This keeps the boundary
-clear: QuillSQL decides SQL semantics; Holt owns durable bytes and its own logging.
+There is no QuillSQL-owned page cache, heap file, B+Tree, storage scheduler, or
+SQL-data WAL. Holt owns durable bytes and its own logging. QuillSQL decides SQL/MVCC
+semantics and encodes row/index values into Holt trees.
 
 ## Important Invariants
 
-- A table descriptor in Holt is the durable source of truth for a table id and schema.
-- `information_schema` is a SQL-visible virtual projection generated from the in-memory catalog.
+- Holt descriptors are the durable source of truth for table ids, index ids, and schemas.
+- DataFusion `information_schema` is generated from the Holt catalog provider.
 - Row values are stored as encoded `TupleMeta + Tuple`.
-- Index keys use order-preserving SQL encoding plus RID tie-breakers, so Holt byte order
-  matches SQL range-scan order.
-- Commit and rollback write final transaction status into Holt. Startup recovers those
-  statuses before planning or executing statements.
+- Index keys use order-preserving SQL encoding plus RID tie-breakers.
+- Startup recovers transaction status from Holt before query execution.
+- In-progress or unknown row versions are not visible as committed data.
 
-## Execution Contract
+## Query Compilation Boundary
 
-`TableBinding` is the executor's storage facade:
-
-```text
-scan()
-index_scan(name, range)
-insert(txn, tuple)
-delete(txn, rid, prev_meta, prev_tuple)
-update(txn, rid, new_tuple, prev_meta, prev_tuple)
-prepare_row_for_write(txn, rid, observed_meta)
-```
-
-Physical operators stay small because they only express SQL work: scan rows, evaluate
-expressions, ask `TxnContext` for visibility/locks, and call the table binding for
-mutations.
-
-## Restart Behavior
-
-On open, QuillSQL loads Holt catalog descriptors, reconstructs the in-memory catalog,
-loads transaction statuses, and advances the next transaction id past recovered ids.
-Unknown or in-progress row versions are not treated as committed by visibility checks.
+The JIT research boundary is the DataFusion `ExecutionPlan` and Arrow `RecordBatch`
+interface. The `jit-mlir` feature wires in an MLIR-named physical optimizer rule as the
+extension point; native DataFusion execution remains the fallback for unsupported
+expressions.

@@ -1,31 +1,30 @@
 # Catalog Module
 
-`src/catalog/` is QuillSQL's data dictionary. It maps SQL names to schemas, table ids,
-index ids, and statistics. Durable descriptors are stored in Holt; the in-memory catalog
-is rebuilt from those descriptors during startup.
+`src/catalog/` is QuillSQL's in-memory projection of Holt descriptors. Holt is the
+durable source of truth; the catalog is rebuilt from Holt on open and then exposed to
+DataFusion through `HoltCatalogProvider` and `HoltSchemaProvider`.
 
 ## Responsibilities
 
-- Track schemas, tables, columns, indexes, and table statistics.
+- Track schemas, tables, columns, indexes, and Holt ids.
 - Create and drop Holt table/index descriptors during DDL.
-- Generate SQL-visible `information_schema.schemas`, `tables`, `columns`, and `indexes`.
-- Give the planner and executor stable `TableReference` and `Schema` lookups.
+- Rebuild the in-memory catalog from Holt descriptors during startup.
+- Provide table metadata to DataFusion's catalog and `information_schema` support.
 
 ## Key Files
 
 | File | Role |
 | ---- | ---- |
 | `core.rs` | Main catalog types and DDL metadata mutation. |
-| `information.rs` | Startup loader and virtual `information_schema` row generation. |
-| `schema.rs` | `Schema`, `SchemaRef`, and projection helpers. |
+| `information.rs` | Startup loader for Holt table/index descriptors. |
+| `schema.rs` | `Schema`, `SchemaRef`, and projection helpers used by the private Holt row codec. |
 | `column.rs`, `data_type.rs` | Column metadata and SQL type mapping. |
-| `stats.rs` | `ANALYZE` output and selectivity inputs. |
 
 ## Metadata Flow
 
 1. DDL creates or removes a Holt descriptor and updates the in-memory catalog.
 2. On reopen, QuillSQL rebuilds the in-memory catalog from Holt descriptors.
-3. Queries against `information_schema` scan virtual rows generated from that catalog.
+3. DataFusion reads catalog metadata through `HoltCatalogProvider`.
+4. DataFusion generates SQL-visible `information_schema` rows from that provider.
 
-This means Holt is the durable source of truth, while `information_schema` remains a
-normal SQL-visible view of metadata without storing duplicate system rows.
+There are no stored QuillSQL system-table rows.

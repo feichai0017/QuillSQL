@@ -1196,8 +1196,8 @@
     const HERO_STATS = [
       { label: 'Isolation', value: 'MVCC + 2PL', detail: 'read-uncommitted → serializable', icon: 'mvcc', progress: 100 },
       { label: 'Storage', value: 'Holt', detail: 'rows, indexes, catalog descriptors', icon: 'storage', progress: 92 },
-      { label: 'Executor', value: 'Volcano', detail: 'physical planner & runtime', icon: 'executor', progress: 88 },
-      { label: 'Tests', value: 'sqllogictest', detail: 'suite-backed demo scripts', icon: 'tests', progress: 80 },
+      { label: 'Planner', value: 'DataFusion', detail: 'SQL, optimizer, physical plans', icon: 'executor', progress: 88 },
+      { label: 'Tests', value: 'integration', detail: 'DataFusion over Holt coverage', icon: 'tests', progress: 80 },
     ];
 
     const HERO_ICONS = {
@@ -1264,26 +1264,26 @@
         body: 'Rows, indexes, catalog descriptors, and transaction status are persisted through Holt. QuillSQL owns SQL semantics on top.',
         bullets: [
           'Order-preserving SQL key encoding for range scans',
-          'Holt-backed information_schema projection',
-          'Object-safe table/index handles for execution',
+          'DataFusion information_schema over Holt catalog',
+          'Arrow batches at the execution boundary',
         ],
       },
       execution: {
-        title: 'Planner & Executor',
-        body: 'Logical optimizer rules, Volcano-style executor, expression engine, and plan visualization for teaching.',
+        title: 'DataFusion Execution',
+        body: 'SQL parsing, logical optimization, physical optimization, and physical execution are delegated to DataFusion.',
         bullets: [
-          'Push-down rules (filter/limit), limit merge',
-          'Physical planner bridging scans/indexes/joins',
-          'Explain output for logical & physical plans',
+          'HoltScanExec as the custom storage scan',
+          'Residual filters stay in DataFusion for correctness',
+          'MLIR JIT hook at the physical optimizer layer',
         ],
       },
       teaching: {
         title: 'Teaching Stack',
-        body: 'Module boundaries mirror CMU 15-445 for labs, docs surfaced in mdBook, CLI + web shell for demos.',
+        body: 'Module boundaries are now focused on storage adapters, transactions, DataFusion integration, and query compiler research.',
         bullets: [
-          'sqllogictest based labs, ready-to-run scripts',
+          'Rust integration tests over persistent Holt data',
           'Docs + CLI + HTTP API for integration',
-          'Pluggable components for experiments',
+          'Pluggable JIT compiler experiments',
         ],
       },
     };
@@ -1316,7 +1316,7 @@
         plan: [
           { label: 'Filter', desc: 'email LIKE %quill%' },
           { label: 'Index Scan', desc: 'idx_users_email' },
-          { label: 'Table Fetch', desc: 'Heap lookup users' },
+          { label: 'Row Fetch', desc: 'Holt RID lookup users' },
         ],
       },
       {
@@ -1349,13 +1349,13 @@
         date: '2025-11-21',
       },
       {
-        title: 'Optimizer & Executor Notes',
-        excerpt: 'We expanded the rule-based optimizer (filter/limit pushes, merge limit) and polished Volcano operators so students can instrument execution paths quickly.',
+        title: 'DataFusion Front-End Rewrite',
+        excerpt: 'QuillSQL now lets DataFusion own SQL parsing, optimization, and physical execution while Holt remains the durable storage engine.',
         date: '2025-11-10',
       },
       {
         title: 'Teaching-Friendly Tooling',
-        excerpt: 'New mdBook docs, cli/web shells, and sqllogictest-driven demos help instructors drop QuillSQL into lab exercises without extra scaffolding.',
+        excerpt: 'New mdBook docs, cli/web shells, and integration tests help instructors use QuillSQL for storage and query compiler labs.',
         date: '2025-12-01',
       },
     ];
@@ -1419,10 +1419,10 @@
           <div className="hero-card">
             <div className="hero-copy">
               <span className="eyebrow">QuillSQL</span>
-              <h1>Rust RDBMS for CMU 15-445 style teaching.</h1>
+              <h1>Rust SQL research engine backed by Holt.</h1>
               <p>
                 Single-binary SQL engine featuring MVCC transactions, Holt-backed rows/indexes/catalog metadata,
-                and a Volcano executor. Use the live terminal below to run SQL against a real QuillSQL instance.
+                DataFusion query planning, and a JIT research hook. Use the live terminal below to run SQL against a real QuillSQL instance.
               </p>
               <div className="hero-actions">
                 <button onClick={() => window.open(DOCS_URL, '_blank', 'noopener')}>Docs</button>
@@ -1506,7 +1506,7 @@
                       <div className="mvcc-event">
                         <label>Rows</label>
                         <span style={{ '--fill': '70%' }}></span>
-                        <small>TupleMeta + Tuple</small>
+                        <small>MVCC row payload</small>
                       </div>
                       <div className="mvcc-event">
                         <label>Index</label>
@@ -1528,14 +1528,14 @@
                         <small>rules</small>
                       </div>
                       <div className="mvcc-event">
-                        <label>Planner</label>
+                        <label>Physical</label>
                         <span style={{ '--fill': '65%' }}></span>
-                        <small>physical tree</small>
+                        <small>DataFusion plan</small>
                       </div>
                       <div className="mvcc-event">
-                        <label>Executor</label>
+                        <label>JIT</label>
                         <span style={{ '--fill': '85%' }}></span>
-                        <small>Volcano</small>
+                        <small>MLIR hook</small>
                       </div>
                     </>
                   )}
@@ -1549,7 +1549,7 @@
                       <div className="mvcc-event">
                         <label>Labs</label>
                         <span style={{ '--fill': '70%' }}></span>
-                        <small>sqllogictest</small>
+                        <small>integration</small>
                       </div>
                       <div className="mvcc-event">
                         <label>CLI</label>

@@ -3,7 +3,7 @@
 name = "quill-sql"
 version = "0.3.1"
 edition = "2021"
-description = "An educational Rust relational database (RDBMS) inspired by CMU 15445"
+description = "A DataFusion-fronted SQL research engine backed by Holt storage"
 license = "MIT"
 repository = "https://github.com/feichai0017/quillsql"
 readme = "README.md"
@@ -16,7 +16,6 @@ derive-with = "0.6.0"
 derive-new = "0.7.0"
 comfy-table = "7.1.0"
 thiserror = "2.0.12"
-strum = { version = "0.26", features = ["derive"] }
 sqlparser = "0.34.0"
 clap = { version = "4.3.19", features = ["derive", "cargo"] }
 env_logger = "0.11.5"
@@ -27,6 +26,13 @@ rustyline = "15.0.0"
 axum = { version = "0.7", features = ["macros", "json"] }
 tower-http = { version = "0.5", features = ["fs", "trace", "cors"] }
 holt = "0.4.1"
+datafusion = { version = "53.1.0", default-features = false, features = ["sql"] }
+async-trait = "0.1"
+futures = "0.3"
+
+[features]
+default = []
+jit-mlir = []
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
@@ -36,7 +42,6 @@ regex = "1.9.1"
 rusqlite = { version = "0.31", features = ["bundled"] }
 postgres = "0.19"
 pprof = { version = "0.15.0", features = ["criterion", "flamegraph"] }
-sqllogictest = "0.13.0"
 
 [[bench]]
 name = "storage_bench"

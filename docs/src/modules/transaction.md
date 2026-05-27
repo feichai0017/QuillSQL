@@ -12,7 +12,7 @@ violating correctness.
 | ---- | ---- |
 | `TransactionManager` | Creates/commits/aborts transactions, assigns txn & command ids, and tracks recovered status. |
 | `Transaction` | Stores state, held locks, undo chain, and cached snapshot. |
-| `TxnContext` / `TxnRuntime` | Execution-time wrapper exposing MVCC + locking helpers. |
+| `TxnContext` | Statement-time wrapper exposing MVCC + locking helpers to Holt table/index code. |
 | `LockManager` | Multi-granularity locking (IS/IX/S/SIX/X) with deadlock detection. |
 | `TransactionSnapshot` | Tracks `xmin/xmax/active_txns` for visibility checks. |
 
@@ -20,11 +20,13 @@ violating correctness.
 
 ## Workflow
 
-1. `SessionContext` calls `TransactionManager::begin` to create a transaction.
-2. Each SQL statement builds a `TxnRuntime`, yielding a fresh command id and snapshot.
-3. Operators call `TxnContext::lock_table/lock_row` to obey strict 2PL.
-4. `TableHandle::insert/delete/update` records undo, acquires locks, and writes through
-   Holt handles.
+1. `Database::run` intercepts transaction control statements and calls
+   `TransactionManager::begin/commit/abort`.
+2. Each SQL statement that reaches the Holt provider builds a `TxnContext`, yielding a
+   fresh command id and snapshot.
+3. DataFusion drives the physical plan; Holt scan/DML hooks call
+   `TxnContext::lock_table/lock_row` to obey strict 2PL.
+4. Holt table and index handles record undo, acquire locks, and write through Holt.
 5. Commit: mark the transaction committed, persist final Holt txn status, and release
    locks.
 6. Abort: walk the undo list, restore row/index state through Holt handles, persist final
@@ -58,9 +60,9 @@ violating correctness.
 
 ## Interactions
 
-- **ExecutionContext** – all helpers (lock acquisition, visibility checks, undo logging)
-  are exposed here, so physical operators never touch `LockManager` directly.
-- **StorageEngine** – handles call `TxnContext` before mutating Holt rows/indexes; MVCC
+- **DataFusion table provider** – scans and DML enter QuillSQL through
+  `HoltScanExec`, `insert_into`, `delete_from`, and `update`.
+- **Holt handles** – handles call `TxnContext` before mutating Holt rows/indexes; MVCC
   metadata lives in `TupleMeta`.
 - **Holt** – committed/aborted statuses are persisted in the Holt `txn` tree and recovered
   before execution resumes.
@@ -78,7 +80,7 @@ violating correctness.
 ## Lab Walkthrough (à la CMU 15-445)
 
 1. **Warm-up** – Start two sessions, run `BEGIN; SELECT ...;` under RC vs RR, and trace
-   which snapshot `TxnRuntime` installs by logging `txn.current_command_id()`.
+   which snapshot `TxnContext` installs by logging `txn.current_command_id()`.
 2. **MVCC visibility** – Extend the `transaction_tests.rs` suite with a scenario where
    `txn1` updates a row while `txn2` reads it. Instrument `TupleMeta` printing so
    students see how `(insert_txn_id, delete_txn_id)` change as versions are linked.

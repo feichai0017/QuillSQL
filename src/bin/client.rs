@@ -1,8 +1,6 @@
 use clap::Parser;
 use quill_sql::database::{Database, DatabaseOptions};
-use quill_sql::session::SessionContext;
 use quill_sql::transaction::IsolationLevel;
-use quill_sql::utils::util::pretty_format_tuples;
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
 use std::str::FromStr;
@@ -20,7 +18,8 @@ struct Args {
     isolation_level: Option<String>,
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     env_logger::init();
     let args = Args::parse();
 
@@ -35,15 +34,14 @@ fn main() {
         ..DatabaseOptions::default()
     };
 
-    let mut db = if let Some(path) = args.file {
+    let db = if let Some(path) = args.file {
         Database::new_on_disk_with_options(path.as_str(), db_options.clone())
             .unwrap_or_else(|e| panic!("fail to open {} file, err: {}", path, e))
     } else {
         Database::new_temp_with_options(db_options).expect("fail to open temp database")
     };
-    let mut session = SessionContext::new(db.default_isolation());
 
-    println!(":) Welcome to the bustubx, please input sql.");
+    println!(":) Welcome to QuillSQL, please input SQL.");
     let mut rl = DefaultEditor::new().expect("created editor");
     rl.load_history(".history").ok();
 
@@ -56,11 +54,14 @@ fn main() {
                     println!("bye!");
                     break;
                 }
-                let result = db.run_with_session(&mut session, &line);
+                let result = db.run(&line).await;
                 match result {
-                    Ok(tuples) => {
-                        if !tuples.is_empty() {
-                            println!("{}", pretty_format_tuples(&tuples))
+                    Ok(output) => {
+                        if !output.is_empty() {
+                            match output.pretty_table() {
+                                Ok(table) => println!("{}", table),
+                                Err(err) => println!("{}", err),
+                            }
                         }
                     }
                     Err(e) => println!("{}", e),

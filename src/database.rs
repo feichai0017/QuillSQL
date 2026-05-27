@@ -1,30 +1,23 @@
-use log::debug;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Instant;
+
+use datafusion::arrow::record_batch::RecordBatch;
+use datafusion::logical_expr::LogicalPlan;
+use parking_lot::Mutex;
 use serde::Serialize;
 use sqlparser::ast::TransactionAccessMode;
-use std::path::PathBuf;
-use std::rc::Rc;
-use std::sync::{Arc, Mutex};
-use std::time::Instant;
 use tempfile::TempDir;
 
-use crate::catalog::{load_catalog_data, Catalog, TableStatistics};
-use crate::error::{QuillSQLError, QuillSQLResult};
-use crate::execution::physical_plan::PhysicalPlan;
-use crate::execution::ExecutionEngine;
-use crate::optimizer::LogicalOptimizer;
-use crate::plan::logical_plan::{LogicalPlan, TransactionScope};
-use crate::plan::{LogicalPlanner, PhysicalPlanner, PlannerContext};
-use crate::session::SessionContext;
-use crate::storage::engine::TableHandle;
-use crate::storage::holt::{HoltStore, HoltTableHandle};
-use crate::storage::tuple::Tuple;
-use crate::storage::HoltStorage;
-use crate::transaction::{
-    CommandId, IsolationLevel, LockDebugSnapshot, TransactionManager, TransactionStatus,
-    TxnDebugSnapshot,
+use crate::catalog::{load_catalog_data, Catalog};
+use crate::df::{
+    execute_logical_plan, pretty_format_batches, record_batches_to_string_rows, EngineState,
 };
-use crate::utils::table_ref::TableReference;
-use crate::utils::util::{pretty_format_logical_plan, pretty_format_physical_plan};
+use crate::error::{QuillSQLError, QuillSQLResult};
+use crate::storage::holt::{map_holt_err, HoltStore, HoltTableHandle};
+use crate::transaction::{
+    CommandId, IsolationLevel, LockDebugSnapshot, TransactionManager, TxnDebugSnapshot,
+};
 
 #[derive(Debug, Clone, Default)]
 pub struct DatabaseOptions {
@@ -44,20 +37,32 @@ enum DatabaseLocation {
 }
 
 pub struct Database {
-    pub(crate) catalog: Catalog,
-    pub(crate) transaction_manager: Arc<TransactionManager>,
-    pub(crate) holt_store: Arc<HoltStore>,
-    default_isolation: IsolationLevel,
-    storage: Arc<HoltStorage>,
+    state: EngineState,
     debug_trace: Arc<Mutex<Option<DebugTrace>>>,
-    // Must drop after every Holt owner so temporary databases can checkpoint
-    // before their directory is removed.
     _temp_dir: Option<TempDir>,
 }
 
-struct PreparedStatement {
-    optimized_logical_plan: LogicalPlan,
-    physical_plan: PhysicalPlan,
+#[derive(Debug, Clone)]
+pub struct QueryOutput {
+    pub batches: Vec<RecordBatch>,
+}
+
+impl QueryOutput {
+    pub fn new(batches: Vec<RecordBatch>) -> Self {
+        Self { batches }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.batches.iter().all(|batch| batch.num_rows() == 0)
+    }
+
+    pub fn rows_as_strings(&self) -> Vec<Vec<String>> {
+        record_batches_to_string_rows(&self.batches)
+    }
+
+    pub fn pretty_table(&self) -> QuillSQLResult<comfy_table::Table> {
+        pretty_format_batches(&self.batches)
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -98,25 +103,21 @@ pub struct MvccVersionsDebug {
 }
 
 impl DebugPlanNode {
-    pub fn from_physical(plan: &PhysicalPlan) -> Self {
+    fn from_logical(plan: &LogicalPlan) -> Self {
         Self {
-            op: plan.display_name(),
-            children: plan
-                .inputs()
-                .iter()
-                .map(|child| Self::from_physical(child))
-                .collect(),
-        }
-    }
-
-    pub fn from_logical(plan: &LogicalPlan) -> Self {
-        Self {
-            op: plan.to_string(),
+            op: plan.display().to_string(),
             children: plan
                 .inputs()
                 .iter()
                 .map(|child| Self::from_logical(child))
                 .collect(),
+        }
+    }
+
+    fn leaf(op: impl Into<String>) -> Self {
+        Self {
+            op: op.into(),
+            children: Vec::new(),
         }
     }
 }
@@ -150,130 +151,95 @@ impl Database {
         let transaction_manager = Arc::new(TransactionManager::new());
         seed_holt_transaction_statuses(&holt_store, &transaction_manager)?;
 
-        let catalog = Catalog::new(holt_store.clone());
-        let storage = Arc::new(HoltStorage::new(holt_store.clone()));
+        let mut catalog = Catalog::new(holt_store.clone());
+        load_catalog_data(&mut catalog)?;
 
-        let mut db = Self {
-            catalog,
-            transaction_manager,
+        let state = EngineState {
+            catalog: Arc::new(Mutex::new(catalog)),
             holt_store,
+            transaction_manager,
+            active_txn: Arc::new(Mutex::new(None)),
             default_isolation: options
                 .default_isolation_level
                 .unwrap_or(IsolationLevel::ReadUncommitted),
-            storage,
+        };
+
+        Ok(Self {
+            state,
             debug_trace: Arc::new(Mutex::new(None)),
             _temp_dir: temp_dir,
-        };
-        load_catalog_data(&mut db)?;
-        Ok(db)
+        })
     }
 
-    pub fn run(&mut self, sql: &str) -> QuillSQLResult<Vec<Tuple>> {
-        let mut session = SessionContext::new(self.default_isolation);
-        self.run_with_session(&mut session, sql)
-    }
-
-    pub fn run_with_session(
-        &mut self,
-        session: &mut SessionContext,
-        sql: &str,
-    ) -> QuillSQLResult<Vec<Tuple>> {
+    pub async fn run(&self, sql: &str) -> QuillSQLResult<QueryOutput> {
         let start = Instant::now();
-        let PreparedStatement {
-            optimized_logical_plan,
-            physical_plan,
-        } = self.plan_statement(sql)?;
-        let logical_plan_str = pretty_format_logical_plan(&optimized_logical_plan);
-        let physical_plan_str = pretty_format_physical_plan(&physical_plan);
-        let logical_tree = DebugPlanNode::from_logical(&optimized_logical_plan);
-        let physical_tree = DebugPlanNode::from_physical(&physical_plan);
-
-        if let Some(result) = self.execute_transaction_control(session, &optimized_logical_plan)? {
-            return Ok(result);
+        if self.try_run_transaction_control(sql)? {
+            self.record_trace(
+                "TransactionControl".to_string(),
+                "TransactionControl".to_string(),
+                0,
+                start.elapsed().as_millis(),
+                DebugPlanNode::leaf("TransactionControl"),
+            );
+            return Ok(QueryOutput::new(Vec::new()));
         }
 
-        let result = self.execute_physical_plan(session, physical_plan)?;
+        let ctx = self.state.session_context();
+        let logical_plan = ctx
+            .state()
+            .create_logical_plan(sql)
+            .await
+            .map_err(map_datafusion_err)?;
+        let logical_plan_str = logical_plan.display_indent().to_string();
+        let logical_tree = DebugPlanNode::from_logical(&logical_plan);
 
-        if let Ok(mut guard) = self.debug_trace.lock() {
-            *guard = Some(DebugTrace {
-                logical_plan: logical_plan_str,
-                physical_plan: physical_plan_str,
-                logical_tree,
-                physical_tree,
-                rows: result.len(),
-                duration_ms: start.elapsed().as_millis(),
-            });
-        }
-
-        Ok(result)
-    }
-
-    pub fn default_isolation(&self) -> IsolationLevel {
-        self.default_isolation
-    }
-
-    pub fn create_logical_plan(&mut self, sql: &str) -> QuillSQLResult<LogicalPlan> {
-        let stmts = crate::sql::parser::parse_sql(sql)?;
-        if stmts.len() != 1 {
-            return Err(QuillSQLError::NotSupport(
-                "only support one sql statement".to_string(),
-            ));
-        }
-        let stmt = &stmts[0];
-        let mut planner = LogicalPlanner {
-            context: PlannerContext {
-                catalog: &self.catalog,
-            },
-        };
-        planner.plan(stmt)
-    }
-
-    pub fn analyze_table(&mut self, table_ref: &TableReference) -> QuillSQLResult<TableStatistics> {
-        self.catalog.analyze_table(table_ref)
+        let batches = execute_logical_plan(&self.state, logical_plan.clone()).await?;
+        let rows = batches.iter().map(|batch| batch.num_rows()).sum();
+        self.record_trace(
+            logical_plan_str,
+            "DataFusion physical plan".to_string(),
+            rows,
+            start.elapsed().as_millis(),
+            logical_tree,
+        );
+        Ok(QueryOutput::new(batches))
     }
 
     pub fn flush(&self) -> QuillSQLResult<()> {
-        self.holt_store
+        self.state
+            .holt_store
             .db()
             .checkpoint()
-            .map_err(crate::storage::holt::map_holt_err)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn table_binding(
-        &self,
-        table_ref: &TableReference,
-    ) -> QuillSQLResult<crate::storage::TableBinding> {
-        self.storage.table(&self.catalog, table_ref)
+            .map_err(map_holt_err)
     }
 
     pub fn debug_last_trace(&self) -> Option<DebugTrace> {
-        self.debug_trace.lock().ok().and_then(|guard| guard.clone())
+        self.debug_trace.lock().clone()
     }
 
     pub fn debug_lock_snapshot(&self) -> LockDebugSnapshot {
-        self.transaction_manager.lock_manager_arc().debug_snapshot()
+        self.state
+            .transaction_manager
+            .lock_manager_arc()
+            .debug_snapshot()
     }
 
     pub fn debug_txn_snapshot(&self) -> TxnDebugSnapshot {
-        self.transaction_manager.debug_snapshot()
+        self.state.transaction_manager.debug_snapshot()
     }
 
     pub fn debug_mvcc_versions(&self) -> QuillSQLResult<MvccVersionsDebug> {
         let snapshot = self
+            .state
             .transaction_manager
-            .snapshot(self.transaction_manager.next_txn_id_hint());
+            .snapshot(self.state.transaction_manager.next_txn_id_hint());
+        let catalog = self.state.catalog.lock();
         let mut samples = Vec::new();
         let max_samples = 20usize;
-        for (schema_name, schema) in &self.catalog.schemas {
-            if schema_name == crate::catalog::INFORMATION_SCHEMA_NAME {
-                continue;
-            }
+        for (schema_name, schema) in &catalog.schemas {
             for (table_name, table) in &schema.tables {
-                let Some(table_id) = table.table_id() else {
-                    continue;
-                };
-                let table_ref = TableReference::Full {
+                let table_id = table.table_id;
+                let table_ref = crate::utils::table_ref::TableReference::Full {
                     catalog: crate::catalog::DEFAULT_CATALOG_NAME.to_string(),
                     schema: schema_name.clone(),
                     table: table_name.clone(),
@@ -282,15 +248,15 @@ impl Database {
                     table_ref.clone(),
                     table.schema.clone(),
                     table_id,
-                    self.holt_store.clone(),
+                    self.state.holt_store.clone(),
                 );
-                let mut stream = handle.full_scan()?;
+                let mut stream = crate::storage::TableHandle::full_scan(&handle)?;
                 while let Some((rid, meta, _tuple)) = stream.next()? {
                     if samples.len() >= max_samples {
                         break;
                     }
                     let visible = snapshot.is_visible(&meta, 0 as CommandId, |tid| {
-                        self.transaction_manager.transaction_status(tid)
+                        self.state.transaction_manager.transaction_status(tid)
                     });
                     samples.push(MvccVersionSample {
                         table: table_ref.to_string(),
@@ -318,143 +284,64 @@ impl Database {
     pub fn debug_last_plan(&self) -> Option<DebugPlanSnapshot> {
         self.debug_trace
             .lock()
-            .ok()
-            .and_then(|opt| opt.clone())
+            .clone()
             .map(|trace| DebugPlanSnapshot {
                 logical: trace.logical_tree,
                 physical: trace.physical_tree,
             })
     }
 
-    pub fn table_statistics(
-        &self,
-        table_ref: &TableReference,
-    ) -> Option<&crate::catalog::TableStatistics> {
-        self.catalog.table_statistics(table_ref)
-    }
-
-    pub fn transaction_manager(&self) -> Arc<TransactionManager> {
-        self.transaction_manager.clone()
-    }
-
-    fn plan_statement(&mut self, sql: &str) -> QuillSQLResult<PreparedStatement> {
-        let logical_plan = self.create_logical_plan(sql)?;
-        debug!(
-            "Logical Plan: \n{}",
-            pretty_format_logical_plan(&logical_plan)
-        );
-
-        let optimized_logical_plan = self.optimize_logical_plan(&logical_plan)?;
-        debug!(
-            "Optimized Logical Plan: \n{}",
-            pretty_format_logical_plan(&optimized_logical_plan)
-        );
-
-        let physical_plan = self.build_physical_plan(&optimized_logical_plan);
-        debug!(
-            "Physical Plan: \n{}",
-            pretty_format_physical_plan(&physical_plan)
-        );
-
-        Ok(PreparedStatement {
-            optimized_logical_plan,
-            physical_plan,
-        })
-    }
-
-    fn optimize_logical_plan(&self, logical_plan: &LogicalPlan) -> QuillSQLResult<LogicalPlan> {
-        LogicalOptimizer::new().optimize(logical_plan)
-    }
-
-    fn build_physical_plan(&self, logical_plan: &LogicalPlan) -> PhysicalPlan {
-        let physical_planner = PhysicalPlanner::with_catalog(&self.catalog);
-        physical_planner.create_physical_plan(logical_plan.clone())
-    }
-
-    fn execute_transaction_control(
-        &self,
-        session: &mut SessionContext,
-        plan: &LogicalPlan,
-    ) -> QuillSQLResult<Option<Vec<Tuple>>> {
-        match plan {
-            LogicalPlan::BeginTransaction(modes) => {
-                if session.has_active_transaction() {
-                    return Err(QuillSQLError::Execution(
-                        "transaction already active".to_string(),
-                    ));
-                }
-                let txn = self.transaction_manager.begin(
-                    modes.unwrap_effective_isolation(session.default_isolation()),
-                    modes
-                        .access_mode
-                        .unwrap_or(TransactionAccessMode::ReadWrite),
+    fn try_run_transaction_control(&self, sql: &str) -> QuillSQLResult<bool> {
+        let normalized = sql
+            .trim()
+            .trim_end_matches(';')
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_ascii_lowercase();
+        match normalized.as_str() {
+            "begin" | "begin transaction" | "start transaction" => {
+                self.state.begin_transaction(
+                    self.state.default_isolation,
+                    TransactionAccessMode::ReadWrite,
                 )?;
-                session.set_active_transaction(txn)?;
-                Ok(Some(vec![]))
+                Ok(true)
             }
-            LogicalPlan::CommitTransaction => {
-                let txn_ref = session
-                    .active_txn_mut()
-                    .ok_or_else(|| QuillSQLError::Execution("no active transaction".to_string()))?;
-                let txn_id = txn_ref.id();
-                self.transaction_manager.commit(txn_ref)?;
-                self.holt_store
-                    .put_txn_status(txn_id, TransactionStatus::Committed)?;
-                session.clear_active_transaction();
-                Ok(Some(vec![]))
+            "begin read only" | "begin transaction read only" | "start transaction read only" => {
+                self.state.begin_transaction(
+                    self.state.default_isolation,
+                    TransactionAccessMode::ReadOnly,
+                )?;
+                Ok(true)
             }
-            LogicalPlan::RollbackTransaction => {
-                let txn_ref = session
-                    .active_txn_mut()
-                    .ok_or_else(|| QuillSQLError::Execution("no active transaction".to_string()))?;
-                let txn_id = txn_ref.id();
-                self.transaction_manager.abort(txn_ref)?;
-                self.holt_store
-                    .put_txn_status(txn_id, TransactionStatus::Aborted)?;
-                session.clear_active_transaction();
-                Ok(Some(vec![]))
+            "commit" | "commit transaction" => {
+                self.state.commit_transaction()?;
+                Ok(true)
             }
-            LogicalPlan::SetTransaction { scope, modes } => {
-                match scope {
-                    TransactionScope::Session => session.apply_session_modes(modes),
-                    TransactionScope::Transaction => session.apply_transaction_modes(modes),
-                }
-                Ok(Some(vec![]))
+            "rollback" | "rollback transaction" => {
+                self.state.rollback_transaction()?;
+                Ok(true)
             }
-            _ => Ok(None),
+            _ => Ok(false),
         }
     }
 
-    fn execute_physical_plan(
-        &mut self,
-        session: &mut SessionContext,
-        physical_plan: PhysicalPlan,
-    ) -> QuillSQLResult<Vec<Tuple>> {
-        let needs_cleanup = !session.has_active_transaction();
-        let autocommit = session.autocommit();
-        let result = {
-            let txn = session.ensure_active_transaction(&self.transaction_manager)?;
-            let context = crate::execution::ExecutionContext::new(
-                &mut self.catalog,
-                txn,
-                self.transaction_manager.clone(),
-                self.storage.clone(),
-            );
-            let mut engine = ExecutionEngine { context };
-            engine.execute(Rc::new(physical_plan))?
-        };
-
-        if autocommit && needs_cleanup {
-            if let Some(txn) = session.active_txn_mut() {
-                let txn_id = txn.id();
-                self.transaction_manager.commit(txn)?;
-                self.holt_store
-                    .put_txn_status(txn_id, TransactionStatus::Committed)?;
-            }
-            session.clear_active_transaction();
-        }
-
-        Ok(result)
+    fn record_trace(
+        &self,
+        logical_plan: String,
+        physical_plan: String,
+        rows: usize,
+        duration_ms: u128,
+        logical_tree: DebugPlanNode,
+    ) {
+        *self.debug_trace.lock() = Some(DebugTrace {
+            physical_tree: DebugPlanNode::leaf(physical_plan.clone()),
+            logical_plan,
+            physical_plan,
+            rows,
+            duration_ms,
+            logical_tree,
+        });
     }
 }
 
@@ -486,4 +373,8 @@ fn seed_holt_transaction_statuses(
     }
     transaction_manager.ensure_next_txn_id_at_least(next_txn_id);
     Ok(())
+}
+
+fn map_datafusion_err(err: datafusion::error::DataFusionError) -> QuillSQLError {
+    QuillSQLError::Execution(format!("DataFusion error: {err}"))
 }

@@ -1,5 +1,8 @@
 # QuillSQL
 
+A DataFusion-fronted SQL research engine backed by Holt, built for storage adapters
+and MLIR query compilation experiments.
+
 [![Crates.io](https://img.shields.io/crates/v/quill-sql.svg)](https://crates.io/crates/quill-sql)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Mentioned in Awesome](https://awesome.re/mentioned-badge.svg)](https://github.com/rust-unofficial/awesome-rust#database)
@@ -8,17 +11,19 @@
 
 <div align="center">
   <img src="/public/rust-db.png" alt="QuillSQL Architecture" width="720"/>
-  <p><em>An educational Rust SQL engine backed by Holt storage</em></p>
+  <p><em>DataFusion SQL planning, Holt persistence, and a clean JIT research boundary.</em></p>
 </div>
 
 ## ✨ Highlights
 
-- **Clean architecture**: SQL → Logical Plan → Physical Plan → Volcano executor
-- **Transaction control**: `BEGIN/COMMIT/ROLLBACK`, `SET TRANSACTION`, `SET SESSION TRANSACTION`, enforced `READ ONLY`, row/table locks
-- **Holt storage backend**: table rows, indexes, catalog descriptors, and transaction status are persisted through `holt::DB`
-- **Holt ordered indexes**: point/range scans use order-preserving SQL key encoding with RID tie-breakers
-- **Streaming scans**: executors consume storage through object-safe table/index handles, not page-heap internals
-- **Virtual information schema**: `information_schema.schemas`, `tables`, `columns`, `indexes`
+- **Research focus**: QuillSQL now studies the DataFusion/Holt adapter boundary, SQL-layer transaction semantics, and Arrow/MLIR query compilation.
+- **DataFusion front end**: SQL parsing, binding, logical optimization, physical optimization, and physical execution are handled by DataFusion.
+- **Holt storage backend**: table rows, secondary indexes, catalog descriptors, and transaction status are persisted through `holt::DB`.
+- **Arrow execution boundary**: `Database::run` returns Arrow `RecordBatch`es, which is the research boundary for query compilation and JIT kernels.
+- **Holt ordered indexes**: simple indexed equality/range filters can narrow `HoltScanExec` while DataFusion keeps residual filters for correctness.
+- **Transaction control**: `BEGIN`, `COMMIT`, and `ROLLBACK` keep QuillSQL MVCC metadata and Holt transaction status aligned.
+- **DataFusion information schema**: `information_schema.tables` and `information_schema.columns` are provided by DataFusion over the Holt catalog provider.
+- **MLIR JIT hook**: a `jit-mlir` feature-gated physical optimizer rule is wired in as the extension point for compiled Arrow expression kernels.
 - **Docs**: 📖 **[Read the Book Online](https://feichai0017.github.io/QuillSQL/)** 
 
 ---
@@ -27,20 +32,21 @@
 
 <div align="center">
   <img src="/public/terminal-preview.svg" alt="QuillSQL Web Terminal" width="720"/>
-  <p><em>Built-in web TTY — commands mirror our SQL test suite.</em></p>
+  <p><em>Built-in web TTY over the DataFusion + Holt execution path.</em></p>
 </div>
 
 
 - Run `cargo run --bin server` and open http://127.0.0.1:8080
 - Commands: `help`, `docs`, `doc <name>`, `examples`, `example <name>`, `github`, `profile`
-- Example scripts are pulled straight from `src/tests/sql_example/`
+- Example scripts can be run through the HTTP batch API or the CLI.
 
 ---
 
-## 🎓 Teaching & Research Friendly
+## 🎓 Research Friendly
 
-- Clear module boundaries, suitable for classroom assignments and research prototypes focused on SQL parsing, planning, optimization, execution, and transaction semantics.
+- Clear module boundaries, suitable for research prototypes focused on DataFusion physical plans, Holt storage adapters, transaction semantics, and query compilation.
 - Storage is intentionally delegated to Holt. QuillSQL no longer ships its own page heap, buffer pool, B+Tree, or WAL implementation.
+- DataFusion is the only SQL execution path. There is no parallel QuillSQL parser/planner/executor compatibility mode.
 - Readability-first: simple, pragmatic code with minimal hot-path allocations.
 
 ## 🚀 Quick Start
@@ -59,7 +65,7 @@ QUILL_DB_FILE=my.db QUILL_HTTP_ADDR=0.0.0.0:8080 cargo run --bin server --releas
 
 # batch API (optional)
 curl -XPOST http://127.0.0.1:8080/api/sql_batch -H 'content-type: application/json' \
-     -d '{"sql": "SHOW TABLES; EXPLAIN SELECT 1;"}'
+     -d '{"sql": "SELECT table_name FROM information_schema.tables; EXPLAIN SELECT 1;"}'
 ```
 
 Sample session:
@@ -68,9 +74,6 @@ CREATE TABLE t(id INT, v INT DEFAULT 0);
 INSERT INTO t(id, v) VALUES (1, 10), (2, 20), (3, 30);
 
 SELECT id, v FROM t WHERE v > 10 ORDER BY id DESC LIMIT 1;
-
-SHOW DATABASES;
-SHOW TABLES;
 
 EXPLAIN SELECT id, COUNT(*) FROM t GROUP BY id ORDER BY id;
 ```
@@ -92,7 +95,7 @@ EXPLAIN SELECT id, COUNT(*) FROM t GROUP BY id ORDER BY id;
     ```
 
 - **CREATE INDEX**
-  - Index storage: Holt is implicit; `USING ...` clauses are not supported.
+  - Index storage: Holt is implicit. `USING ...` clauses are not supported because there is no alternate backend.
   - Example:
     ```sql
     CREATE INDEX idx_t_id ON t(id);
@@ -100,12 +103,6 @@ EXPLAIN SELECT id, COUNT(*) FROM t GROUP BY id ORDER BY id;
 
 - **DROP**
   - `DROP TABLE [IF EXISTS] <name>`
-  - `DROP INDEX [IF EXISTS] <name>`
-  - Example:
-    ```sql
-    DROP INDEX IF EXISTS idx_orders_user_id;
-    DROP TABLE orders;
-    ```
 
 - **INSERT**
   - `INSERT INTO ... VALUES (...)` and `INSERT INTO ... SELECT ...`
@@ -124,18 +121,13 @@ EXPLAIN SELECT id, COUNT(*) FROM t GROUP BY id ORDER BY id;
 - **DELETE**
   - `DELETE FROM t [WHERE predicate]`
 
-- **SHOW**
-- `SHOW DATABASES;` (rewritten to `SELECT schema FROM information_schema.schemas`)
-- `SHOW TABLES;` (rewritten to `SELECT table_name FROM information_schema.tables`)
-
 - **EXPLAIN**
-  - `EXPLAIN <statement>` returns a single column named `plan` with multiple lines showing the logical plan tree
+  - `EXPLAIN <statement>` uses DataFusion and shows `HoltScanExec` for Holt-backed table scans.
 
 ## ⚠️ Current Limitations
 
-- Not yet supported: `ALTER`, predicate locking.
-- Not implemented: outer joins (Left/Right/Full), arithmetic expressions, table/subquery aliases
-- `ORDER BY` `DESC` / `NULLS FIRST|LAST` currently affects sorting only (not storage layout)
+- Not yet supported: `ALTER`, `DROP INDEX`, predicate locking.
+- MLIR compilation is an extension hook today; unsupported expressions execute through native DataFusion.
 
 ## 🧪 Testing
 
@@ -167,13 +159,7 @@ docker run --rm -p 8080:8080 quillsql:latest
 docker run --rm -p 8080:8080 -e QUILL_DB_FILE=/data/my.db -v $(pwd)/data:/data quillsql:latest
 ```
 
-Includes sqllogictest-based cases:
-
-- `src/tests/sql_example/create_table.slt`
-- `src/tests/sql_example/create_index.slt`
-- `src/tests/sql_example/insert.slt`
-- `src/tests/sql_example/show_explain.slt`
-- `src/tests/sql_example/delete.slt`
+The active integration coverage lives under `tests/` and exercises DataFusion SQL over Holt tables, persistence/reopen, DataFusion `information_schema`, `EXPLAIN`, DML, and Holt secondary indexes.
 
 ## 📚 Acknowledgements
 

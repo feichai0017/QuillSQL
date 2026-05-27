@@ -4,14 +4,14 @@ use std::fmt::Write as _; // for INSERT statement construction
 use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion, Throughput};
 use postgres::{Client, NoTls};
 use pprof::criterion::{Output, PProfProfiler};
-use quill_sql::database::{Database, DatabaseOptions};
+use quill_sql::database::{Database, DatabaseOptions, QueryOutput};
 use quill_sql::error::QuillSQLResult;
-use quill_sql::session::SessionContext;
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use rusqlite::Connection;
 use std::time::Duration;
+use tokio::runtime::Runtime;
 const ROWS: i64 = 50_000;
 const INSERT_BATCH: i64 = 200;
 const POINT_SAMPLES: usize = 5_000;
@@ -32,6 +32,10 @@ fn postgres_url() -> Option<String> {
 
 fn quill_bench_options() -> DatabaseOptions {
     DatabaseOptions::default()
+}
+
+fn quill_exec(rt: &Runtime, db: &Database, sql: &str) -> QuillSQLResult<QueryOutput> {
+    rt.block_on(db.run(sql))
 }
 
 fn insert_batches<E, F>(
@@ -64,39 +68,45 @@ where
 }
 
 fn prepare_dataset() -> Database {
-    let mut db = Database::new_temp_with_options(quill_bench_options()).expect("temp db");
-    db.run(&format!(
-        "CREATE TABLE {}(id BIGINT NOT NULL, val BIGINT)",
-        QUILL_TABLE
-    ))
+    let rt = Runtime::new().expect("tokio runtime");
+    let db = Database::new_temp_with_options(quill_bench_options()).expect("temp db");
+    quill_exec(
+        &rt,
+        &db,
+        &format!(
+            "CREATE TABLE {}(id BIGINT NOT NULL, val BIGINT)",
+            QUILL_TABLE
+        ),
+    )
     .expect("create table");
-    db.run(&format!(
-        "CREATE INDEX idx_{}_id ON {}(id)",
-        QUILL_TABLE, QUILL_TABLE
-    ))
+    quill_exec(
+        &rt,
+        &db,
+        &format!("CREATE INDEX idx_{}_id ON {}(id)", QUILL_TABLE, QUILL_TABLE),
+    )
     .expect("create index");
-    bulk_insert(&mut db, QUILL_TABLE, 0, ROWS, INSERT_BATCH).expect("bulk insert");
+    bulk_insert(&rt, &db, QUILL_TABLE, 0, ROWS, INSERT_BATCH).expect("bulk insert");
     db.flush().expect("flush");
     db
 }
 
 fn bulk_insert(
-    db: &mut Database,
+    rt: &Runtime,
+    db: &Database,
     table: &str,
     start: i64,
     total: i64,
     batch: i64,
 ) -> QuillSQLResult<()> {
-    let mut session = SessionContext::new(db.default_isolation());
-    db.run_with_session(&mut session, "BEGIN")?;
+    quill_exec(rt, db, "BEGIN")?;
     let result = insert_batches(table, start, total, batch, |sql| {
-        db.run_with_session(&mut session, sql)?;
+        quill_exec(rt, db, sql)?;
         Ok(())
     });
     match result {
-        Ok(()) => db.run_with_session(&mut session, "COMMIT")?,
+        Ok(()) => quill_exec(rt, db, "COMMIT")?,
         Err(err) => {
-            let _ = db.run_with_session(&mut session, "ROLLBACK");
+            let _ = quill_exec(rt, db, "ROLLBACK");
             return Err(err);
         }
     };
@@ -240,6 +250,7 @@ fn bench_insert(c: &mut Criterion) {
     group.throughput(Throughput::Elements((INSERT_BATCH * 50) as u64));
     let insert_opts = quill_bench_options();
     group.bench_function("quill", move |b| {
+        let rt = Runtime::new().expect("tokio runtime");
         let create_sql = format!(
             "CREATE TABLE {}(id BIGINT NOT NULL, val BIGINT)",
             QUILL_TABLE
@@ -247,16 +258,15 @@ fn bench_insert(c: &mut Criterion) {
         let drop_sql = format!("DROP TABLE IF EXISTS {}", QUILL_TABLE);
         let clear_sql = format!("DELETE FROM {}", QUILL_TABLE);
         let db = RefCell::new({
-            let mut db =
-                Database::new_temp_with_options(insert_opts.clone()).expect("temp bench db");
-            db.run(&drop_sql).expect("drop table if exists");
-            db.run(&create_sql).expect("create table");
+            let db = Database::new_temp_with_options(insert_opts.clone()).expect("temp bench db");
+            quill_exec(&rt, &db, &drop_sql).expect("drop table if exists");
+            quill_exec(&rt, &db, &create_sql).expect("create table");
             db
         });
         b.iter(|| {
-            let mut db = db.borrow_mut();
-            db.run(&clear_sql).expect("clear table");
-            bulk_insert(&mut db, QUILL_TABLE, 0, 10_000, INSERT_BATCH).unwrap();
+            let db = db.borrow();
+            quill_exec(&rt, &db, &clear_sql).expect("clear table");
+            bulk_insert(&rt, &db, QUILL_TABLE, 0, 10_000, INSERT_BATCH).unwrap();
             black_box(());
         });
     });
@@ -302,11 +312,12 @@ fn bench_seq_scan(c: &mut Criterion) {
     let mut group = c.benchmark_group("scan_seq");
     group.throughput(Throughput::Elements(ROWS as u64));
 
-    let mut quill_db = prepare_dataset();
+    let rt = Runtime::new().expect("tokio runtime");
+    let quill_db = prepare_dataset();
     let quill_full_sql = format!("SELECT COUNT(*) FROM {}", QUILL_TABLE);
     group.bench_function("quill_full", |b| {
         b.iter(|| {
-            let res = quill_db.run(&quill_full_sql).expect("quill seq scan");
+            let res = quill_exec(&rt, &quill_db, &quill_full_sql).expect("quill seq scan");
             black_box(res);
         });
     });
@@ -318,7 +329,7 @@ fn bench_seq_scan(c: &mut Criterion) {
             let idx = quill_range_idx.get();
             let sql = &quill_range_queries[idx % quill_range_queries.len()];
             quill_range_idx.set((idx + 1) % quill_range_queries.len());
-            let res = quill_db.run(sql).expect("quill seq range");
+            let res = quill_exec(&rt, &quill_db, sql).expect("quill seq range");
             black_box(res);
         });
     });
@@ -402,7 +413,8 @@ fn bench_seq_scan(c: &mut Criterion) {
 }
 
 fn bench_index_scan(c: &mut Criterion) {
-    let mut db = prepare_dataset();
+    let rt = Runtime::new().expect("tokio runtime");
+    let db = prepare_dataset();
     let mut group = c.benchmark_group("index_scan");
     group.throughput(Throughput::Elements(POINT_SAMPLES as u64));
 
@@ -413,7 +425,7 @@ fn bench_index_scan(c: &mut Criterion) {
             let idx = point_idx.get();
             let sql = &point_queries[idx % point_queries.len()];
             point_idx.set((idx + 1) % point_queries.len());
-            let res = db.run(sql).expect("quill index point");
+            let res = quill_exec(&rt, &db, sql).expect("quill index point");
             black_box(res);
         });
     });
@@ -425,7 +437,7 @@ fn bench_index_scan(c: &mut Criterion) {
             let idx = range_idx.get();
             let sql = &range_queries[idx % range_queries.len()];
             range_idx.set((idx + 1) % range_queries.len());
-            let res = db.run(sql).expect("quill index range");
+            let res = quill_exec(&rt, &db, sql).expect("quill index range");
             black_box(res);
         });
     });

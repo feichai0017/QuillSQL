@@ -1,10 +1,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::catalog::{SchemaRef, TableStatistics, INFORMATION_SCHEMA_NAME};
+use crate::catalog::{SchemaRef, INFORMATION_SCHEMA_NAME};
 use crate::error::{QuillSQLError, QuillSQLResult};
-use crate::storage::engine::TableHandle;
-use crate::storage::holt::{HoltStore, HoltTableHandle};
+use crate::storage::holt::HoltStore;
 use crate::utils::table_ref::TableReference;
 
 pub static DEFAULT_CATALOG_NAME: &str = "quillsql";
@@ -35,9 +34,8 @@ impl CatalogSchema {
 pub struct CatalogTable {
     pub name: String,
     pub schema: SchemaRef,
-    pub source: TableSource,
+    pub table_id: u64,
     pub indexes: HashMap<String, CatalogIndex>,
-    pub stats: Option<TableStatistics>,
 }
 
 impl CatalogTable {
@@ -45,34 +43,10 @@ impl CatalogTable {
         Self {
             name: name.into(),
             schema,
-            source: TableSource::Holt { table_id },
+            table_id,
             indexes: HashMap::new(),
-            stats: None,
         }
     }
-
-    pub fn virtual_table(name: impl Into<String>, schema: SchemaRef) -> Self {
-        Self {
-            name: name.into(),
-            schema,
-            source: TableSource::Virtual,
-            indexes: HashMap::new(),
-            stats: None,
-        }
-    }
-
-    pub fn table_id(&self) -> Option<u64> {
-        match self.source {
-            TableSource::Holt { table_id } => Some(table_id),
-            TableSource::Virtual => None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TableSource {
-    Holt { table_id: u64 },
-    Virtual,
 }
 
 #[derive(Debug, Clone)]
@@ -192,48 +166,7 @@ impl Catalog {
     }
 
     pub fn table_id(&self, table_ref: &TableReference) -> QuillSQLResult<u64> {
-        self.catalog_table(table_ref)?.table_id().ok_or_else(|| {
-            QuillSQLError::Storage(format!("table {} is virtual", table_ref.to_log_string()))
-        })
-    }
-
-    pub fn table_statistics(&self, table_ref: &TableReference) -> Option<&TableStatistics> {
-        let schema_name = table_ref.schema().unwrap_or(DEFAULT_SCHEMA_NAME);
-        self.schemas
-            .get(schema_name)
-            .and_then(|schema| schema.tables.get(table_ref.table()))
-            .and_then(|table| table.stats.as_ref())
-    }
-
-    pub fn analyze_table(&mut self, table_ref: &TableReference) -> QuillSQLResult<TableStatistics> {
-        let schema_name = table_ref
-            .schema()
-            .unwrap_or(DEFAULT_SCHEMA_NAME)
-            .to_string();
-        let table_name = table_ref.table().to_string();
-        let catalog_table = self.catalog_table(table_ref)?;
-        let schema = catalog_table.schema.clone();
-        let table = HoltTableHandle::new(
-            table_ref.clone(),
-            schema.clone(),
-            catalog_table.table_id().ok_or_else(|| {
-                QuillSQLError::Storage(format!("table {} is virtual", table_ref.to_log_string()))
-            })?,
-            self.holt_store.clone(),
-        );
-        let mut stats = TableStatistics::empty(schema.as_ref());
-        let mut stream = table.full_scan()?;
-        while let Some((_rid, meta, tuple)) = stream.next()? {
-            if !meta.is_deleted {
-                stats.record_tuple(&tuple);
-            }
-        }
-        self.schemas
-            .get_mut(&schema_name)
-            .and_then(|schema| schema.tables.get_mut(&table_name))
-            .expect("table existence checked above")
-            .stats = Some(stats.clone());
-        Ok(stats)
+        Ok(self.catalog_table(table_ref)?.table_id)
     }
 
     pub fn try_table_schema(&self, table_ref: &TableReference) -> Option<SchemaRef> {
@@ -276,62 +209,6 @@ impl Catalog {
             CatalogIndex::new(index_name.clone(), key_schema.clone(), index_id),
         );
         Ok(index_id)
-    }
-
-    pub fn drop_index(
-        &mut self,
-        table_ref: &TableReference,
-        index_name: &str,
-    ) -> QuillSQLResult<bool> {
-        let schema_name = table_ref
-            .schema()
-            .unwrap_or(DEFAULT_SCHEMA_NAME)
-            .to_string();
-
-        if schema_name == INFORMATION_SCHEMA_NAME {
-            return Err(QuillSQLError::Execution(
-                "dropping indexes on information_schema tables is not allowed".to_string(),
-            ));
-        }
-
-        if !self
-            .catalog_table(table_ref)?
-            .indexes
-            .contains_key(index_name)
-        {
-            return Ok(false);
-        }
-        self.holt_store
-            .drop_index_descriptor(table_ref, index_name)?;
-        self.catalog_table_mut(table_ref)?
-            .indexes
-            .remove(index_name);
-        Ok(true)
-    }
-
-    pub fn find_index_owner(
-        &self,
-        catalog_hint: Option<&str>,
-        schema_hint: Option<&str>,
-        index_name: &str,
-    ) -> Option<TableReference> {
-        let catalog_name = catalog_hint.unwrap_or(DEFAULT_CATALOG_NAME);
-
-        if let Some(schema_name) = schema_hint {
-            return self.find_index_in_schema(catalog_name, schema_name, index_name);
-        }
-
-        for schema_name in self.schemas.keys() {
-            if schema_name == INFORMATION_SCHEMA_NAME {
-                continue;
-            }
-            if let Some(table_ref) =
-                self.find_index_in_schema(catalog_name, schema_name, index_name)
-            {
-                return Some(table_ref);
-            }
-        }
-        None
     }
 
     pub fn load_schema(&mut self, name: impl Into<String>, schema: CatalogSchema) {
@@ -400,35 +277,5 @@ impl Catalog {
             .ok_or_else(|| {
                 QuillSQLError::Storage(format!("table {} not created yet", table_ref.table()))
             })
-    }
-
-    fn find_index_in_schema(
-        &self,
-        catalog_name: &str,
-        schema_name: &str,
-        index_name: &str,
-    ) -> Option<TableReference> {
-        let schema = self.schemas.get(schema_name)?;
-        for (table_name, table) in &schema.tables {
-            if table.indexes.contains_key(index_name) {
-                if catalog_name == DEFAULT_CATALOG_NAME {
-                    if schema_name == DEFAULT_SCHEMA_NAME {
-                        return Some(TableReference::Bare {
-                            table: table_name.clone(),
-                        });
-                    }
-                    return Some(TableReference::Partial {
-                        schema: schema_name.to_string(),
-                        table: table_name.clone(),
-                    });
-                }
-                return Some(TableReference::Full {
-                    catalog: catalog_name.to_string(),
-                    schema: schema_name.to_string(),
-                    table: table_name.clone(),
-                });
-            }
-        }
-        None
     }
 }

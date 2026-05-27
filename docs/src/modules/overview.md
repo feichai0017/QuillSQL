@@ -1,63 +1,73 @@
 # Module Overview
 
-QuillSQL is organized around the SQL stack. Holt is the only persistent storage
-backend, so the remaining modules focus on names, plans, operators, transactions, and
-typed tuple handling.
+QuillSQL is now a DataFusion-fronted SQL research engine backed by Holt. The
+project keeps its own persistent storage adapter, MVCC metadata, transaction
+status handling, CLI, and server, while DataFusion owns SQL parsing, planning,
+optimization, and physical execution.
 
-## SQL Front-End (`src/sql`)
+## Database (`src/database.rs`)
 
-Parses SQL through `sqlparser`. The parser keeps the AST SQL-shaped so later stages can
-make binding and planning decisions explicitly.
+`Database::run` is the only SQL entry point. It creates a DataFusion session,
+registers the Holt catalog provider, intercepts Holt-backed DDL, and returns
+Arrow `RecordBatch` output.
 
-## Planning (`src/plan`)
+## DataFusion Adapter (`src/df`)
 
-`LogicalPlanner` binds table and column names, checks types, and produces `LogicalPlan`.
-`PhysicalPlanner` lowers optimized logical plans into Volcano operators. DDL does not
-accept storage backend clauses; tables and indexes are Holt-backed by definition.
-
-## Optimizer (`src/optimizer`)
-
-The optimizer is a small rule pipeline. Rules are pure rewrites over `LogicalPlan`, which
-makes them easy to test and reason about. The planner can choose Holt index scans for
-simple equality/range predicates.
-
-## Execution (`src/execution`)
-
-Every physical operator implements `VolcanoExecutor` with `init` and `next`. Operators
-receive an `ExecutionContext`, which provides catalog access, expression evaluation,
-transaction helpers, and `HoltStorage`.
-
-## Catalog (`src/catalog`)
-
-The catalog keeps an in-memory projection of schemas, tables, indexes, and statistics.
-Durable descriptors are stored in Holt. `information_schema` is a virtual table family
-generated from the in-memory catalog at scan time.
-
-## Storage Facade (`src/storage`)
-
-The storage module contains:
+This package contains the DataFusion integration:
 
 | File | Role |
 | ---- | ---- |
-| `engine.rs` | Object-safe table/index traits and the Holt storage entrypoint. |
+| `mod.rs` | Shared adapter state and transaction/session boundary. |
+| `provider.rs` | DataFusion catalog, schema, and table providers. |
+| `exec.rs` | `HoltScanExec` and DML result execution nodes. |
+| `ddl.rs` | Holt-backed DDL handling. |
+| `filter.rs` | Indexed filter recognition and residual filter evaluation. |
+| `arrow.rs` | Arrow/Quill row conversion and result formatting. |
+
+Simple single-column indexed equality/range predicates can narrow the Holt scan.
+DataFusion still applies residual filters, so pushdown remains correctness-first.
+
+## JIT (`src/jit`)
+
+The JIT layer is attached as a DataFusion physical optimizer rule. The current
+`jit-mlir` feature is intentionally toolchain-light: it enables the MLIR research
+extension point without requiring system MLIR in the default build. The next step
+is replacing eligible `FilterExec` and `ProjectionExec` nodes with compiled Arrow
+batch kernels.
+
+## Catalog (`src/catalog`)
+
+The catalog is an in-memory projection of Holt descriptors. Holt is the source of
+truth for table and index ids, schemas, and descriptor recovery. DataFusion
+provides `information_schema` from the catalog provider; QuillSQL no longer stores
+or scans system-table rows itself.
+
+## Storage (`src/storage`)
+
+The storage module is the Holt adapter and private row codec:
+
+| File | Role |
+| ---- | ---- |
+| `engine.rs` | Object-safe table/index handles used by the Holt adapter. |
 | `holt.rs` | Holt table/index handles, descriptor persistence, ordered index codec, and transaction status persistence. |
 | `record.rs` | `RecordId` and `TupleMeta`, kept as SQL-layer MVCC metadata. |
-| `tuple.rs`, `codec/` | Tuple and scalar encoding utilities. |
+| `tuple.rs`, `codec/` | Private tuple/scalar encoding utilities for Holt row values and index keys. |
 
 There is no QuillSQL-owned page cache, heap file, B+Tree, or WAL path.
 
 ## Transactions (`src/transaction`)
 
-`TransactionManager` assigns ids, tracks statuses, releases locks, and drives undo on
-abort. `TxnContext` gives operators snapshot visibility and locking helpers. Holt stores
-the recovered transaction status table; QuillSQL keeps MVCC semantics in `TupleMeta`.
+`TransactionManager` assigns ids, tracks status, releases locks, and drives undo on
+abort. `TxnContext` provides snapshot visibility and write checks. Holt stores the
+recovered transaction status table; row versions keep MVCC state in `TupleMeta`.
 
-## Front-Ends (`src/bin`)
+## Front Ends (`src/bin`)
 
-`client` is the interactive SQL shell. `server` exposes HTTP endpoints for SQL execution
-and debug views over locks, transactions, plans, and MVCC samples.
+`client` is the interactive SQL shell. `server` exposes HTTP endpoints for SQL
+execution and debug views over locks, transactions, plans, and MVCC samples.
 
-## Tests (`src/tests`)
+## Tests (`tests`)
 
-The integration tests cover SQL behavior, Holt persistence/reopen, Holt indexes,
-transaction isolation, rollback, and metadata projection.
+Integration tests cover DataFusion SQL over Holt tables, insert/update/delete,
+secondary indexes, persistence/reopen, DataFusion `information_schema`, and
+`EXPLAIN` output containing `HoltScanExec`.

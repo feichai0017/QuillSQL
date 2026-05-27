@@ -11,11 +11,12 @@ use std::sync::Arc;
 use quill_sql::database::{Database, DatabaseOptions};
 use quill_sql::transaction::IsolationLevel;
 use std::str::FromStr;
+use tokio::sync::{Mutex, MutexGuard};
 
 /// Shared app state holding a Database protected by a mutex.
 #[derive(Clone)]
 struct AppState {
-    db: Arc<std::sync::Mutex<Database>>,
+    db: Arc<Mutex<Database>>,
     options: DatabaseOptions,
 }
 
@@ -27,27 +28,15 @@ fn rebuild_db(opts: &DatabaseOptions) -> Database {
     }
 }
 
-fn lock_or_rebuild_db<'a>(
-    state: &'a AppState,
-) -> Result<std::sync::MutexGuard<'a, Database>, (StatusCode, String)> {
-    match state.db.lock() {
-        Ok(guard) => Ok(guard),
-        Err(poisoned) => {
-            let mut guard = poisoned.into_inner();
-            *guard = rebuild_db(&state.options);
-            Ok(guard)
-        }
-    }
+async fn lock_db<'a>(state: &'a AppState) -> MutexGuard<'a, Database> {
+    state.db.lock().await
 }
 
 async fn rebuild(
     State(state): State<AppState>,
 ) -> Result<Json<&'static str>, (StatusCode, String)> {
     let new_db = rebuild_db(&state.options);
-    let mut db_guard = state
-        .db
-        .lock()
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "DB poisoned".to_string()))?;
+    let mut db_guard = state.db.lock().await;
     *db_guard = new_db;
     Ok(Json("rebuilt"))
 }
@@ -88,17 +77,14 @@ fn strip_sql_comments(input: &str) -> String {
 async fn debug_locks_snapshot(
     State(state): State<AppState>,
 ) -> Result<Json<quill_sql::transaction::LockDebugSnapshot>, (StatusCode, String)> {
-    let db_guard = state
-        .db
-        .lock()
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "DB poisoned".to_string()))?;
+    let db_guard = lock_db(&state).await;
     Ok(Json(db_guard.debug_lock_snapshot()))
 }
 
 async fn debug_trace_last(
     State(state): State<AppState>,
 ) -> Result<Json<quill_sql::database::DebugTrace>, (StatusCode, String)> {
-    let db_guard = lock_or_rebuild_db(&state)?;
+    let db_guard = lock_db(&state).await;
     match db_guard.debug_last_trace() {
         Some(trace) => Ok(Json(trace)),
         None => Err((StatusCode::NOT_FOUND, "no query executed yet".to_string())),
@@ -108,7 +94,7 @@ async fn debug_trace_last(
 async fn debug_plan_last(
     State(state): State<AppState>,
 ) -> Result<Json<quill_sql::database::DebugPlanSnapshot>, (StatusCode, String)> {
-    let db_guard = lock_or_rebuild_db(&state)?;
+    let db_guard = lock_db(&state).await;
     match db_guard.debug_last_plan() {
         Some(plan) => Ok(Json(plan)),
         None => Err((StatusCode::NOT_FOUND, "no query executed yet".to_string())),
@@ -118,7 +104,7 @@ async fn debug_plan_last(
 async fn debug_mvcc_versions(
     State(state): State<AppState>,
 ) -> Result<Json<quill_sql::database::MvccVersionsDebug>, (StatusCode, String)> {
-    let db = lock_or_rebuild_db(&state)?;
+    let db = lock_db(&state).await;
     db.debug_mvcc_versions()
         .map(Json)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))
@@ -127,7 +113,7 @@ async fn debug_mvcc_versions(
 async fn debug_txns(
     State(state): State<AppState>,
 ) -> Result<Json<quill_sql::transaction::TxnDebugSnapshot>, (StatusCode, String)> {
-    let db = lock_or_rebuild_db(&state)?;
+    let db = lock_db(&state).await;
     Ok(Json(db.debug_txn_snapshot()))
 }
 
@@ -154,7 +140,7 @@ async fn main() {
     };
 
     let state = AppState {
-        db: Arc::new(std::sync::Mutex::new(db)),
+        db: Arc::new(Mutex::new(db)),
         options: db_options,
     };
 
@@ -202,15 +188,13 @@ async fn api_sql(
     State(state): State<AppState>,
     Json(req): Json<SqlRequest>,
 ) -> Result<Json<SqlResponse>, (StatusCode, String)> {
-    let mut db = lock_or_rebuild_db(&state)?;
+    let db = lock_db(&state).await;
     let cleaned = strip_sql_comments(&req.sql);
-    let tuples = db
+    let output = db
         .run(&cleaned)
+        .await
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("{}", e)))?;
-    let rows = tuples
-        .into_iter()
-        .map(|t| t.data.into_iter().map(|v| format!("{}", v)).collect())
-        .collect();
+    let rows = output.rows_as_strings();
     Ok(Json(SqlResponse { rows }))
 }
 
@@ -219,7 +203,7 @@ async fn api_sql_batch(
     State(state): State<AppState>,
     Json(req): Json<SqlRequest>,
 ) -> Result<Json<SqlBatchResponse>, (StatusCode, String)> {
-    let mut db = lock_or_rebuild_db(&state)?;
+    let db = lock_db(&state).await;
     let cleaned = strip_sql_comments(&req.sql);
     let statements = cleaned
         .split(';')
@@ -228,14 +212,11 @@ async fn api_sql_batch(
         .take(100);
     let mut results: Vec<Vec<Vec<String>>> = Vec::new();
     for stmt in statements {
-        let tuples = db
+        let output = db
             .run(stmt)
+            .await
             .map_err(|e| (StatusCode::BAD_REQUEST, format!("{}", e)))?;
-        let rows: Vec<Vec<String>> = tuples
-            .into_iter()
-            .map(|t| t.data.into_iter().map(|v| format!("{}", v)).collect())
-            .collect();
-        results.push(rows);
+        results.push(output.rows_as_strings());
     }
     Ok(Json(SqlBatchResponse { results }))
 }
