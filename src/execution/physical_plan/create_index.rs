@@ -1,4 +1,4 @@
-use crate::catalog::{SchemaRef, EMPTY_SCHEMA_REF};
+use crate::catalog::{IndexEngine, SchemaRef, TableBackend, EMPTY_SCHEMA_REF};
 use crate::error::QuillSQLError;
 use crate::expression::{ColumnExpr, Expr};
 use crate::plan::logical_plan::OrderByExpr;
@@ -16,6 +16,7 @@ pub struct PhysicalCreateIndex {
     pub table: TableReference,
     pub table_schema: SchemaRef,
     pub columns: Vec<OrderByExpr>,
+    pub using: Option<IndexEngine>,
 }
 
 impl VolcanoExecutor for PhysicalCreateIndex {
@@ -35,14 +36,65 @@ impl VolcanoExecutor for PhysicalCreateIndex {
             }
         }
         let key_schema = Arc::new(self.table_schema.project(&key_indices)?);
-        context
-            .catalog
-            .create_index(self.name.clone(), &self.table, key_schema)?;
+        let table_backend = context.catalog.table_backend(&self.table)?;
+        match (
+            table_backend,
+            self.using.unwrap_or(default_index_engine(table_backend)),
+        ) {
+            (TableBackend::Page, IndexEngine::BTree) => {
+                context
+                    .catalog
+                    .create_index(self.name.clone(), &self.table, key_schema)?;
+            }
+            (TableBackend::Page, IndexEngine::Holt)
+            | (TableBackend::Holt { .. }, IndexEngine::Holt) => {
+                context
+                    .catalog
+                    .create_holt_index(self.name.clone(), &self.table, key_schema)?;
+            }
+            (TableBackend::Holt { .. }, IndexEngine::BTree) => {
+                return Err(QuillSQLError::NotSupport(
+                    "BTree index on Holt table is not supported".to_string(),
+                ));
+            }
+        }
+        backfill_index(context, &self.table, &self.name)?;
         Ok(None)
     }
     fn output_schema(&self) -> SchemaRef {
         EMPTY_SCHEMA_REF.clone()
     }
+}
+
+fn default_index_engine(table_backend: TableBackend) -> IndexEngine {
+    match table_backend {
+        TableBackend::Page => IndexEngine::BTree,
+        TableBackend::Holt { .. } => IndexEngine::Holt,
+    }
+}
+
+fn backfill_index(
+    context: &mut ExecutionContext,
+    table: &TableReference,
+    index_name: &str,
+) -> QuillSQLResult<()> {
+    let binding = context.table(table)?;
+    let index = binding
+        .indexes()
+        .iter()
+        .find(|index| index.name() == index_name)
+        .cloned()
+        .ok_or_else(|| QuillSQLError::Execution(format!("index {index_name} not found")))?;
+    let mut stream = binding.scan()?;
+    while let Some((rid, meta, tuple)) = stream.next()? {
+        if meta.is_deleted || !context.txn_ctx().is_visible(&meta) {
+            continue;
+        }
+        if let Ok(key) = tuple.project_with_schema(index.key_schema()) {
+            index.insert(&key, rid, context.txn_ctx().txn_id())?;
+        }
+    }
+    Ok(())
 }
 
 impl std::fmt::Display for PhysicalCreateIndex {

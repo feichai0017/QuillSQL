@@ -27,11 +27,12 @@ use crate::{
     plan::{LogicalPlanner, PlannerContext},
     recovery::wal::{WalHeadDebug, WalSegmentDebug},
     storage::{
-        disk_manager::DiskManager, disk_scheduler::DiskScheduler, tuple::Tuple,
+        disk_manager::DiskManager, disk_scheduler::DiskScheduler, holt::HoltStore, tuple::Tuple,
         DefaultStorageEngine, StorageEngine,
     },
     transaction::{
-        CommandId, IsolationLevel, LockDebugSnapshot, TransactionManager, TxnDebugSnapshot,
+        CommandId, IsolationLevel, LockDebugSnapshot, TransactionManager, TransactionStatus,
+        TxnDebugSnapshot,
     },
 };
 use sqlparser::ast::TransactionAccessMode;
@@ -53,9 +54,16 @@ pub struct WalOptions {
 #[derive(Debug, Clone, Default)]
 pub struct DatabaseOptions {
     pub wal: WalOptions,
+    pub holt: HoltOptions,
     pub default_isolation_level: Option<IsolationLevel>,
 }
 
+#[derive(Debug, Default, Clone)]
+pub struct HoltOptions {
+    pub directory: Option<PathBuf>,
+}
+
+#[derive(Clone)]
 enum DatabaseLocation {
     OnDisk(String),
     Temporary,
@@ -91,6 +99,7 @@ pub struct Database {
     background_workers: BackgroundWorkers,
     pub(crate) wal_manager: Arc<WalManager>,
     pub(crate) transaction_manager: Arc<TransactionManager>,
+    pub(crate) holt_store: Arc<HoltStore>,
     default_isolation: IsolationLevel,
     storage_engine: Arc<dyn StorageEngine>,
     _table_registry: Arc<TableRegistry>,
@@ -200,7 +209,10 @@ impl Database {
         location: DatabaseLocation,
         options: DatabaseOptions,
     ) -> QuillSQLResult<Self> {
-        let (disk_manager, wal_config, temp_dir) = bootstrap_storage(location, &options.wal)?;
+        let (disk_manager, wal_config, temp_dir) =
+            bootstrap_storage(location.clone(), &options.wal)?;
+        let holt_dir = holt_directory_for_location(&location, temp_dir.as_ref(), &options.holt)?;
+        let holt_store = Arc::new(HoltStore::open(holt_dir)?);
 
         let disk_scheduler = Arc::new(DiskScheduler::new(disk_manager.clone()));
         let buffer_pool = Arc::new(BufferManager::new(BUFFER_POOL_SIZE, disk_scheduler.clone()));
@@ -219,6 +231,7 @@ impl Database {
             wal_manager.clone(),
             synchronous_commit,
         ));
+        seed_holt_transaction_statuses(&holt_store, &transaction_manager)?;
 
         let worker_cfg = background_config(
             &wal_config,
@@ -238,8 +251,10 @@ impl Database {
             buffer_pool.clone(),
             disk_manager.clone(),
             table_registry.clone(),
+            Some(holt_store.clone()),
         );
-        let storage_engine: Arc<dyn StorageEngine> = Arc::new(DefaultStorageEngine::default());
+        let storage_engine: Arc<dyn StorageEngine> =
+            Arc::new(DefaultStorageEngine::new(Some(holt_store.clone())));
 
         let recovery_summary = RecoveryManager::new(wal_manager.clone(), disk_scheduler.clone())
             .with_buffer_pool(buffer_pool.clone())
@@ -293,6 +308,7 @@ impl Database {
             background_workers,
             wal_manager,
             transaction_manager,
+            holt_store,
             default_isolation: options
                 .default_isolation_level
                 .unwrap_or(IsolationLevel::ReadUncommitted),
@@ -376,7 +392,19 @@ impl Database {
         let target = self.wal_manager.max_assigned_lsn();
         let _ = self.wal_manager.flush_until(target)?;
         self.wal_manager.persist_control_file()?;
+        self.holt_store
+            .db()
+            .checkpoint()
+            .map_err(crate::storage::holt::map_holt_err)?;
         self.buffer_pool.flush_all_pages()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn table_binding(
+        &self,
+        table_ref: &TableReference,
+    ) -> QuillSQLResult<crate::storage::TableBinding> {
+        self.storage_engine.table(&self.catalog, table_ref)
     }
 
     pub fn debug_last_trace(&self) -> Option<DebugTrace> {
@@ -515,7 +543,7 @@ impl Database {
     }
 
     fn build_physical_plan(&self, logical_plan: &LogicalPlan) -> PhysicalPlan {
-        let physical_planner = PhysicalPlanner::new();
+        let physical_planner = PhysicalPlanner::with_catalog(&self.catalog);
         physical_planner.create_physical_plan(logical_plan.clone())
     }
 
@@ -544,7 +572,10 @@ impl Database {
                 let txn_ref = session
                     .active_txn_mut()
                     .ok_or_else(|| QuillSQLError::Execution("no active transaction".to_string()))?;
+                let txn_id = txn_ref.id();
                 self.transaction_manager.commit(txn_ref)?;
+                self.holt_store
+                    .put_txn_status(txn_id, TransactionStatus::Committed)?;
                 session.clear_active_transaction();
                 Ok(Some(vec![]))
             }
@@ -552,7 +583,10 @@ impl Database {
                 let txn_ref = session
                     .active_txn_mut()
                     .ok_or_else(|| QuillSQLError::Execution("no active transaction".to_string()))?;
+                let txn_id = txn_ref.id();
                 self.transaction_manager.abort(txn_ref)?;
+                self.holt_store
+                    .put_txn_status(txn_id, TransactionStatus::Aborted)?;
                 session.clear_active_transaction();
                 Ok(Some(vec![]))
             }
@@ -588,7 +622,10 @@ impl Database {
 
         if autocommit && needs_cleanup {
             if let Some(txn) = session.active_txn_mut() {
+                let txn_id = txn.id();
                 self.transaction_manager.commit(txn)?;
+                self.holt_store
+                    .put_txn_status(txn_id, TransactionStatus::Committed)?;
             }
             session.clear_active_transaction();
         }
@@ -605,6 +642,38 @@ impl Drop for Database {
 
 fn wal_config_for_path(db_path: &str, overrides: &WalOptions) -> WalConfig {
     build_wal_config(wal_directory_from_path(db_path), overrides)
+}
+
+fn holt_directory_for_location(
+    location: &DatabaseLocation,
+    temp_dir: Option<&TempDir>,
+    overrides: &HoltOptions,
+) -> QuillSQLResult<PathBuf> {
+    if let Some(directory) = &overrides.directory {
+        return Ok(directory.clone());
+    }
+    match location {
+        DatabaseLocation::OnDisk(path) => Ok(PathBuf::from(format!("{path}.holt"))),
+        DatabaseLocation::Temporary => {
+            let temp_dir = temp_dir.ok_or_else(|| {
+                QuillSQLError::Internal("temporary database directory was not initialized".into())
+            })?;
+            Ok(temp_dir.path().join("holt"))
+        }
+    }
+}
+
+fn seed_holt_transaction_statuses(
+    holt_store: &HoltStore,
+    transaction_manager: &TransactionManager,
+) -> QuillSQLResult<()> {
+    let mut next_txn_id = 1;
+    for (txn_id, status) in holt_store.recover_txn_statuses()? {
+        transaction_manager.record_recovered_status(txn_id, status);
+        next_txn_id = next_txn_id.max(txn_id.saturating_add(1));
+    }
+    transaction_manager.ensure_next_txn_id_at_least(next_txn_id);
+    Ok(())
 }
 
 fn wal_directory_from_path(db_path: &str) -> PathBuf {

@@ -229,13 +229,17 @@ impl TransactionManager {
                 })
             })?;
             txn.record_lsn(clr_result.end_lsn);
-            let heap_result = self.wal.append_record_with(|ctx| {
-                txn.record_lsn(ctx.end_lsn);
-                WalRecordPayload::Heap(payload.clone())
-            })?;
-            txn.record_lsn(heap_result.end_lsn);
+            if let Some(payload) = payload {
+                let heap_result = self.wal.append_record_with(|ctx| {
+                    txn.record_lsn(ctx.end_lsn);
+                    WalRecordPayload::Heap(payload.clone())
+                })?;
+                txn.record_lsn(heap_result.end_lsn);
+                undo_next = Some(heap_result.start_lsn);
+            } else {
+                undo_next = Some(clr_result.start_lsn);
+            }
             action.undo(txn_id)?;
-            undo_next = Some(heap_result.start_lsn);
         }
 
         let append = self.wal.append_record_with(|_| {
@@ -287,6 +291,28 @@ impl TransactionManager {
             .get(&txn_id)
             .map(|entry| *entry.value())
             .unwrap_or(TransactionStatus::Unknown)
+    }
+
+    pub fn record_recovered_status(&self, txn_id: TransactionId, status: TransactionStatus) {
+        if txn_id == 0 {
+            return;
+        }
+        self.txn_statuses.insert(txn_id, status);
+    }
+
+    pub fn ensure_next_txn_id_at_least(&self, next_txn_id: TransactionId) {
+        let mut current = self.next_txn_id.load(Ordering::SeqCst);
+        while current < next_txn_id {
+            match self.next_txn_id.compare_exchange(
+                current,
+                next_txn_id,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => break,
+                Err(observed) => current = observed,
+            }
+        }
     }
 
     pub fn oldest_active_txn(&self) -> Option<TransactionId> {

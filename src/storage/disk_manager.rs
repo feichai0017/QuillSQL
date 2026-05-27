@@ -1,4 +1,4 @@
-use log::{debug, warn};
+use log::debug;
 use std::alloc::{alloc, alloc_zeroed, dealloc, Layout};
 use std::fs::File;
 use std::path::Path;
@@ -66,6 +66,7 @@ impl AlignedPageBuf {
         unsafe { slice::from_raw_parts_mut(self.ptr.as_ptr(), PAGE_SIZE) }
     }
 
+    #[cfg(target_os = "linux")]
     pub(crate) fn ptr(&self) -> *mut u8 {
         self.ptr.as_ptr()
     }
@@ -87,9 +88,11 @@ pub struct DiskManager {
 
 impl DiskManager {
     fn open_raw_file(db_path: &Path, create: bool, direct: bool) -> std::io::Result<(File, bool)> {
-        let mut request_direct = direct
+        let request_direct = direct
             && !std::env::var("QUILL_DISABLE_DIRECT_IO")
                 .map_or(false, |v| v == "1" || v.eq_ignore_ascii_case("true"));
+        #[cfg(target_os = "linux")]
+        let mut request_direct = request_direct;
 
         #[cfg(target_os = "linux")]
         if request_direct {
@@ -187,13 +190,9 @@ impl DiskManager {
                 aligned.as_mut_slice().copy_from_slice(&meta_bytes);
 
                 if let Err(err) = db_file.write_all(aligned.as_slice()) {
-                    let mut need_fallback = err.kind() == ErrorKind::InvalidInput;
+                    let need_fallback = err.kind() == ErrorKind::InvalidInput;
                     #[cfg(target_os = "linux")]
-                    {
-                        if !need_fallback && err.raw_os_error() == Some(libc::EINVAL) {
-                            need_fallback = true;
-                        }
-                    }
+                    let need_fallback = need_fallback || err.raw_os_error() == Some(libc::EINVAL);
 
                     if need_fallback {
                         let (mut fallback_file, _) =

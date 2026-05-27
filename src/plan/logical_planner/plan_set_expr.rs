@@ -268,7 +268,7 @@ impl LogicalPlanner<'_> {
             sqlparser::ast::TableFactor::Table { name, .. } => {
                 // TODO handle alias
                 let table_ref = self.bind_table_name(name)?;
-                let schema = self.context.catalog.table_heap(&table_ref)?.schema.clone();
+                let schema = self.context.catalog.table_schema(&table_ref)?;
                 let row_estimate = self
                     .context
                     .catalog

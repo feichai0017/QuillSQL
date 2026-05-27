@@ -150,6 +150,7 @@ impl RequestReceiver {
         RequestReceiver { queue }
     }
 
+    #[cfg(target_os = "linux")]
     pub(crate) fn try_recv(&self) -> Option<DiskRequest> {
         let mut guard = self.queue.queue.lock().unwrap();
         guard.pop_front()
@@ -170,6 +171,7 @@ impl RequestReceiver {
         }
     }
 
+    #[cfg(target_os = "linux")]
     pub(crate) fn is_shutdown(&self) -> bool {
         self.queue.is_shutdown()
     }

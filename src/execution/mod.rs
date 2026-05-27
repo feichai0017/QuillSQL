@@ -5,7 +5,6 @@ use crate::execution::physical_plan::PhysicalPlan;
 use crate::expression::{Expr, ExprTrait};
 use crate::storage::{
     engine::{StorageEngine, TableBinding},
-    table_heap::TableHeap,
     tuple::Tuple,
 };
 use crate::transaction::{Transaction, TransactionManager, TxnContext};
@@ -65,13 +64,9 @@ impl<'a> ExecutionContext<'a> {
         expr.evaluate(tuple)
     }
 
-    /// Look up the table heap through the storage engine.
+    /// Look up the table binding through the storage engine.
     pub fn table(&self, table: &TableReference) -> QuillSQLResult<TableBinding> {
         self.storage.table(self.catalog, table)
-    }
-
-    pub fn table_heap(&self, table: &TableReference) -> QuillSQLResult<Arc<TableHeap>> {
-        Ok(self.table(table)?.table_heap())
     }
 
     pub fn txn_ctx(&self) -> &TxnContext<'a> {

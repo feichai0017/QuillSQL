@@ -54,6 +54,7 @@ io-uring = { version = "0.6", optional = true }
 crc32fast = "1.4"
 libc = "0.2.176"
 crossbeam-channel = "0.5.15"
+holt = "0.4.1"
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 stack-map = "1.0.5"

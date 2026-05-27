@@ -10,6 +10,7 @@ use crate::catalog::{
 };
 use crate::storage::disk_manager::DiskManager;
 use crate::storage::heap::MvccHeap;
+use crate::storage::holt::HoltStore;
 use crate::storage::page::{BPLUS_INTERNAL_PAGE_MAX_SIZE, BPLUS_LEAF_PAGE_MAX_SIZE};
 use crate::storage::table_heap::{TableHeap, TableIterator};
 use crate::storage::tuple::Tuple;
@@ -30,6 +31,7 @@ pub struct Catalog {
     pub schemas: HashMap<String, CatalogSchema>,
     pub buffer_pool: Arc<BufferManager>,
     pub disk_manager: Arc<DiskManager>,
+    pub holt_store: Option<Arc<HoltStore>>,
     table_registry: Arc<TableRegistry>,
 }
 
@@ -51,8 +53,10 @@ impl CatalogSchema {
 #[derive(Debug)]
 pub struct CatalogTable {
     pub name: String,
-    pub table: Arc<TableHeap>,
-    pub indexes: HashMap<String, Arc<BPlusTreeIndex>>,
+    pub schema: SchemaRef,
+    pub backend: TableBackend,
+    pub table: Option<Arc<TableHeap>>,
+    pub indexes: HashMap<String, CatalogIndex>,
     pub stats: Option<TableStatistics>,
 }
 
@@ -60,9 +64,83 @@ impl CatalogTable {
     pub fn new(name: impl Into<String>, table: Arc<TableHeap>) -> Self {
         Self {
             name: name.into(),
-            table,
+            schema: table.schema.clone(),
+            backend: TableBackend::Page,
+            table: Some(table),
             indexes: HashMap::new(),
             stats: None,
+        }
+    }
+
+    pub fn new_holt(name: impl Into<String>, schema: SchemaRef, table_id: u64) -> Self {
+        Self {
+            name: name.into(),
+            schema,
+            backend: TableBackend::Holt { table_id },
+            table: None,
+            indexes: HashMap::new(),
+            stats: None,
+        }
+    }
+
+    pub fn table_heap(&self) -> QuillSQLResult<Arc<TableHeap>> {
+        self.table.clone().ok_or_else(|| {
+            QuillSQLError::Storage(format!(
+                "table {} is not backed by the page heap",
+                self.name
+            ))
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TableBackend {
+    Page,
+    Holt { table_id: u64 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TableEngine {
+    Page,
+    Holt,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexBackend {
+    BTree,
+    Holt { index_id: u64 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexEngine {
+    BTree,
+    Holt,
+}
+
+#[derive(Debug, Clone)]
+pub struct CatalogIndex {
+    pub name: String,
+    pub key_schema: SchemaRef,
+    pub backend: IndexBackend,
+    pub btree: Option<Arc<BPlusTreeIndex>>,
+}
+
+impl CatalogIndex {
+    pub fn new_btree(name: impl Into<String>, index: Arc<BPlusTreeIndex>) -> Self {
+        Self {
+            name: name.into(),
+            key_schema: index.key_schema.clone(),
+            backend: IndexBackend::BTree,
+            btree: Some(index),
+        }
+    }
+
+    pub fn new_holt(name: impl Into<String>, key_schema: SchemaRef, index_id: u64) -> Self {
+        Self {
+            name: name.into(),
+            key_schema,
+            backend: IndexBackend::Holt { index_id },
+            btree: None,
         }
     }
 }
@@ -75,11 +153,13 @@ impl Catalog {
         buffer_pool: Arc<BufferManager>,
         disk_manager: Arc<DiskManager>,
         table_registry: Arc<TableRegistry>,
+        holt_store: Option<Arc<HoltStore>>,
     ) -> Self {
         Self {
             schemas: HashMap::new(),
             buffer_pool,
             disk_manager,
+            holt_store,
             table_registry,
         }
     }
@@ -120,7 +200,7 @@ impl Catalog {
                 schema_name.clone().into(),
             ],
         );
-        let _ = MvccHeap::new(schemas_table.table.clone()).insert(
+        let _ = MvccHeap::new(schemas_table.table_heap()?).insert(
             &tuple,
             SYSTEM_TXN_ID,
             SYSTEM_COMMAND_ID,
@@ -158,12 +238,7 @@ impl Catalog {
             schema.clone(),
             self.buffer_pool.clone(),
         )?);
-        let catalog_table = CatalogTable {
-            name: table_name.clone(),
-            table: table_heap.clone(),
-            indexes: HashMap::new(),
-            stats: None,
-        };
+        let catalog_table = CatalogTable::new(table_name.clone(), table_heap.clone());
         catalog_schema
             .tables
             .insert(table_name.clone(), catalog_table);
@@ -192,7 +267,7 @@ impl Catalog {
                 (table_heap.first_page_id.load(Ordering::SeqCst)).into(),
             ],
         );
-        let _ = MvccHeap::new(tables_table.table.clone()).insert(
+        let _ = MvccHeap::new(tables_table.table_heap()?).insert(
             &tuple,
             SYSTEM_TXN_ID,
             SYSTEM_COMMAND_ID,
@@ -206,7 +281,7 @@ impl Catalog {
                 "table information_schema.columns not created yet".to_string(),
             ));
         };
-        let columns_mvcc = MvccHeap::new(columns_table.table.clone());
+        let columns_mvcc = MvccHeap::new(columns_table.table_heap()?);
         for col in schema.columns.iter() {
             let sql_type: sqlparser::ast::DataType = (&col.data_type).into();
             let tuple = Tuple::new(
@@ -225,6 +300,103 @@ impl Catalog {
         }
 
         Ok(table_heap)
+    }
+
+    pub fn create_holt_table(
+        &mut self,
+        table_ref: TableReference,
+        schema: SchemaRef,
+    ) -> QuillSQLResult<u64> {
+        let catalog_name = table_ref
+            .catalog()
+            .unwrap_or(DEFAULT_CATALOG_NAME)
+            .to_string();
+        let catalog_schema_name = table_ref
+            .schema()
+            .unwrap_or(DEFAULT_SCHEMA_NAME)
+            .to_string();
+        let table_name = table_ref.table().to_string();
+
+        {
+            let Some(catalog_schema) = self.schemas.get_mut(&catalog_schema_name) else {
+                return Err(QuillSQLError::Storage(format!(
+                    "catalog schema {} not created yet",
+                    catalog_schema_name
+                )));
+            };
+            if catalog_schema.tables.contains_key(table_ref.table()) {
+                return Err(QuillSQLError::Storage(
+                    "Cannot create duplicated table".to_string(),
+                ));
+            }
+        }
+
+        let holt = self
+            .holt_store
+            .as_ref()
+            .ok_or_else(|| QuillSQLError::Storage("Holt store is not configured".to_string()))?;
+        let table_id = holt.create_table_descriptor(&table_ref, schema.as_ref())?;
+        let catalog_table = CatalogTable::new_holt(table_name.clone(), schema.clone(), table_id);
+        self.schemas
+            .get_mut(&catalog_schema_name)
+            .expect("schema checked above")
+            .tables
+            .insert(table_name.clone(), catalog_table);
+
+        let Some(information_schema) = self.schemas.get_mut(INFORMATION_SCHEMA_NAME) else {
+            return Err(QuillSQLError::Internal(
+                "catalog schema information_schema not created yet".to_string(),
+            ));
+        };
+        let Some(tables_table) = information_schema.tables.get_mut(INFORMATION_SCHEMA_TABLES)
+        else {
+            return Err(QuillSQLError::Internal(
+                "table information_schema.tables not created yet".to_string(),
+            ));
+        };
+
+        let tuple = Tuple::new(
+            TABLES_SCHEMA.clone(),
+            vec![
+                catalog_name.clone().into(),
+                catalog_schema_name.clone().into(),
+                table_name.clone().into(),
+                0u32.into(),
+            ],
+        );
+        let _ = MvccHeap::new(tables_table.table_heap()?).insert(
+            &tuple,
+            SYSTEM_TXN_ID,
+            SYSTEM_COMMAND_ID,
+        )?;
+
+        let Some(columns_table) = information_schema
+            .tables
+            .get_mut(INFORMATION_SCHEMA_COLUMNS)
+        else {
+            return Err(QuillSQLError::Internal(
+                "table information_schema.columns not created yet".to_string(),
+            ));
+        };
+        let columns_mvcc = MvccHeap::new(columns_table.table_heap()?);
+        for col in schema.columns.iter() {
+            let sql_type: sqlparser::ast::DataType = (&col.data_type).into();
+            let tuple = Tuple::new(
+                COLUMNS_SCHEMA.clone(),
+                vec![
+                    catalog_name.clone().into(),
+                    catalog_schema_name.clone().into(),
+                    table_name.clone().into(),
+                    col.name.clone().into(),
+                    format!("{sql_type}").into(),
+                    col.nullable.into(),
+                    format!("{}", col.default).into(),
+                ],
+            );
+            let _ = columns_mvcc.insert(&tuple, SYSTEM_TXN_ID, SYSTEM_COMMAND_ID)?;
+        }
+
+        Ok(table_id)
     }
 
     pub fn drop_table(&mut self, table_ref: &TableReference) -> QuillSQLResult<bool> {
@@ -281,7 +453,50 @@ impl Catalog {
                 table_name
             )));
         };
-        Ok(catalog_table.table.clone())
+        catalog_table.table_heap()
+    }
+
+    pub fn table_schema(&self, table_ref: &TableReference) -> QuillSQLResult<SchemaRef> {
+        let catalog_schema_name = table_ref
+            .schema()
+            .unwrap_or(DEFAULT_SCHEMA_NAME)
+            .to_string();
+        let table_name = table_ref.table().to_string();
+
+        let Some(catalog_schema) = self.schemas.get(&catalog_schema_name) else {
+            return Err(QuillSQLError::Storage(format!(
+                "catalog schema {} not created yet",
+                catalog_schema_name
+            )));
+        };
+        let Some(catalog_table) = catalog_schema.tables.get(&table_name) else {
+            return Err(QuillSQLError::Storage(format!(
+                "table {} not created yet",
+                table_name
+            )));
+        };
+        Ok(catalog_table.schema.clone())
+    }
+
+    pub fn table_backend(&self, table_ref: &TableReference) -> QuillSQLResult<TableBackend> {
+        let schema_name = table_ref
+            .schema()
+            .unwrap_or(DEFAULT_SCHEMA_NAME)
+            .to_string();
+        let table_name = table_ref.table().to_string();
+        let Some(schema) = self.schemas.get(&schema_name) else {
+            return Err(QuillSQLError::Storage(format!(
+                "catalog schema {} not created yet",
+                schema_name
+            )));
+        };
+        let Some(table) = schema.tables.get(&table_name) else {
+            return Err(QuillSQLError::Storage(format!(
+                "table {} not created yet",
+                table_name
+            )));
+        };
+        Ok(table.backend)
     }
 
     pub fn table_statistics(&self, table_ref: &TableReference) -> Option<&TableStatistics> {
@@ -315,7 +530,7 @@ impl Catalog {
             )));
         };
 
-        let stats = TableStatistics::analyze(catalog_table.table.clone())?;
+        let stats = TableStatistics::analyze(catalog_table.table_heap()?)?;
         catalog_table.stats = Some(stats.clone());
         Ok(stats)
     }
@@ -328,13 +543,21 @@ impl Catalog {
         self.schemas
             .get(&schema_name)
             .and_then(|schema| schema.tables.get(table_ref.table()))
-            .map(|catalog_table| catalog_table.table.clone())
+            .and_then(|catalog_table| catalog_table.table.clone())
     }
 
-    pub fn table_indexes(
-        &self,
-        table_ref: &TableReference,
-    ) -> QuillSQLResult<Vec<(String, Arc<BPlusTreeIndex>)>> {
+    pub fn try_table_schema(&self, table_ref: &TableReference) -> Option<SchemaRef> {
+        let schema_name = table_ref
+            .schema()
+            .unwrap_or(DEFAULT_SCHEMA_NAME)
+            .to_string();
+        self.schemas
+            .get(&schema_name)
+            .and_then(|schema| schema.tables.get(table_ref.table()))
+            .map(|catalog_table| catalog_table.schema.clone())
+    }
+
+    pub fn table_indexes(&self, table_ref: &TableReference) -> QuillSQLResult<Vec<CatalogIndex>> {
         let catalog_schema_name = table_ref
             .schema()
             .unwrap_or(DEFAULT_SCHEMA_NAME)
@@ -353,11 +576,7 @@ impl Catalog {
                 table_name
             )));
         };
-        Ok(catalog_table
-            .indexes
-            .iter()
-            .map(|(name, index)| (name.clone(), index.clone()))
-            .collect())
+        Ok(catalog_table.indexes.values().cloned().collect())
     }
 
     pub fn create_index(
@@ -400,9 +619,10 @@ impl Catalog {
             BPLUS_INTERNAL_PAGE_MAX_SIZE as u32,
             BPLUS_LEAF_PAGE_MAX_SIZE as u32,
         ));
-        catalog_table
-            .indexes
-            .insert(index_name.clone(), b_plus_tree_index.clone());
+        catalog_table.indexes.insert(
+            index_name.clone(),
+            CatalogIndex::new_btree(index_name.clone(), b_plus_tree_index.clone()),
+        );
 
         // update system table
         let Some(information_schema) = self.schemas.get_mut(INFORMATION_SCHEMA_NAME) else {
@@ -432,13 +652,102 @@ impl Catalog {
                 b_plus_tree_index.header_page_id.into(),
             ],
         );
-        let _ = MvccHeap::new(indexes_table.table.clone()).insert(
+        let _ = MvccHeap::new(indexes_table.table_heap()?).insert(
             &tuple,
             SYSTEM_TXN_ID,
             SYSTEM_COMMAND_ID,
         )?;
 
         Ok(b_plus_tree_index)
+    }
+
+    pub fn create_holt_index(
+        &mut self,
+        index_name: String,
+        table_ref: &TableReference,
+        key_schema: SchemaRef,
+    ) -> QuillSQLResult<u64> {
+        let catalog_name = table_ref
+            .catalog()
+            .unwrap_or(DEFAULT_CATALOG_NAME)
+            .to_string();
+        let catalog_schema_name = table_ref
+            .schema()
+            .unwrap_or(DEFAULT_SCHEMA_NAME)
+            .to_string();
+        let table_name = table_ref.table().to_string();
+
+        {
+            let Some(catalog_schema) = self.schemas.get_mut(&catalog_schema_name) else {
+                return Err(QuillSQLError::Storage(format!(
+                    "catalog schema {} not created yet",
+                    catalog_schema_name
+                )));
+            };
+            let Some(catalog_table) = catalog_schema.tables.get_mut(&table_name) else {
+                return Err(QuillSQLError::Storage(format!(
+                    "table {} not created yet",
+                    table_name
+                )));
+            };
+            if catalog_table.indexes.contains_key(&index_name) {
+                return Err(QuillSQLError::Storage(
+                    "Cannot create duplicated index".to_string(),
+                ));
+            }
+        }
+
+        let holt = self
+            .holt_store
+            .as_ref()
+            .ok_or_else(|| QuillSQLError::Storage("Holt store is not configured".to_string()))?;
+        let index_id = holt.create_index_descriptor(table_ref, &index_name, key_schema.as_ref())?;
+        let catalog_table = self
+            .schemas
+            .get_mut(&catalog_schema_name)
+            .expect("schema checked above")
+            .tables
+            .get_mut(&table_name)
+            .expect("table checked above");
+        catalog_table.indexes.insert(
+            index_name.clone(),
+            CatalogIndex::new_holt(index_name.clone(), key_schema.clone(), index_id),
+        );
+
+        let Some(information_schema) = self.schemas.get_mut(INFORMATION_SCHEMA_NAME) else {
+            return Err(QuillSQLError::Internal(
+                "catalog schema information_schema not created yet".to_string(),
+            ));
+        };
+        let Some(indexes_table) = information_schema
+            .tables
+            .get_mut(INFORMATION_SCHEMA_INDEXES)
+        else {
+            return Err(QuillSQLError::Internal(
+                "table information_schema.indexes not created yet".to_string(),
+            ));
+        };
+
+        let tuple = Tuple::new(
+            INDEXES_SCHEMA.clone(),
+            vec![
+                catalog_name.clone().into(),
+                catalog_schema_name.clone().into(),
+                table_name.clone().into(),
+                index_name.clone().into(),
+                key_schema_to_varchar(&key_schema).into(),
+                0u32.into(),
+                0u32.into(),
+                0u32.into(),
+            ],
+        );
+        let _ = MvccHeap::new(indexes_table.table_heap()?).insert(
+            &tuple,
+            SYSTEM_TXN_ID,
+            SYSTEM_COMMAND_ID,
+        )?;
+
+        Ok(index_id)
     }
 
     pub fn drop_index(
@@ -526,7 +835,10 @@ impl Catalog {
                 table_name
             )));
         };
-        Ok(catalog_table.indexes.get(index_name).cloned())
+        Ok(catalog_table
+            .indexes
+            .get(index_name)
+            .and_then(|index| index.btree.clone()))
     }
 
     pub fn load_schema(&mut self, name: impl Into<String>, schema: CatalogSchema) {
@@ -547,8 +859,29 @@ impl Catalog {
             )));
         };
         self.table_registry
-            .register(table_ref.clone(), table.table.clone());
+            .register(table_ref.clone(), table.table_heap()?);
         catalog_schema.tables.insert(table_name, table);
+        Ok(())
+    }
+
+    pub fn load_holt_table(
+        &mut self,
+        table_ref: TableReference,
+        table_name: impl Into<String>,
+        schema: SchemaRef,
+        table_id: u64,
+    ) -> QuillSQLResult<()> {
+        let catalog_schema_name = table_ref.schema().unwrap_or(DEFAULT_SCHEMA_NAME);
+        let Some(catalog_schema) = self.schemas.get_mut(catalog_schema_name) else {
+            return Err(QuillSQLError::Storage(format!(
+                "catalog schema {} not created yet",
+                catalog_schema_name
+            )));
+        };
+        catalog_schema.tables.insert(
+            table_ref.table().to_string(),
+            CatalogTable::new_holt(table_name, schema, table_id),
+        );
         Ok(())
     }
 
@@ -573,7 +906,38 @@ impl Catalog {
             )));
         };
         let idx_name: String = index_name.into();
-        catalog_table.indexes.insert(idx_name.clone(), index);
+        catalog_table
+            .indexes
+            .insert(idx_name.clone(), CatalogIndex::new_btree(idx_name, index));
+        Ok(())
+    }
+
+    pub fn load_holt_index(
+        &mut self,
+        table_ref: TableReference,
+        index_name: impl Into<String>,
+        key_schema: SchemaRef,
+        index_id: u64,
+    ) -> QuillSQLResult<()> {
+        let catalog_schema_name = table_ref.schema().unwrap_or(DEFAULT_SCHEMA_NAME);
+        let table_name = table_ref.table().to_string();
+        let Some(catalog_schema) = self.schemas.get_mut(catalog_schema_name) else {
+            return Err(QuillSQLError::Storage(format!(
+                "catalog schema {} not created yet",
+                catalog_schema_name
+            )));
+        };
+        let Some(catalog_table) = catalog_schema.tables.get_mut(&table_name) else {
+            return Err(QuillSQLError::Storage(format!(
+                "catalog table {} not created yet",
+                table_name
+            )));
+        };
+        let idx_name = index_name.into();
+        catalog_table.indexes.insert(
+            idx_name.clone(),
+            CatalogIndex::new_holt(idx_name, key_schema, index_id),
+        );
         Ok(())
     }
 
@@ -631,8 +995,7 @@ impl Catalog {
                         "table information_schema.tables not created yet".to_string(),
                     )
                 })?
-                .table
-                .clone();
+                .table_heap()?;
             let columns_heap = information_schema
                 .tables
                 .get(INFORMATION_SCHEMA_COLUMNS)
@@ -641,8 +1004,7 @@ impl Catalog {
                         "table information_schema.columns not created yet".to_string(),
                     )
                 })?
-                .table
-                .clone();
+                .table_heap()?;
             let indexes_heap = information_schema
                 .tables
                 .get(INFORMATION_SCHEMA_INDEXES)
@@ -651,8 +1013,7 @@ impl Catalog {
                         "table information_schema.indexes not created yet".to_string(),
                     )
                 })?
-                .table
-                .clone();
+                .table_heap()?;
             (tables_heap, columns_heap, indexes_heap)
         };
 
@@ -720,8 +1081,7 @@ impl Catalog {
                         "table information_schema.indexes not created yet".to_string(),
                     )
                 })?
-                .table
-                .clone()
+                .table_heap()?
         };
 
         Self::delete_matching_rows(indexes_heap, |tuple| {

@@ -14,7 +14,7 @@ impl<'a> LogicalPlanner<'a> {
     ) -> QuillSQLResult<LogicalPlan> {
         let mut input = self.plan_set_expr(source.body.as_ref())?;
         let table = self.bind_table_name(table_name)?;
-        let table_schema = self.context.catalog.table_heap(&table)?.schema.clone();
+        let table_schema = self.context.catalog.table_schema(&table)?;
 
         let projected_schema = if columns_ident.is_empty() {
             table_schema.clone()

@@ -1,13 +1,9 @@
 use crate::error::QuillSQLResult;
 use crate::recovery::Lsn;
-use crate::storage::codec::TupleCodec;
-use crate::storage::heap::wal_codec::{
-    HeapDeletePayload, HeapInsertPayload, HeapRecordPayload, TupleMetaRepr,
-};
-use crate::storage::index::btree_index::BPlusTreeIndex;
+use crate::storage::heap::wal_codec::HeapRecordPayload;
 use crate::storage::page::{RecordId, TupleMeta};
-use crate::storage::table_heap::TableHeap;
 use crate::storage::tuple::Tuple;
+use crate::storage::{IndexHandle, TableHandle};
 use sqlparser::ast::TransactionAccessMode;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -60,20 +56,68 @@ pub enum TransactionState {
     Aborted,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum UndoAction {
     Insert {
-        table: Arc<TableHeap>,
+        table: Arc<dyn TableHandle>,
         rid: RecordId,
-        indexes: Vec<(Arc<BPlusTreeIndex>, Tuple)>,
+        indexes: Vec<IndexUndoLink>,
     },
     Delete {
-        table: Arc<TableHeap>,
+        table: Arc<dyn TableHandle>,
         rid: RecordId,
         prev_meta: TupleMeta,
         prev_tuple: Tuple,
-        indexes: Vec<(Arc<BPlusTreeIndex>, Tuple)>,
+        indexes: Vec<IndexUndoLink>,
     },
+}
+
+#[derive(Clone)]
+pub struct IndexUndoLink {
+    pub index: Arc<dyn IndexHandle>,
+    pub key: Tuple,
+    pub rid: RecordId,
+}
+
+impl std::fmt::Debug for IndexUndoLink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IndexUndoLink")
+            .field("index", &self.index.name())
+            .field("key", &self.key)
+            .field("rid", &self.rid)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for UndoAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Insert {
+                table,
+                rid,
+                indexes,
+            } => f
+                .debug_struct("Insert")
+                .field("table", &table.table_ref())
+                .field("rid", rid)
+                .field("indexes", indexes)
+                .finish(),
+            Self::Delete {
+                table,
+                rid,
+                prev_meta,
+                prev_tuple,
+                indexes,
+            } => f
+                .debug_struct("Delete")
+                .field("table", &table.table_ref())
+                .field("rid", rid)
+                .field("prev_meta", prev_meta)
+                .field("prev_tuple", prev_tuple)
+                .field("indexes", indexes)
+                .finish(),
+        }
+    }
 }
 
 impl UndoAction {
@@ -84,10 +128,10 @@ impl UndoAction {
                 rid,
                 indexes,
             } => {
-                for (index, key) in indexes.into_iter() {
-                    index.delete_with_txn(&key, txn_id)?;
+                for link in indexes.into_iter() {
+                    link.index.delete(&link.key, link.rid, txn_id)?;
                 }
-                table.recover_delete_tuple(rid, txn_id, 0)?;
+                table.undo_insert(rid, txn_id)?;
                 Ok(())
             }
             UndoAction::Delete {
@@ -97,45 +141,28 @@ impl UndoAction {
                 prev_tuple,
                 indexes,
             } => {
-                for (index, key) in indexes {
-                    index.insert_with_txn(&key, rid, txn_id)?;
+                for link in indexes {
+                    link.index.insert(&link.key, link.rid, txn_id)?;
                 }
-                table.recover_restore_tuple(rid, prev_meta, &prev_tuple)?;
+                table.undo_delete(rid, prev_meta, prev_tuple)?;
                 Ok(())
             }
         }
     }
 
-    pub fn to_heap_payload(&self, txn_id: TransactionId) -> QuillSQLResult<HeapRecordPayload> {
+    pub fn to_heap_payload(
+        &self,
+        txn_id: TransactionId,
+    ) -> QuillSQLResult<Option<HeapRecordPayload>> {
         match self {
-            UndoAction::Insert { table, rid, .. } => {
-                let (meta, tuple) = table.full_tuple(*rid)?;
-                let mut deleted_meta = meta;
-                deleted_meta.mark_deleted(txn_id, 0);
-                Ok(HeapRecordPayload::Delete(HeapDeletePayload {
-                    relation: table.relation_ident(),
-                    page_id: rid.page_id,
-                    slot_id: rid.slot_num as u16,
-                    op_txn_id: meta.insert_txn_id,
-                    new_tuple_meta: TupleMetaRepr::from(deleted_meta),
-                    old_tuple_meta: TupleMetaRepr::from(meta),
-                    old_tuple_data: TupleCodec::encode(&tuple),
-                }))
-            }
+            UndoAction::Insert { table, rid, .. } => table.undo_insert_payload(*rid, txn_id),
             UndoAction::Delete {
                 table,
                 rid,
                 prev_meta,
                 prev_tuple,
                 ..
-            } => Ok(HeapRecordPayload::Insert(HeapInsertPayload {
-                relation: table.relation_ident(),
-                page_id: rid.page_id,
-                slot_id: rid.slot_num as u16,
-                op_txn_id: txn_id,
-                tuple_meta: TupleMetaRepr::from(*prev_meta),
-                tuple_data: TupleCodec::encode(prev_tuple),
-            })),
+            } => table.undo_delete_payload(*rid, *prev_meta, prev_tuple, txn_id),
         }
     }
 }
@@ -254,55 +281,67 @@ impl Transaction {
 
     pub fn push_insert_undo(
         &mut self,
-        table: Arc<TableHeap>,
+        table: Arc<dyn TableHandle>,
         rid: RecordId,
-        indexes: Vec<(Arc<BPlusTreeIndex>, Tuple)>,
+        indexes: Vec<(Arc<dyn IndexHandle>, Tuple, RecordId)>,
     ) {
         self.undo_actions.push(UndoAction::Insert {
             table,
             rid,
-            indexes,
+            indexes: indexes
+                .into_iter()
+                .map(|(index, key, rid)| IndexUndoLink { index, key, rid })
+                .collect(),
         });
     }
 
     pub fn push_update_undo(
         &mut self,
-        table: Arc<TableHeap>,
+        table: Arc<dyn TableHandle>,
         old_rid: RecordId,
         new_rid: RecordId,
         prev_meta: TupleMeta,
         prev_tuple: Tuple,
-        new_keys: Vec<(Arc<BPlusTreeIndex>, Tuple)>,
-        old_keys: Vec<(Arc<BPlusTreeIndex>, Tuple)>,
+        new_keys: Vec<(Arc<dyn IndexHandle>, Tuple, RecordId)>,
+        old_keys: Vec<(Arc<dyn IndexHandle>, Tuple, RecordId)>,
     ) {
         self.undo_actions.push(UndoAction::Insert {
             table: table.clone(),
             rid: new_rid,
-            indexes: new_keys,
+            indexes: new_keys
+                .into_iter()
+                .map(|(index, key, rid)| IndexUndoLink { index, key, rid })
+                .collect(),
         });
         self.undo_actions.push(UndoAction::Delete {
             table: table.clone(),
             rid: old_rid,
             prev_meta,
             prev_tuple,
-            indexes: old_keys,
+            indexes: old_keys
+                .into_iter()
+                .map(|(index, key, rid)| IndexUndoLink { index, key, rid })
+                .collect(),
         });
     }
 
     pub fn push_delete_undo(
         &mut self,
-        table: Arc<TableHeap>,
+        table: Arc<dyn TableHandle>,
         rid: RecordId,
         prev_meta: TupleMeta,
         prev_tuple: Tuple,
-        indexes: Vec<(Arc<BPlusTreeIndex>, Tuple)>,
+        indexes: Vec<(Arc<dyn IndexHandle>, Tuple, RecordId)>,
     ) {
         self.undo_actions.push(UndoAction::Delete {
             table,
             rid,
             prev_meta,
             prev_tuple,
-            indexes,
+            indexes: indexes
+                .into_iter()
+                .map(|(index, key, rid)| IndexUndoLink { index, key, rid })
+                .collect(),
         });
     }
 

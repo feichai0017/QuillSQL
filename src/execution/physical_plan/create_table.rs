@@ -1,4 +1,4 @@
-use crate::catalog::SchemaRef;
+use crate::catalog::{SchemaRef, TableEngine};
 use crate::utils::table_ref::TableReference;
 use crate::{
     catalog::Schema,
@@ -13,17 +13,27 @@ pub struct PhysicalCreateTable {
     pub table: TableReference,
     pub schema: Schema,
     pub if_not_exists: bool,
+    pub engine: TableEngine,
 }
 
 impl VolcanoExecutor for PhysicalCreateTable {
     fn next(&self, context: &mut ExecutionContext) -> QuillSQLResult<Option<Tuple>> {
-        if self.if_not_exists && context.catalog.try_table_heap(&self.table).is_some() {
+        if self.if_not_exists && context.catalog.try_table_schema(&self.table).is_some() {
             return Ok(None);
         }
 
-        context
-            .catalog
-            .create_table(self.table.clone(), Arc::new(self.schema.clone()))?;
+        match self.engine {
+            TableEngine::Page => {
+                context
+                    .catalog
+                    .create_table(self.table.clone(), Arc::new(self.schema.clone()))?;
+            }
+            TableEngine::Holt => {
+                context
+                    .catalog
+                    .create_holt_table(self.table.clone(), Arc::new(self.schema.clone()))?;
+            }
+        }
         Ok(None)
     }
     fn output_schema(&self) -> SchemaRef {

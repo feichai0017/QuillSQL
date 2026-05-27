@@ -27,7 +27,7 @@ impl VolcanoExecutor for PhysicalDropTable {
     }
 
     fn next(&self, context: &mut ExecutionContext) -> QuillSQLResult<Option<Tuple>> {
-        if context.catalog.try_table_heap(&self.table).is_none() {
+        if context.catalog.try_table_schema(&self.table).is_none() {
             if self.if_exists {
                 return Ok(None);
             }

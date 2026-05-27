@@ -20,7 +20,7 @@ impl<'a> LogicalPlanner<'a> {
             }
         };
 
-        let table_schema = self.context.catalog.table_heap(&table_ref)?.schema.clone();
+        let table_schema = self.context.catalog.table_schema(&table_ref)?;
 
         let mut assignment_map = HashMap::new();
         for assign in assignments {

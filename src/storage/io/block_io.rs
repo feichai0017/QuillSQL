@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread;
 
-pub fn spawn_runtime(
+pub(crate) fn spawn_runtime(
     disk_manager: Arc<DiskManager>,
     config: IOSchedulerConfig,
 ) -> (RequestSender, Vec<thread::JoinHandle<()>>) {
@@ -126,7 +126,7 @@ fn write_wal_blocking(path: &PathBuf, offset: u64, data: &Bytes, sync: bool) -> 
 }
 
 fn fsync_wal_blocking(path: &PathBuf) -> QuillSQLResult<()> {
-    let mut file = OpenOptions::new()
+    let file = OpenOptions::new()
         .create(true)
         .read(true)
         .write(true)

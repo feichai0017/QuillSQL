@@ -23,14 +23,16 @@ impl<'a> LogicalPlanner<'a> {
                 name,
                 columns,
                 if_not_exists,
+                engine,
                 ..
-            } => self.plan_create_table(name, columns, *if_not_exists),
+            } => self.plan_create_table(name, columns, *if_not_exists, engine.as_deref()),
             ast::Statement::CreateIndex {
                 name,
                 table_name,
+                using,
                 columns,
                 ..
-            } => self.plan_create_index(name, table_name, columns),
+            } => self.plan_create_index(name, table_name, using.as_ref(), columns),
             ast::Statement::Drop {
                 object_type,
                 if_exists,

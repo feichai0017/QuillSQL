@@ -1002,6 +1002,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "holt"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a0dc6d589b9bf9d29e4ee1321c254b8885d72387655552c9d865dd9112518fd9"
+dependencies = [
+ "crc32fast",
+ "crossbeam-channel",
+ "dashmap",
+ "io-uring 0.7.10",
+ "libc",
+ "smallvec",
+]
+
+[[package]]
 name = "home"
 version = "0.5.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1780,6 +1794,7 @@ dependencies = [
  "fs4",
  "futures",
  "glob",
+ "holt",
  "io-uring 0.6.4",
  "libc",
  "log",

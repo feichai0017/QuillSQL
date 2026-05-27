@@ -24,8 +24,7 @@ impl<'a> LogicalPlanner<'a> {
             }
         };
 
-        let table_heap = self.context.catalog.table_heap(&table_ref)?;
-        let table_schema = table_heap.schema.clone();
+        let table_schema = self.context.catalog.table_schema(&table_ref)?;
 
         let predicate = match selection {
             Some(expr) => Some(self.bind_expr(expr)?),

@@ -65,7 +65,9 @@ pub fn load_catalog_data(db: &mut Database) -> QuillSQLResult<()> {
     load_schemas(db)?;
     create_default_schema_if_not_exists(&mut db.catalog)?;
     load_user_tables(db)?;
+    load_holt_catalog_tables(db)?;
     load_user_indexes(db)?;
+    load_holt_catalog_indexes(db)?;
     Ok(())
 }
 
@@ -208,8 +210,7 @@ fn load_schemas(db: &mut Database) -> QuillSQLResult<()> {
             .ok_or_else(|| {
                 QuillSQLError::Internal("information_schema.schemas missing".to_string())
             })?
-            .table
-            .clone()
+            .table_heap()?
     };
 
     let mut iterator = TableIterator::new(schemas_table, ..);
@@ -248,16 +249,14 @@ fn load_user_tables(db: &mut Database) -> QuillSQLResult<()> {
             .ok_or_else(|| {
                 QuillSQLError::Internal("information_schema.columns missing".to_string())
             })?
-            .table
-            .clone();
+            .table_heap()?;
         let tables_heap = information_schema
             .tables
             .get(INFORMATION_SCHEMA_TABLES)
             .ok_or_else(|| {
                 QuillSQLError::Internal("information_schema.tables missing".to_string())
             })?
-            .table
-            .clone();
+            .table_heap()?;
         (columns_heap, tables_heap)
     };
 
@@ -343,6 +342,24 @@ fn load_user_tables(db: &mut Database) -> QuillSQLResult<()> {
             .remove(&(catalog.clone(), schema.clone(), table.clone()))
             .unwrap_or_default();
         let schema_ref = Arc::new(Schema::new(columns));
+        let table_ref = TableReference::Full {
+            catalog: catalog.to_string(),
+            schema: schema.to_string(),
+            table: table.to_string(),
+        };
+
+        if let Some(table_id) = db
+            .catalog
+            .holt_store
+            .as_ref()
+            .map(|holt| holt.table_descriptor(&table_ref))
+            .transpose()?
+            .flatten()
+        {
+            db.catalog
+                .load_holt_table(table_ref, table.clone(), schema_ref, table_id)?;
+            continue;
+        }
 
         let last_page_id =
             load_table_last_page_id(&mut db.catalog, *first_page_id, schema_ref.clone())?;
@@ -353,14 +370,8 @@ fn load_user_tables(db: &mut Database) -> QuillSQLResult<()> {
             last_page_id: AtomicPageId::new(last_page_id),
         };
 
-        db.catalog.load_table(
-            TableReference::Full {
-                catalog: catalog.to_string(),
-                schema: schema.to_string(),
-                table: table.to_string(),
-            },
-            CatalogTable::new(table, Arc::new(table_heap)),
-        )?;
+        db.catalog
+            .load_table(table_ref, CatalogTable::new(table, Arc::new(table_heap)))?;
     }
     Ok(())
 }
@@ -381,8 +392,7 @@ fn load_user_indexes(db: &mut Database) -> QuillSQLResult<()> {
             .ok_or_else(|| {
                 QuillSQLError::Internal("information_schema.indexes missing".to_string())
             })?
-            .table
-            .clone()
+            .table_heap()?
     };
 
     let mut iterator = TableIterator::new(indexes_heap, ..);
@@ -436,11 +446,24 @@ fn load_user_indexes(db: &mut Database) -> QuillSQLResult<()> {
             schema: table_schema_name.clone(),
             table: table_name.clone(),
         };
-        let table_schema = db.catalog.table_heap(&table_ref)?.schema.clone();
+        let table_schema = db.catalog.table_schema(&table_ref)?;
         let key_schema = Arc::new(parse_key_schema_from_varchar(
             key_schema_str.as_str(),
             table_schema,
         )?);
+
+        if let Some(index_id) = db
+            .catalog
+            .holt_store
+            .as_ref()
+            .map(|holt| holt.index_descriptor(&table_ref, index_name))
+            .transpose()?
+            .flatten()
+        {
+            db.catalog
+                .load_holt_index(table_ref, index_name, key_schema, index_id)?;
+            continue;
+        }
 
         let b_plus_tree_index = BPlusTreeIndex::open(
             key_schema,
@@ -451,6 +474,63 @@ fn load_user_indexes(db: &mut Database) -> QuillSQLResult<()> {
         );
         db.catalog
             .load_index(table_ref, index_name, Arc::new(b_plus_tree_index))?;
+    }
+    Ok(())
+}
+
+fn load_holt_catalog_tables(db: &mut Database) -> QuillSQLResult<()> {
+    let Some(holt) = db.catalog.holt_store.clone() else {
+        return Ok(());
+    };
+    for descriptor in holt.table_descriptors()? {
+        if db.catalog.try_table_schema(&descriptor.table_ref).is_some() {
+            continue;
+        }
+        let schema_name = descriptor
+            .table_ref
+            .schema()
+            .unwrap_or(DEFAULT_SCHEMA_NAME)
+            .to_string();
+        if !db.catalog.schemas.contains_key(&schema_name) {
+            db.catalog
+                .load_schema(schema_name.clone(), CatalogSchema::new(schema_name));
+        }
+        db.catalog.load_holt_table(
+            descriptor.table_ref,
+            descriptor.table_name,
+            descriptor.schema,
+            descriptor.table_id,
+        )?;
+    }
+    Ok(())
+}
+
+fn load_holt_catalog_indexes(db: &mut Database) -> QuillSQLResult<()> {
+    let Some(holt) = db.catalog.holt_store.clone() else {
+        return Ok(());
+    };
+    for descriptor in holt.index_descriptors()? {
+        if db
+            .catalog
+            .table_indexes(&descriptor.table_ref)
+            .map(|indexes| {
+                indexes
+                    .iter()
+                    .any(|index| index.name == descriptor.index_name)
+            })
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        if db.catalog.try_table_schema(&descriptor.table_ref).is_none() {
+            continue;
+        }
+        db.catalog.load_holt_index(
+            descriptor.table_ref,
+            descriptor.index_name,
+            descriptor.key_schema,
+            descriptor.index_id,
+        )?;
     }
     Ok(())
 }

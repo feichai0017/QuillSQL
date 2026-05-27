@@ -83,6 +83,7 @@ fn main() {
     let db_options = DatabaseOptions {
         wal: wal_options,
         default_isolation_level,
+        ..DatabaseOptions::default()
     };
 
     let mut db = if let Some(path) = args.file {
