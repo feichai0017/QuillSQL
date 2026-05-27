@@ -38,7 +38,7 @@
             const default_dark_theme = "navy";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-1d3cbbe2.js"></script>
+        <script src="toc-b5857736.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -160,167 +160,163 @@
 </div>
 
 <h1 id="quillsql-internals"><a class="header" href="#quillsql-internals">QuillSQL Internals</a></h1>
-<p>Welcome to the technical documentation for QuillSQL.</p>
-<p>This book documents QuillSQL as a DataFusion-fronted SQL research engine layered over
-Holt. It is intended for developers and contributors who want to understand the Holt
-storage adapter, DataFusion execution boundary, transaction semantics, and MLIR/JIT
-extension point without also maintaining a separate page store.</p>
-<hr>
-<h2 id="table-of-contents"><a class="header" href="#table-of-contents">Table of Contents</a></h2>
+<p>QuillSQL is now a DataFusion, Arrow, Parquet, and MLIR query compiler research
+engine. DataFusion owns the SQL front end, optimizer, and physical execution
+framework. QuillSQL keeps the embedding API, CLI/server surfaces, debug views,
+and the JIT research boundary.</p>
+<p>The project deliberately does not carry a custom storage engine. Interactive
+queries use DataFusion memory tables; persistent analytical data should come
+from Arrow/Parquet datasets and DataFusion’s file/object-store integrations.</p>
+<h2 id="core-topics"><a class="header" href="#core-topics">Core Topics</a></h2>
 <ul>
-<li>
-<p><a href="#quillsql-architecture"><strong>Overall Architecture</strong></a>: A high-level overview of the entire system.</p>
-</li>
-<li>
-<p><strong>Core Modules</strong></p>
-<ul>
-<li><a href="#transaction-module"><strong>Transaction Manager</strong></a>: Concurrency control with MVCC and 2PL.</li>
-<li><a href="#catalog-module"><strong>Catalog</strong></a>: SQL metadata projection backed by Holt descriptors.</li>
-</ul>
-</li>
+<li><a href="#quillsql-architecture">Overall Architecture</a>: where DataFusion, Arrow/Parquet,
+and MLIR meet.</li>
+<li><a href="#module-overview">Module Overview</a>: current Rust package layout.</li>
+<li><a href="#front-ends-cli--http">Front-Ends</a>: CLI and HTTP entry points.</li>
+<li><a href="#testing--documentation">Testing</a>: validation commands and test scope.</li>
 </ul>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="quillsql-architecture"><a class="header" href="#quillsql-architecture">QuillSQL Architecture</a></h1>
-<p>QuillSQL is a SQL research layer over Holt. DataFusion owns SQL parsing, binding,
-logical optimization, physical optimization, and physical execution. QuillSQL owns the
-Holt catalog/table/index adapter, MVCC metadata, transaction status recovery, and the
-CLI/server surfaces.</p>
+<p>QuillSQL is a thin SQL research shell around DataFusion. It does not implement
+its own parser, binder, optimizer, executor, page store, WAL, SQL catalog, or
+index manager. The storage path is DataFusion-native: memory tables for local
+experiments and Arrow/Parquet datasets for persistent analytical data.</p>
 <h2 id="end-to-end-pipeline"><a class="header" href="#end-to-end-pipeline">End-to-End Pipeline</a></h2>
 <pre class="mermaid">flowchart LR
-    SQL["SQL text"] --&gt; DF["DataFusion SessionContext"]
+    SQL["SQL text"] --&gt; DB["Database::run"]
+    DB --&gt; DF["DataFusion SessionContext"]
     DF --&gt; Logical["DataFusion LogicalPlan"]
-    Logical --&gt; Optimized["DataFusion Optimizers"]
+    Logical --&gt; Optimized["DataFusion optimizers"]
     Optimized --&gt; Physical["DataFusion ExecutionPlan"]
-    Physical --&gt; Scan["HoltScanExec"]
-    Scan --&gt; Table["Holt table tree"]
-    Scan --&gt; Index["Holt index tree"]
-    Table --&gt; Holt["holt::DB"]
-    Index --&gt; Holt
+    Physical --&gt; Arrow["Arrow RecordBatch output"]
 
-    Catalog["HoltCatalogProvider"] --&gt; DF
-    Catalog --&gt; Descriptors["Holt catalog tree"]
-    Txn["TransactionManager"] --&gt; Status["Holt txn tree"]
+    Parquet["Parquet / Arrow datasets"] --&gt; DF
+    Memory["DataFusion memory tables"] --&gt; DF
+    Physical --&gt; JITRule["MlirJitRule candidate discovery"]
+    JITRule --&gt; MLIR["MLIR arith module verification"]
 </pre>
 
-<p>DDL is the main place where QuillSQL intercepts DataFusion: <code>CREATE TABLE</code>,
-<code>CREATE INDEX</code>, and <code>DROP TABLE</code> update Holt descriptors and refresh the in-memory
-catalog projection. DML uses DataFusion table-provider hooks and writes through Holt.</p>
 <h2 id="storage-boundary"><a class="header" href="#storage-boundary">Storage Boundary</a></h2>
-<pre class="mermaid">flowchart TD
-    subgraph QuillSQL
-        Provider["HoltTableProvider"]
-        ScanExec["HoltScanExec"]
-        TxnMeta["TupleMeta / MVCC"]
-    end
-
-    Provider --&gt; RowTree["table/&lt;table_id&gt;"]
-    Provider --&gt; IndexTree["index/&lt;index_id&gt;"]
-    Provider --&gt; CatalogTree["catalog"]
-    TxnMeta --&gt; TxnTree["txn"]
-
-    RowTree --&gt; DB["holt::DB"]
-    IndexTree --&gt; DB
-    CatalogTree --&gt; DB
-    TxnTree --&gt; DB
-</pre>
-
-<p>There is no QuillSQL-owned page cache, heap file, B+Tree, storage scheduler, or
-SQL-data WAL. Holt owns durable bytes and its own logging. QuillSQL decides SQL/MVCC
-semantics and encodes row/index values into Holt trees.</p>
-<h2 id="important-invariants"><a class="header" href="#important-invariants">Important Invariants</a></h2>
+<p>There is no QuillSQL-owned storage engine after the cleanup.</p>
 <ul>
-<li>Holt descriptors are the durable source of truth for table ids, index ids, and schemas.</li>
-<li>DataFusion <code>information_schema</code> is generated from the Holt catalog provider.</li>
-<li>Row values are stored as encoded <code>TupleMeta + Tuple</code>.</li>
-<li>Index keys use order-preserving SQL encoding plus RID tie-breakers.</li>
-<li>Startup recovers transaction status from Holt before query execution.</li>
-<li>In-progress or unknown row versions are not visible as committed data.</li>
+<li>Temporary or interactive data uses DataFusion’s in-memory tables.</li>
+<li>Durable data should be registered as Parquet/Arrow datasets.</li>
+<li>DataFusion’s catalog and file-source integrations define table visibility.</li>
+<li>QuillSQL’s <code>DatabaseOptions::data_dir</code> is scratch state, not a private database
+file format.</li>
 </ul>
-<h2 id="query-compilation-boundary"><a class="header" href="#query-compilation-boundary">Query Compilation Boundary</a></h2>
-<p>The JIT research boundary is the DataFusion <code>ExecutionPlan</code> and Arrow <code>RecordBatch</code>
-interface. The <code>jit-mlir</code> feature wires in an MLIR-named physical optimizer rule as the
-extension point; native DataFusion execution remains the fallback for unsupported
-expressions.</p>
+<p>This makes the project better suited to OLAP/query-compiler research than OLTP
+storage-engine research.</p>
+<h2 id="jit-boundary"><a class="header" href="#jit-boundary">JIT Boundary</a></h2>
+<p>The JIT boundary is the DataFusion physical plan plus Arrow <code>RecordBatch</code>
+interface. <code>MlirJitRule</code> walks DataFusion physical plans and tries to lower
+supported <code>FilterExec</code> and <code>ProjectionExec</code> expressions into a small JIT IR.</p>
+<p>The MLIR backend then emits scalar <code>arith</code> functions and verifies them through
+<code>melior</code> when <code>jit-mlir</code> is enabled. Native kernel execution is the next step;
+the current rule is discovery and verification only, so unsupported expressions
+fall back to DataFusion without a parallel executor.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="module-overview"><a class="header" href="#module-overview">Module Overview</a></h1>
-<p>QuillSQL is now a DataFusion-fronted SQL research engine backed by Holt. The
-project keeps its own persistent storage adapter, MVCC metadata, transaction
-status handling, CLI, and server, while DataFusion owns SQL parsing, planning,
-optimization, and physical execution.</p>
+<p>The current codebase is intentionally small. DataFusion provides the SQL engine;
+QuillSQL provides the embedding API, front ends, and MLIR research hooks.</p>
 <h2 id="database-srcdatabasers"><a class="header" href="#database-srcdatabasers">Database (<code>src/database.rs</code>)</a></h2>
-<p><code>Database::run</code> is the only SQL entry point. It creates a DataFusion session,
-registers the Holt catalog provider, intercepts Holt-backed DDL, and returns
-Arrow <code>RecordBatch</code> output.</p>
-<h2 id="datafusion-adapter-srcdf"><a class="header" href="#datafusion-adapter-srcdf">DataFusion Adapter (<code>src/df</code>)</a></h2>
-<p>This package contains the DataFusion integration:</p>
-<div class="table-wrapper">
-<table>
-<thead>
-<tr><th>File</th><th>Role</th></tr>
-</thead>
-<tbody>
-<tr><td><code>mod.rs</code></td><td>Shared adapter state and transaction/session boundary.</td></tr>
-<tr><td><code>provider.rs</code></td><td>DataFusion catalog, schema, and table providers.</td></tr>
-<tr><td><code>exec.rs</code></td><td><code>HoltScanExec</code> and DML result execution nodes.</td></tr>
-<tr><td><code>ddl.rs</code></td><td>Holt-backed DDL handling.</td></tr>
-<tr><td><code>filter.rs</code></td><td>Indexed filter recognition and residual filter evaluation.</td></tr>
-<tr><td><code>arrow.rs</code></td><td>Arrow/Quill row conversion and result formatting.</td></tr>
-</tbody>
-</table>
-</div>
-<p>Simple single-column indexed equality/range predicates can narrow the Holt scan.
-DataFusion still applies residual filters, so pushdown remains correctness-first.</p>
+<p><code>Database::run</code> is the only SQL entry point. It asks DataFusion to create the
+logical plan, captures a debug snapshot of the logical/physical plan, executes
+through DataFusion, and returns Arrow <code>RecordBatch</code> output.</p>
+<p><code>Database::register_parquet</code> exposes the durable storage path by registering a
+Parquet dataset as a DataFusion table.</p>
 <h2 id="jit-srcjit"><a class="header" href="#jit-srcjit">JIT (<code>src/jit</code>)</a></h2>
-<p>The JIT layer is attached as a DataFusion physical optimizer rule. Its current
-scope is a research skeleton:</p>
 <div class="table-wrapper">
 <table>
 <thead>
 <tr><th>File</th><th>Role</th></tr>
 </thead>
 <tbody>
-<tr><td><code>expr.rs</code></td><td>Small JIT expression IR lowered from DataFusion physical expressions.</td></tr>
-<tr><td><code>kernel.rs</code></td><td>Arrow batch kernel ABI and backend trait.</td></tr>
-<tr><td><code>mlir/</code></td><td>MLIR-first backend that emits textual MLIR-shaped modules.</td></tr>
+<tr><td><code>expr.rs</code></td><td>Lowers supported DataFusion physical expressions into QuillSQL’s small JIT IR.</td></tr>
+<tr><td><code>kernel.rs</code></td><td>Defines the future Arrow kernel ABI and compiled-kernel descriptor.</td></tr>
+<tr><td><code>mlir/</code></td><td>MLIR-first backend that emits and verifies <code>arith</code> scalar functions.</td></tr>
 <tr><td><code>rule.rs</code></td><td>DataFusion physical optimizer rule that discovers <code>FilterExec</code> and <code>ProjectionExec</code> candidates.</td></tr>
 </tbody>
 </table>
 </div>
-<p>The default behaviour is still correctness-first: candidates are inspected and
-lowered, but the rule does not replace DataFusion execution until executable
-kernels exist.</p>
-<h2 id="catalog-srccatalog"><a class="header" href="#catalog-srccatalog">Catalog (<code>src/catalog</code>)</a></h2>
-<p>The catalog is an in-memory projection of Holt descriptors. Holt is the source of
-truth for table and index ids, schemas, and descriptor recovery. DataFusion
-provides <code>information_schema</code> from the catalog provider; QuillSQL no longer stores
-or scans system-table rows itself.</p>
-<h2 id="storage-srcstorage"><a class="header" href="#storage-srcstorage">Storage (<code>src/storage</code>)</a></h2>
-<p>The storage module is the Holt adapter and private row codec:</p>
+<p>The JIT package is not a storage adapter and not a second executor. It is the
+research boundary for replacing selected DataFusion physical operators later.</p>
+<h2 id="front-ends-srcbin"><a class="header" href="#front-ends-srcbin">Front Ends (<code>src/bin</code>)</a></h2>
+<p><code>client</code> is the interactive SQL shell. <code>server</code> exposes HTTP endpoints for SQL
+execution plus lightweight debug endpoints for the last DataFusion plan.</p>
+<h2 id="removed-layers"><a class="header" href="#removed-layers">Removed Layers</a></h2>
+<p>The project no longer contains the old teaching database stack:</p>
+<ul>
+<li>custom SQL AST/planner/optimizer/executor</li>
+<li>custom system tables</li>
+<li>custom row heap, buffer manager, legacy index manager, WAL, or recovery manager</li>
+<li>external KV storage adapter</li>
+<li>SQL-layer transaction manager</li>
+</ul>
+<p>Those topics are useful, but they are no longer the theme of this repository.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="front-ends-cli--http"><a class="header" href="#front-ends-cli--http">Front-Ends (CLI / HTTP)</a></h1>
+<p>The <code>bin/</code> directory contains the user-facing entry points. Both binaries embed
+the same <code>Database</code> type and therefore run the same DataFusion SQL path.</p>
 <div class="table-wrapper">
 <table>
 <thead>
-<tr><th>File</th><th>Role</th></tr>
+<tr><th>Binary</th><th>Purpose</th></tr>
 </thead>
 <tbody>
-<tr><td><code>engine.rs</code></td><td>Object-safe table/index handles used by the Holt adapter.</td></tr>
-<tr><td><code>holt.rs</code></td><td>Holt table/index handles, descriptor persistence, ordered index codec, and transaction status persistence.</td></tr>
-<tr><td><code>record.rs</code></td><td><code>RecordId</code> and <code>TupleMeta</code>, kept as SQL-layer MVCC metadata.</td></tr>
-<tr><td><code>tuple.rs</code>, <code>codec/</code></td><td>Private tuple/scalar encoding utilities for Holt row values and index keys.</td></tr>
+<tr><td><code>client.rs</code></td><td>Interactive CLI that reads SQL, executes it, and prints tabular output.</td></tr>
+<tr><td><code>server.rs</code></td><td>HTTP + JSON API for local demos, web UI experiments, and integration tests.</td></tr>
 </tbody>
 </table>
 </div>
-<p>There is no QuillSQL-owned page cache, heap file, B+Tree, or WAL path.</p>
-<h2 id="transactions-srctransaction"><a class="header" href="#transactions-srctransaction">Transactions (<code>src/transaction</code>)</a></h2>
-<p><code>TransactionManager</code> assigns ids, tracks status, releases locks, and drives undo on
-abort. <code>TxnContext</code> provides snapshot visibility and write checks. Holt stores the
-recovered transaction status table; row versions keep MVCC state in <code>TupleMeta</code>.</p>
-<h2 id="front-ends-srcbin"><a class="header" href="#front-ends-srcbin">Front Ends (<code>src/bin</code>)</a></h2>
-<p><code>client</code> is the interactive SQL shell. <code>server</code> exposes HTTP endpoints for SQL
-execution and debug views over locks, transactions, plans, and MVCC samples.</p>
-<h2 id="tests-tests"><a class="header" href="#tests-tests">Tests (<code>tests</code>)</a></h2>
-<p>Integration tests cover DataFusion SQL over Holt tables, insert/update/delete,
-secondary indexes, persistence/reopen, DataFusion <code>information_schema</code>, and
-<code>EXPLAIN</code> output containing <code>HoltScanExec</code>.</p>
+<h2 id="cli"><a class="header" href="#cli">CLI</a></h2>
+<ul>
+<li>Uses <code>rustyline</code> for history and multi-line editing.</li>
+<li>Executes each statement through <code>Database::run</code>.</li>
+<li>Prints Arrow <code>RecordBatch</code> output with <code>comfy_table</code>.</li>
+</ul>
+<h2 id="http"><a class="header" href="#http">HTTP</a></h2>
+<p>Important endpoints:</p>
+<ul>
+<li><code>POST /api/sql</code>: run one SQL string.</li>
+<li><code>POST /api/sql_batch</code>: split a semicolon-delimited script and return one result
+set per statement.</li>
+<li><code>GET /debug/trace/last</code>: return the last captured logical/physical plan trace.</li>
+<li><code>GET /debug/plan/last</code>: return a compact plan tree snapshot.</li>
+</ul>
+<p>Configuration comes from <code>QUILL_DATA_DIR</code>, <code>QUILL_HTTP_ADDR</code>, <code>PORT</code>, and
+<code>RUST_LOG</code>.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="testing--documentation"><a class="header" href="#testing--documentation">Testing &amp; Documentation</a></h1>
+<p>The active tests focus on DataFusion execution, Parquet registration, and the
+MLIR JIT boundary.</p>
+<h2 id="test-suite"><a class="header" href="#test-suite">Test Suite</a></h2>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Location</th><th>Purpose</th></tr>
+</thead>
+<tbody>
+<tr><td><code>tests/df_arrow_parquet.rs</code></td><td>End-to-end SQL over DataFusion memory tables and registered Parquet datasets.</td></tr>
+<tr><td><code>src/jit/*</code> unit tests</td><td>JIT expression lowering plus MLIR module generation and verification.</td></tr>
+</tbody>
+</table>
+</div>
+<p>Common commands:</p>
+<pre><code class="language-bash">cargo test
+cargo test --features jit-mlir
+cargo clippy --all-targets -- -D warnings
+</code></pre>
+<p>The <code>jit-mlir</code> feature requires local MLIR/LLVM libraries. On a Homebrew LLVM 22
+installation, set:</p>
+<pre><code class="language-bash">MLIR_SYS_220_PREFIX=/opt/homebrew/opt/llvm \
+LLVM_SYS_220_PREFIX=/opt/homebrew/opt/llvm \
+cargo test --features jit-mlir
+</code></pre>
+<h2 id="documentation"><a class="header" href="#documentation">Documentation</a></h2>
+<p>The <code>docs/</code> directory is an mdBook. It tracks the current DataFusion +
+Arrow/Parquet + MLIR architecture and intentionally omits the removed teaching
+database storage stack.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="contributors-guide"><a class="header" href="#contributors-guide">Contributor’s Guide</a></h1>
 <p>Welcome, and thank you for your interest in contributing to QuillSQL! Whether you’re fixing a bug, adding a new feature, or improving the documentation, this guide will help you get started.</p>
@@ -423,283 +419,6 @@ cargo install mdbook-mermaid
 <p>This will build the book and start a local web server. You can open your browser to <code>http://localhost:3000</code> to see the live-previewed documentation.</p>
 </li>
 </ol>
-<div style="break-before: page; page-break-before: always;"></div>
-<h1 id="catalog-module"><a class="header" href="#catalog-module">Catalog Module</a></h1>
-<p><code>src/catalog/</code> is QuillSQL’s in-memory projection of Holt descriptors. Holt is the
-durable source of truth; the catalog is rebuilt from Holt on open and then exposed to
-DataFusion through <code>HoltCatalogProvider</code> and <code>HoltSchemaProvider</code>.</p>
-<h2 id="responsibilities"><a class="header" href="#responsibilities">Responsibilities</a></h2>
-<ul>
-<li>Track schemas, tables, columns, indexes, and Holt ids.</li>
-<li>Create and drop Holt table/index descriptors during DDL.</li>
-<li>Rebuild the in-memory catalog from Holt descriptors during startup.</li>
-<li>Provide table metadata to DataFusion’s catalog and <code>information_schema</code> support.</li>
-</ul>
-<h2 id="key-files"><a class="header" href="#key-files">Key Files</a></h2>
-<div class="table-wrapper">
-<table>
-<thead>
-<tr><th>File</th><th>Role</th></tr>
-</thead>
-<tbody>
-<tr><td><code>core.rs</code></td><td>Main catalog types and DDL metadata mutation.</td></tr>
-<tr><td><code>information.rs</code></td><td>Startup loader for Holt table/index descriptors.</td></tr>
-<tr><td><code>schema.rs</code></td><td><code>Schema</code>, <code>SchemaRef</code>, and projection helpers used by the private Holt row codec.</td></tr>
-<tr><td><code>column.rs</code>, <code>data_type.rs</code></td><td>Column metadata and SQL type mapping.</td></tr>
-</tbody>
-</table>
-</div>
-<h2 id="metadata-flow"><a class="header" href="#metadata-flow">Metadata Flow</a></h2>
-<ol>
-<li>DDL creates or removes a Holt descriptor and updates the in-memory catalog.</li>
-<li>On reopen, QuillSQL rebuilds the in-memory catalog from Holt descriptors.</li>
-<li>DataFusion reads catalog metadata through <code>HoltCatalogProvider</code>.</li>
-<li>DataFusion generates SQL-visible <code>information_schema</code> rows from that provider.</li>
-</ol>
-<p>There are no stored QuillSQL system-table rows.</p>
-<div style="break-before: page; page-break-before: always;"></div>
-<h1 id="transaction-module"><a class="header" href="#transaction-module">Transaction Module</a></h1>
-<p><code>src/transaction/</code> enforces the Atomicity and Isolation parts of ACID. It combines MVCC
-with strict two-phase locking so reads and writes can proceed concurrently without
-violating correctness.</p>
-<hr>
-<h2 id="main-components"><a class="header" href="#main-components">Main Components</a></h2>
-<div class="table-wrapper">
-<table>
-<thead>
-<tr><th>Type</th><th>Role</th></tr>
-</thead>
-<tbody>
-<tr><td><code>TransactionManager</code></td><td>Creates/commits/aborts transactions, assigns txn &amp; command ids, and tracks recovered status.</td></tr>
-<tr><td><code>Transaction</code></td><td>Stores state, held locks, undo chain, and cached snapshot.</td></tr>
-<tr><td><code>TxnContext</code></td><td>Statement-time wrapper exposing MVCC + locking helpers to Holt table/index code.</td></tr>
-<tr><td><code>LockManager</code></td><td>Multi-granularity locking (IS/IX/S/SIX/X) with deadlock detection.</td></tr>
-<tr><td><code>TransactionSnapshot</code></td><td>Tracks <code>xmin/xmax/active_txns</code> for visibility checks.</td></tr>
-</tbody>
-</table>
-</div>
-<hr>
-<h2 id="workflow"><a class="header" href="#workflow">Workflow</a></h2>
-<ol>
-<li><code>Database::run</code> intercepts transaction control statements and calls
-<code>TransactionManager::begin/commit/abort</code>.</li>
-<li>Each SQL statement that reaches the Holt provider builds a <code>TxnContext</code>, yielding a
-fresh command id and snapshot.</li>
-<li>DataFusion drives the physical plan; Holt scan/DML hooks call
-<code>TxnContext::lock_table/lock_row</code> to obey strict 2PL.</li>
-<li>Holt table and index handles record undo, acquire locks, and write through Holt.</li>
-<li>Commit: mark the transaction committed, persist final Holt txn status, and release
-locks.</li>
-<li>Abort: walk the undo list, restore row/index state through Holt handles, persist final
-Holt txn status, and release locks.</li>
-</ol>
-<hr>
-<h2 id="mvcc-details"><a class="header" href="#mvcc-details">MVCC Details</a></h2>
-<ul>
-<li><code>TupleMeta</code> stores inserting/deleting txn ids and command ids. <code>read_visible_tuple</code>
-checks snapshots and, if needed, rewinds to the latest visible version.</li>
-<li>Isolation levels:
-<ul>
-<li><strong>Read Uncommitted</strong> – minimal snapshot caching.</li>
-<li><strong>Read Committed</strong> – refresh snapshot each command to avoid dirty reads.</li>
-<li><strong>Repeatable Read / Serializable</strong> – capture the snapshot once; RR releases shared
-locks at statement end, Serializable holds them to commit to avoid phantoms.</li>
-</ul>
-</li>
-<li>UPDATE skips versions created by the same <code>(txn_id, command_id)</code> to avoid looping back
-over freshly inserted tuples.</li>
-</ul>
-<hr>
-<h2 id="locking"><a class="header" href="#locking">Locking</a></h2>
-<ul>
-<li>Multi-granularity hierarchy: table-level IS/IX/S/SIX/X plus row-level S/X.</li>
-<li>Deadlock detection: <code>LockManager</code> maintains a wait-for graph and periodically chooses a
-victim (usually the longest waiter).</li>
-<li>Release policy: exclusive/intent locks stay until commit; RR drops shared row locks at
-statement end, Serializable waits until commit.</li>
-</ul>
-<hr>
-<h2 id="interactions"><a class="header" href="#interactions">Interactions</a></h2>
-<ul>
-<li><strong>DataFusion table provider</strong> – scans and DML enter QuillSQL through
-<code>HoltScanExec</code>, <code>insert_into</code>, <code>delete_from</code>, and <code>update</code>.</li>
-<li><strong>Holt handles</strong> – handles call <code>TxnContext</code> before mutating Holt rows/indexes; MVCC
-metadata lives in <code>TupleMeta</code>.</li>
-<li><strong>Holt</strong> – committed/aborted statuses are persisted in the Holt <code>txn</code> tree and recovered
-before execution resumes.</li>
-</ul>
-<hr>
-<h2 id="teaching-ideas"><a class="header" href="#teaching-ideas">Teaching Ideas</a></h2>
-<ul>
-<li>Change <code>DatabaseOptions::default_isolation_level</code> and compare SELECT behaviour under
-RC vs RR.</li>
-<li>Write a unit test that deadlocks two transactions and watch <code>LockManager</code> pick a victim.</li>
-<li>Implement statement-level snapshot refresh or Serializable Snapshot Isolation (SSI) as
-an advanced exercise.</li>
-</ul>
-<h2 id="lab-walkthrough-à-la-cmu-15-445"><a class="header" href="#lab-walkthrough-à-la-cmu-15-445">Lab Walkthrough (à la CMU 15-445)</a></h2>
-<ol>
-<li><strong>Warm-up</strong> – Start two sessions, run <code>BEGIN; SELECT ...;</code> under RC vs RR, and trace
-which snapshot <code>TxnContext</code> installs by logging <code>txn.current_command_id()</code>.</li>
-<li><strong>MVCC visibility</strong> – Extend the <code>transaction_tests.rs</code> suite with a scenario where
-<code>txn1</code> updates a row while <code>txn2</code> reads it. Instrument <code>TupleMeta</code> printing so
-students see how <code>(insert_txn_id, delete_txn_id)</code> change as versions are linked.</li>
-<li><strong>Undo tracing</strong> – Force an abort after a multi-index UPDATE. Watch the undo stack
-entries unfold: <code>Insert</code> removes the new version + index entries, <code>Delete</code> restores
-the old version + keys.</li>
-<li><strong>Restart drill</strong> – Insert committed and rolled-back rows, reopen the database, and
-inspect which <code>TupleMeta</code> versions are visible after Holt transaction status recovery.</li>
-</ol>
-<hr>
-<p>Further reading: <a href="#mvcc-and-2pl">MVCC and 2PL</a></p>
-<div style="break-before: page; page-break-before: always;"></div>
-<h1 id="mvcc-and-2pl"><a class="header" href="#mvcc-and-2pl">MVCC and 2PL</a></h1>
-<p>Of the four ACID properties, <strong>Isolation</strong> is often the most complex to implement. It ensures that concurrent transactions do not interfere with each other, making it appear as if each transaction is executing sequentially, one after another. Without proper isolation, a database would suffer from concurrency-related anomalies like dirty reads, non-repeatable reads, and phantom reads.</p>
-<p>Databases typically use two main strategies for concurrency control:</p>
-<ol>
-<li><strong>Pessimistic Concurrency Control</strong>: Assumes conflicts are likely and prevents them from happening by using locks. The most common protocol is <strong>Two-Phase Locking (2PL)</strong>.</li>
-<li><strong>Optimistic Concurrency Control</strong>: Assumes conflicts are rare. Transactions proceed without locking, and the database validates at commit time that no conflicts occurred. A popular variant is <strong>Multi-Version Concurrency Control (MVCC)</strong>.</li>
-</ol>
-<p>QuillSQL, like many modern relational databases (e.g., PostgreSQL, Oracle), implements a powerful <strong>hybrid model that combines MVCC with 2PL</strong>.</p>
-<h2 id="1-mvcc-reading-without-blocking"><a class="header" href="#1-mvcc-reading-without-blocking">1. MVCC: Reading without Blocking</a></h2>
-<p>The core idea of MVCC is <strong>“writers don’t block readers, and readers don’t block writers.”</strong> This is achieved by never overwriting data in-place. When a row is updated, the database creates a <em>new version</em> of that row, preserving the old one.</p>
-<h3 id="version-chains-and-tuplemeta"><a class="header" href="#version-chains-and-tuplemeta">Version Chains and <code>TupleMeta</code></a></h3>
-<p>Every row value stored through Holt carries QuillSQL metadata (<code>TupleMeta</code>) alongside the
-encoded tuple. That metadata includes:</p>
-<ul>
-<li><code>insert_txn_id</code>: The ID of the transaction that created this version.</li>
-<li><code>delete_txn_id</code>: The ID of the transaction that marked this version as deleted.</li>
-<li>the <code>RecordId</code> of the stored version, used by execution and locking.</li>
-</ul>
-<h3 id="transaction-snapshots"><a class="header" href="#transaction-snapshots">Transaction Snapshots</a></h3>
-<p>When a transaction begins, it asks the <code>TransactionManager</code> for a <strong>snapshot</strong> of the database state. This snapshot, defined in <code>transaction/mvcc.rs</code>, contains three key pieces of information:</p>
-<ul>
-<li><code>xmin</code>: The oldest active transaction ID at the time of the snapshot. Any transaction with an ID less than <code>xmin</code> is guaranteed to be either committed or aborted.</li>
-<li><code>xmax</code>: The next transaction ID to be assigned. Any transaction with an ID greater than or equal to <code>xmax</code> was not yet started when the snapshot was taken.</li>
-<li><code>active_txns</code>: A list of all other transaction IDs that were active when the snapshot was taken.</li>
-</ul>
-<h3 id="the-visibility-check"><a class="header" href="#the-visibility-check">The Visibility Check</a></h3>
-<p>When a transaction scans the database, for every tuple version it encounters, it performs a <strong>visibility check</strong> using its snapshot. The logic in <code>MvccSnapshot::is_visible</code> determines if the version should be “seen” by the current transaction. In simplified terms, a tuple version is visible if:</p>
-<ol>
-<li>Its <code>insert_txn_id</code> belongs to a transaction that was already committed before our snapshot was taken.</li>
-<li><strong>AND</strong> its <code>delete_txn_id</code> is either not set, OR it belongs to a transaction that was not yet committed when our snapshot was taken.</li>
-</ol>
-<p>This mechanism elegantly solves several concurrency problems. Since a reader transaction only ever sees a consistent snapshot of the database, it is completely immune to changes being made by other concurrent writer transactions. This prevents dirty reads and non-repeatable reads.</p>
-<h2 id="2-two-phase-locking-2pl-preventing-write-write-conflicts"><a class="header" href="#2-two-phase-locking-2pl-preventing-write-write-conflicts">2. Two-Phase Locking (2PL): Preventing Write-Write Conflicts</a></h2>
-<p>While MVCC is excellent for read-write conflicts, it does not, by itself, prevent two transactions from trying to modify the same logical row at the same time (a write-write conflict). This is where locking comes in.</p>
-<p>QuillSQL implements a strict <strong>Two-Phase Locking</strong> protocol via the <code>LockManager</code> (<code>transaction/lock_manager.rs</code>).</p>
-<h3 id="the-two-phases"><a class="header" href="#the-two-phases">The Two Phases</a></h3>
-<ol>
-<li><strong>Growing Phase</strong>: The transaction can acquire new locks as it executes.</li>
-<li><strong>Shrinking Phase</strong>: Once the transaction releases its first lock, it cannot acquire any new locks.</li>
-</ol>
-<p>In practice, QuillSQL uses <strong>Strict 2PL</strong>, where the shrinking phase is delayed until the transaction commits or aborts. All locks are held until the very end.</p>
-<h3 id="hierarchical-locking-intention-locks"><a class="header" href="#hierarchical-locking-intention-locks">Hierarchical Locking (Intention Locks)</a></h3>
-<p>To be efficient, the <code>LockManager</code> uses a multi-granularity, hierarchical locking scheme. Before a transaction can take a fine-grained lock on a row (a <code>Shared</code> or <code>Exclusive</code> lock), it must first acquire a coarser-grained <strong>intention lock</strong> on the table.</p>
-<ul>
-<li><strong><code>IntentionShared (IS)</code></strong>: Signals the intent to read rows from the table.</li>
-<li><strong><code>IntentionExclusive (IX)</code></strong>: Signals the intent to modify rows in the table.</li>
-</ul>
-<p>This prevents a transaction wanting to lock the entire table from conflicting with another transaction that is already modifying a single row. For example, a <code>SELECT * FROM users FOR UPDATE</code> (which needs an <code>X</code> lock on the table) will be blocked if another transaction already holds an <code>IX</code> lock on <code>users</code>.</p>
-<h3 id="deadlock-detection"><a class="header" href="#deadlock-detection">Deadlock Detection</a></h3>
-<p>When two or more transactions are waiting for each other to release locks in a circular chain, a <strong>deadlock</strong> occurs. The <code>LockManager</code> detects this by building a <strong>waits-for graph</strong>. When a transaction <code>T1</code> has to wait for a lock held by <code>T2</code>, an edge <code>T1 -&gt; T2</code> is added to the graph. If adding an edge creates a cycle, a deadlock is detected, and one of the transactions (the victim) is immediately aborted to break the cycle.</p>
-<h2 id="3-the-hybrid-model-mvcc--2pl-in-action"><a class="header" href="#3-the-hybrid-model-mvcc--2pl-in-action">3. The Hybrid Model: MVCC + 2PL in Action</a></h2>
-<p>In QuillSQL, these two mechanisms work in concert:</p>
-<ul>
-<li>
-<p>A <strong>reader</strong> (<code>SELECT</code>) transaction acquires an MVCC snapshot. It uses this snapshot to determine visibility. It only needs to acquire <code>Shared</code> (S) locks on the rows it reads to prevent other transactions from modifying them, thus ensuring repeatable reads in higher isolation levels.</p>
-</li>
-<li>
-<p>A <strong>writer</strong> (<code>UPDATE</code>, <code>DELETE</code>) transaction must acquire an <code>Exclusive</code> (X) lock on the specific row it intends to modify. Once the lock is granted, it knows no other writer can interfere. It can then safely create a new tuple version as part of the MVCC protocol.</p>
-</li>
-</ul>
-<p>This hybrid approach provides the best of both worlds: reads are fast and non-blocking, while write-write conflicts are safely prevented by the locking protocol.</p>
-<hr>
-<h2 id="for-study--discussion"><a class="header" href="#for-study--discussion">For Study &amp; Discussion</a></h2>
-<ol>
-<li>
-<p><strong>Isolation Levels</strong>: QuillSQL supports multiple SQL isolation levels. How does the behavior of MVCC snapshots and 2PL change between <code>ReadCommitted</code> and <code>RepeatableRead</code>? In <code>ReadCommitted</code>, a transaction gets a new snapshot for every statement, whereas in <code>RepeatableRead</code>, it uses the same snapshot for the entire transaction. What concurrency anomalies does this difference prevent?</p>
-</li>
-<li>
-<p><strong>Phantom Reads</strong>: Even with MVCC and row-level 2PL, a <code>RepeatableRead</code> transaction can suffer from <em>phantom reads</em>. Imagine <code>T1</code> runs <code>SELECT COUNT(*) FROM users WHERE age &gt; 30</code>. Then, <code>T2</code> inserts a new user with <code>age = 40</code> and commits. If <code>T1</code> runs its <code>SELECT</code> query again, it will see a new “phantom” row that wasn’t there before. How can a database prevent this to achieve the <code>Serializable</code> isolation level? (Hint: research predicate locking and index-range locking).</p>
-</li>
-<li>
-<p><strong>Deadlock Handling</strong>: QuillSQL detects deadlocks by building a waits-for graph and aborting a transaction. What is an alternative strategy for handling deadlocks? For example, what are the pros and cons of using lock timeouts instead of cycle detection?</p>
-</li>
-<li>
-<p><strong>Programming Exercise (Advanced)</strong>: A full implementation of <code>Serializable</code> isolation often requires predicate or index-range locking to prevent phantoms. Extend the <code>LockManager</code> to support locking an ordered Holt index range, then make overlapping inserts wait on that range.</p>
-</li>
-</ol>
-<div style="break-before: page; page-break-before: always;"></div>
-<h1 id="front-ends-cli--http"><a class="header" href="#front-ends-cli--http">Front-Ends (CLI / HTTP)</a></h1>
-<p>The <code>bin/</code> directory contains the user-facing entry points. Both binaries embed the same
-<code>Database</code> type, so they demonstrate how the core engine can power different UIs.</p>
-<div class="table-wrapper">
-<table>
-<thead>
-<tr><th>Binary</th><th>Purpose</th></tr>
-</thead>
-<tbody>
-<tr><td><code>client.rs</code></td><td>Interactive CLI (REPL) that reads SQL, executes it, and prints tabular output.</td></tr>
-<tr><td><code>server.rs</code></td><td>HTTP + JSON API for integration tests or web UIs.</td></tr>
-</tbody>
-</table>
-</div>
-<hr>
-<h2 id="cli-binclientrs"><a class="header" href="#cli-binclientrs">CLI (<code>bin/client.rs</code>)</a></h2>
-<ul>
-<li>Uses <code>rustyline</code> to provide history, multi-line editing, and familiar shell shortcuts.</li>
-<li>Each command awaits <code>database.run(sql)</code> and formats the resulting Arrow
-<code>RecordBatch</code>es as a table.</li>
-<li>Catalog introspection is regular SQL through DataFusion, for example
-<code>SELECT * FROM information_schema.tables</code>.</li>
-</ul>
-<h2 id="http-binserverrs"><a class="header" href="#http-binserverrs">HTTP (<code>bin/server.rs</code>)</a></h2>
-<ul>
-<li>Built with <code>axum</code>/<code>hyper</code> (depending on the current <code>Cargo.toml</code>), exposing endpoints such as:
-<ul>
-<li><code>POST /api/sql</code> – run one SQL string and return stringified rows or an error payload.</li>
-<li><code>POST /api/sql_batch</code> – split a semicolon-delimited script and return one result set
-per statement.</li>
-<li><code>/debug/...</code> endpoints expose lock, transaction, MVCC, and last-plan snapshots for
-local demos.</li>
-</ul>
-</li>
-<li>Configuration comes from <code>QUILL_DB_FILE</code>, <code>QUILL_HTTP_ADDR</code>, <code>PORT</code>, etc., mirroring
-how production services inject settings.</li>
-</ul>
-<hr>
-<h2 id="teaching-ideas-1"><a class="header" href="#teaching-ideas-1">Teaching Ideas</a></h2>
-<ul>
-<li>Extend the CLI with <code>\describe table</code> to practice catalog lookups.</li>
-<li>Add per-connection HTTP sessions if you want long-running browser transactions
-instead of the current single database mutex.</li>
-<li>Combine CLI interaction with <code>RUST_LOG</code> tracing to walk through the entire query
-lifecycle.</li>
-</ul>
-<div style="break-before: page; page-break-before: always;"></div>
-<h1 id="testing--documentation"><a class="header" href="#testing--documentation">Testing &amp; Documentation</a></h1>
-<p>The active tests focus on the current DataFusion + Holt architecture.</p>
-<h2 id="test-suite"><a class="header" href="#test-suite">Test Suite</a></h2>
-<div class="table-wrapper">
-<table>
-<thead>
-<tr><th>Location</th><th>Purpose</th></tr>
-</thead>
-<tbody>
-<tr><td><code>tests/datafusion_holt.rs</code></td><td>End-to-end SQL tests through DataFusion over Holt tables.</td></tr>
-<tr><td>module unit tests</td><td>Storage codecs, ordered index encoding, MVCC visibility, and lock-manager behavior.</td></tr>
-</tbody>
-</table>
-</div>
-<p>Common commands:</p>
-<pre><code class="language-bash">cargo test
-cargo test --features jit-mlir
-cargo clippy --all-targets -- -D warnings
-</code></pre>
-<h2 id="documentation"><a class="header" href="#documentation">Documentation</a></h2>
-<p>The <code>docs/</code> directory is an mdBook. It documents the current DataFusion-fronted
-architecture rather than the removed teaching parser/planner/executor stack.</p>
 
                     </main>
 

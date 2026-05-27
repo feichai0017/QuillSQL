@@ -37,7 +37,7 @@
             const default_dark_theme = "navy";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="../toc-1d3cbbe2.js"></script>
+        <script src="../toc-b5857736.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -155,7 +155,8 @@
                 <div id="mdbook-content" class="content">
                     <main>
                         <h1 id="testing--documentation"><a class="header" href="#testing--documentation">Testing &amp; Documentation</a></h1>
-<p>The active tests focus on the current DataFusion + Holt architecture.</p>
+<p>The active tests focus on DataFusion execution, Parquet registration, and the
+MLIR JIT boundary.</p>
 <h2 id="test-suite"><a class="header" href="#test-suite">Test Suite</a></h2>
 <div class="table-wrapper">
 <table>
@@ -163,8 +164,8 @@
 <tr><th>Location</th><th>Purpose</th></tr>
 </thead>
 <tbody>
-<tr><td><code>tests/datafusion_holt.rs</code></td><td>End-to-end SQL tests through DataFusion over Holt tables.</td></tr>
-<tr><td>module unit tests</td><td>Storage codecs, ordered index encoding, MVCC visibility, and lock-manager behavior.</td></tr>
+<tr><td><code>tests/df_arrow_parquet.rs</code></td><td>End-to-end SQL over DataFusion memory tables and registered Parquet datasets.</td></tr>
+<tr><td><code>src/jit/*</code> unit tests</td><td>JIT expression lowering plus MLIR module generation and verification.</td></tr>
 </tbody>
 </table>
 </div>
@@ -173,9 +174,16 @@
 cargo test --features jit-mlir
 cargo clippy --all-targets -- -D warnings
 </code></pre>
+<p>The <code>jit-mlir</code> feature requires local MLIR/LLVM libraries. On a Homebrew LLVM 22
+installation, set:</p>
+<pre><code class="language-bash">MLIR_SYS_220_PREFIX=/opt/homebrew/opt/llvm \
+LLVM_SYS_220_PREFIX=/opt/homebrew/opt/llvm \
+cargo test --features jit-mlir
+</code></pre>
 <h2 id="documentation"><a class="header" href="#documentation">Documentation</a></h2>
-<p>The <code>docs/</code> directory is an mdBook. It documents the current DataFusion-fronted
-architecture rather than the removed teaching parser/planner/executor stack.</p>
+<p>The <code>docs/</code> directory is an mdBook. It tracks the current DataFusion +
+Arrow/Parquet + MLIR architecture and intentionally omits the removed teaching
+database storage stack.</p>
 
                     </main>
 
@@ -185,6 +193,9 @@ architecture rather than the removed teaching parser/planner/executor stack.</p>
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                             </a>
 
+                            <a rel="next prefetch" href="../contributing.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
+                            </a>
 
                         <div style="clear: both"></div>
                     </nav>
@@ -196,6 +207,9 @@ architecture rather than the removed teaching parser/planner/executor stack.</p>
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                     </a>
 
+                    <a rel="next prefetch" href="../contributing.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
+                    </a>
             </nav>
 
         </div>
