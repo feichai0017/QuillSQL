@@ -22,18 +22,9 @@ impl VolcanoExecutor for PhysicalCreateTable {
             return Ok(None);
         }
 
-        match self.engine {
-            TableEngine::Page => {
-                context
-                    .catalog
-                    .create_table(self.table.clone(), Arc::new(self.schema.clone()))?;
-            }
-            TableEngine::Holt => {
-                context
-                    .catalog
-                    .create_holt_table(self.table.clone(), Arc::new(self.schema.clone()))?;
-            }
-        }
+        context
+            .catalog
+            .create_holt_table(self.table.clone(), Arc::new(self.schema.clone()))?;
         Ok(None)
     }
     fn output_schema(&self) -> SchemaRef {

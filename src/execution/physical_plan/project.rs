@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::rc::Rc;
 
 use crate::catalog::SchemaRef;
 use crate::expression::Expr;
@@ -14,7 +14,7 @@ use super::PhysicalPlan;
 pub struct PhysicalProject {
     pub exprs: Vec<Expr>,
     pub schema: SchemaRef,
-    pub input: Arc<PhysicalPlan>,
+    pub input: Rc<PhysicalPlan>,
 }
 
 impl VolcanoExecutor for PhysicalProject {

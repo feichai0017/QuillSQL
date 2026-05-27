@@ -1,6 +1,7 @@
 use log::debug;
+use std::rc::Rc;
 use std::sync::atomic::Ordering;
-use std::sync::{atomic::AtomicU32, Arc, OnceLock};
+use std::sync::{atomic::AtomicU32, OnceLock};
 
 use crate::catalog::{SchemaRef, INSERT_OUTPUT_SCHEMA_REF};
 use crate::error::QuillSQLError;
@@ -20,7 +21,7 @@ pub struct PhysicalInsert {
     pub table: TableReference,
     pub table_schema: SchemaRef,
     pub projected_schema: SchemaRef,
-    pub input: Arc<PhysicalPlan>,
+    pub input: Rc<PhysicalPlan>,
 
     insert_rows: AtomicU32,
     table_binding: OnceLock<TableBinding>,
@@ -30,7 +31,7 @@ impl PhysicalInsert {
         table: TableReference,
         table_schema: SchemaRef,
         projected_schema: SchemaRef,
-        input: Arc<PhysicalPlan>,
+        input: Rc<PhysicalPlan>,
     ) -> Self {
         Self {
             table,

@@ -3,31 +3,16 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use crate::config::WalConfig;
 use crate::database::Database;
-use crate::recovery::WalManager;
 use crate::session::SessionContext;
-use crate::storage::disk_manager::DiskManager;
-use crate::storage::disk_scheduler::DiskScheduler;
-use crate::storage::page::RecordId;
+use crate::storage::record::RecordId;
 use crate::transaction::{IsolationLevel, LockMode, TransactionManager};
 use crate::utils::scalar::ScalarValue;
 use crate::utils::table_ref::TableReference;
 use sqlparser::ast::TransactionAccessMode;
-use tempfile::TempDir;
 
-fn create_manager(temp: &TempDir) -> TransactionManager {
-    let wal_path = temp.path().join("wal");
-    let mut wal_config = WalConfig::default();
-    wal_config.directory = wal_path;
-    wal_config.sync_on_flush = false;
-
-    let db_path = temp.path().join("wal_txn.db");
-    let disk_manager = Arc::new(DiskManager::try_new(&db_path).unwrap());
-    let scheduler = Arc::new(DiskScheduler::new(disk_manager));
-    let wal = Arc::new(WalManager::new_with_scheduler(wal_config, None, None, scheduler).unwrap());
-
-    TransactionManager::new(wal, true)
+fn create_manager() -> TransactionManager {
+    TransactionManager::new()
 }
 
 fn value_as_i32(value: &ScalarValue) -> i32 {
@@ -39,8 +24,7 @@ fn value_as_i32(value: &ScalarValue) -> i32 {
 
 #[test]
 fn begin_commit_abort() {
-    let temp = TempDir::new().unwrap();
-    let manager = create_manager(&temp);
+    let manager = create_manager();
 
     let mut txn = manager
         .begin(
@@ -68,15 +52,15 @@ fn session_apply_set_transaction() {
     let mut session = SessionContext::new(IsolationLevel::ReadUncommitted);
     session.set_autocommit(false);
 
-    let mut modes_txn = crate::plan::logical_plan::TransactionModes::default();
-    modes_txn.isolation_level = Some(IsolationLevel::Serializable);
-    modes_txn.access_mode = Some(TransactionAccessMode::ReadOnly);
+    let modes_txn = crate::plan::logical_plan::TransactionModes {
+        isolation_level: Some(IsolationLevel::Serializable),
+        access_mode: Some(TransactionAccessMode::ReadOnly),
+    };
 
     session.apply_session_modes(&modes_txn);
     assert_eq!(session.default_isolation(), IsolationLevel::Serializable);
 
-    let temp = TempDir::new().unwrap();
-    let manager = create_manager(&temp);
+    let manager = create_manager();
     let txn = manager
         .begin(
             session.default_isolation(),
@@ -85,8 +69,10 @@ fn session_apply_set_transaction() {
         .unwrap();
     session.set_active_transaction(txn).unwrap();
 
-    let mut txn_modes = crate::plan::logical_plan::TransactionModes::default();
-    txn_modes.access_mode = Some(TransactionAccessMode::ReadOnly);
+    let txn_modes = crate::plan::logical_plan::TransactionModes {
+        access_mode: Some(TransactionAccessMode::ReadOnly),
+        ..Default::default()
+    };
     session.apply_transaction_modes(&txn_modes);
     assert_eq!(
         session.active_txn().unwrap().access_mode(),
@@ -140,8 +126,7 @@ fn read_committed_allows_update_after_select() {
 
 #[test]
 fn repeatable_read_blocks_update_until_commit() {
-    let temp = TempDir::new().unwrap();
-    let manager = Arc::new(create_manager(&temp));
+    let manager = Arc::new(create_manager());
     let table = TableReference::Bare {
         table: "kv".to_string(),
     };

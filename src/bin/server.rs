@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Query, State},
+    extract::State,
     http::StatusCode,
     routing::{get, post},
     Json, Router,
@@ -20,12 +20,11 @@ struct AppState {
 }
 
 fn rebuild_db(opts: &DatabaseOptions) -> Database {
-    let db = if let Ok(path) = std::env::var("QUILL_DB_FILE") {
+    if let Ok(path) = std::env::var("QUILL_DB_FILE") {
         Database::new_on_disk_with_options(&path, opts.clone()).expect("open db file")
     } else {
         Database::new_temp_with_options(opts.clone()).expect("open temp db")
-    };
-    db
+    }
 }
 
 fn lock_or_rebuild_db<'a>(
@@ -86,20 +85,6 @@ fn strip_sql_comments(input: &str) -> String {
     out
 }
 
-async fn debug_wal_head(
-    State(state): State<AppState>,
-) -> Result<Json<quill_sql::recovery::wal::WalHeadDebug>, (StatusCode, String)> {
-    let db_guard = lock_or_rebuild_db(&state)?;
-    Ok(Json(db_guard.debug_wal_head()))
-}
-
-async fn debug_buffer_stats(
-    State(state): State<AppState>,
-) -> Result<Json<quill_sql::database::BufferDebugStats>, (StatusCode, String)> {
-    let db_guard = lock_or_rebuild_db(&state)?;
-    Ok(Json(db_guard.debug_buffer_stats()))
-}
-
 async fn debug_locks_snapshot(
     State(state): State<AppState>,
 ) -> Result<Json<quill_sql::transaction::LockDebugSnapshot>, (StatusCode, String)> {
@@ -130,36 +115,11 @@ async fn debug_plan_last(
     }
 }
 
-#[derive(Deserialize)]
-struct LimitQuery {
-    limit: Option<usize>,
-}
-
-async fn debug_wal_peek(
-    State(state): State<AppState>,
-    Query(q): Query<LimitQuery>,
-) -> Result<Json<Vec<quill_sql::recovery::wal::WalPeekDebug>>, (StatusCode, String)> {
-    let db = lock_or_rebuild_db(&state)?;
-    let limit = q.limit.unwrap_or(10).min(500);
-    db.debug_wal_peek(limit)
-        .map(Json)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))
-}
-
 async fn debug_mvcc_versions(
     State(state): State<AppState>,
 ) -> Result<Json<quill_sql::database::MvccVersionsDebug>, (StatusCode, String)> {
     let db = lock_or_rebuild_db(&state)?;
     db.debug_mvcc_versions()
-        .map(Json)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))
-}
-
-async fn debug_wal_segments(
-    State(state): State<AppState>,
-) -> Result<Json<quill_sql::database::WalSegmentsDebug>, (StatusCode, String)> {
-    let db = lock_or_rebuild_db(&state)?;
-    db.debug_wal_segments()
         .map(Json)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))
 }
@@ -175,7 +135,7 @@ async fn debug_txns(
 async fn main() {
     env_logger::init();
 
-    // Build database (in-memory temp by default); WAL config centralized via DatabaseOptions/WalConfig defaults
+    // Build database (in-memory Holt temp by default).
     let default_isolation_level = std::env::var("QUILL_DEFAULT_ISOLATION")
         .ok()
         .as_deref()
@@ -207,10 +167,6 @@ async fn main() {
         .route("/api/sql", post(api_sql))
         .route("/api/sql_batch", post(api_sql_batch))
         .route("/admin/rebuild", post(rebuild))
-        .route("/debug/wal/head", get(debug_wal_head))
-        .route("/debug/wal/peek", get(debug_wal_peek))
-        .route("/debug/wal/segments", get(debug_wal_segments))
-        .route("/debug/buffer/stats", get(debug_buffer_stats))
         .route("/debug/locks/snapshot", get(debug_locks_snapshot))
         .route("/debug/txns", get(debug_txns))
         .route("/debug/trace/last", get(debug_trace_last))
@@ -240,8 +196,6 @@ async fn main() {
     .await
     .expect("server error");
 }
-
-// no env parsing for WAL in server; configuration centralized in DatabaseOptions
 
 /// Execute SQL and return rows of strings
 async fn api_sql(

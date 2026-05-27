@@ -10,7 +10,7 @@ violating correctness.
 
 | Type | Role |
 | ---- | ---- |
-| `TransactionManager` | Creates/commits/aborts transactions, assigns txn & command ids, coordinates WAL. |
+| `TransactionManager` | Creates/commits/aborts transactions, assigns txn & command ids, and tracks recovered status. |
 | `Transaction` | Stores state, held locks, undo chain, and cached snapshot. |
 | `TxnContext` / `TxnRuntime` | Execution-time wrapper exposing MVCC + locking helpers. |
 | `LockManager` | Multi-granularity locking (IS/IX/S/SIX/X) with deadlock detection. |
@@ -23,11 +23,12 @@ violating correctness.
 1. `SessionContext` calls `TransactionManager::begin` to create a transaction.
 2. Each SQL statement builds a `TxnRuntime`, yielding a fresh command id and snapshot.
 3. Operators call `TxnContext::lock_table/lock_row` to obey strict 2PL.
-4. `TableHandle::insert/delete/update` records undo, acquires locks, and emits WAL via
-   `TxnContext`.
-5. Commit: write a `Commit` record → flush depending on `synchronous_commit` → release
+4. `TableHandle::insert/delete/update` records undo, acquires locks, and writes through
+   Holt handles.
+5. Commit: mark the transaction committed, persist final Holt txn status, and release
    locks.
-6. Abort: walk the undo list, write CLRs, restore heap/index state, release locks.
+6. Abort: walk the undo list, restore row/index state through Holt handles, persist final
+   Holt txn status, and release locks.
 
 ---
 
@@ -59,12 +60,10 @@ violating correctness.
 
 - **ExecutionContext** – all helpers (lock acquisition, visibility checks, undo logging)
   are exposed here, so physical operators never touch `LockManager` directly.
-- **StorageEngine** – handles call `TxnContext` before mutating heaps/indexes; MVCC metadata
-  lives in `TupleMeta`. Deletes and updates now push the affected index keys into the undo
-  chain so heap/index WAL stay in lockstep.
-- **Recovery** – Begin/Commit/Abort records emitted here drive ARIES undo/redo.
-- **Background** – MVCC vacuum reads `TransactionManager::oldest_active_txn()` to compute
-  `safe_xmin`.
+- **StorageEngine** – handles call `TxnContext` before mutating Holt rows/indexes; MVCC
+  metadata lives in `TupleMeta`.
+- **Holt** – committed/aborted statuses are persisted in the Holt `txn` tree and recovered
+  before execution resumes.
 
 ---
 
@@ -85,10 +84,9 @@ violating correctness.
    students see how `(insert_txn_id, delete_txn_id)` change as versions are linked.
 3. **Undo tracing** – Force an abort after a multi-index UPDATE. Watch the undo stack
    entries unfold: `Insert` removes the new version + index entries, `Delete` restores
-   the old version + keys. Map each step to the WAL records that are written.
-4. **Crash drill** – Add `panic!()` right after `TransactionManager::commit` is called
-   but before locks are released. Reboot, run recovery, and inspect the loser list;
-   students can connect the dots between undo actions, CLRs, and ARIES theory.
+   the old version + keys.
+4. **Restart drill** – Insert committed and rolled-back rows, reopen the database, and
+   inspect which `TupleMeta` versions are visible after Holt transaction status recovery.
 
 ---
 

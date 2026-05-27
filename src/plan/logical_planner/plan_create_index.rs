@@ -43,10 +43,9 @@ fn parse_index_engine(
         return Ok(None);
     };
     match using.value.to_ascii_lowercase().as_str() {
-        "btree" | "bplus" | "bplustree" => Ok(Some(IndexEngine::BTree)),
         "holt" => Ok(Some(IndexEngine::Holt)),
         other => Err(QuillSQLError::NotSupport(format!(
-            "index backend {other} is not supported"
+            "index backend {other} is not supported; only USING HOLT is supported"
         ))),
     }
 }

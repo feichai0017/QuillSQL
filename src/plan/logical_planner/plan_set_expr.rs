@@ -153,7 +153,7 @@ impl LogicalPlanner<'_> {
 
     pub fn plan_from_tables(
         &self,
-        from: &Vec<sqlparser::ast::TableWithJoins>,
+        from: &[sqlparser::ast::TableWithJoins],
     ) -> QuillSQLResult<LogicalPlan> {
         match from.len() {
             0 => Ok(LogicalPlan::EmptyRelation(EmptyRelation {

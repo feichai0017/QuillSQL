@@ -304,7 +304,7 @@ impl ScalarValue {
         }
     }
 
-    pub fn from_string(string: &String, data_type: DataType) -> QuillSQLResult<Self> {
+    pub fn from_string(string: &str, data_type: DataType) -> QuillSQLResult<Self> {
         let is_null = string.eq_ignore_ascii_case("null");
         match data_type {
             DataType::Boolean => {
@@ -429,7 +429,11 @@ impl ScalarValue {
                 Ok(ScalarValue::Float64(v))
             }
             DataType::Varchar(_) => {
-                let v = if is_null { None } else { Some(string.clone()) };
+                let v = if is_null {
+                    None
+                } else {
+                    Some(string.to_owned())
+                };
                 Ok(ScalarValue::Varchar(v))
             }
         }

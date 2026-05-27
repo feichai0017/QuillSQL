@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::storage::page::RecordId;
+use crate::storage::record::RecordId;
 use crate::transaction::{LockManager, TransactionId};
 use crate::utils::table_ref::TableReference;
 

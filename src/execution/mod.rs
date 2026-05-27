@@ -10,6 +10,7 @@ use crate::storage::{
 use crate::transaction::{Transaction, TransactionManager, TxnContext};
 use crate::utils::scalar::ScalarValue;
 use crate::{catalog::Catalog, utils::table_ref::TableReference};
+use std::rc::Rc;
 use std::sync::Arc;
 
 pub trait VolcanoExecutor {
@@ -82,7 +83,7 @@ pub struct ExecutionEngine<'a> {
     pub context: ExecutionContext<'a>,
 }
 impl<'a> ExecutionEngine<'a> {
-    pub fn execute(&mut self, plan: Arc<PhysicalPlan>) -> QuillSQLResult<Vec<Tuple>> {
+    pub fn execute(&mut self, plan: Rc<PhysicalPlan>) -> QuillSQLResult<Vec<Tuple>> {
         plan.init(&mut self.context)?;
         let mut result = Vec::new();
         loop {

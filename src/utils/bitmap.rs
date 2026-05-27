@@ -3,6 +3,12 @@ pub struct DynamicBitmap {
     map: Vec<u8>,
 }
 
+impl Default for DynamicBitmap {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DynamicBitmap {
     pub fn new() -> Self {
         Self { map: Vec::new() }

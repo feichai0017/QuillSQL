@@ -1,11 +1,8 @@
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 
 use crate::catalog::Schema;
-use crate::error::QuillSQLResult;
 use crate::expression::BinaryOp;
-use crate::storage::table_heap::{TableHeap, TableIterator};
 use crate::storage::tuple::Tuple;
 use crate::utils::scalar::ScalarValue;
 
@@ -41,18 +38,6 @@ impl TableStatistics {
                 stats.record_value(value);
             }
         }
-    }
-
-    pub fn analyze(table_heap: Arc<TableHeap>) -> QuillSQLResult<Self> {
-        let mut stats = TableStatistics::empty(table_heap.schema.as_ref());
-        let mut iterator = TableIterator::new(table_heap.clone(), ..);
-        while let Some((_rid, meta, tuple)) = iterator.next()? {
-            if meta.is_deleted {
-                continue;
-            }
-            stats.record_tuple(&tuple);
-        }
-        Ok(stats)
     }
 }
 

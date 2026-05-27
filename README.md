@@ -8,18 +8,16 @@
 
 <div align="center">
   <img src="/public/rust-db.png" alt="QuillSQL Architecture" width="720"/>
-  <p><em>An educational Rust RDBMS for cmu15445-style teaching (BusTub-inspired)</em></p>
+  <p><em>An educational Rust SQL engine backed by Holt storage</em></p>
 </div>
 
 ## ✨ Highlights
 
 - **Clean architecture**: SQL → Logical Plan → Physical Plan → Volcano executor
 - **Transaction control**: `BEGIN/COMMIT/ROLLBACK`, `SET TRANSACTION`, `SET SESSION TRANSACTION`, enforced `READ ONLY`, row/table locks
-- **B+Tree index**: OLC readers, B-link pages, latch crabbing, range scan iterator
-- **Buffer manager**: LRU-K + TinyLFU, WAL-aware dirty tracking, prefetch API, background writer
-- **Asynchronous storage**: Dispatcher + io_uring worker pool for data pages, plus a buffered WAL runtime with cached segment handles for sequential log I/O
-- **Streaming / Prefetch**: Large sequential scans bypass the cache via a small direct I/O ring buffer; targeted prefetch warms hot paths without pins
-- **WAL & Recovery (ARIES-inspired)**: FPW, logical heap/index records, DPT, chained CLR, per-transaction undo chains, idempotent replays
+- **Holt storage backend**: table rows, indexes, catalog descriptors, and transaction status are persisted through `holt::DB`
+- **Holt ordered indexes**: point/range scans use order-preserving SQL key encoding with RID tie-breakers
+- **Streaming scans**: executors consume storage through object-safe table/index handles, not page-heap internals
 - **Information schema**: `information_schema.schemas`, `tables`, `columns`, `indexes`
 - **Docs**: 📖 **[Read the Book Online](https://feichai0017.github.io/QuillSQL/)** 
 
@@ -41,8 +39,8 @@
 
 ## 🎓 Teaching & Research Friendly
 
-- Clear module boundaries, suitable for classroom assignments and research prototypes. Inspired by CMU 15-445 BusTub with strengthened WAL/Recovery, observability, and centralized configuration.
-- Pluggable pieces: buffer pool, index, WAL, and recovery are decoupled for side-by-side experiments.
+- Clear module boundaries, suitable for classroom assignments and research prototypes focused on SQL parsing, planning, optimization, execution, and transaction semantics.
+- Storage is intentionally delegated to Holt. QuillSQL no longer ships its own page heap, buffer pool, B+Tree, or WAL implementation.
 - Readability-first: simple, pragmatic code with minimal hot-path allocations.
 
 ## 🚀 Quick Start
@@ -84,18 +82,20 @@ EXPLAIN SELECT id, COUNT(*) FROM t GROUP BY id ORDER BY id;
 
 - **CREATE TABLE**
   - Column options: `NOT NULL` | `DEFAULT <literal>`
+  - Storage: Holt is the only supported engine. `ENGINE=HOLT` is accepted, and omitted `ENGINE` defaults to Holt.
   - Example:
     ```sql
     CREATE TABLE t(
       id INT64 NOT NULL,
       v  INT32 DEFAULT 0
-    );
+    ) ENGINE=HOLT;
     ```
 
 - **CREATE INDEX**
+  - Index storage: Holt is the only supported backend. `USING HOLT` is accepted, and omitted `USING` defaults to Holt.
   - Example:
     ```sql
-    CREATE INDEX idx_t_id ON t(id);
+    CREATE INDEX idx_t_id ON t USING HOLT (id);
     ```
 
 - **DROP**
@@ -152,7 +152,7 @@ Minimal environment variables (runtime only)
 - QUILL_DEFAULT_ISOLATION: default session isolation (`read-uncommitted`, `read-committed`, `repeatable-read`, `serializable`)
 - RUST_LOG: log level (e.g., info, debug)
 
-Programmatic options live in `quillsql::config` (see docs) — build `DatabaseOptions` with `WalOptions`, `BufferPoolConfig`, `BTreeConfig`, etc., and pass into `Database::new_*_with_options`. Examples in the docs remain unchanged.
+Programmatic options are exposed through `quill_sql::database::DatabaseOptions`. The only storage option is the Holt directory override; by default `Database::new_on_disk(path)` uses `path` as the Holt database directory and `Database::new_temp()` creates a temporary Holt database.
 
 ## 📦 Docker
 

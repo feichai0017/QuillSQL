@@ -1,20 +1,11 @@
 pub mod codec;
-pub mod disk_manager;
-pub mod disk_scheduler;
 pub mod engine;
-pub mod heap;
 pub mod holt;
-pub mod index;
-pub mod io;
-pub mod page;
+pub mod record;
 pub mod tuple;
 
 pub use engine::{
-    CatalogStorageEngine, IndexHandle, IndexScanRequest, PageStoreEngine, StorageEngine,
-    TableBinding, TableHandle, TupleStream,
+    HoltStorageEngine, IndexHandle, IndexScanRequest, StorageEngine, TableBinding, TableHandle,
+    TupleStream,
 };
-
-pub use heap::heap_recovery;
-pub use heap::mvcc_heap::{self, MvccHeap};
-pub use heap::table_heap;
-pub use heap::table_heap::{TableHeap, TableIterator};
+pub use record::{RecordId, TupleMeta};

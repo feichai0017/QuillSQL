@@ -9,6 +9,12 @@ pub struct AvgAccumulator {
     count: u64,
 }
 
+impl Default for AvgAccumulator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AvgAccumulator {
     pub fn new() -> Self {
         Self {

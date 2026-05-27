@@ -1,237 +1,93 @@
 # QuillSQL Architecture
 
-This chapter gives a tour of the major subsystems, the flow of a SQL statement, and the contract between execution, transactions, and storage. It uses Mermaid diagrams so you can render the visuals directly inside mdBook or any compatible viewer.
+QuillSQL is now a SQL layer over Holt. The project owns parsing, logical planning,
+optimization, Volcano execution, catalog projection, transaction state, MVCC visibility,
+and lock management. Persistent rows, indexes, catalog descriptors, and recovered
+transaction status live in `holt::DB`.
 
----
-
-## 1. End-to-End Pipeline
-
-```mermaid
-flowchart LR
-    subgraph Frontend
-        CLI["bin/client"] --> Parser["sql::parser"]
-        HTTP["bin/server"] --> Parser
-    end
-    Parser --> LPlan["plan::LogicalPlanner"]
-    LPlan --> Optimizer["optimizer::LogicalOptimizer"]
-    Optimizer --> PPlan["plan::PhysicalPlanner"]
-    PPlan --> Exec["execution::ExecutionEngine (Volcano)"]
-
-    subgraph Txn["transaction::*"]
-        Session["session::SessionContext"]
-        TM["TransactionManager"]
-        LM["LockManager"]
-        Session --> TM --> LM
-    end
-
-    Exec <-->|snapshot, locks| Txn
-    Exec --> Binding
-
-    subgraph Storage["storage::* & buffer::*"]
-        Binding["storage::engine::TableBinding"]
-        Heap["storage::table_heap::TableHeap"]
-        MVCC["storage::heap::MvccHeap"]
-        Index["storage::index::BPlusTree"]
-        Buffer["buffer::BufferManager"]
-        Disk["storage::disk_scheduler (io_uring)"]
-        WAL["recovery::WalManager"]
-        Binding --> Heap
-        Binding --> Index
-        Heap <--> Buffer
-        Index <--> Buffer
-        Buffer <--> Disk
-        WAL --> Disk
-    end
-
-    Background["background::workers\n(checkpoint, WAL writer, MVCC vacuum)"] --> {Buffer, WAL, TM}
-```
-
-**Key takeaways**
-- The frontend (CLI/HTTP) only knows how to parse SQL and drive the planning stages; all shared state lives below.
-- The `ExecutionEngine` drives a Volcano iterator. Each physical operator calls into the transaction runtime for visibility checks and locking, but touches storage exclusively through a `TableBinding`. This makes the executor easy to reason about in a classroom setting.
-- Buffering, WAL, and disk I/O are centralized so that durability/ordering guarantees stay in one module.
-
----
-
-## 2. Transactions, MVCC, and the Executor
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant Session
-    participant TM as TransactionManager
-    participant Runtime as TxnRuntime
-    participant Exec
-    participant Binding
-    participant Heap as TableHeap
-
-    Session->>TM: begin_txn(isolation, access_mode)
-    TM-->>Session: Transaction handle
-    Exec->>Runtime: TxnRuntime::new(&TM, &mut txn)
-    Runtime-->>Exec: {snapshot, command_id}
-
-    loop per tuple
-        Exec->>Binding: scan.next()
-        Binding->>Heap: TableIterator::next()
-        Heap-->>Binding: (rid, meta, tuple)
-        Binding-->>Exec: (rid, meta, tuple)
-        Exec->>Runtime: is_visible(meta)?
-        Runtime-->>Exec: yes/no
-        alt visible & needs lock
-            Exec->>Runtime: lock_row(table, rid, mode)
-            Runtime-->>Exec: guard
-        end
-        alt mutation
-            Exec->>Binding: prepare_row_for_write(...)
-            Binding->>Heap: mvcc.full_tuple(...)
-            Heap-->>Binding: (current_meta, tuple)
-            Binding->>TM: push_undo + append WAL(HeapRecord)
-        end
-    end
-
-    Session->>TM: commit(txn)
-    TM->>WAL: Transaction{Commit}
-    TM->>TM: flush_until(lsn) if synchronous
-    TM-->>Session: release locks, clear snapshot
-```
-
-**Snapshot policy**
-- `Read Uncommitted / Read Committed`: every command obtains a fresh snapshot, so repeated statements can see committed updates.
-- `Repeatable Read / Serializable`: cache the first snapshot on the `Transaction` handle; subsequent commands reuse it for consistent reads. The lock manager releases S-locks at the end of each command for RR, but Serializable keeps them until commit.
-
-**Undo & WAL**
-- Each mutation produces a logical `HeapRecordPayload` or `IndexRecordPayload`. The heap payload already carries redo (new bytes) and undo (old bytes), so recovery can replay forward or backward without re-reading heap pages.
-- On abort, the manager walks the undo stack, emits CLRs, and re-applies the inverse heap/index operations.
-
----
-
-## 3. Storage Layering
-
-```mermaid
-graph TD
-    subgraph Planner View
-        Catalog
-    end
-    Catalog -->|Arc<TableHeap>| TableBinding
-    TableBinding --> Heap["TableHeap"]
-    TableBinding --> Mvcc["MvccHeap"]
-    TableBinding --> Index["BPlusTreeIndex"]
-    Heap -->|pages| BufferMgr
-    Index -->|pages| BufferMgr
-    BufferMgr --> DiskMgr
-    BufferMgr --> WalMgr
-```
-
-| Layer | Responsibility | Notes |
-| ----- | -------------- | ----- |
-| `TableHeap` | Physical slotted pages, tuple encoding, WAL page image helpers | Exposes insert/update/delete that emit heap-specific WAL payloads before dirtying frames. |
-| `MvccHeap` | Version chain management, delete-marking, undo metadata | Creates new versions, rewires forward/back pointers, and delegates actual I/O to `TableHeap`. |
-| `TableBinding` | Safe façade for the executor | Provides `scan`, `index_scan`, `insert`, `delete`, `update`, and `prepare_row_for_write`, always pairing heap/index changes so operators stay small. |
-| `BufferManager` + `DiskScheduler` | Unified cache + async I/O | Uses LRU-K (+ optional TinyLFU admission) and io_uring to keep the hot set resident. |
-| `WalManager` | ARIES-compatible log | Supports logical heap/index records, page write/delta fallback, CLRs, checkpoints, and background flush threads. |
-
----
-
-## 4. `TableBinding` Contract
-
-```mermaid
-classDiagram
-    class TableBinding {
-        +scan() -> TupleStream
-        +index_scan(name, IndexScanRequest) -> TupleStream
-        +insert(&mut TxnContext, &Tuple)
-        +delete(&mut TxnContext, RecordId, TupleMeta, Tuple)
-        +update(&mut TxnContext, RecordId, Tuple, TupleMeta, Tuple) -> RecordId
-        +prepare_row_for_write(&mut TxnContext, RecordId, &TupleMeta)
-        +table_heap() -> Arc<TableHeap>
-    }
-
-    class PhysicalOperator {
-        +init(&mut ExecutionContext)
-        +next(&mut ExecutionContext) -> Option<Tuple>
-    }
-
-    PhysicalOperator --> TableBinding : uses
-```
-
-This binding hides every MVCC/WAL detail from the operators:
-- No more ad-hoc `catalog.table_indexes()` calls.
-- No direct references to `MvccHeap` or `TableHeap`.
-- Executor code reads like pseudo SQL: “lock table”, “scan binding”, “update tuple”.
-
----
-
-## 5. WAL & Recovery Details
+## End-to-End Pipeline
 
 ```mermaid
 flowchart LR
-    subgraph WAL Record Types
-        HI["HeapInsert"] --> redo
-        HD["HeapDelete (with before-image)"] --> redo & undo
-        LI["IndexLeaf{Insert,Delete}"]
-        IS["IndexSplit/Merge/Redistribute/Parent*"]
-        IR["IndexRoot Install/Adopt/Reset"]
-        PI["PageWrite (FPW)"]
-        CI["Checkpoint"]
-        CL["CLR"]
-    end
-    Exec -->|Heap/Index payloads| WalMgr
-    BufferMgr -->|first-touch FPW| WalMgr
-    WalMgr --> DiskScheduler --> log files
-    Recovery -->|analysis/redo/undo| BufferMgr
+    SQL["SQL text"] --> Parser["sql::parser"]
+    Parser --> Logical["LogicalPlanner"]
+    Logical --> Optimizer["LogicalOptimizer"]
+    Optimizer --> Physical["PhysicalPlanner"]
+    Physical --> Exec["ExecutionEngine (Volcano)"]
+
+    Session["SessionContext"] --> Txn["TransactionManager"]
+    Txn --> Locks["LockManager"]
+    Exec --> Ctx["ExecutionContext"]
+    Ctx --> TxnCtx["TxnContext"]
+    TxnCtx --> Txn
+    TxnCtx --> Locks
+
+    Ctx --> Engine["HoltStorageEngine"]
+    Engine --> Table["HoltTableHandle"]
+    Engine --> Index["HoltIndexHandle"]
+    Table --> Holt["holt::DB"]
+    Index --> Holt
+    Catalog["Catalog"] --> Holt
 ```
 
-- **Logical logging first**: heap/index mutations emit redo + undo at the logical level. This keeps the WAL stream compact and human-readable for teaching.
-- **Physical fallbacks**: metadata-heavy pages (meta, freelist, header) still leverage PageWrite FPWs to guarantee a consistent base image, especially on the first page flush after a crash.
-- **Restart**: `RecoveryManager` performs the classical ARIES sequence. It uses the `dirty_page_table` and `active_txn_table` captured by checkpoints to limit redo and undo work.
+The executor never touches Holt directly. It asks `ExecutionContext` for a
+`TableBinding`, then uses object-safe table/index handles for scans and writes.
 
----
-
-## 6. Background Workers
-
-| Worker | Purpose | Configuration |
-| ------ | ------- | ------------- |
-| WAL writer | Periodically flushes WAL buffers, coalesces adjacent writes | `WalOptions::writer_interval_ms`, `buffer_capacity` |
-| Checkpoint | Records ATT + DPT, gently pushes dirty buffers | `WalOptions::checkpoint_interval_ms` |
-| Buffer writer | Flushes frames when the dirty set grows too large | `background::BufferWriterConfig` |
-| MVCC vacuum | Reclaims obsolete tuple versions based on `safe_xmin` | `MvccVacuumConfig` |
-| Index vacuum | Cleans up deleted index entries using B-link traversal | `IndexVacuumConfig` |
-
-Workers register with `background::BackgroundWorkers`, so the database can stop and join them cleanly on shutdown. Each worker publishes metrics (intervals, batches processed) for observability.
-
----
-
-## 7. Example: Repeatable Read UPDATE
+## Storage Boundary
 
 ```mermaid
-sequenceDiagram
-    participant T1 as Txn 1 (RR)
-    participant T2 as Txn 2 (RC)
-    participant Heap as TableHeap
+flowchart TD
+    subgraph QuillSQL
+        Catalog["Catalog descriptors"]
+        TableHandle["TableHandle"]
+        IndexHandle["IndexHandle"]
+        TxnStatus["Transaction statuses"]
+    end
 
-    T1->>Heap: SELECT (snapshot S0)
-    Heap-->>T1: version V0
-    T2->>Heap: UPDATE -> insert V1, delete V0
-    Heap-->>T2: ack
-    T2->>T2: COMMIT (WAL + locks release)
-    T1->>Heap: SELECT again
-    Heap-->>T1: V0 still visible via snapshot S0
-    T1->>T1: COMMIT
-    Note over T1,Heap: Vacuum later removes V0 when safe_xmin advances
+    Catalog --> HCatalog["Holt tree: catalog"]
+    TableHandle --> HTable["Holt tree: table/<table_id>"]
+    IndexHandle --> HIndex["Holt tree: index/<index_id>"]
+    TxnStatus --> HTxn["Holt tree: txn"]
+
+    HCatalog --> DB["holt::DB"]
+    HTable --> DB
+    HIndex --> DB
+    HTxn --> DB
 ```
 
-This timeline demonstrates:
-- Snapshots shield Repeatable Read statements from concurrent writers even if row-level locks are released early.
-- The MVCC chain (`V1.prev_version = V0`, `V0.next_version = V1`) lets future readers reach the newest committed version while the vacuum worker reclaims obsolete ones lazily.
+Holt is the only durable storage engine. QuillSQL no longer contains an internal page
+heap, buffer pool, B+Tree, storage scheduler, or SQL-data WAL. This keeps the boundary
+clear: QuillSQL decides SQL semantics; Holt owns durable bytes and its own logging.
 
----
+## Important Invariants
 
-## 8. Observability & Configuration Cheat Sheet
+- A table descriptor in Holt is the durable source of truth for a table id and schema.
+- `information_schema` is a SQL-visible projection backed by Holt system tables.
+- Row values are stored as encoded `TupleMeta + Tuple`.
+- Index keys use order-preserving SQL encoding plus RID tie-breakers, so Holt byte order
+  matches SQL range-scan order.
+- Commit and rollback write final transaction status into Holt. Startup recovers those
+  statuses before planning or executing statements.
 
-- **Logging**: `RUST_LOG=trace` surfaces lock acquisitions, MVCC vacuums, and io_uring completions.
-- **Runtime knobs**: `WalOptions` (segment size, sync policy), `BufferPoolConfig` (capacity, TinyLFU toggle), `MvccVacuumConfig`, and `IndexVacuumConfig` can all be adjusted via `DatabaseOptions`.
-- **Metrics**: `background::BackgroundWorkers::snapshot()` reports worker health; WAL exposes current LSN and flush LSN; the buffer manager can dump the dirty page table for diagnostics.
+## Execution Contract
 
----
+`TableBinding` is the executor's storage facade:
 
-With these layers in place, QuillSQL remains faithful to production-grade engines (MVCC + WAL + buffer pool) while keeping its code and documentation approachable for coursework and research prototypes.
+```text
+scan()
+index_scan(name, range)
+insert(txn, tuple)
+delete(txn, rid, prev_meta, prev_tuple)
+update(txn, rid, new_tuple, prev_meta, prev_tuple)
+prepare_row_for_write(txn, rid, observed_meta)
+```
+
+Physical operators stay small because they only express SQL work: scan rows, evaluate
+expressions, ask `TxnContext` for visibility/locks, and call the table binding for
+mutations.
+
+## Restart Behavior
+
+On open, QuillSQL loads Holt catalog descriptors, reconstructs the in-memory catalog,
+loads transaction statuses, and advances the next transaction id past recovered ids.
+Unknown or in-progress row versions are not treated as committed by visibility checks.

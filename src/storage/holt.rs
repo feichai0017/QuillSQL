@@ -9,7 +9,7 @@ use crate::catalog::{
 use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::storage::codec::TupleCodec;
 use crate::storage::engine::{IndexHandle, IndexScanRequest, TableHandle, TupleStream};
-use crate::storage::page::{RecordId, TupleMeta};
+use crate::storage::record::{RecordId, TupleMeta};
 use crate::storage::tuple::Tuple;
 use crate::transaction::{TransactionId, TransactionStatus, TxnContext};
 use crate::utils::scalar::ScalarValue;
@@ -211,6 +211,42 @@ impl HoltStore {
             .map_err(map_holt_err)
             .and_then(committed)?;
         Ok(rid)
+    }
+
+    pub fn insert_system_row(&self, table_id: u64, tuple: &Tuple) -> QuillSQLResult<RecordId> {
+        let (rid, next_rid) = self.reserve_rid()?;
+        let table_tree = Self::table_tree_name(table_id);
+        let row_key = encode_rid(rid);
+        let row_value = encode_row(TupleMeta::new(0, 0), tuple);
+        self.db
+            .atomic(|batch| {
+                batch.put(CATALOG_TREE, NEXT_RID, &encode_u64(next_rid));
+                batch.put(&table_tree, &row_key, &row_value);
+            })
+            .map_err(map_holt_err)
+            .and_then(committed)?;
+        Ok(rid)
+    }
+
+    pub fn mark_system_row_deleted(
+        &self,
+        table_id: u64,
+        schema: SchemaRef,
+        rid: RecordId,
+    ) -> QuillSQLResult<()> {
+        let table_tree = Self::table_tree_name(table_id);
+        let tree = self.db.open_tree(&table_tree).map_err(map_holt_err)?;
+        let row_key = encode_rid(rid);
+        let Some(raw) = tree.get(&row_key).map_err(map_holt_err)? else {
+            return Ok(());
+        };
+        let (mut meta, tuple) = decode_row(&raw, schema)?;
+        if meta.is_deleted {
+            return Ok(());
+        }
+        meta.mark_deleted(0, 0);
+        tree.put(&row_key, &encode_row(meta, &tuple))
+            .map_err(map_holt_err)
     }
 
     pub fn reserve_rid(&self) -> QuillSQLResult<(RecordId, u64)> {
@@ -589,12 +625,14 @@ impl TableHandle for HoltTableHandle {
             .and_then(committed)?;
         txn.transaction_mut().push_update_undo(
             Arc::new(self.clone()),
-            rid,
-            new_rid,
-            prev_meta,
-            prev_tuple,
-            new_links,
-            old_links,
+            crate::transaction::UpdateUndo {
+                old_rid: rid,
+                new_rid,
+                prev_meta,
+                prev_tuple,
+                new_keys: new_links,
+                old_keys: old_links,
+            },
         );
         Ok(new_rid)
     }
@@ -644,24 +682,6 @@ impl TableHandle for HoltTableHandle {
             .map_err(map_holt_err)?;
         tree.put(&encode_rid(rid), &self.row_value(prev_meta, &prev_tuple))
             .map_err(map_holt_err)
-    }
-
-    fn undo_insert_payload(
-        &self,
-        _rid: RecordId,
-        _txn_id: TransactionId,
-    ) -> QuillSQLResult<Option<crate::storage::heap::wal_codec::HeapRecordPayload>> {
-        Ok(None)
-    }
-
-    fn undo_delete_payload(
-        &self,
-        _rid: RecordId,
-        _prev_meta: TupleMeta,
-        _prev_tuple: &Tuple,
-        _txn_id: TransactionId,
-    ) -> QuillSQLResult<Option<crate::storage::heap::wal_codec::HeapRecordPayload>> {
-        Ok(None)
     }
 }
 
@@ -735,8 +755,13 @@ impl IndexHandle for HoltIndexHandle {
             .db
             .open_tree(&self.tree_name())
             .map_err(map_holt_err)?;
+        let start_after = index_start_after_key(&request)?;
+        let mut range = tree.range();
+        if let Some(key) = start_after.as_deref() {
+            range = range.start_after(key);
+        }
         Ok(Box::new(HoltIndexStream {
-            iter: tree.range().into_iter(),
+            iter: range.into_iter(),
             table,
             key_schema: self.key_schema.clone(),
             request,
@@ -783,6 +808,9 @@ impl TupleStream for HoltIndexStream {
                 continue;
             };
             let key_tuple = tuple.project_with_schema(self.key_schema.clone())?;
+            if tuple_above_end(&key_tuple, &self.request) {
+                return Ok(None);
+            }
             if tuple_within_bounds(&key_tuple, &self.request) {
                 return Ok(Some((rid, meta, tuple)));
             }
@@ -893,6 +921,20 @@ pub fn encode_index_key(tuple: &Tuple, rid: RecordId) -> QuillSQLResult<Vec<u8>>
     Ok(out)
 }
 
+fn index_start_after_key(request: &IndexScanRequest) -> QuillSQLResult<Option<Vec<u8>>> {
+    match &request.start {
+        Bound::Included(start) => {
+            let min_rid = RecordId::new(0, 0);
+            Ok(Some(encode_index_key(start, min_rid)?))
+        }
+        Bound::Excluded(start) => {
+            let max_rid = RecordId::new(u32::MAX, u32::MAX);
+            Ok(Some(encode_index_key(start, max_rid)?))
+        }
+        Bound::Unbounded => Ok(None),
+    }
+}
+
 fn encode_ordered_scalar(
     out: &mut Vec<u8>,
     value: &ScalarValue,
@@ -976,6 +1018,14 @@ fn tuple_within_bounds(tuple: &Tuple, request: &IndexScanRequest) -> bool {
         Bound::Included(end) => tuple.cmp(end) != Ordering::Greater,
         Bound::Excluded(end) => tuple.cmp(end) == Ordering::Less,
         Bound::Unbounded => true,
+    }
+}
+
+fn tuple_above_end(tuple: &Tuple, request: &IndexScanRequest) -> bool {
+    match &request.end {
+        Bound::Included(end) => tuple.cmp(end) == Ordering::Greater,
+        Bound::Excluded(end) => tuple.cmp(end) != Ordering::Less,
+        Bound::Unbounded => false,
     }
 }
 
@@ -1145,7 +1195,7 @@ mod tests {
 
     use crate::catalog::{Column, DataType, Schema};
     use crate::storage::holt::encode_index_key;
-    use crate::storage::page::RecordId;
+    use crate::storage::record::RecordId;
     use crate::storage::tuple::Tuple;
     use crate::utils::scalar::ScalarValue;
 

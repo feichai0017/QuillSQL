@@ -1,73 +1,33 @@
-﻿# Catalog Module
+# Catalog Module
 
-`src/catalog/` acts as QuillSQL’s data dictionary. It tracks schema/table/index metadata,
-statistics, and the mapping between logical names and physical storage objects such as
-`TableHeap` and `BPlusTreeIndex`. Every layer—planner, execution, background workers—uses
-the catalog to discover structure.
-
----
+`src/catalog/` is QuillSQL's data dictionary. It maps SQL names to schemas, table ids,
+index ids, and statistics. Durable descriptors are stored in Holt; the in-memory catalog
+is rebuilt from those descriptors and from Holt-backed `information_schema` tables during
+startup.
 
 ## Responsibilities
 
-- Persist definitions for schemas, tables, columns, indexes, and constraints.
-- Map logical `TableReference`s to physical handles (heap files, index roots, file ids).
-- Store table statistics (row counts, histograms) that drive ANALYZE and optimization.
-- Manage the DDL lifecycle: creation and deletion update the in-memory registry and the
-  on-disk metadata pages.
+- Track schemas, tables, columns, indexes, and table statistics.
+- Create and drop Holt table/index descriptors during DDL.
+- Maintain SQL-visible `information_schema.schemas`, `tables`, `columns`, and `indexes`.
+- Give the planner and executor stable `TableReference` and `Schema` lookups.
 
----
+## Key Files
 
-## Directory Layout
+| File | Role |
+| ---- | ---- |
+| `catalog.rs` | Main catalog types and DDL metadata mutation. |
+| `information.rs` | Startup loader and `information_schema` projection maintenance. |
+| `schema.rs` | `Schema`, `SchemaRef`, and projection helpers. |
+| `column.rs`, `data_type.rs` | Column metadata and SQL type mapping. |
+| `stats.rs` | `ANALYZE` output and selectivity inputs. |
 
-| Path | Description | Key Types |
-| ---- | ----------- | --------- |
-| `mod.rs` | Public API surface. | `Catalog`, `TableHandleRef` |
-| `schema.rs` | Schema objects and table references. | `Schema`, `Column`, `TableReference` |
-| `registry/` | Thread-safe registry for heaps (MVCC vacuum). | `TableRegistry` |
-| `statistics.rs` | ANALYZE output and helpers. | `TableStatistics` |
-| `loader.rs` | Boot-time metadata loader. | `load_catalog_data` |
+## Metadata Flow
 
----
+1. DDL creates a Holt descriptor and updates the in-memory catalog.
+2. The catalog writes projection rows into Holt-backed `information_schema` tables.
+3. On reopen, QuillSQL loads `information_schema` rows and Holt descriptors, then
+   refreshes the projection to remove stale entries.
 
-## Core Concepts
-
-### TableReference
-Unified identifier (database, schema, table). Logical planner, execution, and transaction
-code all use it when requesting handles from the catalog.
-
-### Registries
-`TableRegistry` maps internal IDs to `Arc<TableHeap>` plus logical names. It is used by
-the MVCC vacuum worker to iterate user tables without poking directly into catalog data.
-
-### Schema & Column
-`Schema` stores column definitions (type, default, nullability). Execution uses it when
-materialising tuples; the planner uses it to check expression types. `Schema::project`
-helps physical operators build projected outputs.
-
-### TableStatistics
-`ANALYZE` writes row counts and histograms into the catalog. Optimizer rules and planner
-heuristics can consult these stats when deciding whether to push filters or pick indexes.
-Each column tracks null/non-null counts, min/max values, and a sample-based distinct
-estimate, enabling DuckDB-style selectivity heuristics (`1/distinct`, uniform ranges).
-
----
-
-## Interactions
-
-- **SQL / Planner** – DDL planning calls `Catalog::create_table` / `create_index`; name
-  binding relies on `Schema`.
-- **Execution** – `ExecutionContext::table_handle` and `index_handle` fetch physical
-  handles through the catalog, so scans never hard-code heap locations.
-- **Background workers** – MVCC and index vacuum iterate the registries via `Arc` clones.
-- **Recovery** – `load_catalog_data` rebuilds the in-memory catalog from control files and
-  metadata pages during startup.
-
----
-
-## Teaching Ideas
-
-- Extend the schema system with hidden or computed columns and teach the catalog to store
-  the extra metadata.
-- Add histogram bins to `TableStatistics` and demonstrate how a simple cost heuristic can
-  choose better plans.
-- Turn on `RUST_LOG=catalog=debug` to observe how DDL mutates the registries.
+This means Holt is the durable source of truth, while `information_schema` remains a
+normal SQL view of metadata.

@@ -23,11 +23,11 @@ pub trait VolcanoExecutor {
 
 Notice that both `init()` and `next()` take a mutable `ExecutionContext`. This object is the “world” in which the query runs. It is passed down the operator tree and exposes:
 
-- **`Catalog` + `StorageEngine`**: Operators call `context.table(&table_ref)` to obtain a `TableBinding`. The binding encapsulates heap/index access (scan, insert, delete, update, prepare-row-for-write) so operators never touch `TableHeap` or `MvccHeap` directly.
+- **`Catalog` + `StorageEngine`**: Operators call `context.table(&table_ref)` to obtain a `TableBinding`. The binding encapsulates Holt row/index access (scan, insert, delete, update, prepare-row-for-write) so operators never touch durable storage internals directly.
 - **`TxnContext`**: Provides the current transaction, MVCC snapshot, and helper methods for row/table locks and visibility checks.
 - **Expression helpers**: `eval_expr` / `eval_predicate` evaluate AST expressions against a tuple without leaking `ScalarValue` plumbing into operators.
 
-Thanks to the binding abstraction, the operator code only expresses “what” should happen (scan/update/delete) while the binding implements “how” (MVCC chain navigation, undo logging, index maintenance).
+Thanks to the binding abstraction, the operator code only expresses “what” should happen (scan/update/delete) while the binding implements “how” (MVCC metadata writes, undo tracking, and index maintenance).
 
 ## 3. Anatomy of Physical Operators
 

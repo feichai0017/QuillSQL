@@ -1,5 +1,5 @@
 use log::debug;
-use std::sync::Arc;
+use std::rc::Rc;
 
 use crate::catalog::SchemaRef;
 use crate::expression::Expr;
@@ -14,7 +14,7 @@ use super::PhysicalPlan;
 #[derive(derive_new::new, Debug)]
 pub struct PhysicalFilter {
     pub predicate: Expr,
-    pub input: Arc<PhysicalPlan>,
+    pub input: Rc<PhysicalPlan>,
 }
 
 impl VolcanoExecutor for PhysicalFilter {

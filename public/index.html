@@ -1195,7 +1195,7 @@
 
     const HERO_STATS = [
       { label: 'Isolation', value: 'MVCC + 2PL', detail: 'read-uncommitted → serializable', icon: 'mvcc', progress: 100 },
-      { label: 'Storage', value: 'Heap + B+Tree', detail: 'WAL + checkpoints, buffer pool', icon: 'storage', progress: 92 },
+      { label: 'Storage', value: 'Holt', detail: 'rows, indexes, catalog descriptors', icon: 'storage', progress: 92 },
       { label: 'Executor', value: 'Volcano', detail: 'physical planner & runtime', icon: 'executor', progress: 88 },
       { label: 'Tests', value: 'sqllogictest', detail: 'suite-backed demo scripts', icon: 'tests', progress: 80 },
     ];
@@ -1260,12 +1260,12 @@
         ],
       },
       storage: {
-        title: 'Storage & WAL',
-        body: 'Heap with MVCC tuple headers, WAL with checkpoints, buffer pool featuring LRU-K + TinyLFU and io_uring scheduler.',
+        title: 'Holt Storage',
+        body: 'Rows, indexes, catalog descriptors, and transaction status are persisted through Holt. QuillSQL owns SQL semantics on top.',
         bullets: [
-          'ARIES-style redo/undo with control files',
-          'Prefetch API and streaming scans for large tables',
-          'B+Tree with OLC, B-link pages, WAL-coded operations',
+          'Order-preserving SQL key encoding for range scans',
+          'Holt-backed information_schema projection',
+          'Object-safe table/index handles for execution',
         ],
       },
       execution: {
@@ -1334,8 +1334,8 @@
 
     const BLOG_POSTS = [
       {
-        title: 'Async Disk & io_uring',
-        excerpt: 'We rolled out a dedicated disk scheduler backed by io_uring, SQPOLL, and fixed buffer pools to keep QuillSQL’s I/O path non-blocking.',
+        title: 'Holt Storage Cleanup',
+        excerpt: 'QuillSQL now delegates durable rows, indexes, catalog descriptors, and recovered transaction status to Holt.',
         date: '2025-10-03',
       },
       {
@@ -1344,8 +1344,8 @@
         date: '2025-11-18',
       },
       {
-        title: 'ARIES-style WAL Revamp',
-        excerpt: 'Index WAL payloads, refined redo/undo phases, and refreshed docs bring QuillSQL’s durability story closer to production-grade systems.',
+        title: 'Holt Index Range Scans',
+        excerpt: 'Ordered SQL key encoding plus RID tie-breakers gives point and range predicates a compact Holt-backed index path.',
         date: '2025-11-21',
       },
       {
@@ -1421,7 +1421,7 @@
               <span className="eyebrow">QuillSQL</span>
               <h1>Rust RDBMS for CMU 15-445 style teaching.</h1>
               <p>
-                Single-binary database engine featuring MVCC transactions, ARIES-inspired WAL/recovery, B+Tree indexes
+                Single-binary SQL engine featuring MVCC transactions, Holt-backed rows/indexes/catalog metadata,
                 and a Volcano executor. Use the live terminal below to run SQL against a real QuillSQL instance.
               </p>
               <div className="hero-actions">
@@ -1504,19 +1504,19 @@
                   {active === 'storage' && (
                     <>
                       <div className="mvcc-event">
-                        <label>WAL</label>
+                        <label>Rows</label>
                         <span style={{ '--fill': '70%' }}></span>
-                        <small>durability</small>
+                        <small>TupleMeta + Tuple</small>
                       </div>
                       <div className="mvcc-event">
-                        <label>Buffer</label>
+                        <label>Index</label>
                         <span style={{ '--fill': '55%' }}></span>
-                        <small>LRU-K / TinyLFU</small>
+                        <small>ordered keys</small>
                       </div>
                       <div className="mvcc-event">
-                        <label>B+Tree</label>
+                        <label>Catalog</label>
                         <span style={{ '--fill': '80%' }}></span>
-                        <small>OLC + WAL</small>
+                        <small>descriptors</small>
                       </div>
                     </>
                   )}
@@ -1703,18 +1703,14 @@
       const pullDebugInsights = async () => {
         if (!debugEnabled) return;
         try {
-          const [wal, walPeek, walSegments, buffer, locks, txns, mvcc, trace, plan] = await Promise.all([
-            fetchDebugJson('/debug/wal/head'),
-            fetchDebugJson('/debug/wal/peek?limit=12'),
-            fetchDebugJson('/debug/wal/segments'),
-            fetchDebugJson('/debug/buffer/stats'),
+          const [locks, txns, mvcc, trace, plan] = await Promise.all([
             fetchDebugJson('/debug/locks/snapshot'),
             fetchDebugJson('/debug/txns'),
             fetchDebugJson('/debug/mvcc/versions'),
             fetchDebugJson('/debug/trace/last'),
             fetchDebugJson('/debug/plan/last'),
           ]);
-          setInsights({ wal, walPeek, walSegments, buffer, locks, txns, mvcc, trace, plan });
+          setInsights({ locks, txns, mvcc, trace, plan });
         } catch (err) {
           appendLine(`debug fetch failed: ${err.message}`, 'muted');
         }
@@ -1816,89 +1812,9 @@
 
       const renderInsightCards = () => {
         if (!insights) return null;
-        const { wal, walPeek, walSegments, buffer, locks, txns, mvcc, trace, plan } = insights;
+        const { locks, txns, mvcc, trace, plan } = insights;
         return (
           <div className="insights-grid">
-            <div className="insight-card">
-              <h4>WAL</h4>
-              <div className="insight-grid-row">
-                <div className="stat">
-                  <span>Durable</span>
-                  <strong>{wal.durable_lsn}</strong>
-                </div>
-                <div className="stat">
-                  <span>Max</span>
-                  <strong>{wal.max_assigned_lsn}</strong>
-                </div>
-                <div className="stat">
-                  <span>Pending</span>
-                  <strong>{wal.pending_records} rec / {wal.pending_bytes}B</strong>
-                </div>
-                <div className="stat">
-                  <span>Checkpoint</span>
-                  <strong>{wal.last_checkpoint_lsn}</strong>
-                </div>
-              </div>
-              <table className="table-compact">
-                <thead>
-                  <tr>
-                    <th>LSN</th>
-                    <th>Prev</th>
-                    <th>RMID</th>
-                    <th>Info</th>
-                    <th>Len</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {walPeek?.map((row, idx) => (
-                    <tr key={idx}>
-                      <td>{row.lsn}</td>
-                      <td>{row.prev_lsn}</td>
-                      <td>{row.rmid}</td>
-                      <td>{row.info}</td>
-                      <td>{row.body_len}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-              <table className="table-compact">
-                <thead>
-                  <tr>
-                    <th>Segment</th>
-                    <th>Size</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {walSegments?.segments?.map((seg) => (
-                    <tr key={seg.id}>
-                      <td>{seg.id}</td>
-                      <td>{seg.size_bytes}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-            <div className="insight-card">
-              <h4>Buffer</h4>
-              <div className="insight-grid-row">
-                <div className="stat">
-                  <span>Capacity</span>
-                  <strong>{buffer.capacity}</strong>
-                </div>
-                <div className="stat">
-                  <span>Free</span>
-                  <strong>{buffer.free_frames}</strong>
-                </div>
-                <div className="stat">
-                  <span>Pinned</span>
-                  <strong>{buffer.pinned_frames}</strong>
-                </div>
-                <div className="stat">
-                  <span>Dirty</span>
-                  <strong>{buffer.dirty_frames} ({buffer.dirty_page_table} map)</strong>
-                </div>
-              </div>
-            </div>
             <div className="insight-card">
               <h4>Locks</h4>
               <table className="table-compact">

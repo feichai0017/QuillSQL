@@ -1,17 +1,17 @@
-use crate::buffer::{AtomicPageId, PageId, INVALID_PAGE_ID};
-use crate::catalog::catalog::{CatalogSchema, CatalogTable};
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock};
+
 use crate::catalog::{
-    Catalog, Column, DataType, Schema, SchemaRef, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME,
+    Catalog, CatalogSchema, CatalogTable, Column, DataType, Schema, SchemaRef, TableBackend,
+    DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME,
 };
 use crate::database::Database;
 use crate::error::{QuillSQLError, QuillSQLResult};
+use crate::storage::engine::TableHandle;
+use crate::storage::holt::HoltTableHandle;
+use crate::storage::tuple::Tuple;
 use crate::utils::scalar::ScalarValue;
 use crate::utils::table_ref::TableReference;
-
-use crate::storage::index::btree_index::BPlusTreeIndex;
-use crate::storage::table_heap::{TableHeap, TableIterator};
-use std::collections::HashMap;
-use std::sync::{Arc, LazyLock};
 
 pub static INFORMATION_SCHEMA_NAME: &str = "information_schema";
 pub static INFORMATION_SCHEMA_SCHEMAS: &str = "schemas";
@@ -68,6 +68,7 @@ pub fn load_catalog_data(db: &mut Database) -> QuillSQLResult<()> {
     load_holt_catalog_tables(db)?;
     load_user_indexes(db)?;
     load_holt_catalog_indexes(db)?;
+    db.catalog.refresh_information_schema_projection()?;
     Ok(())
 }
 
@@ -79,150 +80,36 @@ fn create_default_schema_if_not_exists(catalog: &mut Catalog) -> QuillSQLResult<
 }
 
 fn load_information_schema(catalog: &mut Catalog) -> QuillSQLResult<()> {
-    let meta = catalog.disk_manager.meta.read().unwrap();
-    let information_schema_schemas_first_page_id = meta.information_schema_schemas_first_page_id;
-    let information_schema_tables_first_page_id = meta.information_schema_tables_first_page_id;
-    let information_schema_columns_first_page_id = meta.information_schema_columns_first_page_id;
-    let information_schema_indexes_first_page_id = meta.information_schema_indexes_first_page_id;
-    drop(meta);
-
-    // load last page id
-    let information_schema_schemas_last_page_id = load_table_last_page_id(
-        catalog,
-        information_schema_schemas_first_page_id,
-        SCHEMAS_SCHEMA.clone(),
-    )?;
-    let information_schema_tables_last_page_id = load_table_last_page_id(
-        catalog,
-        information_schema_tables_first_page_id,
-        TABLES_SCHEMA.clone(),
-    )?;
-    let information_schema_columns_last_page_id = load_table_last_page_id(
-        catalog,
-        information_schema_columns_first_page_id,
-        COLUMNS_SCHEMA.clone(),
-    )?;
-    let information_schema_indexes_last_page_id = load_table_last_page_id(
-        catalog,
-        information_schema_indexes_first_page_id,
-        INDEXES_SCHEMA.clone(),
-    )?;
-
-    let table_registry = catalog.table_registry();
+    let holt = catalog.holt_store.clone();
     let mut information_schema = CatalogSchema::new(INFORMATION_SCHEMA_NAME);
 
-    let schemas_table = TableHeap {
-        schema: SCHEMAS_SCHEMA.clone(),
-        buffer_pool: catalog.buffer_pool.clone(),
-        first_page_id: AtomicPageId::new(information_schema_schemas_first_page_id),
-        last_page_id: AtomicPageId::new(information_schema_schemas_last_page_id),
-    };
-    let schemas_heap = Arc::new(schemas_table);
-    information_schema.tables.insert(
-        INFORMATION_SCHEMA_SCHEMAS.to_string(),
-        CatalogTable::new(INFORMATION_SCHEMA_SCHEMAS, schemas_heap.clone()),
-    );
-    table_registry.register(
-        TableReference::Full {
+    for (table_name, schema) in [
+        (INFORMATION_SCHEMA_SCHEMAS, SCHEMAS_SCHEMA.clone()),
+        (INFORMATION_SCHEMA_TABLES, TABLES_SCHEMA.clone()),
+        (INFORMATION_SCHEMA_COLUMNS, COLUMNS_SCHEMA.clone()),
+        (INFORMATION_SCHEMA_INDEXES, INDEXES_SCHEMA.clone()),
+    ] {
+        let table_ref = TableReference::Full {
             catalog: DEFAULT_CATALOG_NAME.to_string(),
             schema: INFORMATION_SCHEMA_NAME.to_string(),
-            table: INFORMATION_SCHEMA_SCHEMAS.to_string(),
-        },
-        schemas_heap,
-    );
-
-    let tables_table = TableHeap {
-        schema: TABLES_SCHEMA.clone(),
-        buffer_pool: catalog.buffer_pool.clone(),
-        first_page_id: AtomicPageId::new(information_schema_tables_first_page_id),
-        last_page_id: AtomicPageId::new(information_schema_tables_last_page_id),
-    };
-    let tables_heap = Arc::new(tables_table);
-    information_schema.tables.insert(
-        INFORMATION_SCHEMA_TABLES.to_string(),
-        CatalogTable::new(INFORMATION_SCHEMA_TABLES, tables_heap.clone()),
-    );
-    table_registry.register(
-        TableReference::Full {
-            catalog: DEFAULT_CATALOG_NAME.to_string(),
-            schema: INFORMATION_SCHEMA_NAME.to_string(),
-            table: INFORMATION_SCHEMA_TABLES.to_string(),
-        },
-        tables_heap,
-    );
-
-    let columns_table = TableHeap {
-        schema: COLUMNS_SCHEMA.clone(),
-        buffer_pool: catalog.buffer_pool.clone(),
-        first_page_id: AtomicPageId::new(information_schema_columns_first_page_id),
-        last_page_id: AtomicPageId::new(information_schema_columns_last_page_id),
-    };
-    let columns_heap = Arc::new(columns_table);
-    information_schema.tables.insert(
-        INFORMATION_SCHEMA_COLUMNS.to_string(),
-        CatalogTable::new(INFORMATION_SCHEMA_COLUMNS, columns_heap.clone()),
-    );
-    table_registry.register(
-        TableReference::Full {
-            catalog: DEFAULT_CATALOG_NAME.to_string(),
-            schema: INFORMATION_SCHEMA_NAME.to_string(),
-            table: INFORMATION_SCHEMA_COLUMNS.to_string(),
-        },
-        columns_heap,
-    );
-
-    let indexes_table = TableHeap {
-        schema: INDEXES_SCHEMA.clone(),
-        buffer_pool: catalog.buffer_pool.clone(),
-        first_page_id: AtomicPageId::new(information_schema_indexes_first_page_id),
-        last_page_id: AtomicPageId::new(information_schema_indexes_last_page_id),
-    };
-    let indexes_heap = Arc::new(indexes_table);
-    information_schema.tables.insert(
-        INFORMATION_SCHEMA_INDEXES.to_string(),
-        CatalogTable::new(INFORMATION_SCHEMA_INDEXES, indexes_heap.clone()),
-    );
-    table_registry.register(
-        TableReference::Full {
-            catalog: DEFAULT_CATALOG_NAME.to_string(),
-            schema: INFORMATION_SCHEMA_NAME.to_string(),
-            table: INFORMATION_SCHEMA_INDEXES.to_string(),
-        },
-        indexes_heap,
-    );
+            table: table_name.to_string(),
+        };
+        let table_id = match holt.table_descriptor(&table_ref)? {
+            Some(table_id) => table_id,
+            None => holt.create_table_descriptor(&table_ref, schema.as_ref())?,
+        };
+        information_schema.tables.insert(
+            table_name.to_string(),
+            CatalogTable::new_holt(table_name, schema, table_id),
+        );
+    }
 
     catalog.load_schema(INFORMATION_SCHEMA_NAME, information_schema);
     Ok(())
 }
 
 fn load_schemas(db: &mut Database) -> QuillSQLResult<()> {
-    let schemas_table = {
-        let information_schema =
-            db.catalog
-                .schemas
-                .get(INFORMATION_SCHEMA_NAME)
-                .ok_or_else(|| {
-                    QuillSQLError::Internal("information_schema not initialized".to_string())
-                })?;
-        information_schema
-            .tables
-            .get(INFORMATION_SCHEMA_SCHEMAS)
-            .ok_or_else(|| {
-                QuillSQLError::Internal("information_schema.schemas missing".to_string())
-            })?
-            .table_heap()?
-    };
-
-    let mut iterator = TableIterator::new(schemas_table, ..);
-    while let Some((_rid, meta, tuple)) = iterator.next()? {
-        if meta.is_deleted {
-            continue;
-        }
-        let ScalarValue::Varchar(Some(_catalog)) = tuple.value(0)? else {
-            return Err(QuillSQLError::Internal(
-                "invalid catalog value in information_schema.schemas".to_string(),
-            ));
-        };
+    for tuple in information_schema_rows(db, INFORMATION_SCHEMA_SCHEMAS)? {
         let ScalarValue::Varchar(Some(schema_name)) = tuple.value(1)? else {
             return Err(QuillSQLError::Internal(
                 "invalid schema value in information_schema.schemas".to_string(),
@@ -235,37 +122,8 @@ fn load_schemas(db: &mut Database) -> QuillSQLResult<()> {
 }
 
 fn load_user_tables(db: &mut Database) -> QuillSQLResult<()> {
-    let (columns_heap, tables_heap) = {
-        let information_schema =
-            db.catalog
-                .schemas
-                .get(INFORMATION_SCHEMA_NAME)
-                .ok_or_else(|| {
-                    QuillSQLError::Internal("information_schema not initialized".to_string())
-                })?;
-        let columns_heap = information_schema
-            .tables
-            .get(INFORMATION_SCHEMA_COLUMNS)
-            .ok_or_else(|| {
-                QuillSQLError::Internal("information_schema.columns missing".to_string())
-            })?
-            .table_heap()?;
-        let tables_heap = information_schema
-            .tables
-            .get(INFORMATION_SCHEMA_TABLES)
-            .ok_or_else(|| {
-                QuillSQLError::Internal("information_schema.tables missing".to_string())
-            })?
-            .table_heap()?;
-        (columns_heap, tables_heap)
-    };
-
     let mut column_map: HashMap<(String, String, String), Vec<Column>> = HashMap::new();
-    let mut column_iter = TableIterator::new(columns_heap, ..);
-    while let Some((_rid, meta, tuple)) = column_iter.next()? {
-        if meta.is_deleted {
-            continue;
-        }
+    for tuple in information_schema_rows(db, INFORMATION_SCHEMA_COLUMNS)? {
         let ScalarValue::Varchar(Some(catalog)) = tuple.value(0)? else {
             return Err(QuillSQLError::Internal(
                 "invalid catalog in information_schema.columns".to_string(),
@@ -312,11 +170,7 @@ fn load_user_tables(db: &mut Database) -> QuillSQLResult<()> {
             );
     }
 
-    let mut table_iter = TableIterator::new(tables_heap, ..);
-    while let Some((_rid, meta, tuple)) = table_iter.next()? {
-        if meta.is_deleted {
-            continue;
-        }
+    for tuple in information_schema_rows(db, INFORMATION_SCHEMA_TABLES)? {
         let ScalarValue::Varchar(Some(catalog)) = tuple.value(0)? else {
             return Err(QuillSQLError::Internal(
                 "invalid catalog in information_schema.tables".to_string(),
@@ -332,74 +186,29 @@ fn load_user_tables(db: &mut Database) -> QuillSQLResult<()> {
                 "invalid table name in information_schema.tables".to_string(),
             ));
         };
-        let ScalarValue::UInt32(Some(first_page_id)) = tuple.value(3)? else {
-            return Err(QuillSQLError::Internal(
-                "invalid first_page_id in information_schema.tables".to_string(),
-            ));
-        };
-
-        let columns = column_map
-            .remove(&(catalog.clone(), schema.clone(), table.clone()))
-            .unwrap_or_default();
-        let schema_ref = Arc::new(Schema::new(columns));
         let table_ref = TableReference::Full {
             catalog: catalog.to_string(),
             schema: schema.to_string(),
             table: table.to_string(),
         };
-
-        if let Some(table_id) = db
-            .catalog
-            .holt_store
-            .as_ref()
-            .map(|holt| holt.table_descriptor(&table_ref))
-            .transpose()?
-            .flatten()
-        {
-            db.catalog
-                .load_holt_table(table_ref, table.clone(), schema_ref, table_id)?;
+        let Some(table_id) = db.catalog.holt_store.table_descriptor(&table_ref)? else {
             continue;
-        }
-
-        let last_page_id =
-            load_table_last_page_id(&mut db.catalog, *first_page_id, schema_ref.clone())?;
-        let table_heap = TableHeap {
-            schema: schema_ref.clone(),
-            buffer_pool: db.buffer_pool.clone(),
-            first_page_id: AtomicPageId::new(*first_page_id),
-            last_page_id: AtomicPageId::new(last_page_id),
         };
-
-        db.catalog
-            .load_table(table_ref, CatalogTable::new(table, Arc::new(table_heap)))?;
+        let columns = column_map
+            .remove(&(catalog.clone(), schema.clone(), table.clone()))
+            .unwrap_or_default();
+        db.catalog.load_holt_table(
+            table_ref,
+            table.clone(),
+            Arc::new(Schema::new(columns)),
+            table_id,
+        )?;
     }
     Ok(())
 }
 
 fn load_user_indexes(db: &mut Database) -> QuillSQLResult<()> {
-    let indexes_heap = {
-        let information_schema =
-            db.catalog
-                .schemas
-                .get(INFORMATION_SCHEMA_NAME)
-                .ok_or_else(|| {
-                    QuillSQLError::Internal("information_schema not initialized".to_string())
-                })?;
-
-        information_schema
-            .tables
-            .get(INFORMATION_SCHEMA_INDEXES)
-            .ok_or_else(|| {
-                QuillSQLError::Internal("information_schema.indexes missing".to_string())
-            })?
-            .table_heap()?
-    };
-
-    let mut iterator = TableIterator::new(indexes_heap, ..);
-    while let Some((_rid, meta, tuple)) = iterator.next()? {
-        if meta.is_deleted {
-            continue;
-        }
+    for tuple in information_schema_rows(db, INFORMATION_SCHEMA_INDEXES)? {
         let ScalarValue::Varchar(Some(catalog_name)) = tuple.value(0)? else {
             return Err(QuillSQLError::Internal(
                 "invalid catalog in information_schema.indexes".to_string(),
@@ -425,64 +234,35 @@ fn load_user_indexes(db: &mut Database) -> QuillSQLResult<()> {
                 "invalid key schema in information_schema.indexes".to_string(),
             ));
         };
-        let ScalarValue::UInt32(Some(internal_max_size)) = tuple.value(5)? else {
-            return Err(QuillSQLError::Internal(
-                "invalid internal max size in information_schema.indexes".to_string(),
-            ));
-        };
-        let ScalarValue::UInt32(Some(leaf_max_size)) = tuple.value(6)? else {
-            return Err(QuillSQLError::Internal(
-                "invalid leaf max size in information_schema.indexes".to_string(),
-            ));
-        };
-        let ScalarValue::UInt32(Some(header_page_id)) = tuple.value(7)? else {
-            return Err(QuillSQLError::Internal(
-                "invalid header page id in information_schema.indexes".to_string(),
-            ));
-        };
 
         let table_ref = TableReference::Full {
             catalog: catalog_name.clone(),
             schema: table_schema_name.clone(),
             table: table_name.clone(),
         };
+        let Some(index_id) = db
+            .catalog
+            .holt_store
+            .index_descriptor(&table_ref, index_name)?
+        else {
+            continue;
+        };
         let table_schema = db.catalog.table_schema(&table_ref)?;
         let key_schema = Arc::new(parse_key_schema_from_varchar(
             key_schema_str.as_str(),
             table_schema,
         )?);
-
-        if let Some(index_id) = db
-            .catalog
-            .holt_store
-            .as_ref()
-            .map(|holt| holt.index_descriptor(&table_ref, index_name))
-            .transpose()?
-            .flatten()
-        {
-            db.catalog
-                .load_holt_index(table_ref, index_name, key_schema, index_id)?;
-            continue;
-        }
-
-        let b_plus_tree_index = BPlusTreeIndex::open(
-            key_schema,
-            db.buffer_pool.clone(),
-            *internal_max_size,
-            *leaf_max_size,
-            *header_page_id,
-        );
         db.catalog
-            .load_index(table_ref, index_name, Arc::new(b_plus_tree_index))?;
+            .load_holt_index(table_ref, index_name, key_schema, index_id)?;
     }
     Ok(())
 }
 
 fn load_holt_catalog_tables(db: &mut Database) -> QuillSQLResult<()> {
-    let Some(holt) = db.catalog.holt_store.clone() else {
-        return Ok(());
-    };
-    for descriptor in holt.table_descriptors()? {
+    for descriptor in db.catalog.holt_store.table_descriptors()? {
+        if descriptor.table_ref.schema() == Some(INFORMATION_SCHEMA_NAME) {
+            continue;
+        }
         if db.catalog.try_table_schema(&descriptor.table_ref).is_some() {
             continue;
         }
@@ -506,10 +286,13 @@ fn load_holt_catalog_tables(db: &mut Database) -> QuillSQLResult<()> {
 }
 
 fn load_holt_catalog_indexes(db: &mut Database) -> QuillSQLResult<()> {
-    let Some(holt) = db.catalog.holt_store.clone() else {
-        return Ok(());
-    };
-    for descriptor in holt.index_descriptors()? {
+    for descriptor in db.catalog.holt_store.index_descriptors()? {
+        if descriptor.table_ref.schema() == Some(INFORMATION_SCHEMA_NAME) {
+            continue;
+        }
+        if db.catalog.try_table_schema(&descriptor.table_ref).is_none() {
+            continue;
+        }
         if db
             .catalog
             .table_indexes(&descriptor.table_ref)
@@ -522,9 +305,6 @@ fn load_holt_catalog_indexes(db: &mut Database) -> QuillSQLResult<()> {
         {
             continue;
         }
-        if db.catalog.try_table_schema(&descriptor.table_ref).is_none() {
-            continue;
-        }
         db.catalog.load_holt_index(
             descriptor.table_ref,
             descriptor.index_name,
@@ -535,23 +315,35 @@ fn load_holt_catalog_indexes(db: &mut Database) -> QuillSQLResult<()> {
     Ok(())
 }
 
-fn load_table_last_page_id(
-    catalog: &mut Catalog,
-    first_page_id: PageId,
-    schema: SchemaRef,
-) -> QuillSQLResult<PageId> {
-    let mut page_id = first_page_id;
-    loop {
-        let (_, table_page) = catalog
-            .buffer_pool
-            .fetch_table_page(page_id, schema.clone())?;
-
-        if table_page.header.next_page_id == INVALID_PAGE_ID {
-            return Ok(page_id);
-        } else {
-            page_id = table_page.header.next_page_id;
+fn information_schema_rows(db: &Database, table_name: &str) -> QuillSQLResult<Vec<Tuple>> {
+    let information_schema = db
+        .catalog
+        .schemas
+        .get(INFORMATION_SCHEMA_NAME)
+        .ok_or_else(|| QuillSQLError::Internal("information_schema not initialized".to_string()))?;
+    let table = information_schema.tables.get(table_name).ok_or_else(|| {
+        QuillSQLError::Internal(format!("information_schema.{table_name} missing"))
+    })?;
+    let TableBackend::Holt { table_id } = table.backend;
+    let table_ref = TableReference::Full {
+        catalog: DEFAULT_CATALOG_NAME.to_string(),
+        schema: INFORMATION_SCHEMA_NAME.to_string(),
+        table: table_name.to_string(),
+    };
+    let handle = HoltTableHandle::new(
+        table_ref,
+        table.schema.clone(),
+        table_id,
+        db.catalog.holt_store.clone(),
+    );
+    let mut stream = handle.full_scan()?;
+    let mut rows = Vec::new();
+    while let Some((_rid, meta, tuple)) = stream.next()? {
+        if !meta.is_deleted {
+            rows.push(tuple);
         }
     }
+    Ok(rows)
 }
 
 pub fn key_schema_to_varchar(key_schema: &Schema) -> String {
@@ -565,7 +357,7 @@ pub fn key_schema_to_varchar(key_schema: &Schema) -> String {
 
 fn parse_key_schema_from_varchar(varchar: &str, table_schema: SchemaRef) -> QuillSQLResult<Schema> {
     let column_names = varchar
-        .split(",")
+        .split(',')
         .map(|name| name.trim())
         .collect::<Vec<&str>>();
     let indices = column_names

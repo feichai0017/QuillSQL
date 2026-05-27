@@ -1,7 +1,5 @@
 use crate::error::QuillSQLResult;
-use crate::recovery::Lsn;
-use crate::storage::heap::wal_codec::HeapRecordPayload;
-use crate::storage::page::{RecordId, TupleMeta};
+use crate::storage::record::{RecordId, TupleMeta};
 use crate::storage::tuple::Tuple;
 use crate::storage::{IndexHandle, TableHandle};
 use sqlparser::ast::TransactionAccessMode;
@@ -79,6 +77,17 @@ pub struct IndexUndoLink {
     pub rid: RecordId,
 }
 
+pub(crate) type IndexUndoEntries = Vec<(Arc<dyn IndexHandle>, Tuple, RecordId)>;
+
+pub(crate) struct UpdateUndo {
+    pub old_rid: RecordId,
+    pub new_rid: RecordId,
+    pub prev_meta: TupleMeta,
+    pub prev_tuple: Tuple,
+    pub new_keys: IndexUndoEntries,
+    pub old_keys: IndexUndoEntries,
+}
+
 impl std::fmt::Debug for IndexUndoLink {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("IndexUndoLink")
@@ -149,22 +158,6 @@ impl UndoAction {
             }
         }
     }
-
-    pub fn to_heap_payload(
-        &self,
-        txn_id: TransactionId,
-    ) -> QuillSQLResult<Option<HeapRecordPayload>> {
-        match self {
-            UndoAction::Insert { table, rid, .. } => table.undo_insert_payload(*rid, txn_id),
-            UndoAction::Delete {
-                table,
-                rid,
-                prev_meta,
-                prev_tuple,
-                ..
-            } => table.undo_delete_payload(*rid, *prev_meta, prev_tuple, txn_id),
-        }
-    }
 }
 
 pub struct Transaction {
@@ -172,9 +165,6 @@ pub struct Transaction {
     isolation_level: IsolationLevel,
     access_mode: TransactionAccessMode,
     state: TransactionState,
-    synchronous_commit: bool,
-    begin_lsn: Option<Lsn>,
-    last_lsn: Option<Lsn>,
     undo_actions: Vec<UndoAction>,
     current_command_id: CommandId,
     next_command_id: CommandId,
@@ -186,16 +176,12 @@ impl Transaction {
         id: TransactionId,
         isolation_level: IsolationLevel,
         access_mode: TransactionAccessMode,
-        synchronous_commit: bool,
     ) -> Self {
         Self {
             id,
             isolation_level,
             access_mode,
             state: TransactionState::Running,
-            synchronous_commit,
-            begin_lsn: None,
-            last_lsn: None,
             undo_actions: Vec::new(),
             current_command_id: INVALID_COMMAND_ID,
             next_command_id: 0,
@@ -229,18 +215,6 @@ impl Transaction {
         self.state
     }
 
-    pub fn synchronous_commit(&self) -> bool {
-        self.synchronous_commit
-    }
-
-    pub fn begin_lsn(&self) -> Option<Lsn> {
-        self.begin_lsn
-    }
-
-    pub fn last_lsn(&self) -> Option<Lsn> {
-        self.last_lsn
-    }
-
     pub fn begin_command(&mut self) -> CommandId {
         let cid = self.next_command_id;
         self.current_command_id = cid;
@@ -252,15 +226,6 @@ impl Transaction {
         self.current_command_id
     }
 
-    pub(crate) fn set_begin_lsn(&mut self, lsn: Lsn) {
-        self.begin_lsn = Some(lsn);
-        self.last_lsn = Some(lsn);
-    }
-
-    pub(crate) fn record_lsn(&mut self, lsn: Lsn) {
-        self.last_lsn = Some(lsn);
-    }
-
     pub(crate) fn set_state(&mut self, state: TransactionState) {
         self.state = state;
     }
@@ -269,11 +234,11 @@ impl Transaction {
         self.access_mode = access_mode;
     }
 
-    pub fn push_insert_undo(
+    pub(crate) fn push_insert_undo(
         &mut self,
         table: Arc<dyn TableHandle>,
         rid: RecordId,
-        indexes: Vec<(Arc<dyn IndexHandle>, Tuple, RecordId)>,
+        indexes: IndexUndoEntries,
     ) {
         self.undo_actions.push(UndoAction::Insert {
             table,
@@ -285,43 +250,36 @@ impl Transaction {
         });
     }
 
-    pub fn push_update_undo(
-        &mut self,
-        table: Arc<dyn TableHandle>,
-        old_rid: RecordId,
-        new_rid: RecordId,
-        prev_meta: TupleMeta,
-        prev_tuple: Tuple,
-        new_keys: Vec<(Arc<dyn IndexHandle>, Tuple, RecordId)>,
-        old_keys: Vec<(Arc<dyn IndexHandle>, Tuple, RecordId)>,
-    ) {
+    pub(crate) fn push_update_undo(&mut self, table: Arc<dyn TableHandle>, undo: UpdateUndo) {
         self.undo_actions.push(UndoAction::Insert {
             table: table.clone(),
-            rid: new_rid,
-            indexes: new_keys
+            rid: undo.new_rid,
+            indexes: undo
+                .new_keys
                 .into_iter()
                 .map(|(index, key, rid)| IndexUndoLink { index, key, rid })
                 .collect(),
         });
         self.undo_actions.push(UndoAction::Delete {
             table: table.clone(),
-            rid: old_rid,
-            prev_meta,
-            prev_tuple,
-            indexes: old_keys
+            rid: undo.old_rid,
+            prev_meta: undo.prev_meta,
+            prev_tuple: undo.prev_tuple,
+            indexes: undo
+                .old_keys
                 .into_iter()
                 .map(|(index, key, rid)| IndexUndoLink { index, key, rid })
                 .collect(),
         });
     }
 
-    pub fn push_delete_undo(
+    pub(crate) fn push_delete_undo(
         &mut self,
         table: Arc<dyn TableHandle>,
         rid: RecordId,
         prev_meta: TupleMeta,
         prev_tuple: Tuple,
-        indexes: Vec<(Arc<dyn IndexHandle>, Tuple, RecordId)>,
+        indexes: IndexUndoEntries,
     ) {
         self.undo_actions.push(UndoAction::Delete {
             table,
@@ -335,11 +293,11 @@ impl Transaction {
         });
     }
 
-    pub fn pop_undo_action(&mut self) -> Option<UndoAction> {
+    pub(crate) fn pop_undo_action(&mut self) -> Option<UndoAction> {
         self.undo_actions.pop()
     }
 
-    pub fn clear_undo(&mut self) {
+    pub(crate) fn clear_undo(&mut self) {
         self.undo_actions.clear();
     }
 

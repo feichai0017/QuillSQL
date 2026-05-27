@@ -1,4 +1,4 @@
-use crate::storage::page::RecordId;
+use crate::storage::record::RecordId;
 use crate::transaction::{Transaction, TransactionId};
 use crate::utils::table_ref::TableReference;
 use log::{trace, warn};
@@ -591,7 +591,6 @@ mod tests {
             id,
             IsolationLevel::ReadCommitted,
             sqlparser::ast::TransactionAccessMode::ReadWrite,
-            true,
         )
     }
 

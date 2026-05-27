@@ -1,4 +1,3 @@
-use crate::buffer::PAGE_SIZE;
 use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::execution::physical_plan::PhysicalPlan;
 use crate::plan::logical_plan::LogicalPlan;
@@ -59,12 +58,6 @@ fn pretty_format_physical_plan_recursively(plan: &PhysicalPlan, indent: usize) -
         result.push_str(&pretty_format_physical_plan_recursively(input, indent + 2));
     }
     result
-}
-
-pub fn page_bytes_to_array(bytes: &[u8]) -> [u8; PAGE_SIZE] {
-    let mut data = [0u8; PAGE_SIZE];
-    data.copy_from_slice(bytes);
-    data
 }
 
 pub fn time() -> u128 {

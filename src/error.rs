@@ -16,9 +16,6 @@ pub enum QuillSQLError {
     #[error("Parser error: {0}")]
     Parser(#[from] sqlparser::parser::ParserError),
 
-    #[error("Bincode error: {0}")]
-    Bincode(#[from] bincode::Error),
-
     #[error("Plan error: {0}")]
     Plan(String),
 

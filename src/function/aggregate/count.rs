@@ -7,6 +7,12 @@ pub struct CountAccumulator {
     count: i64,
 }
 
+impl Default for CountAccumulator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CountAccumulator {
     pub fn new() -> Self {
         Self { count: 0 }

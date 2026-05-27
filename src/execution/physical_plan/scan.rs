@@ -4,7 +4,7 @@ use std::cell::RefCell;
 use std::collections::VecDeque;
 
 use crate::error::QuillSQLResult;
-use crate::storage::page::{RecordId, TupleMeta};
+use crate::storage::record::{RecordId, TupleMeta};
 use crate::storage::tuple::Tuple;
 
 pub type ScanEntry = (RecordId, TupleMeta, Tuple);

@@ -1,5 +1,6 @@
 use crate::catalog::{Catalog, CatalogIndex, Schema};
 use std::ops::Bound;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::expression::{BinaryExpr, BinaryOp, ColumnExpr, Expr, Literal};
@@ -8,6 +9,7 @@ use crate::plan::logical_plan::{
     Limit, LogicalPlan, Project, Sort, TableScan, Values,
 };
 use crate::storage::tuple::Tuple;
+use crate::utils::scalar::ScalarValue;
 
 use crate::execution::physical_plan::{
     PhysicalAggregate, PhysicalAnalyze, PhysicalCreateIndex, PhysicalCreateTable, PhysicalDelete,
@@ -90,7 +92,7 @@ impl<'a> PhysicalPlanner<'a> {
                     table.clone(),
                     table_schema.clone(),
                     projected_schema.clone(),
-                    Arc::new(input_physical_plan),
+                    Rc::new(input_physical_plan),
                 ))
             }
             LogicalPlan::Values(Values { schema, values }) => {
@@ -105,14 +107,14 @@ impl<'a> PhysicalPlanner<'a> {
                 PhysicalPlan::Project(PhysicalProject::new(
                     exprs.clone(),
                     schema.clone(),
-                    Arc::new(input_physical_plan),
+                    Rc::new(input_physical_plan),
                 ))
             }
             LogicalPlan::Filter(Filter { predicate, input }) => {
                 let input_physical_plan = self.build_plan(input.clone());
                 PhysicalPlan::Filter(PhysicalFilter::new(
                     predicate.clone(),
-                    Arc::new(input_physical_plan),
+                    Rc::new(input_physical_plan),
                 ))
             }
             LogicalPlan::TableScan(scan) => self.build_table_scan(scan),
@@ -125,7 +127,7 @@ impl<'a> PhysicalPlanner<'a> {
                 PhysicalPlan::Limit(PhysicalLimit::new(
                     *limit,
                     *offset,
-                    Arc::new(input_physical_plan),
+                    Rc::new(input_physical_plan),
                 ))
             }
             LogicalPlan::Join(Join {
@@ -140,8 +142,8 @@ impl<'a> PhysicalPlanner<'a> {
                 PhysicalPlan::NestedLoopJoin(PhysicalNestedLoopJoin::new(
                     *join_type,
                     condition.clone(),
-                    Arc::new(left_physical_plan),
-                    Arc::new(right_physical_plan),
+                    Rc::new(left_physical_plan),
+                    Rc::new(right_physical_plan),
                     schema.clone(),
                 ))
             }
@@ -154,7 +156,7 @@ impl<'a> PhysicalPlanner<'a> {
                 let input_physical_plan = self.build_plan(Arc::clone(input));
                 PhysicalPlan::Sort(PhysicalSort::new(
                     expr.clone(),
-                    Arc::new(input_physical_plan),
+                    Rc::new(input_physical_plan),
                 ))
             }
             LogicalPlan::EmptyRelation(EmptyRelation {
@@ -172,7 +174,7 @@ impl<'a> PhysicalPlanner<'a> {
             }) => {
                 let input_physical_plan = self.build_plan(Arc::clone(input));
                 PhysicalPlan::Aggregate(PhysicalAggregate::new(
-                    Arc::new(input_physical_plan),
+                    Rc::new(input_physical_plan),
                     group_exprs.clone(),
                     aggr_exprs.clone(),
                     schema.clone(),
@@ -208,11 +210,11 @@ impl<'a> PhysicalPlanner<'a> {
             .unwrap_or_else(|| self.new_seq_scan(scan));
 
         if let Some(limit_value) = scan.limit {
-            plan = PhysicalPlan::Limit(PhysicalLimit::new(Some(limit_value), 0, Arc::new(plan)));
+            plan = PhysicalPlan::Limit(PhysicalLimit::new(Some(limit_value), 0, Rc::new(plan)));
         }
 
         if let Some(predicate) = conjunction(&scan.filters) {
-            plan = PhysicalPlan::Filter(PhysicalFilter::new(predicate, Arc::new(plan)));
+            plan = PhysicalPlan::Filter(PhysicalFilter::new(predicate, Rc::new(plan)));
         }
 
         plan
@@ -256,8 +258,8 @@ fn bounds_for_index(
     index: &CatalogIndex,
     filters: &[Expr],
 ) -> Option<(Bound<Tuple>, Bound<Tuple>)> {
-    if index.key_schema.column_count() != 1 {
-        return None;
+    if index.key_schema.column_count() > 1 {
+        return composite_equality_bounds(index, filters);
     }
     let column = index.key_schema.columns[0].clone();
     let mut lower = Bound::Unbounded;
@@ -273,6 +275,33 @@ fn bounds_for_index(
         }
     }
     matched.then_some((lower, upper))
+}
+
+fn composite_equality_bounds(
+    index: &CatalogIndex,
+    filters: &[Expr],
+) -> Option<(Bound<Tuple>, Bound<Tuple>)> {
+    let mut values = vec![None; index.key_schema.column_count()];
+    for predicate in flattened_conjuncts(filters) {
+        for (idx, column) in index.key_schema.columns.iter().enumerate() {
+            let Some(value) =
+                equality_literal_from_predicate(predicate, column.name.as_str(), column.data_type)
+            else {
+                continue;
+            };
+            if values[idx]
+                .as_ref()
+                .is_some_and(|existing| existing != &value)
+            {
+                return None;
+            }
+            values[idx] = Some(value);
+        }
+    }
+
+    let values = values.into_iter().collect::<Option<Vec<_>>>()?;
+    let key = Tuple::new(index.key_schema.clone(), values);
+    Some((Bound::Included(key.clone()), Bound::Included(key)))
 }
 
 fn flattened_conjuncts(filters: &[Expr]) -> Vec<&Expr> {
@@ -320,6 +349,32 @@ fn column_literal(
     column_name: &str,
     key_schema: &crate::catalog::SchemaRef,
 ) -> Option<Tuple> {
+    let data_type = key_schema.columns[0].data_type;
+    let value = column_literal_value(column_expr, literal_expr, column_name, data_type)?;
+    Some(Tuple::new(key_schema.clone(), vec![value]))
+}
+
+fn equality_literal_from_predicate(
+    predicate: &Expr,
+    column_name: &str,
+    data_type: crate::catalog::DataType,
+) -> Option<ScalarValue> {
+    let Expr::Binary(BinaryExpr { left, op, right }) = predicate else {
+        return None;
+    };
+    if *op != BinaryOp::Eq {
+        return None;
+    }
+    column_literal_value(left, right, column_name, data_type)
+        .or_else(|| column_literal_value(right, left, column_name, data_type))
+}
+
+fn column_literal_value(
+    column_expr: &Expr,
+    literal_expr: &Expr,
+    column_name: &str,
+    data_type: crate::catalog::DataType,
+) -> Option<ScalarValue> {
     let Expr::Column(ColumnExpr { name, .. }) = column_expr else {
         return None;
     };
@@ -329,9 +384,7 @@ fn column_literal(
     let Expr::Literal(Literal { value }) = literal_expr else {
         return None;
     };
-    let data_type = key_schema.columns[0].data_type;
-    let value = value.cast_to(&data_type).ok()?;
-    Some(Tuple::new(key_schema.clone(), vec![value]))
+    value.cast_to(&data_type).ok()
 }
 
 fn bounds_for_op(op: BinaryOp, value: Tuple) -> Option<(Bound<Tuple>, Bound<Tuple>)> {

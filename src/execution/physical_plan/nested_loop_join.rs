@@ -2,7 +2,7 @@
 
 use log::debug;
 use std::cell::RefCell;
-use std::sync::Arc;
+use std::rc::Rc;
 
 use crate::catalog::SchemaRef;
 use crate::expression::Expr;
@@ -19,8 +19,8 @@ use super::PhysicalPlan;
 pub struct PhysicalNestedLoopJoin {
     pub join_type: JoinType,
     pub condition: Option<Expr>,
-    pub left_input: Arc<PhysicalPlan>,
-    pub right_input: Arc<PhysicalPlan>,
+    pub left_input: Rc<PhysicalPlan>,
+    pub right_input: Rc<PhysicalPlan>,
     pub schema: SchemaRef,
 
     left_tuple: RefCell<Option<Tuple>>,
@@ -29,8 +29,8 @@ impl PhysicalNestedLoopJoin {
     pub fn new(
         join_type: JoinType,
         condition: Option<Expr>,
-        left_input: Arc<PhysicalPlan>,
-        right_input: Arc<PhysicalPlan>,
+        left_input: Rc<PhysicalPlan>,
+        right_input: Rc<PhysicalPlan>,
         schema: SchemaRef,
     ) -> Self {
         PhysicalNestedLoopJoin {

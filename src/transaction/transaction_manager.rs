@@ -1,12 +1,9 @@
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::error::{QuillSQLError, QuillSQLResult};
-use crate::recovery::wal::codec::{ClrPayload, TransactionPayload, TransactionRecordKind};
-use crate::recovery::wal_record::WalRecordPayload;
-use crate::recovery::{Lsn, WalManager};
-use crate::storage::page::RecordId;
+use crate::storage::record::RecordId;
 use crate::transaction::{
     IsolationLevel, LockManager, LockMode, Transaction, TransactionId, TransactionSnapshot,
     TransactionState, TransactionStatus,
@@ -24,13 +21,17 @@ struct HeldLocks {
 }
 
 pub struct TransactionManager {
-    wal: Arc<WalManager>,
     next_txn_id: AtomicU64,
-    synchronous_commit: AtomicBool,
     active_txns: DashSet<TransactionId>,
     lock_manager: Arc<LockManager>,
     held_locks: DashMap<TransactionId, HeldLocks>,
     txn_statuses: DashMap<TransactionId, TransactionStatus>,
+}
+
+impl Default for TransactionManager {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -49,11 +50,9 @@ pub struct TxnDebugSnapshot {
 }
 
 impl TransactionManager {
-    pub fn new(wal: Arc<WalManager>, synchronous_commit: bool) -> Self {
+    pub fn new() -> Self {
         Self {
-            wal,
             next_txn_id: AtomicU64::new(1),
-            synchronous_commit: AtomicBool::new(synchronous_commit),
             active_txns: DashSet::new(),
             lock_manager: Arc::new(LockManager::new()),
             held_locks: DashMap::new(),
@@ -61,15 +60,9 @@ impl TransactionManager {
         }
     }
 
-    pub fn with_lock_manager(
-        wal: Arc<WalManager>,
-        synchronous_commit: bool,
-        lock_manager: Arc<LockManager>,
-    ) -> Self {
+    pub fn with_lock_manager(lock_manager: Arc<LockManager>) -> Self {
         Self {
-            wal,
             next_txn_id: AtomicU64::new(1),
-            synchronous_commit: AtomicBool::new(synchronous_commit),
             active_txns: DashSet::new(),
             lock_manager,
             held_locks: DashMap::new(),
@@ -92,15 +85,7 @@ impl TransactionManager {
                 "Transaction ID wrapped around".to_string(),
             ));
         }
-        let sync_commit = self.synchronous_commit.load(Ordering::Relaxed);
-        let mut txn = Transaction::new(txn_id, isolation_level, access_mode, sync_commit);
-        let append = self.wal.append_record_with(|_| {
-            WalRecordPayload::Transaction(TransactionPayload {
-                marker: TransactionRecordKind::Begin,
-                txn_id,
-            })
-        })?;
-        txn.set_begin_lsn(append.end_lsn);
+        let txn = Transaction::new(txn_id, isolation_level, access_mode);
         self.active_txns.insert(txn_id);
         self.txn_statuses
             .insert(txn_id, TransactionStatus::InProgress);
@@ -186,13 +171,6 @@ impl TransactionManager {
         }
 
         let txn_id = txn.id();
-        let append = self.wal.append_record_with(|_| {
-            WalRecordPayload::Transaction(TransactionPayload {
-                marker: TransactionRecordKind::Commit,
-                txn_id,
-            })
-        })?;
-        txn.record_lsn(append.end_lsn);
         txn.set_state(TransactionState::Committed);
 
         self.active_txns.remove(&txn_id);
@@ -201,7 +179,7 @@ impl TransactionManager {
         self.release_all_locks(txn_id);
         txn.clear_undo();
         txn.clear_snapshot();
-        self.finish_commit(txn, append.end_lsn)
+        Ok(())
     }
 
     pub fn abort(&self, txn: &mut Transaction) -> QuillSQLResult<()> {
@@ -217,38 +195,10 @@ impl TransactionManager {
         }
 
         let txn_id = txn.id();
-        let mut undo_next: Option<Lsn> = None;
         while let Some(action) = txn.pop_undo_action() {
-            let payload = action.to_heap_payload(txn_id)?;
-            let clr_result = self.wal.append_record_with(|ctx| {
-                txn.record_lsn(ctx.end_lsn);
-                WalRecordPayload::Clr(ClrPayload {
-                    txn_id,
-                    undone_lsn: ctx.start_lsn,
-                    undo_next_lsn: undo_next.unwrap_or(0),
-                })
-            })?;
-            txn.record_lsn(clr_result.end_lsn);
-            if let Some(payload) = payload {
-                let heap_result = self.wal.append_record_with(|ctx| {
-                    txn.record_lsn(ctx.end_lsn);
-                    WalRecordPayload::Heap(payload.clone())
-                })?;
-                txn.record_lsn(heap_result.end_lsn);
-                undo_next = Some(heap_result.start_lsn);
-            } else {
-                undo_next = Some(clr_result.start_lsn);
-            }
             action.undo(txn_id)?;
         }
 
-        let append = self.wal.append_record_with(|_| {
-            WalRecordPayload::Transaction(TransactionPayload {
-                marker: TransactionRecordKind::Abort,
-                txn_id,
-            })
-        })?;
-        txn.record_lsn(append.end_lsn);
         txn.set_state(TransactionState::Aborted);
 
         self.active_txns.remove(&txn_id);
@@ -256,15 +206,7 @@ impl TransactionManager {
         self.release_all_locks(txn_id);
         txn.clear_undo();
         txn.clear_snapshot();
-        self.finish_commit(txn, append.end_lsn)
-    }
-
-    pub fn synchronous_commit(&self) -> bool {
-        self.synchronous_commit.load(Ordering::Relaxed)
-    }
-
-    pub fn set_synchronous_commit(&self, value: bool) {
-        self.synchronous_commit.store(value, Ordering::Relaxed);
+        Ok(())
     }
 
     pub fn active_transactions(&self) -> Vec<TransactionId> {
@@ -346,15 +288,6 @@ impl TransactionManager {
         }
     }
 
-    fn finish_commit(&self, txn: &Transaction, lsn: Lsn) -> QuillSQLResult<()> {
-        if txn.synchronous_commit() {
-            self.wal.wait_for_durable(lsn)?;
-        } else if !self.wal.has_background_writer() {
-            let _ = self.wal.flush_until(lsn)?;
-        }
-        Ok(())
-    }
-
     pub fn record_row_lock(
         &self,
         txn_id: TransactionId,
@@ -392,26 +325,11 @@ impl TransactionManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::WalConfig;
-    use crate::recovery::WalManager;
-    use crate::storage::page::TupleMeta;
-    use tempfile::TempDir;
-
-    fn build_wal(temp_dir: &TempDir) -> Arc<WalManager> {
-        let wal_path = temp_dir.path().join("wal");
-        let config = WalConfig {
-            directory: wal_path,
-            sync_on_flush: false,
-            ..WalConfig::default()
-        };
-        Arc::new(WalManager::new(config, None, None).expect("wal manager"))
-    }
+    use crate::storage::record::TupleMeta;
 
     #[test]
-    fn commit_waits_for_durable_when_sync() {
-        let temp = TempDir::new().expect("tempdir");
-        let wal = build_wal(&temp);
-        let manager = TransactionManager::new(wal.clone(), true);
+    fn commit_marks_state_and_status() {
+        let manager = TransactionManager::new();
 
         let mut txn = manager
             .begin(
@@ -422,15 +340,15 @@ mod tests {
         manager.commit(&mut txn).expect("commit");
 
         assert_eq!(txn.state(), TransactionState::Committed);
-        let lsn = txn.last_lsn().expect("commit lsn");
-        assert!(wal.durable_lsn() >= lsn);
+        assert_eq!(
+            manager.transaction_status(txn.id()),
+            TransactionStatus::Committed
+        );
     }
 
     #[test]
-    fn abort_records_wal_and_marks_state() {
-        let temp = TempDir::new().expect("tempdir");
-        let wal = build_wal(&temp);
-        let manager = TransactionManager::new(wal.clone(), false);
+    fn abort_marks_state_and_status() {
+        let manager = TransactionManager::new();
 
         let mut txn = manager
             .begin(
@@ -441,16 +359,15 @@ mod tests {
         manager.abort(&mut txn).expect("abort");
 
         assert_eq!(txn.state(), TransactionState::Aborted);
-        let lsn = txn.last_lsn().expect("abort lsn");
-        // Async commit still triggers flush_until, so durable LSN should advance.
-        assert!(wal.durable_lsn() >= lsn);
+        assert_eq!(
+            manager.transaction_status(txn.id()),
+            TransactionStatus::Aborted
+        );
     }
 
     #[test]
     fn snapshot_excludes_running_insert_until_commit() {
-        let temp = TempDir::new().expect("tempdir");
-        let wal = build_wal(&temp);
-        let manager = TransactionManager::new(wal, true);
+        let manager = TransactionManager::new();
 
         let mut writer = manager
             .begin(
@@ -481,9 +398,7 @@ mod tests {
 
     #[test]
     fn snapshot_treats_committed_delete_as_invisible() {
-        let temp = TempDir::new().expect("tempdir");
-        let wal = build_wal(&temp);
-        let manager = TransactionManager::new(wal, true);
+        let manager = TransactionManager::new();
 
         let mut inserter = manager
             .begin(

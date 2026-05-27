@@ -10,13 +10,13 @@ use crate::utils::scalar::ScalarValue;
 use crate::{error::QuillSQLResult, storage::tuple::Tuple};
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
 
 #[derive(Debug)]
 pub struct PhysicalAggregate {
     /// The incoming physical plan
-    pub input: Arc<PhysicalPlan>,
+    pub input: Rc<PhysicalPlan>,
     /// Grouping expressions
     pub group_exprs: Vec<Expr>,
     /// Aggregate expressions
@@ -30,7 +30,7 @@ pub struct PhysicalAggregate {
 
 impl PhysicalAggregate {
     pub fn new(
-        input: Arc<PhysicalPlan>,
+        input: Rc<PhysicalPlan>,
         group_exprs: Vec<Expr>,
         aggr_exprs: Vec<Expr>,
         schema: SchemaRef,

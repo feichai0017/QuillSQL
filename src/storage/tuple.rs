@@ -1,6 +1,6 @@
 use crate::catalog::{Schema, SchemaRef, EMPTY_SCHEMA_REF};
 use crate::error::{QuillSQLError, QuillSQLResult};
-use crate::storage::page::RecordId;
+use crate::storage::record::RecordId;
 use crate::utils::scalar::ScalarValue;
 use crate::utils::table_ref::TableReference;
 use std::cmp::Ordering;
@@ -88,22 +88,24 @@ impl Tuple {
 
 impl Ord for Tuple {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.partial_cmp(other).unwrap_or(Ordering::Equal)
+        let column_count = self.schema.column_count();
+        for idx in 0..column_count {
+            let order = self
+                .value(idx)
+                .ok()
+                .and_then(|left| left.partial_cmp(other.value(idx).ok()?))
+                .unwrap_or(Ordering::Equal);
+            if order != Ordering::Equal {
+                return order;
+            }
+        }
+        Ordering::Equal
     }
 }
 
 impl PartialOrd for Tuple {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        let column_count = self.schema.column_count();
-        for idx in 0..column_count {
-            let order = self.value(idx).ok()?.partial_cmp(other.value(idx).ok()?)?;
-            if order == Ordering::Equal {
-                continue;
-            } else {
-                return Some(order);
-            }
-        }
-        Some(Ordering::Equal)
+        Some(self.cmp(other))
     }
 }
 
@@ -116,31 +118,6 @@ impl Display for Tuple {
             .collect::<Vec<String>>()
             .join(", ");
         write!(f, "({})", values)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::catalog::{Column, DataType, Schema};
-    use std::cmp::Ordering;
-    use std::sync::Arc;
-
-    #[test]
-    pub fn tuple_compare() {
-        let schema = Arc::new(Schema::new(vec![
-            Column::new("a", DataType::Int8, false),
-            Column::new("b", DataType::Int16, false),
-        ]));
-        let tuple1 = super::Tuple::new(schema.clone(), vec![1i8.into(), 2i16.into()]);
-        let tuple2 = super::Tuple::new(schema.clone(), vec![1i8.into(), 2i16.into()]);
-        let tuple3 = super::Tuple::new(schema.clone(), vec![1i8.into(), 3i16.into()]);
-        let tuple4 = super::Tuple::new(schema.clone(), vec![2i8.into(), 2i16.into()]);
-        let tuple5 = super::Tuple::new(schema.clone(), vec![1i8.into(), 1i16.into()]);
-
-        assert_eq!(tuple1.partial_cmp(&tuple2).unwrap(), Ordering::Equal);
-        assert_eq!(tuple1.partial_cmp(&tuple3).unwrap(), Ordering::Less);
-        assert_eq!(tuple1.partial_cmp(&tuple4).unwrap(), Ordering::Less);
-        assert_eq!(tuple1.partial_cmp(&tuple5).unwrap(), Ordering::Greater);
     }
 }
 
@@ -166,4 +143,29 @@ fn value_as_u32(value: &ScalarValue) -> QuillSQLResult<u32> {
         ));
     }
     Ok(num as u32)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::catalog::{Column, DataType, Schema};
+    use std::cmp::Ordering;
+    use std::sync::Arc;
+
+    #[test]
+    pub fn tuple_compare() {
+        let schema = Arc::new(Schema::new(vec![
+            Column::new("a", DataType::Int8, false),
+            Column::new("b", DataType::Int16, false),
+        ]));
+        let tuple1 = super::Tuple::new(schema.clone(), vec![1i8.into(), 2i16.into()]);
+        let tuple2 = super::Tuple::new(schema.clone(), vec![1i8.into(), 2i16.into()]);
+        let tuple3 = super::Tuple::new(schema.clone(), vec![1i8.into(), 3i16.into()]);
+        let tuple4 = super::Tuple::new(schema.clone(), vec![2i8.into(), 2i16.into()]);
+        let tuple5 = super::Tuple::new(schema.clone(), vec![1i8.into(), 1i16.into()]);
+
+        assert_eq!(tuple1.partial_cmp(&tuple2).unwrap(), Ordering::Equal);
+        assert_eq!(tuple1.partial_cmp(&tuple3).unwrap(), Ordering::Less);
+        assert_eq!(tuple1.partial_cmp(&tuple4).unwrap(), Ordering::Less);
+        assert_eq!(tuple1.partial_cmp(&tuple5).unwrap(), Ordering::Greater);
+    }
 }

@@ -9,7 +9,7 @@ impl<'a> LogicalPlanner<'a> {
     pub fn plan_insert(
         &self,
         table_name: &sqlparser::ast::ObjectName,
-        columns_ident: &Vec<sqlparser::ast::Ident>,
+        columns_ident: &[sqlparser::ast::Ident],
         source: &sqlparser::ast::Query,
     ) -> QuillSQLResult<LogicalPlan> {
         let mut input = self.plan_set_expr(source.body.as_ref())?;

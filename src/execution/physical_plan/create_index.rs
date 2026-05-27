@@ -1,4 +1,4 @@
-use crate::catalog::{IndexEngine, SchemaRef, TableBackend, EMPTY_SCHEMA_REF};
+use crate::catalog::{IndexEngine, SchemaRef, EMPTY_SCHEMA_REF};
 use crate::error::QuillSQLError;
 use crate::expression::{ColumnExpr, Expr};
 use crate::plan::logical_plan::OrderByExpr;
@@ -36,40 +36,15 @@ impl VolcanoExecutor for PhysicalCreateIndex {
             }
         }
         let key_schema = Arc::new(self.table_schema.project(&key_indices)?);
-        let table_backend = context.catalog.table_backend(&self.table)?;
-        match (
-            table_backend,
-            self.using.unwrap_or(default_index_engine(table_backend)),
-        ) {
-            (TableBackend::Page, IndexEngine::BTree) => {
-                context
-                    .catalog
-                    .create_index(self.name.clone(), &self.table, key_schema)?;
-            }
-            (TableBackend::Page, IndexEngine::Holt)
-            | (TableBackend::Holt { .. }, IndexEngine::Holt) => {
-                context
-                    .catalog
-                    .create_holt_index(self.name.clone(), &self.table, key_schema)?;
-            }
-            (TableBackend::Holt { .. }, IndexEngine::BTree) => {
-                return Err(QuillSQLError::NotSupport(
-                    "BTree index on Holt table is not supported".to_string(),
-                ));
-            }
-        }
+        let _ = self.using.unwrap_or(IndexEngine::Holt);
+        context
+            .catalog
+            .create_holt_index(self.name.clone(), &self.table, key_schema)?;
         backfill_index(context, &self.table, &self.name)?;
         Ok(None)
     }
     fn output_schema(&self) -> SchemaRef {
         EMPTY_SCHEMA_REF.clone()
-    }
-}
-
-fn default_index_engine(table_backend: TableBackend) -> IndexEngine {
-    match table_backend {
-        TableBackend::Page => IndexEngine::BTree,
-        TableBackend::Holt { .. } => IndexEngine::Holt,
     }
 }
 

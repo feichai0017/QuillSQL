@@ -8,7 +8,7 @@ use crate::catalog::SchemaRef;
 use crate::execution::physical_plan::{resolve_table_binding, stream_not_ready};
 use crate::storage::{
     engine::{TableBinding, TupleStream},
-    page::{RecordId, TupleMeta},
+    record::{RecordId, TupleMeta},
 };
 use crate::transaction::LockMode;
 use crate::utils::table_ref::TableReference;

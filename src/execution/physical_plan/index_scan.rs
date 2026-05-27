@@ -10,7 +10,7 @@ use crate::execution::physical_plan::{resolve_table_binding, stream_not_ready};
 use crate::execution::{ExecutionContext, VolcanoExecutor};
 use crate::storage::{
     engine::{IndexScanRequest, TableBinding, TupleStream},
-    page::{RecordId, TupleMeta},
+    record::{RecordId, TupleMeta},
 };
 use crate::transaction::{IsolationLevel, LockMode};
 use crate::utils::table_ref::TableReference;

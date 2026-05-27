@@ -37,6 +37,12 @@ pub struct LogicalOptimizer {
     pub max_passes: usize,
 }
 
+impl Default for LogicalOptimizer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LogicalOptimizer {
     pub fn new() -> Self {
         let rules: Vec<Arc<dyn LogicalOptimizerRule + Sync + Send>> = vec![

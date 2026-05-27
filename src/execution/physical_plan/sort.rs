@@ -2,8 +2,8 @@
 
 use std::cell::RefCell;
 use std::cmp::Ordering as CmpOrdering;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
 
 use crate::catalog::SchemaRef;
 use crate::error::QuillSQLError;
@@ -20,13 +20,13 @@ use super::PhysicalPlan;
 #[derive(Debug)]
 pub struct PhysicalSort {
     pub order_bys: Vec<OrderByExpr>,
-    pub input: Arc<PhysicalPlan>,
+    pub input: Rc<PhysicalPlan>,
 
     all_tuples: RefCell<Vec<Tuple>>,
     cursor: AtomicUsize,
 }
 impl PhysicalSort {
-    pub fn new(order_bys: Vec<OrderByExpr>, input: Arc<PhysicalPlan>) -> Self {
+    pub fn new(order_bys: Vec<OrderByExpr>, input: Rc<PhysicalPlan>) -> Self {
         PhysicalSort {
             order_bys,
             input,

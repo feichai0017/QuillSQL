@@ -1,3 +1,3 @@
-mod physical_planner;
+mod planner;
 
-pub use physical_planner::PhysicalPlanner;
+pub use planner::PhysicalPlanner;

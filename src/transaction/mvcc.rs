@@ -1,4 +1,4 @@
-use crate::storage::page::TupleMeta;
+use crate::storage::record::TupleMeta;
 use crate::transaction::{CommandId, TransactionId, INVALID_COMMAND_ID};
 use serde::Serialize;
 
@@ -190,7 +190,7 @@ impl TransactionSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::page::TupleMeta;
+    use crate::storage::record::TupleMeta;
 
     #[test]
     fn snapshot_filters_uncommitted() {

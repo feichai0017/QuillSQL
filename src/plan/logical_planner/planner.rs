@@ -121,7 +121,7 @@ impl<'a> LogicalPlanner<'a> {
 
     fn plan_begin_transaction(
         &self,
-        modes: &Vec<ast::TransactionMode>,
+        modes: &[ast::TransactionMode],
     ) -> QuillSQLResult<LogicalPlan> {
         Ok(LogicalPlan::BeginTransaction(TransactionModes::from_modes(
             modes,
@@ -132,7 +132,7 @@ impl<'a> LogicalPlanner<'a> {
         &self,
         session_scope: bool,
         snapshot: &Option<Value>,
-        modes: &Vec<ast::TransactionMode>,
+        modes: &[ast::TransactionMode],
     ) -> QuillSQLResult<LogicalPlan> {
         if snapshot.is_some() {
             return Err(QuillSQLError::Plan(
@@ -189,7 +189,7 @@ impl<'a> LogicalPlanner<'a> {
         cache_metadata: bool,
         noscan: bool,
     ) -> QuillSQLResult<LogicalPlan> {
-        if partitions.as_ref().map_or(false, |p| !p.is_empty()) {
+        if partitions.as_ref().is_some_and(|p| !p.is_empty()) {
             return Err(QuillSQLError::Plan(
                 "ANALYZE PARTITION is not supported".to_string(),
             ));

@@ -117,40 +117,25 @@ fn holt_index_range_scan_returns_matching_rows() {
 }
 
 #[test]
-fn page_table_can_use_holt_secondary_index() {
+fn btree_storage_options_are_rejected() {
     let mut db = Database::new_temp().expect("database");
-    db.run("create table pt(id int, v int) engine=page")
-        .expect("create page table");
-    db.run("create index pt_holt_idx on pt using holt (id)")
-        .expect("create holt index on page table");
-    db.run("insert into pt values (1, 10), (2, 20), (3, 30)")
-        .expect("insert rows");
+    let err = db
+        .run("create table bt(id int, v int) engine=btree")
+        .expect_err("BTree storage engine should be removed");
+    assert!(
+        err.to_string().contains("only ENGINE=HOLT is supported"),
+        "{err:?}"
+    );
 
-    let table_ref = TableReference::Bare {
-        table: "pt".to_string(),
-    };
-    let key_schema = db
-        .catalog
-        .table_indexes(&table_ref)
-        .expect("table indexes")
-        .into_iter()
-        .find(|idx| idx.name == "pt_holt_idx")
-        .expect("pt_holt_idx")
-        .key_schema;
-    let binding = db.table_binding(&table_ref).expect("table binding");
-    let start = Tuple::new(key_schema.clone(), vec![ScalarValue::Int32(Some(2))]);
-    let end = Tuple::new(key_schema, vec![ScalarValue::Int32(Some(3))]);
-    let mut stream = binding
-        .index_scan(
-            "pt_holt_idx",
-            IndexScanRequest::new(Bound::Included(start), Bound::Included(end)),
-        )
-        .expect("index scan");
-    let mut ids = Vec::new();
-    while let Some((_rid, _meta, tuple)) = stream.next().expect("next index row") {
-        ids.push(value_as_i32(&tuple.data[0]));
-    }
-    assert_eq!(ids, vec![2, 3]);
+    db.run("create table ht(id int, v int)")
+        .expect("create default Holt table");
+    let err = db
+        .run("create index ht_btree_idx on ht using btree (id)")
+        .expect_err("BTree indexes should be removed");
+    assert!(
+        err.to_string().contains("only USING HOLT is supported"),
+        "{err:?}"
+    );
 }
 
 #[test]
@@ -171,6 +156,29 @@ fn sql_uses_holt_index_for_range_predicate_after_backfill() {
     let trace = db.debug_last_trace().expect("debug trace");
     assert!(
         trace.physical_plan.contains("IndexScan: ht_idx"),
+        "{}",
+        trace.physical_plan
+    );
+}
+
+#[test]
+fn sql_uses_composite_holt_index_for_full_equality() {
+    let mut db = Database::new_temp().expect("database");
+    db.run("create table ht(a int, b int, v int) engine=holt")
+        .expect("create holt table");
+    db.run("insert into ht values (1, 1, 10), (1, 2, 20), (2, 1, 30)")
+        .expect("insert rows before index");
+    db.run("create index ht_ab_idx on ht using holt (a, b)")
+        .expect("create composite holt index");
+
+    let rows = db
+        .run("select v from ht where b = 2 and a = 1")
+        .expect("indexed equality query");
+    assert_eq!(first_column(rows), vec![20]);
+
+    let trace = db.debug_last_trace().expect("debug trace");
+    assert!(
+        trace.physical_plan.contains("IndexScan: ht_ab_idx"),
         "{}",
         trace.physical_plan
     );
@@ -207,6 +215,20 @@ fn default_table_engine_is_holt() {
         .run("select id from dt where id = 2")
         .expect("select from default holt table");
     assert_eq!(first_column(rows), vec![2]);
+}
+
+#[test]
+fn information_schema_tables_are_holt_projection_tables() {
+    let db = Database::new_temp().expect("database");
+    let table_ref = TableReference::Full {
+        catalog: "quillsql".to_string(),
+        schema: "information_schema".to_string(),
+        table: "tables".to_string(),
+    };
+    assert!(matches!(
+        db.catalog.table_backend(&table_ref).expect("table backend"),
+        TableBackend::Holt { .. }
+    ));
 }
 
 #[test]

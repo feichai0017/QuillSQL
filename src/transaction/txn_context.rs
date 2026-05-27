@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::error::QuillSQLError;
 use crate::storage::{
-    page::{RecordId, TupleMeta},
+    record::{RecordId, TupleMeta},
     tuple::Tuple,
 };
 use crate::transaction::{

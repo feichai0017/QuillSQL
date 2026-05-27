@@ -15,10 +15,11 @@ The core idea of MVCC is **"writers don't block readers, and readers don't block
 
 ### Version Chains and `TupleMeta`
 
-As discussed in the [Storage Engine](../storage/table_heap.md) chapter, every tuple on disk has associated metadata (`TupleMeta`) that includes:
+Every row value stored through Holt carries QuillSQL metadata (`TupleMeta`) alongside the
+encoded tuple. That metadata includes:
 - `insert_txn_id`: The ID of the transaction that created this version.
 - `delete_txn_id`: The ID of the transaction that marked this version as deleted.
-- `prev_version` / `next_version`: Pointers (RIDs) that form a linked list of versions for a single logical row, called the **version chain**.
+- the `RecordId` of the stored version, used by execution and locking.
 
 ### Transaction Snapshots
 
@@ -83,4 +84,4 @@ This hybrid approach provides the best of both worlds: reads are fast and non-bl
 
 3.  **Deadlock Handling**: QuillSQL detects deadlocks by building a waits-for graph and aborting a transaction. What is an alternative strategy for handling deadlocks? For example, what are the pros and cons of using lock timeouts instead of cycle detection?
 
-4.  **Programming Exercise (Advanced)**: A full implementation of `Serializable` isolation often requires index-range locking to prevent phantoms. Extend the `LockManager` to support locking a *range* of keys within a B+Tree index. This would require a new lock type and a way to check for overlapping ranges. When a `SELECT ... WHERE age > 30` query runs, it would place a shared lock on the `(30, +∞)` range in the index on the `age` column, preventing any other transaction from inserting a new user with an age in that range.
+4.  **Programming Exercise (Advanced)**: A full implementation of `Serializable` isolation often requires predicate or index-range locking to prevent phantoms. Extend the `LockManager` to support locking an ordered Holt index range, then make overlapping inserts wait on that range.

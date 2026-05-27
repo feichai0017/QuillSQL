@@ -1,5 +1,5 @@
+use std::rc::Rc;
 use std::sync::atomic::AtomicUsize;
-use std::sync::Arc;
 
 use crate::catalog::SchemaRef;
 use crate::{
@@ -14,12 +14,12 @@ use super::PhysicalPlan;
 pub struct PhysicalLimit {
     pub limit: Option<usize>,
     pub offset: usize,
-    pub input: Arc<PhysicalPlan>,
+    pub input: Rc<PhysicalPlan>,
 
     cursor: AtomicUsize,
 }
 impl PhysicalLimit {
-    pub fn new(limit: Option<usize>, offset: usize, input: Arc<PhysicalPlan>) -> Self {
+    pub fn new(limit: Option<usize>, offset: usize, input: Rc<PhysicalPlan>) -> Self {
         PhysicalLimit {
             limit,
             offset,

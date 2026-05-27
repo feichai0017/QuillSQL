@@ -24,7 +24,7 @@ impl<'a> LogicalPlanner<'a> {
 
         let mut assignment_map = HashMap::new();
         for assign in assignments {
-            let column_ident = assign.id.get(0).ok_or(QuillSQLError::Plan(format!(
+            let column_ident = assign.id.first().ok_or(QuillSQLError::Plan(format!(
                 "Assignment {} is not supported",
                 assign
             )))?;
