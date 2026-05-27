@@ -468,13 +468,7 @@ impl TableHandle for HoltTableHandle {
         let mut index_links = Vec::new();
         let mut index_puts = Vec::new();
         for handle in indexes {
-            let Some(index_id) = handle.holt_index_id() else {
-                return Err(QuillSQLError::Storage(format!(
-                    "Holt table {} cannot maintain non-Holt index {}",
-                    self.table_ref,
-                    handle.name()
-                )));
-            };
+            let index_id = handle.index_id();
             if let Ok(key_tuple) = tuple.project_with_schema(handle.key_schema()) {
                 let encoded_key = encode_index_key(&key_tuple, rid)?;
                 index_puts.push((index_id, encoded_key));
@@ -520,13 +514,7 @@ impl TableHandle for HoltTableHandle {
         let mut index_links = Vec::new();
         let mut index_deletes = Vec::new();
         for handle in indexes {
-            let Some(index_id) = handle.holt_index_id() else {
-                return Err(QuillSQLError::Storage(format!(
-                    "Holt table {} cannot maintain non-Holt index {}",
-                    self.table_ref,
-                    handle.name()
-                )));
-            };
+            let index_id = handle.index_id();
             if let Ok(key_tuple) = prev_tuple.project_with_schema(handle.key_schema()) {
                 index_deletes.push((index_id, encode_index_key(&key_tuple, rid)?));
                 index_links.push((handle.clone(), key_tuple, rid));
@@ -583,13 +571,7 @@ impl TableHandle for HoltTableHandle {
         let mut old_index_deletes = Vec::new();
         let mut new_index_puts = Vec::new();
         for handle in indexes {
-            let Some(index_id) = handle.holt_index_id() else {
-                return Err(QuillSQLError::Storage(format!(
-                    "Holt table {} cannot maintain non-Holt index {}",
-                    self.table_ref,
-                    handle.name()
-                )));
-            };
+            let index_id = handle.index_id();
             if let Ok(old_key) = prev_tuple.project_with_schema(handle.key_schema()) {
                 old_index_deletes.push((index_id, encode_index_key(&old_key, rid)?));
                 old_links.push((handle.clone(), old_key, rid));
@@ -716,8 +698,8 @@ impl IndexHandle for HoltIndexHandle {
         self.key_schema.clone()
     }
 
-    fn holt_index_id(&self) -> Option<u64> {
-        Some(self.index_id)
+    fn index_id(&self) -> u64 {
+        self.index_id
     }
 
     fn insert(&self, key: &Tuple, rid: RecordId, txn_id: TransactionId) -> QuillSQLResult<()> {

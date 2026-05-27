@@ -2,7 +2,6 @@ use std::ops::Bound;
 
 use tempfile::TempDir;
 
-use crate::catalog::{IndexBackend, TableBackend};
 use crate::database::Database;
 use crate::session::SessionContext;
 use crate::storage::engine::IndexScanRequest;
@@ -80,6 +79,17 @@ fn holt_table_reopens_committed_rows() {
 }
 
 #[test]
+fn temp_database_drops_after_holt_store_shutdown() {
+    for _ in 0..3 {
+        let mut db = Database::new_temp().expect("database");
+        db.run("create table ht(id int, v int)")
+            .expect("create table");
+        db.run("insert into ht values (1, 10)").expect("insert row");
+        db.flush().expect("flush database");
+    }
+}
+
+#[test]
 fn holt_index_range_scan_returns_matching_rows() {
     let mut db = Database::new_temp().expect("database");
     db.run("create table ht(id int, v int) engine=holt")
@@ -117,7 +127,7 @@ fn holt_index_range_scan_returns_matching_rows() {
 }
 
 #[test]
-fn btree_storage_options_are_rejected() {
+fn non_holt_storage_options_are_rejected() {
     let mut db = Database::new_temp().expect("database");
     let err = db
         .run("create table bt(id int, v int) engine=btree")
@@ -197,19 +207,16 @@ fn default_table_engine_is_holt() {
     let table_ref = TableReference::Bare {
         table: "dt".to_string(),
     };
-    assert!(matches!(
-        db.catalog.table_backend(&table_ref).expect("table backend"),
-        TableBackend::Holt { .. }
-    ));
+    assert!(db.catalog.table_id(&table_ref).expect("table id") > 0);
     let indexes = db.catalog.table_indexes(&table_ref).expect("indexes");
-    assert!(matches!(
+    assert!(
         indexes
             .iter()
             .find(|index| index.name == "dt_idx")
             .expect("dt_idx")
-            .backend,
-        IndexBackend::Holt { .. }
-    ));
+            .index_id
+            > 0
+    );
 
     let rows = db
         .run("select id from dt where id = 2")
@@ -225,10 +232,7 @@ fn information_schema_tables_are_holt_projection_tables() {
         schema: "information_schema".to_string(),
         table: "tables".to_string(),
     };
-    assert!(matches!(
-        db.catalog.table_backend(&table_ref).expect("table backend"),
-        TableBackend::Holt { .. }
-    ));
+    assert!(db.catalog.table_id(&table_ref).expect("table id") > 0);
 }
 
 #[test]

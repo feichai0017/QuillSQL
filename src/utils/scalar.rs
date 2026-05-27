@@ -161,15 +161,11 @@ impl ScalarValue {
                 };
                 data.map(ScalarValue::Float64)
             }
-            DataType::Varchar(_) => {
-                match self {
-                    // If already a string, keep it and optionally truncate to the target length
-                    ScalarValue::Varchar(v) => Ok(ScalarValue::Varchar(v.clone())),
-                    // Simple numeric to string example kept for minimal compatibility
-                    ScalarValue::Int8(v) => Ok(ScalarValue::Varchar(v.map(|v| v.to_string()))),
-                    _ => Err(error),
-                }
-            }
+            DataType::Varchar(_) => match self {
+                ScalarValue::Varchar(v) => Ok(ScalarValue::Varchar(v.clone())),
+                ScalarValue::Int8(v) => Ok(ScalarValue::Varchar(v.map(|v| v.to_string()))),
+                _ => Err(error),
+            },
             _ => Err(error),
         }
     }

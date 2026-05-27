@@ -18,7 +18,7 @@ use crate::session::SessionContext;
 use crate::storage::engine::TableHandle;
 use crate::storage::holt::{HoltStore, HoltTableHandle};
 use crate::storage::tuple::Tuple;
-use crate::storage::{HoltStorageEngine, StorageEngine};
+use crate::storage::HoltStorage;
 use crate::transaction::{
     CommandId, IsolationLevel, LockDebugSnapshot, TransactionManager, TransactionStatus,
     TxnDebugSnapshot,
@@ -44,13 +44,15 @@ enum DatabaseLocation {
 }
 
 pub struct Database {
-    _temp_dir: Option<TempDir>,
     pub(crate) catalog: Catalog,
     pub(crate) transaction_manager: Arc<TransactionManager>,
     pub(crate) holt_store: Arc<HoltStore>,
     default_isolation: IsolationLevel,
-    storage_engine: Arc<dyn StorageEngine>,
+    storage: Arc<HoltStorage>,
     debug_trace: Arc<Mutex<Option<DebugTrace>>>,
+    // Must drop after every Holt owner so temporary databases can checkpoint
+    // before their directory is removed.
+    _temp_dir: Option<TempDir>,
 }
 
 struct PreparedStatement {
@@ -149,19 +151,18 @@ impl Database {
         seed_holt_transaction_statuses(&holt_store, &transaction_manager)?;
 
         let catalog = Catalog::new(holt_store.clone());
-        let storage_engine: Arc<dyn StorageEngine> =
-            Arc::new(HoltStorageEngine::new(holt_store.clone()));
+        let storage = Arc::new(HoltStorage::new(holt_store.clone()));
 
         let mut db = Self {
-            _temp_dir: temp_dir,
             catalog,
             transaction_manager,
             holt_store,
             default_isolation: options
                 .default_isolation_level
                 .unwrap_or(IsolationLevel::ReadUncommitted),
-            storage_engine,
+            storage,
             debug_trace: Arc::new(Mutex::new(None)),
+            _temp_dir: temp_dir,
         };
         load_catalog_data(&mut db)?;
         Ok(db)
@@ -243,7 +244,7 @@ impl Database {
         &self,
         table_ref: &TableReference,
     ) -> QuillSQLResult<crate::storage::TableBinding> {
-        self.storage_engine.table(&self.catalog, table_ref)
+        self.storage.table(&self.catalog, table_ref)
     }
 
     pub fn debug_last_trace(&self) -> Option<DebugTrace> {
@@ -269,7 +270,6 @@ impl Database {
                 continue;
             }
             for (table_name, table) in &schema.tables {
-                let crate::catalog::TableBackend::Holt { table_id } = table.backend;
                 let table_ref = TableReference::Full {
                     catalog: crate::catalog::DEFAULT_CATALOG_NAME.to_string(),
                     schema: schema_name.clone(),
@@ -278,7 +278,7 @@ impl Database {
                 let handle = HoltTableHandle::new(
                     table_ref.clone(),
                     table.schema.clone(),
-                    table_id,
+                    table.table_id,
                     self.holt_store.clone(),
                 );
                 let mut stream = handle.full_scan()?;
@@ -435,7 +435,7 @@ impl Database {
                 &mut self.catalog,
                 txn,
                 self.transaction_manager.clone(),
-                self.storage_engine.clone(),
+                self.storage.clone(),
             );
             let mut engine = ExecutionEngine { context };
             engine.execute(Rc::new(physical_plan))?

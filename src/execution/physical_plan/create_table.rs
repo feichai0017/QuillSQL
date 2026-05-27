@@ -1,4 +1,4 @@
-use crate::catalog::{SchemaRef, TableEngine};
+use crate::catalog::SchemaRef;
 use crate::utils::table_ref::TableReference;
 use crate::{
     catalog::Schema,
@@ -13,7 +13,6 @@ pub struct PhysicalCreateTable {
     pub table: TableReference,
     pub schema: Schema,
     pub if_not_exists: bool,
-    pub engine: TableEngine,
 }
 
 impl VolcanoExecutor for PhysicalCreateTable {
@@ -24,7 +23,7 @@ impl VolcanoExecutor for PhysicalCreateTable {
 
         context
             .catalog
-            .create_holt_table(self.table.clone(), Arc::new(self.schema.clone()))?;
+            .create_table(self.table.clone(), Arc::new(self.schema.clone()))?;
         Ok(None)
     }
     fn output_schema(&self) -> SchemaRef {

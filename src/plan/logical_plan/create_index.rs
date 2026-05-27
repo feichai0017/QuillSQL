@@ -1,4 +1,4 @@
-use crate::catalog::{IndexEngine, SchemaRef};
+use crate::catalog::SchemaRef;
 use crate::plan::logical_plan::OrderByExpr;
 use crate::utils::table_ref::TableReference;
 
@@ -8,7 +8,6 @@ pub struct CreateIndex {
     pub table: TableReference,
     pub table_schema: SchemaRef,
     pub columns: Vec<OrderByExpr>,
-    pub using: Option<IndexEngine>,
 }
 
 impl std::fmt::Display for CreateIndex {

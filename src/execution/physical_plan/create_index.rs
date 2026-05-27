@@ -1,4 +1,4 @@
-use crate::catalog::{IndexEngine, SchemaRef, EMPTY_SCHEMA_REF};
+use crate::catalog::{SchemaRef, EMPTY_SCHEMA_REF};
 use crate::error::QuillSQLError;
 use crate::expression::{ColumnExpr, Expr};
 use crate::plan::logical_plan::OrderByExpr;
@@ -16,7 +16,6 @@ pub struct PhysicalCreateIndex {
     pub table: TableReference,
     pub table_schema: SchemaRef,
     pub columns: Vec<OrderByExpr>,
-    pub using: Option<IndexEngine>,
 }
 
 impl VolcanoExecutor for PhysicalCreateIndex {
@@ -36,10 +35,9 @@ impl VolcanoExecutor for PhysicalCreateIndex {
             }
         }
         let key_schema = Arc::new(self.table_schema.project(&key_indices)?);
-        let _ = self.using.unwrap_or(IndexEngine::Holt);
         context
             .catalog
-            .create_holt_index(self.name.clone(), &self.table, key_schema)?;
+            .create_index(self.name.clone(), &self.table, key_schema)?;
         backfill_index(context, &self.table, &self.name)?;
         Ok(None)
     }

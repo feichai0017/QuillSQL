@@ -5,7 +5,6 @@ pub mod record;
 pub mod tuple;
 
 pub use engine::{
-    HoltStorageEngine, IndexHandle, IndexScanRequest, StorageEngine, TableBinding, TableHandle,
-    TupleStream,
+    HoltStorage, IndexHandle, IndexScanRequest, TableBinding, TableHandle, TupleStream,
 };
 pub use record::{RecordId, TupleMeta};

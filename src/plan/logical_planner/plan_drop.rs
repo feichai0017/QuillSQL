@@ -24,8 +24,7 @@ impl<'a> LogicalPlanner<'a> {
 
         let table_ref = self.bind_table_name(&names[0])?;
         if cascade {
-            // Implicitly drop dependent indexes, so CASCADE behaves the same as default.
-            // No-op, but accepted for compatibility.
+            // Table descriptors own index descriptors, so table drop removes them together.
         }
 
         Ok(LogicalPlan::DropTable(DropTable {

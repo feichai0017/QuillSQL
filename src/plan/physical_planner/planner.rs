@@ -47,25 +47,21 @@ impl<'a> PhysicalPlanner<'a> {
                 name,
                 columns,
                 if_not_exists,
-                engine,
             }) => PhysicalPlan::CreateTable(PhysicalCreateTable::new(
                 name.clone(),
                 Schema::new(columns.clone()),
                 *if_not_exists,
-                *engine,
             )),
             LogicalPlan::CreateIndex(CreateIndex {
                 index_name,
                 table,
                 table_schema,
                 columns,
-                using,
             }) => PhysicalPlan::CreateIndex(PhysicalCreateIndex::new(
                 index_name.clone(),
                 table.clone(),
                 table_schema.clone(),
                 columns.clone(),
-                *using,
             )),
             LogicalPlan::DropTable(DropTable { name, if_exists }) => {
                 PhysicalPlan::DropTable(PhysicalDropTable::new(name.clone(), *if_exists))

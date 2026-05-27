@@ -1,7 +1,7 @@
 use crate::error::{QuillSQLError, QuillSQLResult};
 use std::collections::HashSet;
 
-use crate::catalog::{Column, DataType, TableEngine};
+use crate::catalog::{Column, DataType};
 use crate::expression::Expr;
 use crate::plan::logical_plan::{CreateTable, LogicalPlan};
 use crate::utils::scalar::ScalarValue;
@@ -17,7 +17,7 @@ impl<'a> LogicalPlanner<'a> {
         engine: Option<&str>,
     ) -> QuillSQLResult<LogicalPlan> {
         let name = self.bind_table_name(name)?;
-        let engine = parse_table_engine(engine)?;
+        validate_table_engine(engine)?;
         let mut columns = vec![];
         for col_def in column_defs {
             let data_type: DataType = (&col_def.data_type).try_into()?;
@@ -62,14 +62,13 @@ impl<'a> LogicalPlanner<'a> {
             name,
             columns,
             if_not_exists,
-            engine,
         }))
     }
 }
 
-fn parse_table_engine(engine: Option<&str>) -> QuillSQLResult<TableEngine> {
+fn validate_table_engine(engine: Option<&str>) -> QuillSQLResult<()> {
     match engine.map(str::to_ascii_lowercase).as_deref() {
-        None | Some("holt") | Some("default") => Ok(TableEngine::Holt),
+        None | Some("holt") | Some("default") => Ok(()),
         Some(other) => Err(QuillSQLError::NotSupport(format!(
             "table engine {other} is not supported; only ENGINE=HOLT is supported"
         ))),

@@ -41,56 +41,36 @@ impl CatalogSchema {
 pub struct CatalogTable {
     pub name: String,
     pub schema: SchemaRef,
-    pub backend: TableBackend,
+    pub table_id: u64,
     pub indexes: HashMap<String, CatalogIndex>,
     pub stats: Option<TableStatistics>,
 }
 
 impl CatalogTable {
-    pub fn new_holt(name: impl Into<String>, schema: SchemaRef, table_id: u64) -> Self {
+    pub fn new(name: impl Into<String>, schema: SchemaRef, table_id: u64) -> Self {
         Self {
             name: name.into(),
             schema,
-            backend: TableBackend::Holt { table_id },
+            table_id,
             indexes: HashMap::new(),
             stats: None,
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TableBackend {
-    Holt { table_id: u64 },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TableEngine {
-    Holt,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IndexBackend {
-    Holt { index_id: u64 },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IndexEngine {
-    Holt,
-}
-
 #[derive(Debug, Clone)]
 pub struct CatalogIndex {
     pub name: String,
     pub key_schema: SchemaRef,
-    pub backend: IndexBackend,
+    pub index_id: u64,
 }
 
 impl CatalogIndex {
-    pub fn new_holt(name: impl Into<String>, key_schema: SchemaRef, index_id: u64) -> Self {
+    pub fn new(name: impl Into<String>, key_schema: SchemaRef, index_id: u64) -> Self {
         Self {
             name: name.into(),
             key_schema,
-            backend: IndexBackend::Holt { index_id },
+            index_id,
         }
     }
 }
@@ -124,7 +104,7 @@ impl Catalog {
         Ok(())
     }
 
-    pub fn create_holt_table(
+    pub fn create_table(
         &mut self,
         table_ref: TableReference,
         schema: SchemaRef,
@@ -162,7 +142,7 @@ impl Catalog {
             .tables
             .insert(
                 table_name.clone(),
-                CatalogTable::new_holt(table_name.clone(), schema.clone(), table_id),
+                CatalogTable::new(table_name.clone(), schema.clone(), table_id),
             );
 
         self.insert_table_metadata(&catalog_name, &catalog_schema_name, &table_name, &schema)?;
@@ -218,8 +198,8 @@ impl Catalog {
         Ok(self.catalog_table(table_ref)?.schema.clone())
     }
 
-    pub fn table_backend(&self, table_ref: &TableReference) -> QuillSQLResult<TableBackend> {
-        Ok(self.catalog_table(table_ref)?.backend)
+    pub fn table_id(&self, table_ref: &TableReference) -> QuillSQLResult<u64> {
+        Ok(self.catalog_table(table_ref)?.table_id)
     }
 
     pub fn table_statistics(&self, table_ref: &TableReference) -> Option<&TableStatistics> {
@@ -237,12 +217,11 @@ impl Catalog {
             .to_string();
         let table_name = table_ref.table().to_string();
         let catalog_table = self.catalog_table(table_ref)?;
-        let TableBackend::Holt { table_id } = catalog_table.backend;
         let schema = catalog_table.schema.clone();
         let table = HoltTableHandle::new(
             table_ref.clone(),
             schema.clone(),
-            table_id,
+            catalog_table.table_id,
             self.holt_store.clone(),
         );
         let mut stats = TableStatistics::empty(schema.as_ref());
@@ -277,7 +256,7 @@ impl Catalog {
             .collect())
     }
 
-    pub fn create_holt_index(
+    pub fn create_index(
         &mut self,
         index_name: String,
         table_ref: &TableReference,
@@ -307,7 +286,7 @@ impl Catalog {
                 .create_index_descriptor(table_ref, &index_name, key_schema.as_ref())?;
         self.catalog_table_mut(table_ref)?.indexes.insert(
             index_name.clone(),
-            CatalogIndex::new_holt(index_name.clone(), key_schema.clone(), index_id),
+            CatalogIndex::new(index_name.clone(), key_schema.clone(), index_id),
         );
         self.insert_index_metadata(
             &catalog_name,
@@ -385,7 +364,7 @@ impl Catalog {
         self.schemas.insert(name.into(), schema);
     }
 
-    pub fn load_holt_table(
+    pub fn load_table(
         &mut self,
         table_ref: TableReference,
         table_name: impl Into<String>,
@@ -398,12 +377,12 @@ impl Catalog {
         })?;
         catalog_schema.tables.insert(
             table_ref.table().to_string(),
-            CatalogTable::new_holt(table_name, schema, table_id),
+            CatalogTable::new(table_name, schema, table_id),
         );
         Ok(())
     }
 
-    pub fn load_holt_index(
+    pub fn load_index(
         &mut self,
         table_ref: TableReference,
         index_name: impl Into<String>,
@@ -413,7 +392,7 @@ impl Catalog {
         let idx_name = index_name.into();
         self.catalog_table_mut(&table_ref)?.indexes.insert(
             idx_name.clone(),
-            CatalogIndex::new_holt(idx_name, key_schema, index_id),
+            CatalogIndex::new(idx_name, key_schema, index_id),
         );
         Ok(())
     }
@@ -521,7 +500,7 @@ impl Catalog {
     }
 
     fn insert_system_tuple(&self, table_name: &str, tuple: &Tuple) -> QuillSQLResult<()> {
-        let TableBackend::Holt { table_id } = self.information_schema_table(table_name)?.backend;
+        let table_id = self.information_schema_table(table_name)?.table_id;
         let _ = self.holt_store.insert_system_row(table_id, tuple)?;
         Ok(())
     }
@@ -650,7 +629,7 @@ impl Catalog {
         F: FnMut(&Tuple) -> QuillSQLResult<bool>,
     {
         let table = self.information_schema_table(table_name)?;
-        let TableBackend::Holt { table_id } = table.backend;
+        let table_id = table.table_id;
         let table_ref = TableReference::Full {
             catalog: DEFAULT_CATALOG_NAME.to_string(),
             schema: INFORMATION_SCHEMA_NAME.to_string(),

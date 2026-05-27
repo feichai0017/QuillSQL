@@ -4,7 +4,7 @@ use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::execution::physical_plan::PhysicalPlan;
 use crate::expression::{Expr, ExprTrait};
 use crate::storage::{
-    engine::{StorageEngine, TableBinding},
+    engine::{HoltStorage, TableBinding},
     tuple::Tuple,
 };
 use crate::transaction::{Transaction, TransactionManager, TxnContext};
@@ -28,8 +28,8 @@ pub trait VolcanoExecutor {
 pub struct ExecutionContext<'a> {
     /// Mutable reference to the global catalog (schema + metadata).
     pub catalog: &'a mut Catalog,
-    /// Pluggable storage engine used for heap/index access.
-    storage: Arc<dyn StorageEngine>,
+    /// Holt-backed table and index access.
+    storage: Arc<HoltStorage>,
     /// Transaction runtime wrapper (snapshot, locks, undo tracking).
     txn: TxnContext<'a>,
 }
@@ -39,7 +39,7 @@ impl<'a> ExecutionContext<'a> {
         catalog: &'a mut Catalog,
         txn: &'a mut Transaction,
         txn_mgr: Arc<TransactionManager>,
-        storage: Arc<dyn StorageEngine>,
+        storage: Arc<HoltStorage>,
     ) -> Self {
         Self {
             catalog,
@@ -65,7 +65,7 @@ impl<'a> ExecutionContext<'a> {
         expr.evaluate(tuple)
     }
 
-    /// Look up the table binding through the storage engine.
+    /// Look up the table binding through Holt storage.
     pub fn table(&self, table: &TableReference) -> QuillSQLResult<TableBinding> {
         self.storage.table(self.catalog, table)
     }

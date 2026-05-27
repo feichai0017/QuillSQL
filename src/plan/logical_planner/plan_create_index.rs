@@ -1,4 +1,3 @@
-use crate::catalog::IndexEngine;
 use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::plan::logical_plan::{CreateIndex, LogicalPlan};
 
@@ -24,26 +23,23 @@ impl<'a> LogicalPlanner<'a> {
             let col_expr = self.bind_order_by_expr(col)?;
             columns_expr.push(col_expr);
         }
-        let using = parse_index_engine(using)?;
+        validate_index_engine(using)?;
         let table_schema = self.context.catalog.table_schema(&table)?;
         Ok(LogicalPlan::CreateIndex(CreateIndex {
             index_name,
             table,
             table_schema,
             columns: columns_expr,
-            using,
         }))
     }
 }
 
-fn parse_index_engine(
-    using: Option<&sqlparser::ast::Ident>,
-) -> QuillSQLResult<Option<IndexEngine>> {
+fn validate_index_engine(using: Option<&sqlparser::ast::Ident>) -> QuillSQLResult<()> {
     let Some(using) = using else {
-        return Ok(None);
+        return Ok(());
     };
     match using.value.to_ascii_lowercase().as_str() {
-        "holt" => Ok(Some(IndexEngine::Holt)),
+        "holt" => Ok(()),
         other => Err(QuillSQLError::NotSupport(format!(
             "index backend {other} is not supported; only USING HOLT is supported"
         ))),

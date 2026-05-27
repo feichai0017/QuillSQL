@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 
 use crate::catalog::{
-    Catalog, CatalogSchema, CatalogTable, Column, DataType, Schema, SchemaRef, TableBackend,
+    Catalog, CatalogSchema, CatalogTable, Column, DataType, Schema, SchemaRef,
     DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME,
 };
 use crate::database::Database;
@@ -65,9 +65,9 @@ pub fn load_catalog_data(db: &mut Database) -> QuillSQLResult<()> {
     load_schemas(db)?;
     create_default_schema_if_not_exists(&mut db.catalog)?;
     load_user_tables(db)?;
-    load_holt_catalog_tables(db)?;
+    load_descriptor_tables(db)?;
     load_user_indexes(db)?;
-    load_holt_catalog_indexes(db)?;
+    load_descriptor_indexes(db)?;
     db.catalog.refresh_information_schema_projection()?;
     Ok(())
 }
@@ -100,7 +100,7 @@ fn load_information_schema(catalog: &mut Catalog) -> QuillSQLResult<()> {
         };
         information_schema.tables.insert(
             table_name.to_string(),
-            CatalogTable::new_holt(table_name, schema, table_id),
+            CatalogTable::new(table_name, schema, table_id),
         );
     }
 
@@ -197,7 +197,7 @@ fn load_user_tables(db: &mut Database) -> QuillSQLResult<()> {
         let columns = column_map
             .remove(&(catalog.clone(), schema.clone(), table.clone()))
             .unwrap_or_default();
-        db.catalog.load_holt_table(
+        db.catalog.load_table(
             table_ref,
             table.clone(),
             Arc::new(Schema::new(columns)),
@@ -253,12 +253,12 @@ fn load_user_indexes(db: &mut Database) -> QuillSQLResult<()> {
             table_schema,
         )?);
         db.catalog
-            .load_holt_index(table_ref, index_name, key_schema, index_id)?;
+            .load_index(table_ref, index_name, key_schema, index_id)?;
     }
     Ok(())
 }
 
-fn load_holt_catalog_tables(db: &mut Database) -> QuillSQLResult<()> {
+fn load_descriptor_tables(db: &mut Database) -> QuillSQLResult<()> {
     for descriptor in db.catalog.holt_store.table_descriptors()? {
         if descriptor.table_ref.schema() == Some(INFORMATION_SCHEMA_NAME) {
             continue;
@@ -275,7 +275,7 @@ fn load_holt_catalog_tables(db: &mut Database) -> QuillSQLResult<()> {
             db.catalog
                 .load_schema(schema_name.clone(), CatalogSchema::new(schema_name));
         }
-        db.catalog.load_holt_table(
+        db.catalog.load_table(
             descriptor.table_ref,
             descriptor.table_name,
             descriptor.schema,
@@ -285,7 +285,7 @@ fn load_holt_catalog_tables(db: &mut Database) -> QuillSQLResult<()> {
     Ok(())
 }
 
-fn load_holt_catalog_indexes(db: &mut Database) -> QuillSQLResult<()> {
+fn load_descriptor_indexes(db: &mut Database) -> QuillSQLResult<()> {
     for descriptor in db.catalog.holt_store.index_descriptors()? {
         if descriptor.table_ref.schema() == Some(INFORMATION_SCHEMA_NAME) {
             continue;
@@ -305,7 +305,7 @@ fn load_holt_catalog_indexes(db: &mut Database) -> QuillSQLResult<()> {
         {
             continue;
         }
-        db.catalog.load_holt_index(
+        db.catalog.load_index(
             descriptor.table_ref,
             descriptor.index_name,
             descriptor.key_schema,
@@ -324,7 +324,6 @@ fn information_schema_rows(db: &Database, table_name: &str) -> QuillSQLResult<Ve
     let table = information_schema.tables.get(table_name).ok_or_else(|| {
         QuillSQLError::Internal(format!("information_schema.{table_name} missing"))
     })?;
-    let TableBackend::Holt { table_id } = table.backend;
     let table_ref = TableReference::Full {
         catalog: DEFAULT_CATALOG_NAME.to_string(),
         schema: INFORMATION_SCHEMA_NAME.to_string(),
@@ -333,7 +332,7 @@ fn information_schema_rows(db: &Database, table_name: &str) -> QuillSQLResult<Ve
     let handle = HoltTableHandle::new(
         table_ref,
         table.schema.clone(),
-        table_id,
+        table.table_id,
         db.catalog.holt_store.clone(),
     );
     let mut stream = handle.full_scan()?;

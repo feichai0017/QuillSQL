@@ -2,7 +2,7 @@ use std::fmt;
 use std::ops::Bound;
 use std::sync::Arc;
 
-use crate::catalog::{Catalog, IndexBackend, SchemaRef, TableBackend};
+use crate::catalog::{Catalog, SchemaRef};
 use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::storage::holt::{HoltIndexHandle, HoltStore, HoltTableHandle};
 use crate::storage::record::{RecordId, TupleMeta};
@@ -78,7 +78,7 @@ pub trait TableHandle: Send + Sync {
 pub trait IndexHandle: Send + Sync {
     fn name(&self) -> &str;
     fn key_schema(&self) -> SchemaRef;
-    fn holt_index_id(&self) -> Option<u64>;
+    fn index_id(&self) -> u64;
     fn insert(&self, key: &Tuple, rid: RecordId, txn_id: TransactionId) -> QuillSQLResult<()>;
     fn delete(&self, key: &Tuple, rid: RecordId, txn_id: TransactionId) -> QuillSQLResult<()>;
     fn range_scan(
@@ -88,17 +88,37 @@ pub trait IndexHandle: Send + Sync {
     ) -> QuillSQLResult<Box<dyn TupleStream>>;
 }
 
-pub trait StorageEngine: Send + Sync {
-    fn table(&self, catalog: &Catalog, table: &TableReference) -> QuillSQLResult<TableBinding>;
-}
-
-pub struct HoltStorageEngine {
+pub struct HoltStorage {
     holt_store: Arc<HoltStore>,
 }
 
-impl HoltStorageEngine {
+impl HoltStorage {
     pub fn new(holt_store: Arc<HoltStore>) -> Self {
         Self { holt_store }
+    }
+
+    pub fn table(&self, catalog: &Catalog, table: &TableReference) -> QuillSQLResult<TableBinding> {
+        let table_id = catalog.table_id(table)?;
+        let schema = catalog.table_schema(table)?;
+        let handle: Arc<dyn TableHandle> = Arc::new(HoltTableHandle::new(
+            table.clone(),
+            schema,
+            table_id,
+            self.holt_store.clone(),
+        ));
+        let indexes = catalog.table_indexes(table)?;
+        let index_handles = indexes
+            .into_iter()
+            .map(|index| {
+                Ok(Arc::new(HoltIndexHandle::new(
+                    index.name,
+                    index.key_schema,
+                    index.index_id,
+                    self.holt_store.clone(),
+                )) as Arc<dyn IndexHandle>)
+            })
+            .collect::<QuillSQLResult<Vec<_>>>()?;
+        Ok(TableBinding::new(handle, index_handles))
     }
 }
 
@@ -114,10 +134,6 @@ impl TableBinding {
             table,
             indexes: Arc::new(indexes),
         }
-    }
-
-    pub fn table(&self) -> Arc<dyn TableHandle> {
-        self.table.clone()
     }
 
     pub fn indexes(&self) -> &[Arc<dyn IndexHandle>] {
@@ -174,7 +190,7 @@ impl TableBinding {
             .iter()
             .find(|idx| idx.name() == name)
             .ok_or_else(|| QuillSQLError::Execution(format!("index {} not found", name)))?;
-        handle.range_scan(self.table(), request)
+        handle.range_scan(self.table.clone(), request)
     }
 }
 
@@ -184,33 +200,5 @@ impl fmt::Debug for TableBinding {
             .field("table", &self.table.table_ref())
             .field("index_count", &self.indexes.len())
             .finish()
-    }
-}
-
-impl StorageEngine for HoltStorageEngine {
-    fn table(&self, catalog: &Catalog, table: &TableReference) -> QuillSQLResult<TableBinding> {
-        let table_id = match catalog.table_backend(table)? {
-            TableBackend::Holt { table_id } => table_id,
-        };
-        let schema = catalog.table_schema(table)?;
-        let handle: Arc<dyn TableHandle> = Arc::new(HoltTableHandle::new(
-            table.clone(),
-            schema,
-            table_id,
-            self.holt_store.clone(),
-        ));
-        let indexes = catalog.table_indexes(table)?;
-        let index_handles = indexes
-            .into_iter()
-            .map(|index| match index.backend {
-                IndexBackend::Holt { index_id } => Ok(Arc::new(HoltIndexHandle::new(
-                    index.name,
-                    index.key_schema,
-                    index_id,
-                    self.holt_store.clone(),
-                )) as Arc<dyn IndexHandle>),
-            })
-            .collect::<QuillSQLResult<Vec<_>>>()?;
-        Ok(TableBinding::new(handle, index_handles))
     }
 }
