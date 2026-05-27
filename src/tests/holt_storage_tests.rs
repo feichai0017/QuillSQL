@@ -2,6 +2,7 @@ use std::ops::Bound;
 
 use tempfile::TempDir;
 
+use crate::catalog::{IndexBackend, TableBackend};
 use crate::database::Database;
 use crate::session::SessionContext;
 use crate::storage::engine::IndexScanRequest;
@@ -118,7 +119,7 @@ fn holt_index_range_scan_returns_matching_rows() {
 #[test]
 fn page_table_can_use_holt_secondary_index() {
     let mut db = Database::new_temp().expect("database");
-    db.run("create table pt(id int, v int)")
+    db.run("create table pt(id int, v int) engine=page")
         .expect("create page table");
     db.run("create index pt_holt_idx on pt using holt (id)")
         .expect("create holt index on page table");
@@ -173,4 +174,65 @@ fn sql_uses_holt_index_for_range_predicate_after_backfill() {
         "{}",
         trace.physical_plan
     );
+}
+
+#[test]
+fn default_table_engine_is_holt() {
+    let mut db = Database::new_temp().expect("database");
+    db.run("create table dt(id int, v int)")
+        .expect("create default table");
+    db.run("create index dt_idx on dt(id)")
+        .expect("create default index");
+    db.run("insert into dt values (1, 10), (2, 20)")
+        .expect("insert rows");
+
+    let table_ref = TableReference::Bare {
+        table: "dt".to_string(),
+    };
+    assert!(matches!(
+        db.catalog.table_backend(&table_ref).expect("table backend"),
+        TableBackend::Holt { .. }
+    ));
+    let indexes = db.catalog.table_indexes(&table_ref).expect("indexes");
+    assert!(matches!(
+        indexes
+            .iter()
+            .find(|index| index.name == "dt_idx")
+            .expect("dt_idx")
+            .backend,
+        IndexBackend::Holt { .. }
+    ));
+
+    let rows = db
+        .run("select id from dt where id = 2")
+        .expect("select from default holt table");
+    assert_eq!(first_column(rows), vec![2]);
+}
+
+#[test]
+fn dropped_default_holt_table_does_not_reappear_after_reopen() {
+    let temp = TempDir::new().expect("temp dir");
+    let db_path = temp.path().join("quill.db");
+    let db_path = db_path.to_str().expect("db path").to_string();
+
+    {
+        let mut db = Database::new_on_disk(&db_path).expect("open database");
+        db.run("create table dt(id int, v int)")
+            .expect("create default holt table");
+        db.run("create index dt_idx on dt(id)")
+            .expect("create default holt index");
+        db.run("insert into dt values (1, 10)").expect("insert row");
+        db.run("drop table dt").expect("drop table");
+        db.flush().expect("flush database");
+    }
+
+    {
+        let mut db = Database::new_on_disk(&db_path).expect("reopen database");
+        let rows = db
+            .run("select table_name from information_schema.tables where table_name = 'dt'")
+            .expect("query information_schema");
+        assert!(rows.is_empty());
+        db.run("select * from dt")
+            .expect_err("dropped Holt table should not reload from descriptor");
+    }
 }

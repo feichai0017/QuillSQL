@@ -10,7 +10,7 @@ pub mod page;
 pub mod tuple;
 
 pub use engine::{
-    DefaultStorageEngine, IndexHandle, IndexScanRequest, PageStoreEngine, StorageEngine,
+    CatalogStorageEngine, IndexHandle, IndexScanRequest, PageStoreEngine, StorageEngine,
     TableBinding, TableHandle, TupleStream,
 };
 

@@ -155,7 +155,7 @@ impl TransactionSnapshot {
 
         let deleter = meta.delete_txn_id;
         if deleter == 0 {
-            return true;
+            return false;
         }
 
         if deleter == self.txn_id {
@@ -234,13 +234,22 @@ mod tests {
             next_version: None,
             prev_version: None,
         };
-        assert!(!snapshot.is_visible(&meta, 0, |txn| {
-            if txn == 5 {
-                TransactionStatus::Committed
-            } else {
-                TransactionStatus::Committed
-            }
-        }));
+        assert!(!snapshot.is_visible(&meta, 0, |_| TransactionStatus::Committed));
+    }
+
+    #[test]
+    fn snapshot_hides_system_deleted_tuple() {
+        let snapshot = TransactionSnapshot::new(3, 2, 10, vec![4, 6]);
+        let meta = TupleMeta {
+            insert_txn_id: 0,
+            insert_cid: 0,
+            delete_txn_id: 0,
+            delete_cid: 0,
+            is_deleted: true,
+            next_version: None,
+            prev_version: None,
+        };
+        assert!(!snapshot.is_visible(&meta, 0, |_| TransactionStatus::Unknown));
     }
 
     #[test]

@@ -9,8 +9,9 @@ use crate::catalog::{
     INFORMATION_SCHEMA_SCHEMAS, INFORMATION_SCHEMA_TABLES, SCHEMAS_SCHEMA, TABLES_SCHEMA,
 };
 use crate::storage::disk_manager::DiskManager;
+use crate::storage::engine::TableHandle;
 use crate::storage::heap::MvccHeap;
-use crate::storage::holt::HoltStore;
+use crate::storage::holt::{HoltStore, HoltTableHandle};
 use crate::storage::page::{BPLUS_INTERNAL_PAGE_MAX_SIZE, BPLUS_LEAF_PAGE_MAX_SIZE};
 use crate::storage::table_heap::{TableHeap, TableIterator};
 use crate::storage::tuple::Tuple;
@@ -416,13 +417,35 @@ impl Catalog {
             ));
         }
 
-        let Some(schema) = self.schemas.get_mut(&schema_name) else {
+        let Some(catalog_table) = self
+            .schemas
+            .get(&schema_name)
+            .and_then(|schema| schema.tables.get(&table_name))
+        else {
             return Ok(false);
         };
+        let table_backend = catalog_table.backend;
+        let indexes = catalog_table.indexes.clone();
 
-        let Some(catalog_table) = schema.tables.remove(&table_name) else {
-            return Ok(false);
-        };
+        if let Some(holt) = self.holt_store.clone() {
+            for (index_name, index) in &indexes {
+                if matches!(index.backend, IndexBackend::Holt { .. }) {
+                    holt.drop_index_descriptor(table_ref, index_name)?;
+                }
+            }
+            if matches!(table_backend, TableBackend::Holt { .. }) {
+                holt.drop_table_descriptor(table_ref)?;
+            }
+        }
+
+        let schema = self
+            .schemas
+            .get_mut(&schema_name)
+            .expect("table existence checked above");
+        let catalog_table = schema
+            .tables
+            .remove(&table_name)
+            .expect("table existence checked above");
 
         self.table_registry.unregister(table_ref);
 
@@ -517,20 +540,43 @@ impl Catalog {
             .to_string();
         let table_name = table_ref.table().to_string();
 
-        let Some(catalog_schema) = self.schemas.get_mut(&catalog_schema_name) else {
+        let Some(catalog_schema) = self.schemas.get(&catalog_schema_name) else {
             return Err(QuillSQLError::Storage(format!(
                 "catalog schema {} not created yet",
                 catalog_schema_name
             )));
         };
-        let Some(catalog_table) = catalog_schema.tables.get_mut(&table_name) else {
+        let Some(catalog_table) = catalog_schema.tables.get(&table_name) else {
             return Err(QuillSQLError::Storage(format!(
                 "table {} not created yet",
                 table_name
             )));
         };
+        let table_backend = catalog_table.backend;
+        let schema = catalog_table.schema.clone();
 
-        let stats = TableStatistics::analyze(catalog_table.table_heap()?)?;
+        let stats = match table_backend {
+            TableBackend::Page => TableStatistics::analyze(catalog_table.table_heap()?)?,
+            TableBackend::Holt { table_id } => {
+                let holt = self.holt_store.clone().ok_or_else(|| {
+                    QuillSQLError::Storage("Holt store is not configured".to_string())
+                })?;
+                let table = HoltTableHandle::new(table_ref.clone(), schema.clone(), table_id, holt);
+                let mut stats = TableStatistics::empty(schema.as_ref());
+                let mut stream = table.full_scan()?;
+                while let Some((_rid, meta, tuple)) = stream.next()? {
+                    if !meta.is_deleted {
+                        stats.record_tuple(&tuple);
+                    }
+                }
+                stats
+            }
+        };
+        let catalog_table = self
+            .schemas
+            .get_mut(&catalog_schema_name)
+            .and_then(|schema| schema.tables.get_mut(&table_name))
+            .expect("table existence checked above");
         catalog_table.stats = Some(stats.clone());
         Ok(stats)
     }
@@ -771,16 +817,33 @@ impl Catalog {
             ));
         }
 
-        let Some(schema) = self.schemas.get_mut(&schema_name) else {
-            return Ok(false);
-        };
-        let Some(table) = schema.tables.get_mut(&table_name) else {
+        let Some(index_backend) = self
+            .schemas
+            .get(&schema_name)
+            .and_then(|schema| schema.tables.get(&table_name))
+            .and_then(|table| table.indexes.get(index_name))
+            .map(|index| index.backend)
+        else {
             return Ok(false);
         };
 
-        if table.indexes.remove(index_name).is_none() {
-            return Ok(false);
+        if matches!(index_backend, IndexBackend::Holt { .. }) {
+            let holt = self
+                .holt_store
+                .clone()
+                .ok_or_else(|| QuillSQLError::Storage("Holt store is not configured".into()))?;
+            holt.drop_index_descriptor(table_ref, index_name)?;
         }
+
+        let schema = self
+            .schemas
+            .get_mut(&schema_name)
+            .expect("index existence checked above");
+        let table = schema
+            .tables
+            .get_mut(&table_name)
+            .expect("index existence checked above");
+        table.indexes.remove(index_name);
 
         self.remove_index_metadata(&catalog_name, &schema_name, &table_name, index_name)?;
 

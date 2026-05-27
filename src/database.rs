@@ -28,7 +28,7 @@ use crate::{
     recovery::wal::{WalHeadDebug, WalSegmentDebug},
     storage::{
         disk_manager::DiskManager, disk_scheduler::DiskScheduler, holt::HoltStore, tuple::Tuple,
-        DefaultStorageEngine, StorageEngine,
+        CatalogStorageEngine, StorageEngine,
     },
     transaction::{
         CommandId, IsolationLevel, LockDebugSnapshot, TransactionManager, TransactionStatus,
@@ -254,7 +254,7 @@ impl Database {
             Some(holt_store.clone()),
         );
         let storage_engine: Arc<dyn StorageEngine> =
-            Arc::new(DefaultStorageEngine::new(Some(holt_store.clone())));
+            Arc::new(CatalogStorageEngine::new(Some(holt_store.clone())));
 
         let recovery_summary = RecoveryManager::new(wal_manager.clone(), disk_scheduler.clone())
             .with_buffer_pool(buffer_pool.clone())

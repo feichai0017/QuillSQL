@@ -162,6 +162,46 @@ impl HoltStore {
         Ok(index_id)
     }
 
+    pub fn drop_table_descriptor(&self, table_ref: &TableReference) -> QuillSQLResult<()> {
+        let table = Self::canonical_table_name(table_ref);
+        let table_id = self.table_descriptor(table_ref)?;
+        let key = table_key(&table);
+        let schema_key = table_schema_key(&table);
+        self.db
+            .atomic(|batch| {
+                batch.delete(CATALOG_TREE, &key);
+                batch.delete(CATALOG_TREE, &schema_key);
+            })
+            .map_err(map_holt_err)
+            .and_then(committed)?;
+        if let Some(table_id) = table_id {
+            self.drop_tree_if_exists(&Self::table_tree_name(table_id))?;
+        }
+        Ok(())
+    }
+
+    pub fn drop_index_descriptor(
+        &self,
+        table_ref: &TableReference,
+        index_name: &str,
+    ) -> QuillSQLResult<()> {
+        let table = Self::canonical_table_name(table_ref);
+        let index_id = self.index_descriptor(table_ref, index_name)?;
+        let key = index_key(&table, index_name);
+        let schema_key = index_schema_key(&table, index_name);
+        self.db
+            .atomic(|batch| {
+                batch.delete(CATALOG_TREE, &key);
+                batch.delete(CATALOG_TREE, &schema_key);
+            })
+            .map_err(map_holt_err)
+            .and_then(committed)?;
+        if let Some(index_id) = index_id {
+            self.drop_tree_if_exists(&Self::index_tree_name(index_id))?;
+        }
+        Ok(())
+    }
+
     pub fn allocate_rid(&self) -> QuillSQLResult<RecordId> {
         let (rid, next) = self.reserve_rid()?;
         self.db
@@ -181,6 +221,14 @@ impl HoltStore {
         let page_id = (raw >> 32) as u32;
         let slot_num = raw as u32;
         Ok((RecordId::new(page_id, slot_num), next))
+    }
+
+    fn drop_tree_if_exists(&self, tree: &str) -> QuillSQLResult<()> {
+        match self.db.drop_tree(tree) {
+            Ok(()) => Ok(()),
+            Err(holt::Error::TreeNotFound { .. }) => Ok(()),
+            Err(err) => Err(map_holt_err(err)),
+        }
     }
 
     pub fn put_txn_status(
@@ -1087,6 +1135,10 @@ fn decode_txn_status(raw: u8) -> QuillSQLResult<TransactionStatus> {
     }
 }
 
+pub(crate) fn map_holt_err(err: holt::Error) -> QuillSQLError {
+    QuillSQLError::Storage(format!("Holt error: {err}"))
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -1199,8 +1251,4 @@ mod tests {
         let high = encode_index_key(&tuple, RecordId::new(0, 2)).unwrap();
         assert!(low < high);
     }
-}
-
-pub(crate) fn map_holt_err(err: holt::Error) -> QuillSQLError {
-    QuillSQLError::Storage(format!("Holt error: {err}"))
 }

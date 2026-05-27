@@ -75,16 +75,18 @@ impl ColumnStatistics {
         }
 
         self.non_null_count += 1;
-        let is_new_min = self.min.as_ref().map_or(true, |min| {
-            matches!(value.partial_cmp(min), Some(Ordering::Less))
-        });
+        let is_new_min = self
+            .min
+            .as_ref()
+            .is_none_or(|min| matches!(value.partial_cmp(min), Some(Ordering::Less)));
         if is_new_min {
             self.min = Some(value.clone());
         }
 
-        let is_new_max = self.max.as_ref().map_or(true, |max| {
-            matches!(value.partial_cmp(max), Some(Ordering::Greater))
-        });
+        let is_new_max = self
+            .max
+            .as_ref()
+            .is_none_or(|max| matches!(value.partial_cmp(max), Some(Ordering::Greater)));
         if is_new_max {
             self.max = Some(value.clone());
         }

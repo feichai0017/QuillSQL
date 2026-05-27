@@ -265,18 +265,8 @@ impl Transaction {
         self.state = state;
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn set_access_mode(&mut self, access_mode: TransactionAccessMode) {
-        self.access_mode = access_mode;
-    }
-
     pub fn update_access_mode(&mut self, access_mode: TransactionAccessMode) {
         self.access_mode = access_mode;
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn mark_tainted(&mut self) {
-        self.state = TransactionState::Tainted;
     }
 
     pub fn push_insert_undo(

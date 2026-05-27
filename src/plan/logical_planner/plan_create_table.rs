@@ -69,8 +69,8 @@ impl<'a> LogicalPlanner<'a> {
 
 fn parse_table_engine(engine: Option<&str>) -> QuillSQLResult<TableEngine> {
     match engine.map(str::to_ascii_lowercase).as_deref() {
-        None | Some("page") | Some("pagestore") | Some("default") => Ok(TableEngine::Page),
-        Some("holt") => Ok(TableEngine::Holt),
+        None | Some("holt") | Some("default") => Ok(TableEngine::Holt),
+        Some("page") | Some("pagestore") => Ok(TableEngine::Page),
         Some(other) => Err(QuillSQLError::NotSupport(format!(
             "table engine {other} is not supported"
         ))),

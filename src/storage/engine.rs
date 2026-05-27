@@ -120,11 +120,11 @@ pub trait StorageEngine: Send + Sync {
 pub struct PageStoreEngine;
 
 #[derive(Default)]
-pub struct DefaultStorageEngine {
+pub struct CatalogStorageEngine {
     holt_store: Option<Arc<HoltStore>>,
 }
 
-impl DefaultStorageEngine {
+impl CatalogStorageEngine {
     pub fn new(holt_store: Option<Arc<HoltStore>>) -> Self {
         Self { holt_store }
     }
@@ -528,7 +528,7 @@ impl StorageEngine for PageStoreEngine {
     }
 }
 
-impl StorageEngine for DefaultStorageEngine {
+impl StorageEngine for CatalogStorageEngine {
     fn table(&self, catalog: &Catalog, table: &TableReference) -> QuillSQLResult<TableBinding> {
         let handle: Arc<dyn TableHandle> = match catalog.table_backend(table)? {
             TableBackend::Page => {

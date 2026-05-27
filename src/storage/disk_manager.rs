@@ -1,5 +1,5 @@
 use log::debug;
-use std::alloc::{alloc, alloc_zeroed, dealloc, Layout};
+use std::alloc::{alloc_zeroed, dealloc, Layout};
 use std::fs::File;
 use std::path::Path;
 use std::ptr::NonNull;
@@ -31,24 +31,13 @@ pub(crate) struct AlignedPageBuf {
 
 impl AlignedPageBuf {
     pub(crate) fn new_zeroed() -> QuillSQLResult<Self> {
-        Self::allocate(true)
+        Self::allocate()
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn new_uninit() -> QuillSQLResult<Self> {
-        Self::allocate(false)
-    }
-
-    fn allocate(zeroed: bool) -> QuillSQLResult<Self> {
+    fn allocate() -> QuillSQLResult<Self> {
         let layout = Layout::from_size_align(PAGE_SIZE, PAGE_SIZE)
             .map_err(|_| QuillSQLError::Internal("Invalid PAGE_SIZE layout".into()))?;
-        let ptr = unsafe {
-            if zeroed {
-                alloc_zeroed(layout)
-            } else {
-                alloc(layout)
-            }
-        };
+        let ptr = unsafe { alloc_zeroed(layout) };
         let Some(non_null) = NonNull::new(ptr) else {
             return Err(QuillSQLError::Internal("Aligned allocation failed".into()));
         };
@@ -90,7 +79,7 @@ impl DiskManager {
     fn open_raw_file(db_path: &Path, create: bool, direct: bool) -> std::io::Result<(File, bool)> {
         let request_direct = direct
             && !std::env::var("QUILL_DISABLE_DIRECT_IO")
-                .map_or(false, |v| v == "1" || v.eq_ignore_ascii_case("true"));
+                .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
         #[cfg(target_os = "linux")]
         let mut request_direct = request_direct;
 
@@ -213,7 +202,7 @@ impl DiskManager {
 
         // calculate next page id
         let db_file_len = db_file.metadata()?.len();
-        if (db_file_len - *META_PAGE_SIZE as u64) % PAGE_SIZE as u64 != 0 {
+        if !(db_file_len - *META_PAGE_SIZE as u64).is_multiple_of(PAGE_SIZE as u64) {
             return Err(QuillSQLError::Internal(format!(
                 "db file size not a multiple of {} + meta page size {}",
                 PAGE_SIZE, *META_PAGE_SIZE,
@@ -396,7 +385,7 @@ impl DiskManager {
         let mut guard = self.db_file.lock().unwrap();
         guard.seek(std::io::SeekFrom::Start(0))?;
         let encoded = encode_meta_page(&self.meta.read().unwrap());
-        if self.direct_io && encoded.as_ptr() as usize % PAGE_SIZE != 0 {
+        if self.direct_io && !(encoded.as_ptr() as usize).is_multiple_of(PAGE_SIZE) {
             let mut aligned = AlignedPageBuf::new_zeroed()?;
             aligned.as_mut_slice().copy_from_slice(&encoded);
             guard.write_all(aligned.as_slice())?;
@@ -420,7 +409,7 @@ impl DiskManager {
             (*META_PAGE_SIZE + (page_id - 1) as usize * PAGE_SIZE) as u64,
         ))?;
 
-        if data.as_ptr() as usize % PAGE_SIZE == 0 {
+        if (data.as_ptr() as usize).is_multiple_of(PAGE_SIZE) {
             guard.write_all(data)?;
         } else {
             let mut aligned = AlignedPageBuf::new_zeroed()?;
