@@ -256,12 +256,23 @@ Parquet dataset as a DataFusion table.</p>
 <tr><td><code>expr.rs</code></td><td>Lowers supported DataFusion physical expressions into QuillSQL’s small JIT IR.</td></tr>
 <tr><td><code>ir.rs</code></td><td>Defines <code>KernelIR</code>, <code>PipelineIR</code>, and the initial filter/project fusion boundary.</td></tr>
 <tr><td><code>kernel.rs</code></td><td>Defines the future Arrow kernel ABI and compiled-kernel descriptor.</td></tr>
-<tr><td><code>mlir/</code></td><td>MLIR-first backend that emits/verifies <code>arith</code> scalar functions and runs the first native scalar ExecutionEngine smoke path.</td></tr>
+<tr><td><code>mlir/</code></td><td>MLIR emission, verification, and native scalar ExecutionEngine invocation.</td></tr>
 <tr><td><code>rule.rs</code></td><td>DataFusion physical optimizer rule that rewrites supported filter/project islands.</td></tr>
-<tr><td><code>runtime.rs</code></td><td>Fixed-width Arrow batch kernel runtime for compiled filter/project execution.</td></tr>
+<tr><td><code>runtime/</code></td><td>Fixed-width Arrow batch kernel runtime for compiled filter/project execution.</td></tr>
 </tbody>
 </table>
 </div>
+<p>The two JIT subdirectories have stricter internal boundaries:</p>
+<ul>
+<li><code>mlir/mod.rs</code>: public backend surface and <code>KernelBackend</code> implementation.</li>
+<li><code>mlir/emit.rs</code>: textual MLIR emission from QuillSQL JIT expressions.</li>
+<li><code>mlir/verify.rs</code>: feature-gated MLIR parser/verifier setup.</li>
+<li><code>mlir/native.rs</code>: feature-gated <code>ExecutionEngine</code> invocation.</li>
+<li><code>runtime/mod.rs</code>: public fixed-width filter/project kernel surface.</li>
+<li><code>runtime/array.rs</code>: Arrow array views and output builders.</li>
+<li><code>runtime/eval.rs</code>: expression evaluation and SQL boolean/null semantics.</li>
+<li><code>runtime/value.rs</code>: scalar value representation.</li>
+</ul>
 <p>The JIT package is not a storage adapter and not a second SQL engine. It is the
 research boundary for replacing selected DataFusion physical operators with
 compiled kernels.</p>
