@@ -14,12 +14,13 @@ use serde::Serialize;
 use tempfile::TempDir;
 
 use crate::error::{QuillSQLError, QuillSQLResult};
-use crate::jit::{JitCandidate, MlirJitRule};
+use crate::jit::{JitCandidate, JitOptions, MlirJitRule};
 
 #[derive(Debug, Clone)]
 pub struct DatabaseOptions {
     pub data_dir: Option<PathBuf>,
     pub debug_trace: bool,
+    pub jit: JitOptions,
 }
 
 impl Default for DatabaseOptions {
@@ -27,6 +28,7 @@ impl Default for DatabaseOptions {
         Self {
             data_dir: None,
             debug_trace: true,
+            jit: JitOptions::default(),
         }
     }
 }
@@ -107,30 +109,36 @@ impl DebugPlanNode {
 
 impl Database {
     pub fn new(options: DatabaseOptions) -> QuillSQLResult<Self> {
-        match options.data_dir {
-            Some(data_dir) => Self::open(data_dir, None, options.debug_trace),
+        let DatabaseOptions {
+            data_dir,
+            debug_trace,
+            jit,
+        } = options;
+        match data_dir {
+            Some(data_dir) => Self::open(data_dir, None, debug_trace, jit),
             None => {
                 let temp_dir = TempDir::new()?;
                 let data_dir = temp_dir.path().join("data");
-                Self::open(data_dir, Some(temp_dir), options.debug_trace)
+                Self::open(data_dir, Some(temp_dir), debug_trace, jit)
             }
         }
     }
 
     pub fn new_with_data_dir(data_dir: impl Into<PathBuf>) -> QuillSQLResult<Self> {
-        Self::open(data_dir.into(), None, true)
+        Self::open(data_dir.into(), None, true, JitOptions::default())
     }
 
     pub fn new_temp() -> QuillSQLResult<Self> {
         let temp_dir = TempDir::new()?;
         let data_dir = temp_dir.path().join("data");
-        Self::open(data_dir, Some(temp_dir), true)
+        Self::open(data_dir, Some(temp_dir), true, JitOptions::default())
     }
 
     fn open(
         data_dir: PathBuf,
         temp_dir: Option<TempDir>,
         debug_trace_enabled: bool,
+        jit_options: JitOptions,
     ) -> QuillSQLResult<Self> {
         std::fs::create_dir_all(&data_dir)?;
 
@@ -140,7 +148,7 @@ impl Database {
         let state = SessionStateBuilder::new()
             .with_config(config)
             .with_default_features()
-            .with_physical_optimizer_rule(Arc::new(crate::jit::MlirJitRule::new()))
+            .with_physical_optimizer_rule(Arc::new(MlirJitRule::with_options(jit_options)))
             .build();
         let ctx = SessionContext::new_with_state(state);
 

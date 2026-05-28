@@ -7,6 +7,7 @@ use datafusion::arrow::record_batch::RecordBatch;
 use quill_sql::database::{Database, DatabaseOptions};
 #[cfg(feature = "jit-mlir")]
 use quill_sql::jit::DecimalFilterSumInput;
+use quill_sql::jit::JitOptions;
 use quill_sql::jit::{
     FilterProjectKernel, JitBinaryOp, JitExpr, JitProjection, JitScalar, JitType, KernelBackend,
     MlirBackend, PipelineIr, PipelineOp,
@@ -63,6 +64,7 @@ fn projections() -> Vec<JitProjection> {
 fn benchmark_database() -> Database {
     Database::new(DatabaseOptions {
         debug_trace: false,
+        jit: JitOptions::from_env(),
         ..Default::default()
     })
     .expect("database")

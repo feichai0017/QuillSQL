@@ -88,9 +88,11 @@ compacts one projected column, and an `f64` filter/sum kernel for the first
 scan/filter/plain-aggregate path. It also has a Q6-shaped
 `Date32`/`Decimal128` filter/sum kernel that compiles and invokes through MLIR
 over fixed-width column slices. With `jit-mlir` and
-`QUILL_JIT_MLIR_DISPATCH=1`, `CompiledFilterSumExec` dispatches that decimal
-path through a thread-local MLIR execution cache when the input batch has no
-nulls or slice offsets; other cases keep the safe Arrow runtime fallback.
+`DatabaseOptions { jit: JitOptions::mlir_execution(), .. }`,
+`CompiledFilterSumExec` dispatches that decimal path through a thread-local MLIR
+execution cache when the input batch has no nulls or slice offsets; other cases
+keep the safe Arrow runtime fallback. CLI, server, and benchmark binaries read
+the same option once at startup from `QUILL_JIT=mlir`.
 
 Run the MLIR path with:
 
@@ -99,7 +101,7 @@ MLIR_SYS_220_PREFIX=/opt/homebrew/opt/llvm \
 LLVM_SYS_220_PREFIX=/opt/homebrew/opt/llvm \
 cargo test --features jit-mlir
 
-QUILL_JIT_MLIR_DISPATCH=1 \
+QUILL_JIT=mlir \
 MLIR_SYS_220_PREFIX=/opt/homebrew/opt/llvm \
 LLVM_SYS_220_PREFIX=/opt/homebrew/opt/llvm \
 cargo bench --features jit-mlir --bench tpch -- q6_scan_filter_aggregate
@@ -157,12 +159,15 @@ The integration tests cover DataFusion memory tables, Parquet registration, and
 - `PORT`: bind port, overriding `QUILL_HTTP_ADDR`.
 - `QUILL_HTTP_ADDR`: listen address, default `0.0.0.0:8080`.
 - `QUILL_DATA_DIR`: directory for DataFusion scratch state.
+- `QUILL_JIT`: set to `mlir` to request executable MLIR kernels when the binary
+  is built with `--features jit-mlir`; unset keeps the fixed-width Arrow runtime
+  fallback.
 - `RUST_LOG`: log level.
 
 `DatabaseOptions` exposes the same data-directory setting for embedded use. It
-also has a `debug_trace` switch: interactive and HTTP paths leave it enabled,
-while benchmark harnesses disable it so query timings do not include trace-only
-physical planning.
+also has `debug_trace` and `jit` switches: interactive and HTTP paths leave
+trace enabled, while benchmark harnesses disable it so query timings do not
+include trace-only physical planning.
 
 ## Docker
 

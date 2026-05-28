@@ -3,6 +3,7 @@ mod expr;
 mod ir;
 mod kernel;
 mod mlir;
+mod options;
 mod rule;
 mod runtime;
 
@@ -19,6 +20,7 @@ pub use mlir::{
     DecimalFilterSumInput, DecimalFilterSumOutput,
 };
 pub use mlir::{MlirBackend, MlirColumn, MlirModule};
+pub use options::JitOptions;
 pub use rule::{JitCandidate, MlirJitRule};
 pub use runtime::{FilterProjectKernel, FilterSumKernel, FilterSumValue};
 

@@ -17,7 +17,7 @@ use serde::Serialize;
 
 use crate::jit::{
     CompiledFilterProjectExec, CompiledFilterSumExec, CompiledKernel, FilterProjectKernel,
-    FilterSumKernel, JitExpr, JitProjection, KernelBackend, KernelKind, MlirBackend,
+    FilterSumKernel, JitExpr, JitOptions, JitProjection, KernelBackend, KernelKind, MlirBackend,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -31,12 +31,18 @@ pub struct JitCandidate {
 #[derive(Debug, Default)]
 pub struct MlirJitRule {
     backend: MlirBackend,
+    options: JitOptions,
 }
 
 impl MlirJitRule {
     pub fn new() -> Self {
+        Self::with_options(JitOptions::default())
+    }
+
+    pub fn with_options(options: JitOptions) -> Self {
         Self {
             backend: MlirBackend::new(),
+            options,
         }
     }
 
@@ -321,7 +327,7 @@ impl MlirJitRule {
                 KernelKind::FilterSum,
                 self.backend.name(),
                 module.text,
-                super::mlir::execution_enabled(),
+                self.options.mlir_execution_enabled(),
             );
         }
 

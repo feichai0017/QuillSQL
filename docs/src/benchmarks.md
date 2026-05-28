@@ -12,10 +12,10 @@ QuillSQL uses benchmarks to separate three different claims:
 The current code has real `CompiledFilterProjectExec` and
 `CompiledFilterSumExec` nodes in the DataFusion hot path, and their execution
 bodies use QuillSQL's fixed-width Arrow batch kernels. With `jit-mlir` and
-`QUILL_JIT_MLIR_DISPATCH=1`, the Q6-shaped decimal filter/sum path can dispatch
-to an executable MLIR kernel for null-free, offset-free fixed-width batches.
-Other compiled MLIR kernel speedups are intentionally not claimed as end-to-end
-query speedups yet.
+`QUILL_JIT=mlir`, the Q6-shaped decimal filter/sum path can dispatch to an
+executable MLIR kernel for null-free, offset-free fixed-width batches. Other
+compiled MLIR kernel speedups are intentionally not claimed as end-to-end query
+speedups yet.
 
 ## Microbenchmarks
 
@@ -62,6 +62,7 @@ SF0.01 data inside the repository under `benchdata/tpch-sf0.01`.
 ```bash
 cargo bench --bench tpch -- --sample-size 10
 scripts/bench_tpch.sh
+QUILL_BENCH_FEATURES=jit-mlir QUILL_JIT=mlir scripts/bench_tpch.sh
 ```
 
 Generated data is outside version control. Useful knobs:
@@ -72,6 +73,8 @@ Generated data is outside version control. Useful knobs:
 | `QUILL_TPCH_GEN_THREADS` | Number of generator threads. |
 | `QUILL_TPCH_REGENERATE=1` | Delete and rebuild the generated data directory. |
 | `QUILL_TPCH_DIR` | Use an existing Parquet dataset instead of generating one. |
+| `QUILL_BENCH_FEATURES` | Cargo features passed by the benchmark scripts, for example `jit-mlir`. |
+| `QUILL_JIT=mlir` | Request executable MLIR dispatch after building with `jit-mlir`. |
 
 When `QUILL_TPCH_DIR` is set, the directory can contain either
 `<table>.parquet` files or table directories:

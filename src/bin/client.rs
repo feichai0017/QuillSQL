@@ -1,5 +1,6 @@
 use clap::Parser;
 use quill_sql::database::{Database, DatabaseOptions};
+use quill_sql::jit::JitOptions;
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
 
@@ -17,6 +18,7 @@ async fn main() {
 
     let db = Database::new(DatabaseOptions {
         data_dir: args.data_dir.map(Into::into),
+        jit: JitOptions::from_env(),
         ..Default::default()
     })
     .expect("fail to open database");

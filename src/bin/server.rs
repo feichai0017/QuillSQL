@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use quill_sql::database::{Database, DatabaseOptions};
+use quill_sql::jit::JitOptions;
 use tokio::sync::{Mutex, MutexGuard};
 
 /// Shared app state holding a Database protected by a mutex.
@@ -26,6 +27,7 @@ fn rebuild_db(opts: &DatabaseOptions) -> Database {
 fn database_options_from_env() -> DatabaseOptions {
     DatabaseOptions {
         data_dir: std::env::var("QUILL_DATA_DIR").ok().map(PathBuf::from),
+        jit: JitOptions::from_env(),
         ..Default::default()
     }
 }

@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use quill_sql::database::{Database, DatabaseOptions};
+use quill_sql::jit::JitOptions;
 use tpchgen_cli::{Compression, OutputFormat, Table, TpchGenerator};
 
 const DEFAULT_SCALE_FACTOR: f64 = 0.01;
@@ -155,6 +156,7 @@ async fn load_or_generate_data() -> Result<PathBuf, String> {
 async fn prepare_database(root: &Path, tables: &[&str]) -> Result<Database, String> {
     let db = Database::new(DatabaseOptions {
         debug_trace: false,
+        jit: JitOptions::from_env(),
         ..Default::default()
     })
     .map_err(|err| err.to_string())?;

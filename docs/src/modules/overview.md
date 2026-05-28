@@ -21,6 +21,7 @@ Parquet dataset as a DataFusion table.
 | `ir.rs` | Defines `KernelIR`, `PipelineIR`, and the initial filter/project fusion boundary. |
 | `kernel.rs` | Defines the future Arrow kernel ABI and compiled-kernel descriptor. |
 | `mlir/` | MLIR emission, verification, and compiled ExecutionEngine invocation. |
+| `options.rs` | Startup-time JIT execution options shared by the database and benchmark harnesses. |
 | `rule.rs` | DataFusion physical optimizer rule that rewrites supported filter/project islands. |
 | `runtime/` | Fixed-width Arrow batch kernel runtime for compiled filter/project execution. |
 
