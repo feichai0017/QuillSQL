@@ -160,27 +160,28 @@
 </div>
 
 <h1 id="quillsql-internals"><a class="header" href="#quillsql-internals">QuillSQL Internals</a></h1>
-<p>QuillSQL is now a DataFusion, Arrow, Parquet, and MLIR query compiler research
-engine. DataFusion owns the SQL front end, optimizer, and physical execution
-framework. QuillSQL keeps the embedding API, CLI/server surfaces, debug views,
-and the JIT research boundary.</p>
+<p>QuillSQL is now a frontend-agnostic Arrow and MLIR query compiler research
+engine. DataFusion is the first complete frontend adapter and still powers the
+CLI/server SQL path. QuillSQL keeps the embedding API, debug views, neutral
+<code>PipelineGraph</code>, Arrow runtime, and JIT research boundary.</p>
 <p>The project deliberately does not carry a custom storage engine. Interactive
 queries use DataFusion memory tables; persistent analytical data should come
 from Arrow/Parquet datasets and DataFusion’s file/object-store integrations.</p>
 <h2 id="core-topics"><a class="header" href="#core-topics">Core Topics</a></h2>
 <ul>
-<li><a href="#quillsql-architecture">Overall Architecture</a>: where DataFusion, Arrow/Parquet,
-and MLIR meet.</li>
+<li><a href="#quillsql-architecture">Overall Architecture</a>: where frontend adapters, Arrow, and
+MLIR meet.</li>
 <li><a href="#module-overview">Module Overview</a>: current Rust package layout.</li>
 <li><a href="#front-ends-cli--http">Front-Ends</a>: CLI and HTTP entry points.</li>
 <li><a href="#testing--documentation">Testing</a>: validation commands and test scope.</li>
 </ul>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="quillsql-architecture"><a class="header" href="#quillsql-architecture">QuillSQL Architecture</a></h1>
-<p>QuillSQL is a thin SQL research shell around DataFusion. It does not implement
-its own parser, binder, optimizer, executor, page store, WAL, SQL catalog, or
-index manager. The storage path is DataFusion-backed: memory tables for local
-experiments and Arrow/Parquet datasets for persistent analytical data.</p>
+<p>QuillSQL is a frontend-agnostic query compiler research engine. It does not
+implement its own SQL parser, binder, cost optimizer, page store, WAL, SQL
+catalog, or index manager. Frontend adapters translate external physical plans
+into a neutral <code>PipelineGraph</code>; Arrow batches are the runtime transport; MLIR is
+the compiler boundary.</p>
 <h2 id="end-to-end-pipeline"><a class="header" href="#end-to-end-pipeline">End-to-End Pipeline</a></h2>
 <pre class="mermaid">flowchart LR
     SQL["SQL text"] --&gt; DB["Database::run / prepare"]
@@ -188,13 +189,15 @@ experiments and Arrow/Parquet datasets for persistent analytical data.</p>
     DF --&gt; Logical["DataFusion LogicalPlan"]
     Logical --&gt; Optimized["DataFusion optimizers"]
     Optimized --&gt; Physical["DataFusion ExecutionPlan"]
-    Physical --&gt; JITRule["MlirJitRule physical rewrite"]
+    Physical --&gt; DFAdapter["quill-df adapter"]
+    DFAdapter --&gt; Graph["PipelineGraph"]
+    Graph --&gt; JITRule["MLIR JIT compile"]
     JITRule --&gt; CompiledExec["CompiledPipelineExec"]
     CompiledExec --&gt; Arrow["Arrow RecordBatch output"]
 
     Parquet["Parquet / Arrow datasets"] --&gt; DF
     Memory["DataFusion memory tables"] --&gt; DF
-    JITRule --&gt; MLIR["Quill dialect + MLIR verification"]
+    Graph --&gt; MLIR["Quill dialect + MLIR verification"]
 </pre>
 
 <h2 id="storage-boundary"><a class="header" href="#storage-boundary">Storage Boundary</a></h2>
@@ -212,10 +215,10 @@ trace-only planning work.</li>
 <p>This makes the project better suited to OLAP/query-compiler research than OLTP
 storage-engine research.</p>
 <h2 id="jit-boundary"><a class="header" href="#jit-boundary">JIT Boundary</a></h2>
-<p>The JIT boundary is the DataFusion physical plan plus Arrow <code>RecordBatch</code>
-interface. <code>MlirJitRule</code> walks DataFusion physical plans, asks
-<code>pipeline/extract.rs</code> to extract supported physical pipelines, and delegates
-compilation to <code>lower/compiler.rs</code>.</p>
+<p>The JIT boundary is <code>PipelineGraph</code> plus Arrow <code>RecordBatch</code>/fixed-width column
+buffers. <code>quill-df</code> walks DataFusion physical plans, extracts supported physical
+pipelines, and wraps compiled results as DataFusion <code>ExecutionPlan</code>s. The core
+JIT and runtime crates do not depend on DataFusion.</p>
 <p>The MLIR backend emits a formal Quill dialect module from <code>PipelineGraph</code>, verifies
 that module through <code>melior</code> when <code>jit-mlir</code> is enabled, and then lowers covered
 pipeline specs to executable <code>scf/arith/llvm</code> modules. The physical optimizer can
@@ -239,7 +242,7 @@ to keep a pure DataFusion physical plan for baseline measurements.</p>
 <h2 id="graph-and-fusion"><a class="header" href="#graph-and-fusion">Graph And Fusion</a></h2>
 <p>QuillSQL keeps one semantic pipeline graph plus an explicit lowering boundary:</p>
 <ul>
-<li><code>PipelineGraph</code>: a linear pipeline prefix from a DataFusion physical plan,
+<li><code>PipelineGraph</code>: a linear pipeline prefix from a frontend physical plan,
 including the first <code>filter -&gt; plain SUM</code> sink shape used as the stepping
 stone toward whole-pipeline lowering. It describes the executable subgraph
 selected for compilation; it is not a replacement SQL plan.</li>
@@ -265,11 +268,11 @@ Filter(Date32/Decimal128 comparisons) -&gt; SUM(Decimal128 * Decimal128)
 Group keys + SUM/COUNT/MIN/MAX aggregate inputs
   =&gt; quill.sink.group_aggregate dialect skeleton
 </code></pre>
-<p><code>pipeline/extract.rs</code> also recognizes the common DataFusion shape where a
+<p><code>crates/quill-df/src/extract.rs</code> also recognizes the common DataFusion shape where a
 round-robin <code>RepartitionExec</code> sits between the filter and projection, and
 records that as an output adapter on the extracted pipeline. For plain
 aggregates, it extracts the partial <code>SUM</code> pipeline and leaves DataFusion’s final
-aggregate in place. <code>pipeline/rule.rs</code> only performs traversal and replacement;
+aggregate in place. <code>crates/quill-df/src/rule.rs</code> only performs traversal and replacement;
 it no longer constructs shape-specific execution nodes directly. The recognized
 physical-plan shapes are also exposed as <code>PipelineGraph</code> candidates in debug traces,
 so future
@@ -283,7 +286,7 @@ aggregate graph and dialect op are present as the Q1 extension point, but the
 optimizer rule still leaves Q1 on DataFusion until the hash aggregate lowering
 is implemented.</p>
 <p>The intended compiler path is:</p>
-<pre><code class="language-text">DataFusion ExecutionPlan
+<pre><code class="language-text">frontend physical plan
   -&gt; PipelineGraph
   -&gt; Quill dialect
   -&gt; lowering to scf/arith/llvm
@@ -296,9 +299,9 @@ the dialect operations and lowering rules rather than adding more direct runtime
 shortcuts.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="module-overview"><a class="header" href="#module-overview">Module Overview</a></h1>
-<p>The current codebase is a small Cargo workspace. DataFusion provides the SQL
-engine; QuillSQL provides the embedding API, front ends, and MLIR research
-hooks.</p>
+<p>The current codebase is a small Cargo workspace. QuillSQL’s core JIT path is
+frontend-neutral; DataFusion is the first complete frontend adapter used by the
+CLI, server, tests, and benchmarks.</p>
 <h2 id="workspace-packages"><a class="header" href="#workspace-packages">Workspace Packages</a></h2>
 <div class="table-wrapper">
 <table>
@@ -307,8 +310,11 @@ hooks.</p>
 </thead>
 <tbody>
 <tr><td><code>quill-sql</code></td><td>CLI/server binaries, benchmarks, and release metadata.</td></tr>
-<tr><td><code>quill-core</code></td><td>DataFusion-backed <code>Database</code> API, query execution, Parquet registration, and debug traces.</td></tr>
-<tr><td><code>quill-jit</code></td><td>Pipeline extraction, Quill dialect emission, MLIR lowering, compiled execution nodes, and Arrow kernel runtime.</td></tr>
+<tr><td><code>quill-core</code></td><td>Public <code>Database</code> API, query execution wrapper, Parquet registration, and debug traces.</td></tr>
+<tr><td><code>quill-plan</code></td><td>Frontend-neutral <code>PipelineGraph</code>, expression, type, source, stage, and sink model.</td></tr>
+<tr><td><code>quill-runtime</code></td><td>Arrow batch binding, fixed-width kernels, aggregate state, and result materialization.</td></tr>
+<tr><td><code>quill-jit</code></td><td>Compiler orchestration, frontend adapter trait, Quill dialect emission, and MLIR lowering.</td></tr>
+<tr><td><code>quill-df</code></td><td>DataFusion frontend adapter, physical optimizer rule, and <code>CompiledPipelineExec</code>.</td></tr>
 <tr><td><code>quill-mlir</code></td><td>Optional C++/TableGen Quill dialect registration and MLIR pass extension points.</td></tr>
 </tbody>
 </table>
@@ -322,50 +328,51 @@ Benchmark code uses this path to reduce parsing and logical planning noise while
 still giving DataFusion a fresh physical plan for each execution.</p>
 <p><code>Database::register_parquet</code> exposes the durable storage path by registering a
 Parquet dataset as a DataFusion table.</p>
-<h2 id="jit-cratesquill-jitsrc"><a class="header" href="#jit-cratesquill-jitsrc">JIT (<code>crates/quill-jit/src</code>)</a></h2>
+<h2 id="jit-workspace"><a class="header" href="#jit-workspace">JIT Workspace</a></h2>
 <div class="table-wrapper">
 <table>
 <thead>
-<tr><th>Directory</th><th>Role</th></tr>
+<tr><th>Package / Directory</th><th>Role</th></tr>
 </thead>
 <tbody>
-<tr><td><code>pipeline/</code></td><td>Expression lowering, <code>PipelineGraph</code>, DataFusion physical-plan extraction, and the physical optimizer rule.</td></tr>
-<tr><td><code>dialect/</code></td><td>Quill pipeline dialect model used as the explicit lowering boundary.</td></tr>
-<tr><td><code>lower/</code></td><td>Exact pipeline pattern lowering, compiled-plan construction, and JIT options.</td></tr>
-<tr><td><code>runtime/</code></td><td>DataFusion compiled pipeline node, pipeline specs, and fixed-width Arrow batch kernels.</td></tr>
-<tr><td><code>mlir/</code></td><td>MLIR emission, formal Quill dialect verification, and compiled ExecutionEngine invocation.</td></tr>
+<tr><td><code>quill-plan</code></td><td>Neutral graph and expression model shared by all frontends.</td></tr>
+<tr><td><code>quill-runtime</code></td><td>DataFusion-free Arrow runtime kernels and pipeline specs.</td></tr>
+<tr><td><code>quill-df</code></td><td>DataFusion expression lowering, pipeline extraction, optimizer rule, and execution wrapper.</td></tr>
+<tr><td><code>quill-jit/src/dialect</code></td><td>Quill pipeline dialect text model used as the explicit lowering boundary.</td></tr>
+<tr><td><code>quill-jit/src/lower</code></td><td>Exact graph pattern lowering and JIT options.</td></tr>
+<tr><td><code>quill-jit/src/mlir</code></td><td>MLIR emission, formal Quill dialect verification, and compiled ExecutionEngine invocation.</td></tr>
 </tbody>
 </table>
 </div>
 <p>The JIT subdirectories have stricter internal boundaries:</p>
 <ul>
-<li><code>pipeline/expr.rs</code>: lowers supported DataFusion physical expressions into the
-small JIT expression IR.</li>
-<li><code>pipeline/graph.rs</code>: defines the semantic <code>PipelineGraph</code> shape extracted from
-DataFusion plans.</li>
-<li><code>pipeline/extract.rs</code>: extracts recognizable physical-plan pipelines such as
+<li><code>quill-df/src/expr.rs</code>: lowers supported DataFusion physical expressions into
+the neutral JIT expression model.</li>
+<li><code>quill-plan/src/graph.rs</code>: defines the semantic <code>PipelineGraph</code> shape extracted
+from frontend physical plans.</li>
+<li><code>quill-df/src/extract.rs</code>: extracts recognizable physical-plan pipelines such as
 <code>filter -&gt; projection</code> and <code>filter -&gt; plain SUM</code>.</li>
-<li><code>pipeline/rule.rs</code>: physical optimizer rule that delegates supported pipeline
+<li><code>quill-df/src/rule.rs</code>: physical optimizer rule that delegates supported pipeline
 rewrites to the compiler.</li>
-<li><code>lower/compiler.rs</code>: compiles recognized <code>PipelineGraph</code> shapes into DataFusion
+<li><code>quill-df/src/compiler.rs</code>: compiles recognized <code>PipelineGraph</code> shapes into DataFusion
 execution nodes.</li>
-<li><code>mlir/mod.rs</code>: public backend surface and <code>KernelBackend</code> implementation.</li>
-<li><code>mlir/lower.rs</code>: lowers supported Quill dialect modules to executable MLIR;
+<li><code>quill-jit/src/mlir/mod.rs</code>: public backend surface and <code>KernelBackend</code> implementation.</li>
+<li><code>quill-jit/src/mlir/lower.rs</code>: lowers supported Quill dialect modules to executable MLIR;
 currently covers the Q6-shaped decimal filter/sum path.</li>
-<li><code>mlir/emit.rs</code>: textual MLIR emission helpers for QuillSQL JIT expressions
+<li><code>quill-jit/src/mlir/emit.rs</code>: textual MLIR emission helpers for QuillSQL JIT expressions
 and fixed-width kernels.</li>
-<li><code>mlir/verify.rs</code>: feature-gated MLIR parser/verifier setup.</li>
-<li><code>mlir/compiled.rs</code>: feature-gated <code>ExecutionEngine</code> invocation artifacts.</li>
-<li><code>runtime/exec.rs</code>: unified DataFusion physical execution node for compiled
+<li><code>quill-jit/src/mlir/verify.rs</code>: feature-gated MLIR parser/verifier setup.</li>
+<li><code>quill-jit/src/mlir/compiled.rs</code>: feature-gated <code>ExecutionEngine</code> invocation artifacts.</li>
+<li><code>quill-df/src/exec.rs</code>: unified DataFusion physical execution node for compiled
 record and scalar aggregate pipelines.</li>
-<li><code>runtime/kernel.rs</code>: <code>PipelineSpec</code>, <code>PredicateSpec</code>, and compiled pipeline
+<li><code>quill-runtime/src/kernel.rs</code>: <code>PipelineSpec</code>, <code>PredicateSpec</code>, and compiled pipeline
 metadata.</li>
-<li><code>runtime/record.rs</code>: fixed-width filter/project record-batch runtime.</li>
-<li><code>runtime/sum.rs</code>: fixed-width plain <code>SUM</code> runtime and Q6-shaped decimal
+<li><code>quill-runtime/src/record.rs</code>: fixed-width filter/project record-batch runtime.</li>
+<li><code>quill-runtime/src/sum.rs</code>: fixed-width plain <code>SUM</code> runtime and Q6-shaped decimal
 filter/sum specialization.</li>
-<li><code>runtime/array.rs</code>: Arrow array views and output builders.</li>
-<li><code>runtime/eval.rs</code>: expression evaluation and SQL boolean/null semantics.</li>
-<li><code>runtime/value.rs</code>: scalar value representation.</li>
+<li><code>quill-runtime/src/array.rs</code>: Arrow array views and output builders.</li>
+<li><code>quill-runtime/src/eval.rs</code>: expression evaluation and SQL boolean/null semantics.</li>
+<li><code>quill-runtime/src/value.rs</code>: scalar value representation.</li>
 </ul>
 <p>The JIT package is not a storage adapter and not a second SQL engine. It is the
 research boundary for replacing selected DataFusion physical operators with
@@ -386,7 +393,7 @@ execution plus lightweight debug endpoints for the last DataFusion plan.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="front-ends-cli--http"><a class="header" href="#front-ends-cli--http">Front-Ends (CLI / HTTP)</a></h1>
 <p>The <code>bin/</code> directory contains the user-facing entry points. Both binaries embed
-the same <code>Database</code> type and therefore run the same DataFusion SQL path.</p>
+the same <code>Database</code> type and therefore use the DataFusion frontend adapter.</p>
 <div class="table-wrapper">
 <table>
 <thead>
@@ -427,7 +434,9 @@ MLIR JIT boundary.</p>
 </thead>
 <tbody>
 <tr><td><code>tests/df_arrow_parquet.rs</code></td><td>End-to-end SQL over DataFusion memory tables and registered Parquet datasets.</td></tr>
-<tr><td><code>crates/quill-jit/src/*</code> unit tests</td><td>JIT expression lowering plus MLIR module generation and verification.</td></tr>
+<tr><td><code>crates/quill-plan/src/*</code> unit tests</td><td>Frontend-neutral expression and graph behavior.</td></tr>
+<tr><td><code>crates/quill-runtime/src/*</code> unit tests</td><td>Arrow runtime kernels and aggregate behavior.</td></tr>
+<tr><td><code>crates/quill-jit/src/*</code> unit tests</td><td>MLIR module generation, verification, and compiled invocation.</td></tr>
 </tbody>
 </table>
 </div>
@@ -446,8 +455,8 @@ LLVM_SYS_220_PREFIX=/opt/homebrew/opt/llvm \
 cargo test --features jit-mlir
 </code></pre>
 <h2 id="documentation"><a class="header" href="#documentation">Documentation</a></h2>
-<p>The <code>docs/</code> directory is an mdBook. It tracks the current DataFusion +
-Arrow/Parquet + MLIR architecture and intentionally omits the removed teaching
+<p>The <code>docs/</code> directory is an mdBook. It tracks the current frontend-adapter +
+Arrow + MLIR architecture and intentionally omits the removed teaching
 database storage stack.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="benchmarking"><a class="header" href="#benchmarking">Benchmarking</a></h1>
@@ -491,9 +500,9 @@ are intentionally not claimed as end-to-end query speedups yet.</p>
 <tr><td><code>kernel/decimal_filter_sum_64k</code></td><td>Compiled MLIR Q6-shaped decimal filter/sum execution over 64K fixed-width column slices. Requires <code>jit-mlir</code>.</td></tr>
 <tr><td><code>pipeline/record_filter_project_64k</code></td><td>Direct fixed-width Arrow record pipeline execution outside DataFusion planning.</td></tr>
 <tr><td><code>pipeline/scalar_sum_64k</code></td><td>Direct fixed-width Arrow scalar-sum pipeline execution outside DataFusion planning.</td></tr>
-<tr><td><code>sql/filter_project_64k</code></td><td>DataFusion SQL planning/execution over a 64K-row in-memory Arrow table, including <code>CompiledPipelineExec</code> when the pattern matches.</td></tr>
-<tr><td><code>sql/filter_sum_64k</code></td><td>DataFusion SQL planning/execution over a 64K-row in-memory Arrow table, including <code>CompiledPipelineExec</code> when the pattern matches.</td></tr>
-<tr><td><code>datafusion/prepared_filter_sum_64k</code></td><td>Prepared-plan filter/sum execution that removes SQL parsing and logical-plan construction from the timed loop while still using DataFusion physical planning and execution.</td></tr>
+<tr><td><code>sql/df/filter_project_64k</code></td><td>DataFusion SQL planning/execution over a 64K-row in-memory Arrow table, including <code>CompiledPipelineExec</code> when the pattern matches.</td></tr>
+<tr><td><code>sql/df/filter_sum_64k</code></td><td>DataFusion SQL planning/execution over a 64K-row in-memory Arrow table, including <code>CompiledPipelineExec</code> when the pattern matches.</td></tr>
+<tr><td><code>sql/df/prepared_filter_sum_64k</code></td><td>Prepared-plan filter/sum execution that removes SQL parsing and logical-plan construction from the timed loop while still using DataFusion physical planning and execution.</td></tr>
 </tbody>
 </table>
 </div>
@@ -509,9 +518,9 @@ By default it uses the pure Rust <code>tpchgen-cli</code> generator to create SF
 inside the repository under <code>benchdata/tpch-sf0.01</code>. Each query reports two
 measurements:</p>
 <ul>
-<li><code>sql/&lt;query&gt;</code> runs through <code>Database::run</code>, including SQL parsing, logical
+<li><code>sql/df/&lt;query&gt;</code> runs through <code>Database::run</code>, including SQL parsing, logical
 optimization, physical planning, and execution.</li>
-<li><code>prepared/&lt;query&gt;</code> runs a <code>PreparedQuery</code>, reusing the SQL/logical plan while
+<li><code>prepared/df/&lt;query&gt;</code> runs a <code>PreparedQuery</code>, reusing the SQL/logical plan while
 letting DataFusion create a fresh physical plan for each execution. DataFusion
 physical plans are not assumed to be reentrant.</li>
 </ul>

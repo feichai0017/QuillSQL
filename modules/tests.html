@@ -165,7 +165,9 @@ MLIR JIT boundary.</p>
 </thead>
 <tbody>
 <tr><td><code>tests/df_arrow_parquet.rs</code></td><td>End-to-end SQL over DataFusion memory tables and registered Parquet datasets.</td></tr>
-<tr><td><code>crates/quill-jit/src/*</code> unit tests</td><td>JIT expression lowering plus MLIR module generation and verification.</td></tr>
+<tr><td><code>crates/quill-plan/src/*</code> unit tests</td><td>Frontend-neutral expression and graph behavior.</td></tr>
+<tr><td><code>crates/quill-runtime/src/*</code> unit tests</td><td>Arrow runtime kernels and aggregate behavior.</td></tr>
+<tr><td><code>crates/quill-jit/src/*</code> unit tests</td><td>MLIR module generation, verification, and compiled invocation.</td></tr>
 </tbody>
 </table>
 </div>
@@ -184,8 +186,8 @@ LLVM_SYS_220_PREFIX=/opt/homebrew/opt/llvm \
 cargo test --features jit-mlir
 </code></pre>
 <h2 id="documentation"><a class="header" href="#documentation">Documentation</a></h2>
-<p>The <code>docs/</code> directory is an mdBook. It tracks the current DataFusion +
-Arrow/Parquet + MLIR architecture and intentionally omits the removed teaching
+<p>The <code>docs/</code> directory is an mdBook. It tracks the current frontend-adapter +
+Arrow + MLIR architecture and intentionally omits the removed teaching
 database storage stack.</p>
 
                     </main>

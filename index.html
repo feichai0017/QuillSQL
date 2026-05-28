@@ -159,17 +159,17 @@
 </div>
 
 <h1 id="quillsql-internals"><a class="header" href="#quillsql-internals">QuillSQL Internals</a></h1>
-<p>QuillSQL is now a DataFusion, Arrow, Parquet, and MLIR query compiler research
-engine. DataFusion owns the SQL front end, optimizer, and physical execution
-framework. QuillSQL keeps the embedding API, CLI/server surfaces, debug views,
-and the JIT research boundary.</p>
+<p>QuillSQL is now a frontend-agnostic Arrow and MLIR query compiler research
+engine. DataFusion is the first complete frontend adapter and still powers the
+CLI/server SQL path. QuillSQL keeps the embedding API, debug views, neutral
+<code>PipelineGraph</code>, Arrow runtime, and JIT research boundary.</p>
 <p>The project deliberately does not carry a custom storage engine. Interactive
 queries use DataFusion memory tables; persistent analytical data should come
 from Arrow/Parquet datasets and DataFusion’s file/object-store integrations.</p>
 <h2 id="core-topics"><a class="header" href="#core-topics">Core Topics</a></h2>
 <ul>
-<li><a href="./architecture.html">Overall Architecture</a>: where DataFusion, Arrow/Parquet,
-and MLIR meet.</li>
+<li><a href="./architecture.html">Overall Architecture</a>: where frontend adapters, Arrow, and
+MLIR meet.</li>
 <li><a href="./modules/overview.html">Module Overview</a>: current Rust package layout.</li>
 <li><a href="./modules/bin.html">Front-Ends</a>: CLI and HTTP entry points.</li>
 <li><a href="./modules/tests.html">Testing</a>: validation commands and test scope.</li>

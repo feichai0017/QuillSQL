@@ -155,10 +155,11 @@
                 <div id="mdbook-content" class="content">
                     <main>
                         <h1 id="quillsql-architecture"><a class="header" href="#quillsql-architecture">QuillSQL Architecture</a></h1>
-<p>QuillSQL is a thin SQL research shell around DataFusion. It does not implement
-its own parser, binder, optimizer, executor, page store, WAL, SQL catalog, or
-index manager. The storage path is DataFusion-backed: memory tables for local
-experiments and Arrow/Parquet datasets for persistent analytical data.</p>
+<p>QuillSQL is a frontend-agnostic query compiler research engine. It does not
+implement its own SQL parser, binder, cost optimizer, page store, WAL, SQL
+catalog, or index manager. Frontend adapters translate external physical plans
+into a neutral <code>PipelineGraph</code>; Arrow batches are the runtime transport; MLIR is
+the compiler boundary.</p>
 <h2 id="end-to-end-pipeline"><a class="header" href="#end-to-end-pipeline">End-to-End Pipeline</a></h2>
 <pre class="mermaid">flowchart LR
     SQL["SQL text"] --&gt; DB["Database::run / prepare"]
@@ -166,13 +167,15 @@ experiments and Arrow/Parquet datasets for persistent analytical data.</p>
     DF --&gt; Logical["DataFusion LogicalPlan"]
     Logical --&gt; Optimized["DataFusion optimizers"]
     Optimized --&gt; Physical["DataFusion ExecutionPlan"]
-    Physical --&gt; JITRule["MlirJitRule physical rewrite"]
+    Physical --&gt; DFAdapter["quill-df adapter"]
+    DFAdapter --&gt; Graph["PipelineGraph"]
+    Graph --&gt; JITRule["MLIR JIT compile"]
     JITRule --&gt; CompiledExec["CompiledPipelineExec"]
     CompiledExec --&gt; Arrow["Arrow RecordBatch output"]
 
     Parquet["Parquet / Arrow datasets"] --&gt; DF
     Memory["DataFusion memory tables"] --&gt; DF
-    JITRule --&gt; MLIR["Quill dialect + MLIR verification"]
+    Graph --&gt; MLIR["Quill dialect + MLIR verification"]
 </pre>
 
 <h2 id="storage-boundary"><a class="header" href="#storage-boundary">Storage Boundary</a></h2>
@@ -190,10 +193,10 @@ trace-only planning work.</li>
 <p>This makes the project better suited to OLAP/query-compiler research than OLTP
 storage-engine research.</p>
 <h2 id="jit-boundary"><a class="header" href="#jit-boundary">JIT Boundary</a></h2>
-<p>The JIT boundary is the DataFusion physical plan plus Arrow <code>RecordBatch</code>
-interface. <code>MlirJitRule</code> walks DataFusion physical plans, asks
-<code>pipeline/extract.rs</code> to extract supported physical pipelines, and delegates
-compilation to <code>lower/compiler.rs</code>.</p>
+<p>The JIT boundary is <code>PipelineGraph</code> plus Arrow <code>RecordBatch</code>/fixed-width column
+buffers. <code>quill-df</code> walks DataFusion physical plans, extracts supported physical
+pipelines, and wraps compiled results as DataFusion <code>ExecutionPlan</code>s. The core
+JIT and runtime crates do not depend on DataFusion.</p>
 <p>The MLIR backend emits a formal Quill dialect module from <code>PipelineGraph</code>, verifies
 that module through <code>melior</code> when <code>jit-mlir</code> is enabled, and then lowers covered
 pipeline specs to executable <code>scf/arith/llvm</code> modules. The physical optimizer can
@@ -217,7 +220,7 @@ to keep a pure DataFusion physical plan for baseline measurements.</p>
 <h2 id="graph-and-fusion"><a class="header" href="#graph-and-fusion">Graph And Fusion</a></h2>
 <p>QuillSQL keeps one semantic pipeline graph plus an explicit lowering boundary:</p>
 <ul>
-<li><code>PipelineGraph</code>: a linear pipeline prefix from a DataFusion physical plan,
+<li><code>PipelineGraph</code>: a linear pipeline prefix from a frontend physical plan,
 including the first <code>filter -&gt; plain SUM</code> sink shape used as the stepping
 stone toward whole-pipeline lowering. It describes the executable subgraph
 selected for compilation; it is not a replacement SQL plan.</li>
@@ -243,11 +246,11 @@ Filter(Date32/Decimal128 comparisons) -&gt; SUM(Decimal128 * Decimal128)
 Group keys + SUM/COUNT/MIN/MAX aggregate inputs
   =&gt; quill.sink.group_aggregate dialect skeleton
 </code></pre>
-<p><code>pipeline/extract.rs</code> also recognizes the common DataFusion shape where a
+<p><code>crates/quill-df/src/extract.rs</code> also recognizes the common DataFusion shape where a
 round-robin <code>RepartitionExec</code> sits between the filter and projection, and
 records that as an output adapter on the extracted pipeline. For plain
 aggregates, it extracts the partial <code>SUM</code> pipeline and leaves DataFusion’s final
-aggregate in place. <code>pipeline/rule.rs</code> only performs traversal and replacement;
+aggregate in place. <code>crates/quill-df/src/rule.rs</code> only performs traversal and replacement;
 it no longer constructs shape-specific execution nodes directly. The recognized
 physical-plan shapes are also exposed as <code>PipelineGraph</code> candidates in debug traces,
 so future
@@ -261,7 +264,7 @@ aggregate graph and dialect op are present as the Q1 extension point, but the
 optimizer rule still leaves Q1 on DataFusion until the hash aggregate lowering
 is implemented.</p>
 <p>The intended compiler path is:</p>
-<pre><code class="language-text">DataFusion ExecutionPlan
+<pre><code class="language-text">frontend physical plan
   -&gt; PipelineGraph
   -&gt; Quill dialect
   -&gt; lowering to scf/arith/llvm

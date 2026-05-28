@@ -195,9 +195,9 @@ are intentionally not claimed as end-to-end query speedups yet.</p>
 <tr><td><code>kernel/decimal_filter_sum_64k</code></td><td>Compiled MLIR Q6-shaped decimal filter/sum execution over 64K fixed-width column slices. Requires <code>jit-mlir</code>.</td></tr>
 <tr><td><code>pipeline/record_filter_project_64k</code></td><td>Direct fixed-width Arrow record pipeline execution outside DataFusion planning.</td></tr>
 <tr><td><code>pipeline/scalar_sum_64k</code></td><td>Direct fixed-width Arrow scalar-sum pipeline execution outside DataFusion planning.</td></tr>
-<tr><td><code>sql/filter_project_64k</code></td><td>DataFusion SQL planning/execution over a 64K-row in-memory Arrow table, including <code>CompiledPipelineExec</code> when the pattern matches.</td></tr>
-<tr><td><code>sql/filter_sum_64k</code></td><td>DataFusion SQL planning/execution over a 64K-row in-memory Arrow table, including <code>CompiledPipelineExec</code> when the pattern matches.</td></tr>
-<tr><td><code>datafusion/prepared_filter_sum_64k</code></td><td>Prepared-plan filter/sum execution that removes SQL parsing and logical-plan construction from the timed loop while still using DataFusion physical planning and execution.</td></tr>
+<tr><td><code>sql/df/filter_project_64k</code></td><td>DataFusion SQL planning/execution over a 64K-row in-memory Arrow table, including <code>CompiledPipelineExec</code> when the pattern matches.</td></tr>
+<tr><td><code>sql/df/filter_sum_64k</code></td><td>DataFusion SQL planning/execution over a 64K-row in-memory Arrow table, including <code>CompiledPipelineExec</code> when the pattern matches.</td></tr>
+<tr><td><code>sql/df/prepared_filter_sum_64k</code></td><td>Prepared-plan filter/sum execution that removes SQL parsing and logical-plan construction from the timed loop while still using DataFusion physical planning and execution.</td></tr>
 </tbody>
 </table>
 </div>
@@ -213,9 +213,9 @@ By default it uses the pure Rust <code>tpchgen-cli</code> generator to create SF
 inside the repository under <code>benchdata/tpch-sf0.01</code>. Each query reports two
 measurements:</p>
 <ul>
-<li><code>sql/&lt;query&gt;</code> runs through <code>Database::run</code>, including SQL parsing, logical
+<li><code>sql/df/&lt;query&gt;</code> runs through <code>Database::run</code>, including SQL parsing, logical
 optimization, physical planning, and execution.</li>
-<li><code>prepared/&lt;query&gt;</code> runs a <code>PreparedQuery</code>, reusing the SQL/logical plan while
+<li><code>prepared/df/&lt;query&gt;</code> runs a <code>PreparedQuery</code>, reusing the SQL/logical plan while
 letting DataFusion create a fresh physical plan for each execution. DataFusion
 physical plans are not assumed to be reentrant.</li>
 </ul>
