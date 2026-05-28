@@ -1,6 +1,12 @@
-use crate::jit::{
-    JitExpr, JitProjection, KernelKind, PipelineIr, PipelineOp, PipelineSink, PipelineSource,
-};
+use serde::Serialize;
+
+use crate::jit::{JitExpr, JitProjection, PipelineIr, PipelineOp, PipelineSink, PipelineSource};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum PipelineKind {
+    Record,
+    Aggregate,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum PipelineLowering {
@@ -8,7 +14,7 @@ pub enum PipelineLowering {
         predicate: JitExpr,
         projections: Vec<JitProjection>,
     },
-    Sum {
+    PlainSum {
         predicate: JitExpr,
         measure: JitExpr,
     },
@@ -29,7 +35,7 @@ impl PipelineLowering {
                 PipelineSource::DataFusionInput,
                 [PipelineOp::Filter(predicate)],
                 PipelineSink::Sum { measure },
-            ) => Some(Self::Sum {
+            ) => Some(Self::PlainSum {
                 predicate: predicate.clone(),
                 measure: measure.clone(),
             }),
@@ -37,10 +43,10 @@ impl PipelineLowering {
         }
     }
 
-    pub fn kind(&self) -> KernelKind {
+    pub fn kind(&self) -> PipelineKind {
         match self {
-            Self::Record { .. } => KernelKind::FilterProject,
-            Self::Sum { .. } => KernelKind::FilterSum,
+            Self::Record { .. } => PipelineKind::Record,
+            Self::PlainSum { .. } => PipelineKind::Aggregate,
         }
     }
 }
@@ -48,7 +54,7 @@ impl PipelineLowering {
 #[cfg(test)]
 mod tests {
     use crate::jit::{
-        JitExpr, JitProjection, JitScalar, KernelKind, PipelineIr, PipelineLowering, PipelineOp,
+        JitExpr, JitProjection, JitScalar, PipelineIr, PipelineKind, PipelineLowering, PipelineOp,
     };
 
     #[test]
@@ -61,7 +67,7 @@ mod tests {
         ]);
 
         let lowering = PipelineLowering::from_ir(&pipeline).expect("lowering");
-        assert_eq!(lowering.kind(), KernelKind::FilterProject);
+        assert_eq!(lowering.kind(), PipelineKind::Record);
         assert!(matches!(lowering, PipelineLowering::Record { .. }));
     }
 
@@ -72,7 +78,7 @@ mod tests {
         let pipeline = PipelineIr::filter_sum(predicate, measure);
 
         let lowering = PipelineLowering::from_ir(&pipeline).expect("lowering");
-        assert_eq!(lowering.kind(), KernelKind::FilterSum);
-        assert!(matches!(lowering, PipelineLowering::Sum { .. }));
+        assert_eq!(lowering.kind(), PipelineKind::Aggregate);
+        assert!(matches!(lowering, PipelineLowering::PlainSum { .. }));
     }
 }

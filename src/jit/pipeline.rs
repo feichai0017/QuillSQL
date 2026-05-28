@@ -14,8 +14,8 @@ use datafusion::physical_plan::ExecutionPlan;
 use serde::Serialize;
 
 use crate::jit::{
-    CompiledAggregatePipelineExec, CompiledRecordPipelineExec, JitExpr, JitProjection, KernelKind,
-    PipelineIr, PipelineLowering, PipelineOp,
+    CompiledAggregatePipelineExec, CompiledRecordPipelineExec, JitExpr, JitProjection, PipelineIr,
+    PipelineKind, PipelineLowering, PipelineOp,
 };
 
 #[derive(Debug, Clone)]
@@ -27,7 +27,7 @@ pub(crate) struct PipelineMatch {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PipelineCandidate {
     pub node: &'static str,
-    pub kernel: KernelKind,
+    pub kind: PipelineKind,
     pub operators: Vec<&'static str>,
     pub sink: &'static str,
 }
@@ -48,10 +48,10 @@ pub(crate) struct OutputAdapter {
 
 impl PipelineMatch {
     pub fn candidate(&self) -> Option<PipelineCandidate> {
-        let kernel = PipelineLowering::from_ir(&self.pipeline)?.kind();
+        let kind = PipelineLowering::from_ir(&self.pipeline)?.kind();
         Some(PipelineCandidate {
             node: self.node,
-            kernel,
+            kind,
             operators: self.pipeline.operator_names(),
             sink: self.pipeline.sink_name(),
         })

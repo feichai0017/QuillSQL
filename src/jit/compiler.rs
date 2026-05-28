@@ -51,7 +51,7 @@ impl<'a> PipelineCompiler<'a> {
                 let exec = Arc::new(exec) as Arc<dyn ExecutionPlan>;
                 Self::apply_output_adapter(exec, output_adapter).map(Some)
             }
-            Some(PipelineLowering::Sum { predicate, measure }) => {
+            Some(PipelineLowering::PlainSum { predicate, measure }) => {
                 let runtime = match FilterSumKernel::try_new(predicate.clone(), measure.clone()) {
                     Ok(runtime) => runtime,
                     Err(_) => return Ok(None),

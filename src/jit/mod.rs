@@ -17,7 +17,7 @@ pub use kernel::{
     ArrowArrayView, ArrowMutableArrayView, CompiledKernel, FilterKernelFn, JitTypeTag,
     KernelBackend, KernelKind, ProjectionKernelFn,
 };
-pub use lowering::PipelineLowering;
+pub use lowering::{PipelineKind, PipelineLowering};
 #[cfg(feature = "jit-mlir")]
 pub use mlir::{
     CompiledDecimalFilterSum, CompiledF64FilterSum, CompiledI64Filter, CompiledI64FilterProject,

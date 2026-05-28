@@ -6,7 +6,7 @@ use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::dataframe::DataFrameWriteOptions;
 use datafusion::execution::context::SessionContext;
 use quill_sql::database::{Database, DatabaseOptions, QueryOutput};
-use quill_sql::jit::{JitOptions, KernelKind};
+use quill_sql::jit::{JitOptions, KernelKind, PipelineKind};
 use tempfile::TempDir;
 
 fn rows(result: QueryOutput) -> Vec<Vec<String>> {
@@ -164,7 +164,7 @@ async fn debug_trace_reports_jit_candidates() {
             .pipeline_candidates
             .iter()
             .any(|candidate| candidate.node == "CompiledRecordPipelineExec"
-                && candidate.kernel == KernelKind::FilterProject
+                && candidate.kind == PipelineKind::Record
                 && candidate.operators == vec!["filter", "projection"]
                 && candidate.sink == "record_batch"),
         "{:?}",
@@ -265,7 +265,7 @@ async fn debug_trace_reports_filter_sum_candidate() {
         trace
             .pipeline_candidates
             .iter()
-            .any(|candidate| candidate.kernel == KernelKind::FilterSum
+            .any(|candidate| candidate.kind == PipelineKind::Aggregate
                 && candidate.node == "CompiledAggregatePipelineExec"
                 && candidate.operators == vec!["filter"]
                 && candidate.sink == "sum"),
