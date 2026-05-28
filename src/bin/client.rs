@@ -17,6 +17,7 @@ async fn main() {
 
     let db = Database::new(DatabaseOptions {
         data_dir: args.data_dir.map(Into::into),
+        ..Default::default()
     })
     .expect("fail to open database");
 

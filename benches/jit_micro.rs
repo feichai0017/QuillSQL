@@ -4,7 +4,7 @@ use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use datafusion::arrow::array::{Float64Array, Int64Array};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
-use quill_sql::database::Database;
+use quill_sql::database::{Database, DatabaseOptions};
 #[cfg(feature = "jit-mlir")]
 use quill_sql::jit::DecimalFilterSumInput;
 use quill_sql::jit::{
@@ -58,6 +58,14 @@ fn projections() -> Vec<JitProjection> {
         },
         "next_id",
     )]
+}
+
+fn benchmark_database() -> Database {
+    Database::new(DatabaseOptions {
+        debug_trace: false,
+        ..Default::default()
+    })
+    .expect("database")
 }
 
 #[cfg(feature = "jit-mlir")]
@@ -273,7 +281,7 @@ fn bench_jit_ir_and_mlir(c: &mut Criterion) {
 
 fn bench_datafusion_filter_project(c: &mut Criterion) {
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
-    let db = Database::new_temp().expect("database");
+    let db = benchmark_database();
     let input_schema = schema();
     let row_count = 65_536_i64;
     let ids = (0..row_count).collect::<Vec<_>>();
@@ -308,7 +316,7 @@ fn bench_datafusion_filter_project(c: &mut Criterion) {
 
 fn bench_datafusion_filter_sum(c: &mut Criterion) {
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
-    let db = Database::new_temp().expect("database");
+    let db = benchmark_database();
     let input_schema = sum_schema();
     let row_count = 65_536_i64;
     let values = (0..row_count)

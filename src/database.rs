@@ -16,14 +16,25 @@ use tempfile::TempDir;
 use crate::error::{QuillSQLError, QuillSQLResult};
 use crate::jit::{JitCandidate, MlirJitRule};
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct DatabaseOptions {
     pub data_dir: Option<PathBuf>,
+    pub debug_trace: bool,
+}
+
+impl Default for DatabaseOptions {
+    fn default() -> Self {
+        Self {
+            data_dir: None,
+            debug_trace: true,
+        }
+    }
 }
 
 pub struct Database {
     ctx: SessionContext,
     debug_trace: Arc<Mutex<Option<DebugTrace>>>,
+    debug_trace_enabled: bool,
     _temp_dir: Option<TempDir>,
     _data_dir: PathBuf,
 }
@@ -97,22 +108,30 @@ impl DebugPlanNode {
 impl Database {
     pub fn new(options: DatabaseOptions) -> QuillSQLResult<Self> {
         match options.data_dir {
-            Some(data_dir) => Self::new_with_data_dir(data_dir),
-            None => Self::new_temp(),
+            Some(data_dir) => Self::open(data_dir, None, options.debug_trace),
+            None => {
+                let temp_dir = TempDir::new()?;
+                let data_dir = temp_dir.path().join("data");
+                Self::open(data_dir, Some(temp_dir), options.debug_trace)
+            }
         }
     }
 
     pub fn new_with_data_dir(data_dir: impl Into<PathBuf>) -> QuillSQLResult<Self> {
-        Self::open(data_dir.into(), None)
+        Self::open(data_dir.into(), None, true)
     }
 
     pub fn new_temp() -> QuillSQLResult<Self> {
         let temp_dir = TempDir::new()?;
         let data_dir = temp_dir.path().join("data");
-        Self::open(data_dir, Some(temp_dir))
+        Self::open(data_dir, Some(temp_dir), true)
     }
 
-    fn open(data_dir: PathBuf, temp_dir: Option<TempDir>) -> QuillSQLResult<Self> {
+    fn open(
+        data_dir: PathBuf,
+        temp_dir: Option<TempDir>,
+        debug_trace_enabled: bool,
+    ) -> QuillSQLResult<Self> {
         std::fs::create_dir_all(&data_dir)?;
 
         let config = SessionConfig::new()
@@ -128,6 +147,7 @@ impl Database {
         Ok(Self {
             ctx,
             debug_trace: Arc::new(Mutex::new(None)),
+            debug_trace_enabled,
             _temp_dir: temp_dir,
             _data_dir: data_dir,
         })
@@ -141,22 +161,34 @@ impl Database {
             .create_logical_plan(sql)
             .await
             .map_err(map_datafusion_err)?;
-        let logical_tree = DebugPlanNode::from_logical(&logical_plan);
-        let logical_plan_str = logical_plan.display_indent().to_string();
-        let physical_plan = self
-            .ctx
-            .state()
-            .create_physical_plan(&logical_plan)
-            .await
-            .ok();
-        let physical_plan_str = physical_plan
-            .as_ref()
-            .map(|plan| displayable(plan.as_ref()).indent(false).to_string())
-            .unwrap_or_else(|| "DataFusion physical plan unavailable for this statement".into());
-        let jit_candidates = physical_plan
-            .as_ref()
-            .map(|plan| MlirJitRule::new().inspect_plan(Arc::clone(plan)))
-            .unwrap_or_default();
+        let trace_input = if self.debug_trace_enabled {
+            let logical_tree = DebugPlanNode::from_logical(&logical_plan);
+            let logical_plan_str = logical_plan.display_indent().to_string();
+            let physical_plan = self
+                .ctx
+                .state()
+                .create_physical_plan(&logical_plan)
+                .await
+                .ok();
+            let physical_plan_str = physical_plan
+                .as_ref()
+                .map(|plan| displayable(plan.as_ref()).indent(false).to_string())
+                .unwrap_or_else(|| {
+                    "DataFusion physical plan unavailable for this statement".into()
+                });
+            let jit_candidates = physical_plan
+                .as_ref()
+                .map(|plan| MlirJitRule::new().inspect_plan(Arc::clone(plan)))
+                .unwrap_or_default();
+            Some((
+                logical_tree,
+                logical_plan_str,
+                physical_plan_str,
+                jit_candidates,
+            ))
+        } else {
+            None
+        };
 
         let df = self
             .ctx
@@ -165,15 +197,19 @@ impl Database {
             .map_err(map_datafusion_err)?;
         let batches = df.collect().await.map_err(map_datafusion_err)?;
         let rows = batches.iter().map(|batch| batch.num_rows()).sum();
-        self.record_trace(DebugTrace {
-            logical_plan: logical_plan_str,
-            physical_plan: physical_plan_str.clone(),
-            jit_candidates,
-            rows,
-            duration_ms: start.elapsed().as_millis(),
-            logical_tree,
-            physical_tree: DebugPlanNode::leaf(physical_plan_str),
-        });
+        if let Some((logical_tree, logical_plan, physical_plan, jit_candidates)) = trace_input {
+            self.record_trace(DebugTrace {
+                logical_plan,
+                physical_plan: physical_plan.clone(),
+                jit_candidates,
+                rows,
+                duration_ms: start.elapsed().as_millis(),
+                logical_tree,
+                physical_tree: DebugPlanNode::leaf(physical_plan),
+            });
+        } else {
+            self.clear_trace();
+        }
         Ok(QueryOutput::new(batches))
     }
 
@@ -219,6 +255,10 @@ impl Database {
 
     fn record_trace(&self, trace: DebugTrace) {
         *self.debug_trace.lock().expect("debug trace lock") = Some(trace);
+    }
+
+    fn clear_trace(&self) {
+        *self.debug_trace.lock().expect("debug trace lock") = None;
     }
 }
 

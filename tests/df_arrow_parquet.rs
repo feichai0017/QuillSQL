@@ -5,7 +5,7 @@ use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::dataframe::DataFrameWriteOptions;
 use datafusion::execution::context::SessionContext;
-use quill_sql::database::{Database, QueryOutput};
+use quill_sql::database::{Database, DatabaseOptions, QueryOutput};
 use quill_sql::jit::KernelKind;
 use tempfile::TempDir;
 
@@ -66,6 +66,21 @@ async fn explain_uses_datafusion_physical_plan() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(text.contains("ProjectionExec"), "{text}");
+}
+
+#[tokio::test]
+async fn debug_trace_can_be_disabled_for_benchmarks() {
+    let db = Database::new(DatabaseOptions {
+        debug_trace: false,
+        ..Default::default()
+    })
+    .expect("database");
+
+    assert_eq!(
+        rows(db.run("select 1::bigint").await.unwrap()),
+        vec![vec!["1".to_string()]]
+    );
+    assert!(db.debug_last_trace().is_none());
 }
 
 #[tokio::test]

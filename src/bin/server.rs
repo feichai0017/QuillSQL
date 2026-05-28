@@ -26,6 +26,7 @@ fn rebuild_db(opts: &DatabaseOptions) -> Database {
 fn database_options_from_env() -> DatabaseOptions {
     DatabaseOptions {
         data_dir: std::env::var("QUILL_DATA_DIR").ok().map(PathBuf::from),
+        ..Default::default()
     }
 }
 

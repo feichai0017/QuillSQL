@@ -32,6 +32,9 @@ There is no QuillSQL-owned storage engine after the cleanup.
 - DataFusion's catalog and file-source integrations define table visibility.
 - QuillSQL's `DatabaseOptions::data_dir` is scratch state, not a private database
   file format.
+- `DatabaseOptions::debug_trace` controls plan introspection. It is useful for
+  interactive debugging, but benchmark paths disable it to avoid measuring
+  trace-only planning work.
 
 This makes the project better suited to OLAP/query-compiler research than OLTP
 storage-engine research.

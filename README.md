@@ -159,7 +159,10 @@ The integration tests cover DataFusion memory tables, Parquet registration, and
 - `QUILL_DATA_DIR`: directory for DataFusion scratch state.
 - `RUST_LOG`: log level.
 
-`DatabaseOptions` exposes the same data-directory setting for embedded use.
+`DatabaseOptions` exposes the same data-directory setting for embedded use. It
+also has a `debug_trace` switch: interactive and HTTP paths leave it enabled,
+while benchmark harnesses disable it so query timings do not include trace-only
+physical planning.
 
 ## Docker
 
