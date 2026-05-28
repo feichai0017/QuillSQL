@@ -1,12 +1,14 @@
 use std::sync::Arc;
 
-use datafusion::arrow::array::{Array, BooleanArray, Float64Array, Int64Array};
+use datafusion::arrow::array::{
+    Array, BooleanArray, Date32Array, Decimal128Array, Float64Array, Int64Array,
+};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
 
 use crate::jit::{JitBinaryOp, JitExpr, JitProjection, JitScalar, JitType};
 
-use super::{FilterProjectKernel, FilterSumKernel};
+use super::{FilterProjectKernel, FilterSumKernel, FilterSumValue};
 
 #[test]
 fn executes_filter_project_with_nulls() {
@@ -193,5 +195,125 @@ fn executes_filter_sum_fast_path_with_nulls() {
     .unwrap();
 
     let output = kernel.execute(&batch).unwrap();
-    assert_eq!(output, Some(4.0));
+    assert_eq!(output, FilterSumValue::Float64(Some(4.0)));
+}
+
+#[test]
+fn executes_decimal_filter_sum_with_date_predicate() {
+    let input_schema = Arc::new(Schema::new(vec![
+        Field::new("shipdate", DataType::Date32, true),
+        Field::new("price", DataType::Decimal128(15, 2), true),
+        Field::new("discount", DataType::Decimal128(15, 2), true),
+        Field::new("quantity", DataType::Decimal128(15, 2), true),
+    ]));
+    let batch = RecordBatch::try_new(
+        input_schema,
+        vec![
+            Arc::new(Date32Array::from(vec![Some(9), Some(10), Some(12), None])),
+            Arc::new(
+                Decimal128Array::from(vec![
+                    Some(10_000_i128),
+                    Some(20_000),
+                    Some(30_000),
+                    Some(40_000),
+                ])
+                .with_precision_and_scale(15, 2)
+                .unwrap(),
+            ),
+            Arc::new(
+                Decimal128Array::from(vec![Some(4_i128), Some(5), Some(7), Some(6)])
+                    .with_precision_and_scale(15, 2)
+                    .unwrap(),
+            ),
+            Arc::new(
+                Decimal128Array::from(vec![
+                    Some(1_000_i128),
+                    Some(2_500),
+                    Some(2_000),
+                    Some(2_000),
+                ])
+                .with_precision_and_scale(15, 2)
+                .unwrap(),
+            ),
+        ],
+    )
+    .unwrap();
+    let predicate = and(
+        date_cmp(JitBinaryOp::GtEq, 0, 10),
+        and(
+            decimal_cmp(JitBinaryOp::GtEq, 2, 5),
+            and(
+                decimal_cmp(JitBinaryOp::LtEq, 2, 7),
+                decimal_cmp(JitBinaryOp::Lt, 3, 2_400),
+            ),
+        ),
+    );
+    let measure = JitExpr::Binary {
+        op: JitBinaryOp::Mul,
+        left: Box::new(decimal_col(1, "price", 15, 2)),
+        right: Box::new(decimal_col(2, "discount", 15, 2)),
+        ty: JitType::Decimal128 {
+            precision: 30,
+            scale: 4,
+        },
+        nullable: true,
+    };
+    let kernel = FilterSumKernel::try_new(predicate, measure).unwrap();
+
+    let output = kernel.execute(&batch).unwrap();
+    assert_eq!(
+        output,
+        FilterSumValue::Decimal128 {
+            value: Some(210_000),
+            scale: 4
+        }
+    );
+}
+
+fn and(left: JitExpr, right: JitExpr) -> JitExpr {
+    JitExpr::Binary {
+        op: JitBinaryOp::And,
+        left: Box::new(left),
+        right: Box::new(right),
+        ty: JitType::Bool,
+        nullable: true,
+    }
+}
+
+fn date_cmp(op: JitBinaryOp, index: usize, value: i32) -> JitExpr {
+    JitExpr::Binary {
+        op,
+        left: Box::new(JitExpr::Column {
+            index,
+            name: "shipdate".to_string(),
+            ty: JitType::Date32,
+            nullable: true,
+        }),
+        right: Box::new(JitExpr::Literal(JitScalar::Date32(value))),
+        ty: JitType::Bool,
+        nullable: true,
+    }
+}
+
+fn decimal_cmp(op: JitBinaryOp, index: usize, value: i128) -> JitExpr {
+    JitExpr::Binary {
+        op,
+        left: Box::new(decimal_col(index, "decimal", 15, 2)),
+        right: Box::new(JitExpr::Literal(JitScalar::Decimal128 {
+            value,
+            precision: 15,
+            scale: 2,
+        })),
+        ty: JitType::Bool,
+        nullable: true,
+    }
+}
+
+fn decimal_col(index: usize, name: &str, precision: u8, scale: i8) -> JitExpr {
+    JitExpr::Column {
+        index,
+        name: name.to_string(),
+        ty: JitType::Decimal128 { precision, scale },
+        nullable: true,
+    }
 }

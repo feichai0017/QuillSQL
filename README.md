@@ -73,8 +73,9 @@ The JIT package is intentionally separate from the DataFusion wrapper:
   ExecutionEngine kernels.
 - `src/jit/rule.rs` is the DataFusion physical optimizer rule that rewrites
   supported filter/project islands.
-- `src/jit/runtime/` is the fixed-width Arrow batch kernel runtime used until
-  compiled MLIR function pointers are wired into DataFusion execution nodes.
+- `src/jit/runtime/` is the fixed-width Arrow batch kernel runtime. It includes
+  the current DataFusion execution-node kernels and keeps specialized paths
+  such as filter/sum separate from the generic expression evaluator.
 
 Current scope: MLIR is parsed and verified, and the DataFusion optimizer rule
 replaces supported filter/project islands with `CompiledFilterProjectExec` and
@@ -84,8 +85,10 @@ kernel descriptors. Compiled scalar MLIR invocation is wired for the first
 `i64 -> bool` probe. The compiled batch path now includes an `i64` filter
 kernel that emits a byte selection mask, an `i64` filter/project kernel that
 compacts one projected column, and an `f64` filter/sum kernel for the first
-scan/filter/plain-aggregate path. Direct DataFusion execution-node dispatch to
-compiled MLIR function pointers is the next step.
+scan/filter/plain-aggregate path. The runtime also has a Q6-shaped
+`Date32`/`Decimal128` filter/sum specialization so the TPC-H Q6 benchmark
+exercises the compiled physical node boundary. Direct DataFusion execution-node
+dispatch to compiled MLIR function pointers is the next step.
 
 Run the MLIR path with:
 

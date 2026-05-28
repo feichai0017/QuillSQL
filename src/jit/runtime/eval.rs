@@ -40,14 +40,30 @@ fn eval_literal(value: &JitScalar) -> Scalar {
     match value {
         JitScalar::Null(ty) => match ty {
             JitType::Bool => Scalar::Bool(None),
+            JitType::Date32 => Scalar::Date32(None),
             JitType::Int32 => Scalar::Int32(None),
             JitType::Int64 => Scalar::Int64(None),
             JitType::Float64 => Scalar::Float64(None),
+            JitType::Decimal128 { precision, scale } => Scalar::Decimal128 {
+                value: None,
+                precision: *precision,
+                scale: *scale,
+            },
         },
         JitScalar::Bool(value) => Scalar::Bool(Some(*value)),
+        JitScalar::Date32(value) => Scalar::Date32(Some(*value)),
         JitScalar::Int32(value) => Scalar::Int32(Some(*value)),
         JitScalar::Int64(value) => Scalar::Int64(Some(*value)),
         JitScalar::Float64(value) => Scalar::Float64(Some(*value)),
+        JitScalar::Decimal128 {
+            value,
+            precision,
+            scale,
+        } => Scalar::Decimal128 {
+            value: Some(*value),
+            precision: *precision,
+            scale: *scale,
+        },
     }
 }
 
@@ -93,6 +109,26 @@ fn eval_arithmetic(op: JitBinaryOp, lhs: Scalar, rhs: Scalar) -> JitResult<Scala
                 _ => unreachable!(),
             }),
         )),
+        (
+            Scalar::Decimal128 {
+                value: lhs,
+                precision: lhs_precision,
+                scale: lhs_scale,
+            },
+            Scalar::Decimal128 {
+                value: rhs,
+                precision: rhs_precision,
+                scale: rhs_scale,
+            },
+        ) => eval_decimal_arithmetic(
+            op,
+            lhs,
+            lhs_precision,
+            lhs_scale,
+            rhs,
+            rhs_precision,
+            rhs_scale,
+        ),
         _ => Err(type_mismatch(lhs, rhs)),
     }
 }
@@ -104,6 +140,9 @@ fn eval_comparison(op: JitBinaryOp, lhs: Scalar, rhs: Scalar) -> JitResult<Scala
         {
             option_zip(lhs, rhs).map(|(lhs, rhs)| compare_bool(op, lhs, rhs))
         }
+        (Scalar::Date32(lhs), Scalar::Date32(rhs)) => {
+            option_zip(lhs, rhs).map(|(lhs, rhs)| compare_ord(op, lhs, rhs))
+        }
         (Scalar::Int32(lhs), Scalar::Int32(rhs)) => {
             option_zip(lhs, rhs).map(|(lhs, rhs)| compare_ord(op, lhs, rhs))
         }
@@ -111,6 +150,25 @@ fn eval_comparison(op: JitBinaryOp, lhs: Scalar, rhs: Scalar) -> JitResult<Scala
             option_zip(lhs, rhs).map(|(lhs, rhs)| compare_ord(op, lhs, rhs))
         }
         (Scalar::Float64(lhs), Scalar::Float64(rhs)) => {
+            option_zip(lhs, rhs).map(|(lhs, rhs)| compare_ord(op, lhs, rhs))
+        }
+        (
+            Scalar::Decimal128 {
+                value: lhs,
+                scale: lhs_scale,
+                ..
+            },
+            Scalar::Decimal128 {
+                value: rhs,
+                scale: rhs_scale,
+                ..
+            },
+        ) => {
+            if lhs_scale != rhs_scale {
+                return Err(JitError::UnsupportedExpr(format!(
+                    "decimal comparison requires matching scale, got {lhs_scale} and {rhs_scale}"
+                )));
+            }
             option_zip(lhs, rhs).map(|(lhs, rhs)| compare_ord(op, lhs, rhs))
         }
         _ => return Err(type_mismatch(lhs, rhs)),
@@ -143,6 +201,65 @@ fn compare_bool(op: JitBinaryOp, lhs: bool, rhs: bool) -> bool {
         JitBinaryOp::Eq => lhs == rhs,
         JitBinaryOp::NotEq => lhs != rhs,
         _ => unreachable!(),
+    }
+}
+
+fn eval_decimal_arithmetic(
+    op: JitBinaryOp,
+    lhs: Option<i128>,
+    lhs_precision: u8,
+    lhs_scale: i8,
+    rhs: Option<i128>,
+    rhs_precision: u8,
+    rhs_scale: i8,
+) -> JitResult<Scalar> {
+    match op {
+        JitBinaryOp::Add | JitBinaryOp::Sub => {
+            if lhs_scale != rhs_scale {
+                return Err(JitError::UnsupportedExpr(format!(
+                    "decimal {} requires matching scale, got {} and {}",
+                    format_decimal_op(op),
+                    lhs_scale,
+                    rhs_scale
+                )));
+            }
+            let value = option_zip(lhs, rhs).map(|(lhs, rhs)| match op {
+                JitBinaryOp::Add => lhs + rhs,
+                JitBinaryOp::Sub => lhs - rhs,
+                _ => unreachable!(),
+            });
+            Ok(Scalar::Decimal128 {
+                value,
+                precision: lhs_precision.max(rhs_precision).saturating_add(1).min(38),
+                scale: lhs_scale,
+            })
+        }
+        JitBinaryOp::Mul => Ok(Scalar::Decimal128 {
+            value: option_zip(lhs, rhs).map(|(lhs, rhs)| lhs * rhs),
+            precision: lhs_precision.saturating_add(rhs_precision).min(38),
+            scale: lhs_scale.saturating_add(rhs_scale),
+        }),
+        _ => Err(JitError::UnsupportedExpr(format!(
+            "decimal operator {} is not supported",
+            format_decimal_op(op)
+        ))),
+    }
+}
+
+fn format_decimal_op(op: JitBinaryOp) -> &'static str {
+    match op {
+        JitBinaryOp::Add => "+",
+        JitBinaryOp::Sub => "-",
+        JitBinaryOp::Mul => "*",
+        JitBinaryOp::Div => "/",
+        JitBinaryOp::Eq => "==",
+        JitBinaryOp::NotEq => "!=",
+        JitBinaryOp::Lt => "<",
+        JitBinaryOp::LtEq => "<=",
+        JitBinaryOp::Gt => ">",
+        JitBinaryOp::GtEq => ">=",
+        JitBinaryOp::And => "and",
+        JitBinaryOp::Or => "or",
     }
 }
 

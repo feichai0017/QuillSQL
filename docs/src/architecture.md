@@ -69,6 +69,7 @@ Filter -> Projection
   => KernelIR::FilterProject
 
 Filter -> SUM(f64 expression)
+Filter(Date32/Decimal128 comparisons) -> SUM(Decimal128 * Decimal128)
   => CompiledFilterSumExec
 ```
 
@@ -78,4 +79,6 @@ node below the repartition. For plain aggregates, it rewrites the partial `SUM`
 node to a partition-preserving compiled filter/sum node and leaves DataFusion's
 final aggregate in place. This lets the project measure real operator
 boundaries before taking on grouped aggregates, joins, hash repartitioning, or
-whole-query pipeline lowering.
+whole-query pipeline lowering. The decimal path is a fixed-width Arrow runtime
+specialization for Q6-shaped predicates; it is not yet lowered to executable
+MLIR.

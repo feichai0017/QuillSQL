@@ -3,8 +3,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use datafusion::arrow::array::{ArrayRef, Float64Array};
-use datafusion::arrow::datatypes::SchemaRef as ArrowSchemaRef;
+use datafusion::arrow::array::{ArrayRef, Decimal128Array, Float64Array};
+use datafusion::arrow::datatypes::{DataType as ArrowDataType, SchemaRef as ArrowSchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::{DataFusionError, Result};
 use datafusion::execution::context::TaskContext;
@@ -16,7 +16,9 @@ use datafusion::physical_plan::{
 };
 use futures::{ready, Stream, StreamExt};
 
-use crate::jit::{CompiledKernel, FilterProjectKernel, FilterSumKernel, KernelKind};
+use crate::jit::{
+    CompiledKernel, FilterProjectKernel, FilterSumKernel, FilterSumValue, KernelKind,
+};
 
 #[derive(Debug, Clone)]
 pub struct CompiledFilterProjectExec {
@@ -318,7 +320,7 @@ struct CompiledFilterSumStream {
     schema: ArrowSchemaRef,
     input: SendableRecordBatchStream,
     exec: CompiledFilterSumExec,
-    sum: Option<f64>,
+    sum: Option<FilterSumValue>,
     emitted: bool,
 }
 
@@ -345,19 +347,24 @@ impl Stream for CompiledFilterSumStream {
         loop {
             match ready!(self.input.poll_next_unpin(cx)) {
                 Some(Ok(batch)) => match self.exec.runtime.execute(&batch) {
-                    Ok(Some(partial)) => {
-                        self.sum = Some(self.sum.unwrap_or(0.0) + partial);
+                    Ok(partial) => {
+                        if let Some(sum) = &mut self.sum {
+                            if let Err(err) = sum.merge(partial) {
+                                return Poll::Ready(Some(Err(err.into())));
+                            }
+                        } else {
+                            self.sum = Some(partial);
+                        }
                     }
-                    Ok(None) => {}
                     Err(err) => return Poll::Ready(Some(Err(err.into()))),
                 },
                 Some(Err(err)) => return Poll::Ready(Some(Err(err))),
                 None => {
                     self.emitted = true;
-                    let values = Arc::new(Float64Array::from(vec![self.sum])) as ArrayRef;
-                    let batch = RecordBatch::try_new(Arc::clone(&self.schema), vec![values])
-                        .map_err(|err| DataFusionError::Execution(err.to_string()));
-                    return Poll::Ready(Some(batch));
+                    return Poll::Ready(Some(finish_filter_sum_batch(
+                        Arc::clone(&self.schema),
+                        self.sum,
+                    )));
                 }
             }
         }
@@ -374,4 +381,62 @@ impl RecordBatchStream for CompiledFilterSumStream {
     fn schema(&self) -> ArrowSchemaRef {
         Arc::clone(&self.schema)
     }
+}
+
+fn finish_filter_sum_batch(
+    schema: ArrowSchemaRef,
+    sum: Option<FilterSumValue>,
+) -> Result<RecordBatch> {
+    let field = schema.field(0);
+    let values = match field.data_type() {
+        ArrowDataType::Float64 => {
+            let value = match sum {
+                Some(FilterSumValue::Float64(value)) => value,
+                None => None,
+                Some(other) => {
+                    return Err(DataFusionError::Execution(format!(
+                        "expected f64 sum, got {:?}",
+                        other.ty()
+                    )));
+                }
+            };
+            Arc::new(Float64Array::from(vec![value])) as ArrayRef
+        }
+        ArrowDataType::Decimal128(precision, scale) => {
+            let value = match sum {
+                Some(FilterSumValue::Decimal128 {
+                    value,
+                    scale: value_scale,
+                }) => {
+                    if value_scale != *scale {
+                        return Err(DataFusionError::Execution(format!(
+                            "expected decimal scale {}, got {}",
+                            scale, value_scale
+                        )));
+                    }
+                    value
+                }
+                None => None,
+                Some(other) => {
+                    return Err(DataFusionError::Execution(format!(
+                        "expected decimal sum, got {:?}",
+                        other.ty()
+                    )));
+                }
+            };
+            Arc::new(
+                Decimal128Array::from(vec![value])
+                    .with_precision_and_scale(*precision, *scale)
+                    .map_err(|err| DataFusionError::Execution(err.to_string()))?,
+            ) as ArrayRef
+        }
+        other => {
+            return Err(DataFusionError::Execution(format!(
+                "unsupported filter-sum output type {other:?}"
+            )));
+        }
+    };
+
+    RecordBatch::try_new(schema, vec![values])
+        .map_err(|err| DataFusionError::Execution(err.to_string()))
 }

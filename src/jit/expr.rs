@@ -11,18 +11,26 @@ use crate::jit::{JitError, JitResult};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum JitType {
     Bool,
+    Date32,
     Int32,
     Int64,
     Float64,
+    Decimal128 { precision: u8, scale: i8 },
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum JitScalar {
     Null(JitType),
     Bool(bool),
+    Date32(i32),
     Int32(i32),
     Int64(i64),
     Float64(f64),
+    Decimal128 {
+        value: i128,
+        precision: u8,
+        scale: i8,
+    },
 }
 
 impl JitScalar {
@@ -30,9 +38,16 @@ impl JitScalar {
         match self {
             Self::Null(ty) => *ty,
             Self::Bool(_) => JitType::Bool,
+            Self::Date32(_) => JitType::Date32,
             Self::Int32(_) => JitType::Int32,
             Self::Int64(_) => JitType::Int64,
             Self::Float64(_) => JitType::Float64,
+            Self::Decimal128 {
+                precision, scale, ..
+            } => JitType::Decimal128 {
+                precision: *precision,
+                scale: *scale,
+            },
         }
     }
 }
@@ -157,9 +172,14 @@ impl JitProjection {
 fn jit_type(data_type: &ArrowDataType) -> JitResult<JitType> {
     match data_type {
         ArrowDataType::Boolean => Ok(JitType::Bool),
+        ArrowDataType::Date32 => Ok(JitType::Date32),
         ArrowDataType::Int32 => Ok(JitType::Int32),
         ArrowDataType::Int64 => Ok(JitType::Int64),
         ArrowDataType::Float64 => Ok(JitType::Float64),
+        ArrowDataType::Decimal128(precision, scale) => Ok(JitType::Decimal128 {
+            precision: *precision,
+            scale: *scale,
+        }),
         other => Err(JitError::UnsupportedType(format!("{other:?}"))),
     }
 }
@@ -169,12 +189,25 @@ fn jit_scalar(value: &ScalarValue) -> JitResult<JitScalar> {
         ScalarValue::Null => Ok(JitScalar::Null(JitType::Bool)),
         ScalarValue::Boolean(Some(value)) => Ok(JitScalar::Bool(*value)),
         ScalarValue::Boolean(None) => Ok(JitScalar::Null(JitType::Bool)),
+        ScalarValue::Date32(Some(value)) => Ok(JitScalar::Date32(*value)),
+        ScalarValue::Date32(None) => Ok(JitScalar::Null(JitType::Date32)),
         ScalarValue::Int32(Some(value)) => Ok(JitScalar::Int32(*value)),
         ScalarValue::Int32(None) => Ok(JitScalar::Null(JitType::Int32)),
         ScalarValue::Int64(Some(value)) => Ok(JitScalar::Int64(*value)),
         ScalarValue::Int64(None) => Ok(JitScalar::Null(JitType::Int64)),
         ScalarValue::Float64(Some(value)) => Ok(JitScalar::Float64(*value)),
         ScalarValue::Float64(None) => Ok(JitScalar::Null(JitType::Float64)),
+        ScalarValue::Decimal128(Some(value), precision, scale) => Ok(JitScalar::Decimal128 {
+            value: *value,
+            precision: *precision,
+            scale: *scale,
+        }),
+        ScalarValue::Decimal128(None, precision, scale) => {
+            Ok(JitScalar::Null(JitType::Decimal128 {
+                precision: *precision,
+                scale: *scale,
+            }))
+        }
         other => Err(JitError::UnsupportedType(format!("{other:?}"))),
     }
 }

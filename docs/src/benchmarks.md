@@ -9,10 +9,10 @@ QuillSQL uses benchmarks to separate three different claims:
   filter/sum behave before and after compiled MLIR function pointers are
   enabled.
 
-The current code has a real `CompiledFilterProjectExec` in the DataFusion hot
-path, and its execution body uses QuillSQL's fixed-width Arrow batch kernel.
-Compiled MLIR kernel speedups are intentionally not claimed as end-to-end query
-speedups yet.
+The current code has real `CompiledFilterProjectExec` and
+`CompiledFilterSumExec` nodes in the DataFusion hot path, and their execution
+bodies use QuillSQL's fixed-width Arrow batch kernels. Compiled MLIR kernel
+speedups are intentionally not claimed as end-to-end query speedups yet.
 
 ## Microbenchmarks
 
@@ -91,7 +91,7 @@ Current query ladder:
 
 | Query | Family | Why it is included |
 | ----- | ------ | ------------------ |
-| Q6 | scan/filter/plain aggregate | First fixed-width baseline for filter and simple arithmetic. |
+| Q6 | scan/filter/plain aggregate | First fixed-width baseline for date/decimal filtering and plain sum. |
 | Q1 | scan/filter/grouped aggregate/sort | Exercises aggregate state and result materialization. |
 | Q3 | join-heavy aggregate | Adds multi-table build/probe pressure. |
 

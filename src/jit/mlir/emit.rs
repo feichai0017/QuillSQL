@@ -411,6 +411,12 @@ impl ScalarEmitter {
                     mlir_type(ty)
                 ));
             }
+            JitScalar::Date32(value) => {
+                self.lines.push(format!(
+                    "    {name} = arith.constant {value} : {}",
+                    mlir_type(ty)
+                ));
+            }
             JitScalar::Int32(value) => {
                 self.lines.push(format!(
                     "    {name} = arith.constant {value} : {}",
@@ -427,6 +433,12 @@ impl ScalarEmitter {
                 self.lines.push(format!(
                     "    {name} = arith.constant {} : {}",
                     format_float(*value),
+                    mlir_type(ty)
+                ));
+            }
+            JitScalar::Decimal128 { value, .. } => {
+                self.lines.push(format!(
+                    "    {name} = arith.constant {value} : {}",
                     mlir_type(ty)
                 ));
             }
@@ -464,9 +476,15 @@ impl ScalarEmitter {
     ) -> JitResult<ScalarValueRef> {
         ensure_same_type(&lhs, &rhs)?;
         let opcode = match (op, lhs.ty) {
-            (JitBinaryOp::Add, JitType::Int32 | JitType::Int64) => "addi",
-            (JitBinaryOp::Sub, JitType::Int32 | JitType::Int64) => "subi",
-            (JitBinaryOp::Mul, JitType::Int32 | JitType::Int64) => "muli",
+            (JitBinaryOp::Add, JitType::Int32 | JitType::Int64 | JitType::Decimal128 { .. }) => {
+                "addi"
+            }
+            (JitBinaryOp::Sub, JitType::Int32 | JitType::Int64 | JitType::Decimal128 { .. }) => {
+                "subi"
+            }
+            (JitBinaryOp::Mul, JitType::Int32 | JitType::Int64 | JitType::Decimal128 { .. }) => {
+                "muli"
+            }
             (JitBinaryOp::Div, JitType::Int32 | JitType::Int64) => "divsi",
             (JitBinaryOp::Add, JitType::Float64) => "addf",
             (JitBinaryOp::Sub, JitType::Float64) => "subf",
@@ -538,7 +556,7 @@ impl ScalarEmitter {
                     format_op(op)
                 )));
             }
-            JitType::Int32 | JitType::Int64 => {
+            JitType::Date32 | JitType::Int32 | JitType::Int64 | JitType::Decimal128 { .. } => {
                 let predicate = match op {
                     JitBinaryOp::Eq => "eq",
                     JitBinaryOp::NotEq => "ne",
@@ -613,9 +631,11 @@ fn ensure_same_type(lhs: &ScalarValueRef, rhs: &ScalarValueRef) -> JitResult<()>
 fn mlir_type(ty: JitType) -> &'static str {
     match ty {
         JitType::Bool => "i1",
+        JitType::Date32 => "i32",
         JitType::Int32 => "i32",
         JitType::Int64 => "i64",
         JitType::Float64 => "f64",
+        JitType::Decimal128 { .. } => "i128",
     }
 }
 
@@ -659,18 +679,28 @@ fn format_scalar(value: &JitScalar) -> String {
     match value {
         JitScalar::Null(ty) => format!("null:{}", format_type(*ty)),
         JitScalar::Bool(value) => value.to_string(),
+        JitScalar::Date32(value) => format!("{value}:date32"),
         JitScalar::Int32(value) => format!("{value}:i32"),
         JitScalar::Int64(value) => format!("{value}:i64"),
         JitScalar::Float64(value) => format!("{value}:f64"),
+        JitScalar::Decimal128 {
+            value,
+            precision,
+            scale,
+        } => {
+            format!("{value}:decimal128({precision},{scale})")
+        }
     }
 }
 
 fn format_type(ty: JitType) -> &'static str {
     match ty {
         JitType::Bool => "i1",
+        JitType::Date32 => "date32",
         JitType::Int32 => "i32",
         JitType::Int64 => "i64",
         JitType::Float64 => "f64",
+        JitType::Decimal128 { .. } => "decimal128",
     }
 }
 

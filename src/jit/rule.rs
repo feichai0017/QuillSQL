@@ -7,6 +7,8 @@ use datafusion::common::Result;
 use datafusion::physical_expr::Partitioning;
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
 use datafusion::physical_plan::aggregates::{AggregateExec, AggregateMode};
+#[allow(deprecated)]
+use datafusion::physical_plan::coalesce_batches::CoalesceBatchesExec;
 use datafusion::physical_plan::filter::FilterExec;
 use datafusion::physical_plan::projection::ProjectionExec;
 use datafusion::physical_plan::repartition::RepartitionExec;
@@ -22,7 +24,7 @@ use crate::jit::{
 pub struct JitCandidate {
     pub node: &'static str,
     pub kernel: KernelKind,
-    pub backend: &'static str,
+    pub backend: String,
     pub executable: bool,
 }
 
@@ -58,7 +60,7 @@ impl MlirJitRule {
             return Some(JitCandidate {
                 node: "CompiledFilterProjectExec",
                 kernel: compiled.kernel().kind,
-                backend: "mlir",
+                backend: compiled.kernel().backend.clone(),
                 executable: compiled.kernel().executable,
             });
         }
@@ -67,7 +69,7 @@ impl MlirJitRule {
             return Some(JitCandidate {
                 node: "CompiledFilterSumExec",
                 kernel: compiled.kernel().kind,
-                backend: "mlir",
+                backend: compiled.kernel().backend.clone(),
                 executable: compiled.kernel().executable,
             });
         }
@@ -83,7 +85,7 @@ impl MlirJitRule {
             return Some(JitCandidate {
                 node: "FilterExec",
                 kernel: KernelKind::Filter,
-                backend: "mlir",
+                backend: "mlir".to_string(),
                 executable: kernel.executable,
             });
         }
@@ -103,7 +105,7 @@ impl MlirJitRule {
                 return Some(JitCandidate {
                     node: "FilterProjectExec",
                     kernel: KernelKind::FilterProject,
-                    backend: "mlir",
+                    backend: "mlir".to_string(),
                     executable: kernel.executable,
                 });
             }
@@ -115,7 +117,7 @@ impl MlirJitRule {
             return Some(JitCandidate {
                 node: "ProjectionExec",
                 kernel: KernelKind::Projection,
-                backend: "mlir",
+                backend: "mlir".to_string(),
                 executable: kernel.executable,
             });
         }
@@ -257,12 +259,12 @@ impl MlirJitRule {
             || aggregate.aggr_expr().len() != 1
             || aggregate.filter_expr().iter().any(Option::is_some)
             || aggregate.schema().fields().len() != 1
-            || aggregate.schema().field(0).data_type() != &ArrowDataType::Float64
+            || !is_supported_sum_output(aggregate.schema().field(0).data_type())
         {
             return Ok(None);
         }
 
-        let input = strip_round_robin_repartition(aggregate.input());
+        let input = strip_filter_sum_adapters(aggregate.input());
         let Some(filter) = input.as_any().downcast_ref::<FilterExec>() else {
             return Ok(None);
         };
@@ -288,25 +290,11 @@ impl MlirJitRule {
             None => return Ok(None),
         };
 
-        let module = match self.backend.lower_f64_filter_sum(&predicate, &measure) {
-            Ok(module) => module,
-            Err(_) => return Ok(None),
-        };
-        if self.backend.verify_module(&module).is_err() {
-            return Ok(None);
-        }
-
-        let runtime = match FilterSumKernel::try_new(predicate, measure) {
+        let runtime = match FilterSumKernel::try_new(predicate.clone(), measure.clone()) {
             Ok(runtime) => runtime,
             Err(_) => return Ok(None),
         };
-        let kernel = CompiledKernel::new(
-            module.symbol,
-            KernelKind::FilterSum,
-            self.backend.name(),
-            module.text,
-            false,
-        );
+        let kernel = self.filter_sum_kernel(&predicate, &measure);
         let compiled = CompiledFilterSumExec::try_new(
             Arc::clone(filter.input()),
             runtime,
@@ -315,17 +303,48 @@ impl MlirJitRule {
         )?;
         Ok(Some(Arc::new(compiled) as Arc<dyn ExecutionPlan>))
     }
+
+    fn filter_sum_kernel(&self, predicate: &JitExpr, measure: &JitExpr) -> CompiledKernel {
+        if let Ok(module) = self.backend.lower_f64_filter_sum(predicate, measure) {
+            if self.backend.verify_module(&module).is_ok() {
+                return CompiledKernel::new(
+                    module.symbol,
+                    KernelKind::FilterSum,
+                    self.backend.name(),
+                    module.text,
+                    false,
+                );
+            }
+        }
+
+        CompiledKernel::new(
+            "fixed_width_filter_sum",
+            KernelKind::FilterSum,
+            "fixed-width-runtime",
+            format!("predicate={predicate:?}; measure={measure:?}"),
+            false,
+        )
+    }
 }
 
-fn strip_round_robin_repartition(input: &Arc<dyn ExecutionPlan>) -> &Arc<dyn ExecutionPlan> {
-    let Some(repartition) = input.as_any().downcast_ref::<RepartitionExec>() else {
-        return input;
-    };
-    if matches!(repartition.partitioning(), Partitioning::RoundRobinBatch(_)) {
-        repartition.input()
-    } else {
-        input
+fn is_supported_sum_output(data_type: &ArrowDataType) -> bool {
+    matches!(
+        data_type,
+        ArrowDataType::Float64 | ArrowDataType::Decimal128(_, _)
+    )
+}
+
+#[allow(deprecated)]
+fn strip_filter_sum_adapters(input: &Arc<dyn ExecutionPlan>) -> &Arc<dyn ExecutionPlan> {
+    if let Some(coalesce) = input.as_any().downcast_ref::<CoalesceBatchesExec>() {
+        return strip_filter_sum_adapters(coalesce.input());
     }
+    if let Some(repartition) = input.as_any().downcast_ref::<RepartitionExec>() {
+        if matches!(repartition.partitioning(), Partitioning::RoundRobinBatch(_)) {
+            return strip_filter_sum_adapters(repartition.input());
+        }
+    }
+    input
 }
 
 fn lower_sum_measure(aggregate: &AggregateExec, input_schema: &ArrowSchema) -> Option<JitExpr> {

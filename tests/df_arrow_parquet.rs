@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use datafusion::arrow::array::{Array, Float64Array, Int64Array};
+use datafusion::arrow::array::{Array, Decimal128Array, Float64Array, Int64Array};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::dataframe::DataFrameWriteOptions;
@@ -163,6 +163,55 @@ async fn debug_trace_reports_filter_sum_candidate() {
     );
 }
 
+#[tokio::test]
+async fn parquet_q6_shape_uses_decimal_filter_sum_candidate() {
+    let dir = TempDir::new().expect("temp dir");
+    let parquet_path = dir.path().join("lineitem.parquet");
+    write_q6_lineitem_parquet(parquet_path.to_str().unwrap()).await;
+
+    let db = Database::new_temp().expect("database");
+    db.register_parquet("lineitem", parquet_path.to_str().unwrap())
+        .await
+        .expect("register parquet");
+
+    let output = db
+        .run(
+            "select sum(l_extendedprice * l_discount) as revenue \
+             from lineitem \
+             where l_shipdate >= date '1994-01-01' \
+               and l_shipdate < date '1995-01-01' \
+               and l_discount between cast(0.05 as decimal(15,2)) \
+                                  and cast(0.07 as decimal(15,2)) \
+               and l_quantity < cast(24.00 as decimal(15,2))",
+        )
+        .await
+        .expect("query");
+    let values = output.batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<Decimal128Array>()
+        .expect("decimal sum");
+    assert_eq!(values.len(), 1);
+    assert_eq!(values.value(0), 210_000);
+    assert_eq!(values.scale(), 4);
+
+    let trace = db.debug_last_trace().expect("trace");
+    assert!(
+        trace.physical_plan.contains("CompiledFilterSumExec"),
+        "{}",
+        trace.physical_plan
+    );
+    assert!(
+        trace
+            .jit_candidates
+            .iter()
+            .any(|candidate| candidate.kernel == KernelKind::FilterSum
+                && candidate.backend == "fixed-width-runtime"),
+        "{:?}",
+        trace.jit_candidates
+    );
+}
+
 async fn write_people_parquet(path: &str) {
     let ctx = SessionContext::new();
     ctx.sql(
@@ -175,4 +224,31 @@ async fn write_people_parquet(path: &str) {
     .write_parquet(path, DataFrameWriteOptions::new(), None)
     .await
     .expect("write parquet");
+}
+
+async fn write_q6_lineitem_parquet(path: &str) {
+    let ctx = SessionContext::new();
+    ctx.sql(
+        "select date '1994-02-01' as l_shipdate, \
+                cast(300.00 as decimal(15,2)) as l_extendedprice, \
+                cast(0.07 as decimal(15,2)) as l_discount, \
+                cast(20.00 as decimal(15,2)) as l_quantity \
+         union all select date '1994-03-01', \
+                cast(100.00 as decimal(15,2)), \
+                cast(0.06 as decimal(15,2)), \
+                cast(25.00 as decimal(15,2)) \
+         union all select date '1994-04-01', \
+                cast(200.00 as decimal(15,2)), \
+                cast(0.04 as decimal(15,2)), \
+                cast(10.00 as decimal(15,2)) \
+         union all select date '1995-01-01', \
+                cast(400.00 as decimal(15,2)), \
+                cast(0.05 as decimal(15,2)), \
+                cast(10.00 as decimal(15,2))",
+    )
+    .await
+    .expect("build q6 dataframe")
+    .write_parquet(path, DataFrameWriteOptions::new(), None)
+    .await
+    .expect("write q6 parquet");
 }

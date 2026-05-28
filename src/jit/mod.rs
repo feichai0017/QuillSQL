@@ -17,7 +17,7 @@ pub use kernel::{
 pub use mlir::{CompiledF64FilterSum, CompiledI64Filter, CompiledI64FilterProject};
 pub use mlir::{MlirBackend, MlirModule};
 pub use rule::{JitCandidate, MlirJitRule};
-pub use runtime::{FilterProjectKernel, FilterSumKernel};
+pub use runtime::{FilterProjectKernel, FilterSumKernel, FilterSumValue};
 
 use datafusion::common::DataFusionError;
 use thiserror::Error;
