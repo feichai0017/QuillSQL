@@ -5,8 +5,9 @@ QuillSQL uses benchmarks to separate three different claims:
 - JIT lowering cost: how much time QuillSQL spends building JIT IR and MLIR.
 - DataFusion execution cost: how the current DataFusion path behaves on Arrow
   batches or Parquet datasets.
-- Compiled-node cost: how the rewritten filter/project physical island behaves
-  before and after compiled MLIR function pointers are enabled.
+- Compiled-node cost: how rewritten physical islands such as filter/project and
+  filter/sum behave before and after compiled MLIR function pointers are
+  enabled.
 
 The current code has a real `CompiledFilterProjectExec` in the DataFusion hot
 path, and its execution body uses QuillSQL's fixed-width Arrow batch kernel.

@@ -6,10 +6,11 @@ mod value;
 
 use std::sync::Arc;
 
+use datafusion::arrow::array::{Array, Float64Array, Int64Array};
 use datafusion::arrow::datatypes::SchemaRef as ArrowSchemaRef;
 use datafusion::arrow::record_batch::RecordBatch;
 
-use crate::jit::{JitError, JitExpr, JitProjection, JitResult, JitType};
+use crate::jit::{JitBinaryOp, JitError, JitExpr, JitProjection, JitResult, JitScalar, JitType};
 
 use self::array::{arrow_type, BatchView, OutputBuilder};
 use self::eval::{ensure_supported_expr, eval_expr};
@@ -25,6 +26,18 @@ pub struct FilterProjectKernel {
 pub struct FilterSumKernel {
     predicate: JitExpr,
     measure: JitExpr,
+    plan: Option<FilterSumPlan>,
+}
+
+#[derive(Debug, Clone)]
+enum FilterSumPlan {
+    I64CompareF64Mul {
+        predicate_col: usize,
+        op: JitBinaryOp,
+        threshold: i64,
+        left_col: usize,
+        right_col: usize,
+    },
 }
 
 impl FilterProjectKernel {
@@ -117,7 +130,12 @@ impl FilterSumKernel {
         }
         ensure_supported_expr(&predicate)?;
         ensure_supported_expr(&measure)?;
-        Ok(Self { predicate, measure })
+        let plan = compile_filter_sum_plan(&predicate, &measure);
+        Ok(Self {
+            predicate,
+            measure,
+            plan,
+        })
     }
 
     pub fn predicate(&self) -> &JitExpr {
@@ -129,6 +147,10 @@ impl FilterSumKernel {
     }
 
     pub fn execute(&self, batch: &RecordBatch) -> JitResult<Option<f64>> {
+        if let Some(plan) = &self.plan {
+            return execute_filter_sum_plan(plan, batch);
+        }
+
         let view = BatchView::try_new(batch)?;
         let mut sum = 0.0_f64;
         let mut has_value = false;
@@ -153,5 +175,155 @@ impl FilterSumKernel {
         }
 
         Ok(has_value.then_some(sum))
+    }
+}
+
+fn compile_filter_sum_plan(predicate: &JitExpr, measure: &JitExpr) -> Option<FilterSumPlan> {
+    let (predicate_col, op, threshold) = parse_i64_compare(predicate)?;
+    let (left_col, right_col) = parse_f64_mul(measure)?;
+    Some(FilterSumPlan::I64CompareF64Mul {
+        predicate_col,
+        op,
+        threshold,
+        left_col,
+        right_col,
+    })
+}
+
+fn parse_i64_compare(expr: &JitExpr) -> Option<(usize, JitBinaryOp, i64)> {
+    let JitExpr::Binary {
+        op, left, right, ..
+    } = expr
+    else {
+        return None;
+    };
+    if !is_compare_op(*op) {
+        return None;
+    }
+
+    if let Some((column, threshold)) = parse_i64_column_literal(left, right) {
+        return Some((column, *op, threshold));
+    }
+    if let Some((column, threshold)) = parse_i64_column_literal(right, left) {
+        return Some((column, reverse_compare_op(*op), threshold));
+    }
+    None
+}
+
+fn parse_i64_column_literal(column: &JitExpr, literal: &JitExpr) -> Option<(usize, i64)> {
+    let JitExpr::Column {
+        index,
+        ty: JitType::Int64,
+        ..
+    } = column
+    else {
+        return None;
+    };
+    let JitExpr::Literal(JitScalar::Int64(value)) = literal else {
+        return None;
+    };
+    Some((*index, *value))
+}
+
+fn parse_f64_mul(expr: &JitExpr) -> Option<(usize, usize)> {
+    let JitExpr::Binary {
+        op: JitBinaryOp::Mul,
+        left,
+        right,
+        ..
+    } = expr
+    else {
+        return None;
+    };
+    Some((parse_f64_column(left)?, parse_f64_column(right)?))
+}
+
+fn parse_f64_column(expr: &JitExpr) -> Option<usize> {
+    let JitExpr::Column {
+        index,
+        ty: JitType::Float64,
+        ..
+    } = expr
+    else {
+        return None;
+    };
+    Some(*index)
+}
+
+fn execute_filter_sum_plan(plan: &FilterSumPlan, batch: &RecordBatch) -> JitResult<Option<f64>> {
+    let FilterSumPlan::I64CompareF64Mul {
+        predicate_col,
+        op,
+        threshold,
+        left_col,
+        right_col,
+    } = *plan;
+    let predicate = int64_column(batch, predicate_col)?;
+    let left = float64_column(batch, left_col)?;
+    let right = float64_column(batch, right_col)?;
+    let mut sum = 0.0_f64;
+    let mut has_value = false;
+
+    for row in 0..batch.num_rows() {
+        if !predicate.is_valid(row) || !compare_i64(op, predicate.value(row), threshold) {
+            continue;
+        }
+        if left.is_valid(row) && right.is_valid(row) {
+            sum += left.value(row) * right.value(row);
+            has_value = true;
+        }
+    }
+
+    Ok(has_value.then_some(sum))
+}
+
+fn int64_column(batch: &RecordBatch, index: usize) -> JitResult<&Int64Array> {
+    batch
+        .column(index)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .ok_or_else(|| JitError::Backend(format!("column {index} is not Int64")))
+}
+
+fn float64_column(batch: &RecordBatch, index: usize) -> JitResult<&Float64Array> {
+    batch
+        .column(index)
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .ok_or_else(|| JitError::Backend(format!("column {index} is not Float64")))
+}
+
+fn is_compare_op(op: JitBinaryOp) -> bool {
+    matches!(
+        op,
+        JitBinaryOp::Eq
+            | JitBinaryOp::NotEq
+            | JitBinaryOp::Lt
+            | JitBinaryOp::LtEq
+            | JitBinaryOp::Gt
+            | JitBinaryOp::GtEq
+    )
+}
+
+fn reverse_compare_op(op: JitBinaryOp) -> JitBinaryOp {
+    match op {
+        JitBinaryOp::Lt => JitBinaryOp::Gt,
+        JitBinaryOp::LtEq => JitBinaryOp::GtEq,
+        JitBinaryOp::Gt => JitBinaryOp::Lt,
+        JitBinaryOp::GtEq => JitBinaryOp::LtEq,
+        JitBinaryOp::Eq | JitBinaryOp::NotEq => op,
+        _ => unreachable!("non-comparison operator cannot be reversed"),
+    }
+}
+
+fn compare_i64(op: JitBinaryOp, lhs: i64, rhs: i64) -> bool {
+    match op {
+        JitBinaryOp::Eq => lhs == rhs,
+        JitBinaryOp::NotEq => lhs != rhs,
+        JitBinaryOp::Lt => lhs < rhs,
+        JitBinaryOp::LtEq => lhs <= rhs,
+        JitBinaryOp::Gt => lhs > rhs,
+        JitBinaryOp::GtEq => lhs >= rhs,
+        _ => unreachable!("non-comparison operator cannot compare integers"),
     }
 }

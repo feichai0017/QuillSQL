@@ -101,8 +101,8 @@ Adjust the prefixes for your local LLVM/MLIR installation.
 
 QuillSQL keeps benchmark levels separate:
 
-- `jit_micro`: isolates JIT IR fusion, MLIR lowering, and a small DataFusion
-  filter/project SQL path over an in-memory Arrow table.
+- `jit_micro`: isolates JIT IR fusion, MLIR lowering, and small DataFusion
+  filter/project and filter/sum SQL paths over in-memory Arrow tables.
 - `tpch`: runs a small TPC-H ladder over external Parquet data. It currently
   includes Q6, Q1, and Q3 to cover scan/filter/plain aggregate, grouped
   aggregate/sort, and join-heavy execution.
