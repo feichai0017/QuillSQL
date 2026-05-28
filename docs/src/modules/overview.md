@@ -23,11 +23,12 @@ Parquet dataset as a DataFusion table.
 | `compiler.rs` | Compiles recognized `PipelineIR` shapes into DataFusion execution nodes. |
 | `exec.rs` | DataFusion physical execution nodes for compiled filter/project and aggregate pipelines. |
 | `expr.rs` | Lowers supported DataFusion physical expressions into QuillSQL's small JIT IR. |
-| `ir.rs` | Defines `KernelIR`, `PipelineIR`, and the initial fusion boundaries. |
+| `ir.rs` | Defines the semantic `PipelineIR` shape extracted from DataFusion plans. |
 | `kernel.rs` | Defines the future Arrow kernel ABI and compiled-kernel descriptor. |
+| `lowering.rs` | Lowers exact `PipelineIR` shapes into executable record or aggregate kernels. |
 | `mlir/` | MLIR emission, verification, and compiled ExecutionEngine invocation. |
 | `options.rs` | Startup-time JIT execution options shared by the database and benchmark harnesses. |
-| `pipeline.rs` | Extracts recognizable DataFusion physical-plan pipelines such as `filter -> plain SUM`. |
+| `pipeline.rs` | Extracts recognizable DataFusion physical-plan pipelines such as `filter -> projection` and `filter -> plain SUM`. |
 | `rule.rs` | DataFusion physical optimizer rule that delegates supported pipeline rewrites to the compiler. |
 | `runtime/` | Fixed-width Arrow batch kernel runtime for compiled execution nodes. |
 

@@ -8,11 +8,15 @@ use datafusion::physical_plan::aggregates::{AggregateExec, AggregateMode};
 #[allow(deprecated)]
 use datafusion::physical_plan::coalesce_batches::CoalesceBatchesExec;
 use datafusion::physical_plan::filter::FilterExec;
+use datafusion::physical_plan::projection::ProjectionExec;
 use datafusion::physical_plan::repartition::RepartitionExec;
 use datafusion::physical_plan::ExecutionPlan;
 use serde::Serialize;
 
-use crate::jit::{CompiledAggregatePipelineExec, JitExpr, KernelKind, PipelineIr};
+use crate::jit::{
+    CompiledAggregatePipelineExec, CompiledRecordPipelineExec, JitExpr, JitProjection, KernelKind,
+    PipelineIr, PipelineLowering, PipelineOp,
+};
 
 #[derive(Debug, Clone)]
 pub(crate) struct PipelineMatch {
@@ -33,11 +37,18 @@ pub(crate) struct PhysicalPipeline {
     pub input: Arc<dyn ExecutionPlan>,
     pub output_schema: ArrowSchemaRef,
     pub ir: PipelineIr,
+    pub output_adapter: Option<OutputAdapter>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct OutputAdapter {
+    pub partitioning: Partitioning,
+    pub preserve_order: bool,
 }
 
 impl PipelineMatch {
     pub fn candidate(&self) -> Option<PipelineCandidate> {
-        let kernel = self.pipeline.first_kernel()?.kind();
+        let kernel = PipelineLowering::from_ir(&self.pipeline)?.kind();
         Some(PipelineCandidate {
             node: self.node,
             kernel,
@@ -58,11 +69,51 @@ impl PhysicalPipeline {
             input,
             output_schema,
             ir: PipelineIr::filter_sum(predicate, measure),
+            output_adapter: None,
+        }
+    }
+
+    pub fn filter_project(
+        input: Arc<dyn ExecutionPlan>,
+        output_schema: ArrowSchemaRef,
+        predicate: JitExpr,
+        projections: Vec<JitProjection>,
+        output_adapter: Option<OutputAdapter>,
+    ) -> Self {
+        Self {
+            input,
+            output_schema,
+            ir: PipelineIr::new(vec![
+                PipelineOp::Filter(predicate),
+                PipelineOp::Projection(projections),
+            ]),
+            output_adapter,
         }
     }
 }
 
+pub(crate) fn extract_pipeline_from_node(
+    plan: &Arc<dyn ExecutionPlan>,
+) -> Option<PhysicalPipeline> {
+    if let Some(aggregate) = plan.as_any().downcast_ref::<AggregateExec>() {
+        return extract_filter_sum_pipeline(aggregate);
+    }
+
+    let projection = plan.as_any().downcast_ref::<ProjectionExec>()?;
+    extract_filter_project_pipeline(projection)
+}
+
 pub(crate) fn pipeline_from_node(plan: &Arc<dyn ExecutionPlan>) -> Option<PipelineMatch> {
+    if let Some(compiled) = plan.as_any().downcast_ref::<CompiledRecordPipelineExec>() {
+        return Some(PipelineMatch {
+            node: "CompiledRecordPipelineExec",
+            pipeline: PipelineIr::new(vec![
+                PipelineOp::Filter(compiled.runtime().predicate().clone()),
+                PipelineOp::Projection(compiled.runtime().projections().to_vec()),
+            ]),
+        });
+    }
+
     if let Some(compiled) = plan
         .as_any()
         .downcast_ref::<CompiledAggregatePipelineExec>()
@@ -82,6 +133,48 @@ pub(crate) fn pipeline_from_node(plan: &Arc<dyn ExecutionPlan>) -> Option<Pipeli
         node: "AggregateExec",
         pipeline: pipeline.ir,
     })
+}
+
+fn extract_filter_project_pipeline(projection: &ProjectionExec) -> Option<PhysicalPipeline> {
+    let input = projection.input();
+    if let Some(filter) = input.as_any().downcast_ref::<FilterExec>() {
+        return filter_project_pipeline_from_filter(filter, projection, None);
+    }
+
+    let repartition = input.as_any().downcast_ref::<RepartitionExec>()?;
+    if !matches!(repartition.partitioning(), Partitioning::RoundRobinBatch(_)) {
+        return None;
+    }
+    let filter = repartition.input().as_any().downcast_ref::<FilterExec>()?;
+    filter_project_pipeline_from_filter(
+        filter,
+        projection,
+        Some(OutputAdapter {
+            partitioning: repartition.partitioning().clone(),
+            preserve_order: repartition.preserve_order(),
+        }),
+    )
+}
+
+fn filter_project_pipeline_from_filter(
+    filter: &FilterExec,
+    projection: &ProjectionExec,
+    output_adapter: Option<OutputAdapter>,
+) -> Option<PhysicalPipeline> {
+    if filter.projection().is_some() || filter.fetch().is_some() {
+        return None;
+    }
+
+    let input_schema = filter.input().schema();
+    let predicate = JitExpr::from_physical(filter.predicate(), input_schema.as_ref()).ok()?;
+    let projections = lower_projection_exprs(projection, input_schema.as_ref())?;
+    Some(PhysicalPipeline::filter_project(
+        Arc::clone(filter.input()),
+        projection.schema(),
+        predicate,
+        projections,
+        output_adapter,
+    ))
 }
 
 pub(crate) fn extract_filter_sum_pipeline(aggregate: &AggregateExec) -> Option<PhysicalPipeline> {
@@ -116,6 +209,21 @@ pub(crate) fn extract_filter_sum_pipeline(aggregate: &AggregateExec) -> Option<P
         predicate,
         measure,
     ))
+}
+
+fn lower_projection_exprs(
+    projection: &ProjectionExec,
+    input_schema: &ArrowSchema,
+) -> Option<Vec<JitProjection>> {
+    projection
+        .expr()
+        .iter()
+        .map(|expr| {
+            JitExpr::from_physical(&expr.expr, input_schema)
+                .map(|jit_expr| JitProjection::new(jit_expr, expr.alias.clone()))
+        })
+        .collect::<crate::jit::JitResult<Vec<_>>>()
+        .ok()
 }
 
 fn is_supported_sum_output(data_type: &ArrowDataType) -> bool {

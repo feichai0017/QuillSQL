@@ -100,7 +100,7 @@ async fn prepared_query_reuses_logical_plan() {
         .expect("prepare");
 
     assert!(
-        query.physical_plan().contains("CompiledFilterProjectExec"),
+        query.physical_plan().contains("CompiledRecordPipelineExec"),
         "{}",
         query.physical_plan()
     );
@@ -146,7 +146,7 @@ async fn debug_trace_reports_jit_candidates() {
     let trace = db.debug_last_trace().expect("trace");
 
     assert!(
-        trace.physical_plan.contains("CompiledFilterProjectExec"),
+        trace.physical_plan.contains("CompiledRecordPipelineExec"),
         "{}",
         trace.physical_plan
     );
@@ -158,6 +158,17 @@ async fn debug_trace_reports_jit_candidates() {
                 || candidate.kernel == KernelKind::Filter),
         "{:?}",
         trace.jit_candidates
+    );
+    assert!(
+        trace
+            .pipeline_candidates
+            .iter()
+            .any(|candidate| candidate.node == "CompiledRecordPipelineExec"
+                && candidate.kernel == KernelKind::FilterProject
+                && candidate.operators == vec!["filter", "projection"]
+                && candidate.sink == "record_batch"),
+        "{:?}",
+        trace.pipeline_candidates
     );
 }
 

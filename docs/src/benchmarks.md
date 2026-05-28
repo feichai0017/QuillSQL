@@ -5,12 +5,12 @@ QuillSQL uses benchmarks to separate three different claims:
 - JIT lowering cost: how much time QuillSQL spends building JIT IR and MLIR.
 - DataFusion execution cost: how the current DataFusion path behaves on Arrow
   batches or Parquet datasets, separately from SQL parsing and planning.
-- Compiled pipeline cost: how rewritten physical islands and aggregate
-  pipelines behave before and after compiled MLIR function pointers are enabled.
+- Compiled pipeline cost: how rewritten record and aggregate pipelines behave
+  before and after compiled MLIR function pointers are enabled.
 
-The current code has real `CompiledFilterProjectExec` and
-`CompiledAggregatePipelineExec` nodes in the DataFusion hot path, and their execution
-bodies use QuillSQL's fixed-width Arrow batch kernels. With `jit-mlir` and
+The current code has real `CompiledRecordPipelineExec` and
+`CompiledAggregatePipelineExec` nodes in the DataFusion hot path, and their
+execution bodies use QuillSQL's fixed-width Arrow batch kernels. With `jit-mlir` and
 `QUILL_JIT=mlir`, the single-column i64 filter/project path and the f64 and
 Q6-shaped decimal filter/sum paths can dispatch to executable MLIR kernels for
 null-free, offset-free fixed-width batches. Other compiled MLIR kernel speedups
@@ -28,7 +28,7 @@ Benchmarks:
 
 | Name | Measures |
 | ---- | -------- |
-| `jit_ir/fuse_filter_project` | `PipelineIR` prefix fusion into `KernelIR::FilterProject`. |
+| `pipeline_ir/lower_filter_project` | Exact `PipelineIR` lowering into the record pipeline kernel shape. |
 | `mlir/compile_filter` | JIT expression to MLIR module generation for a filter. |
 | `mlir/compile_filter_project` | Fused filter/project MLIR module generation. |
 | `mlir_compiled/compile_i64_filter` | MLIR parse/lower/JIT cost for the first compiled fixed-width filter kernel. Requires `jit-mlir`. |

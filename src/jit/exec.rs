@@ -21,7 +21,7 @@ use crate::jit::{
 };
 
 #[derive(Debug, Clone)]
-pub struct CompiledFilterProjectExec {
+pub struct CompiledRecordPipelineExec {
     input: Arc<dyn ExecutionPlan>,
     runtime: FilterProjectKernel,
     kernel: CompiledKernel,
@@ -38,7 +38,7 @@ pub struct CompiledAggregatePipelineExec {
     cache: Arc<PlanProperties>,
 }
 
-impl CompiledFilterProjectExec {
+impl CompiledRecordPipelineExec {
     pub fn try_new(
         input: Arc<dyn ExecutionPlan>,
         runtime: FilterProjectKernel,
@@ -47,7 +47,7 @@ impl CompiledFilterProjectExec {
     ) -> Result<Self> {
         if kernel.kind != KernelKind::FilterProject {
             return Err(DataFusionError::Internal(format!(
-                "expected filter-project kernel, got {:?}",
+                "expected record pipeline kernel, got {:?}",
                 kernel.kind
             )));
         }
@@ -147,7 +147,7 @@ impl CompiledAggregatePipelineExec {
     }
 }
 
-impl DisplayAs for CompiledFilterProjectExec {
+impl DisplayAs for CompiledRecordPipelineExec {
     fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match t {
             DisplayFormatType::Default | DisplayFormatType::Verbose => {
@@ -160,7 +160,7 @@ impl DisplayAs for CompiledFilterProjectExec {
                     .join(", ");
                 write!(
                     f,
-                    "CompiledFilterProjectExec: backend={}, executable={}, predicate={:?}, expr=[{}]",
+                    "CompiledRecordPipelineExec: backend={}, executable={}, predicate={:?}, expr=[{}]",
                     self.kernel.backend,
                     self.kernel.executable,
                     self.runtime.predicate(),
@@ -209,9 +209,9 @@ impl DisplayAs for CompiledAggregatePipelineExec {
     }
 }
 
-impl ExecutionPlan for CompiledFilterProjectExec {
+impl ExecutionPlan for CompiledRecordPipelineExec {
     fn name(&self) -> &str {
-        "CompiledFilterProjectExec"
+        "CompiledRecordPipelineExec"
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -240,7 +240,7 @@ impl ExecutionPlan for CompiledFilterProjectExec {
     ) -> Result<Arc<dyn ExecutionPlan>> {
         if children.len() != 1 {
             return Err(DataFusionError::Internal(format!(
-                "CompiledFilterProjectExec expected one child, got {}",
+                "CompiledRecordPipelineExec expected one child, got {}",
                 children.len()
             )));
         }
@@ -259,7 +259,7 @@ impl ExecutionPlan for CompiledFilterProjectExec {
         partition: usize,
         context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
-        Ok(Box::pin(CompiledFilterProjectStream {
+        Ok(Box::pin(CompiledRecordPipelineStream {
             schema: Arc::clone(&self.schema),
             input: self.input.execute(partition, context)?,
             exec: self.clone(),
@@ -327,10 +327,10 @@ impl ExecutionPlan for CompiledAggregatePipelineExec {
     }
 }
 
-struct CompiledFilterProjectStream {
+struct CompiledRecordPipelineStream {
     schema: ArrowSchemaRef,
     input: SendableRecordBatchStream,
-    exec: CompiledFilterProjectExec,
+    exec: CompiledRecordPipelineExec,
 }
 
 struct CompiledFilterSumStream {
@@ -341,7 +341,7 @@ struct CompiledFilterSumStream {
     emitted: bool,
 }
 
-impl Stream for CompiledFilterProjectStream {
+impl Stream for CompiledRecordPipelineStream {
     type Item = Result<RecordBatch>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -388,7 +388,7 @@ impl Stream for CompiledFilterSumStream {
     }
 }
 
-impl RecordBatchStream for CompiledFilterProjectStream {
+impl RecordBatchStream for CompiledRecordPipelineStream {
     fn schema(&self) -> ArrowSchemaRef {
         Arc::clone(&self.schema)
     }

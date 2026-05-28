@@ -15,7 +15,7 @@ flowchart LR
     Logical --> Optimized["DataFusion optimizers"]
     Optimized --> Physical["DataFusion ExecutionPlan"]
     Physical --> JITRule["MlirJitRule physical rewrite"]
-    JITRule --> CompiledExec["CompiledFilterProjectExec"]
+    JITRule --> CompiledExec["CompiledRecordPipelineExec"]
     CompiledExec --> Arrow["Arrow RecordBatch output"]
 
     Parquet["Parquet / Arrow datasets"] --> DF
@@ -42,19 +42,20 @@ storage-engine research.
 ## JIT Boundary
 
 The JIT boundary is the DataFusion physical plan plus Arrow `RecordBatch`
-interface. `MlirJitRule` walks DataFusion physical plans and tries to lower
-supported `FilterExec` and `ProjectionExec` expressions into a small JIT IR.
+interface. `MlirJitRule` walks DataFusion physical plans, asks `pipeline.rs` to
+extract supported physical pipelines, and delegates compilation to
+`PipelineCompiler`.
 
 The MLIR backend then emits scalar `arith` functions and verifies them through
 `melior` when `jit-mlir` is enabled. The physical optimizer can replace
-filter/project islands with `CompiledFilterProjectExec`; the current executable
+filter/project pipelines with `CompiledRecordPipelineExec`; the current executable
 node runs a fixed-width Arrow batch kernel implemented in QuillSQL while carrying
 the MLIR kernel descriptor. A narrow compiled `i64 -> bool` MLIR ExecutionEngine
 probe validates scalar invocation. The compiled fixed-width path now has an
 `i64` filter kernel that writes a byte selection mask, an `i64` filter/project
 kernel that compacts one projected column, an `f64` filter/sum kernel for the
 first plain-aggregate path, and a Q6-shaped `Date32`/`Decimal128` filter/sum
-kernel over fixed-width column slices. `CompiledFilterProjectExec` can invoke
+kernel over fixed-width column slices. `CompiledRecordPipelineExec` can invoke
 the i64 filter/project kernel, and `CompiledAggregatePipelineExec` can invoke the
 filter/sum kernels through thread-local MLIR execution caches when `jit-mlir` is
 enabled, `JitOptions::mlir_execution()` is selected, and the input batch has no
@@ -65,35 +66,34 @@ runtime.
 
 ## IR And Fusion
 
-QuillSQL keeps two JIT-level IRs:
+QuillSQL keeps one semantic pipeline IR plus an explicit lowering boundary:
 
-- `KernelIR`: a single compilable kernel such as filter, projection, fused
-  filter/project, or the current filter/sum aggregate kernel.
 - `PipelineIR`: a linear pipeline prefix from a DataFusion physical plan,
   including the first `filter -> plain SUM` sink shape used as the stepping
   stone toward whole-pipeline lowering.
+- `PipelineLowering`: an exact pattern match from `PipelineIR` to an executable
+  record or aggregate kernel shape.
 
 The first fusion patterns are deliberately small:
 
 ```text
 Filter -> Projection
-  => KernelIR::FilterProject
+  => PipelineLowering::Record
 
 Filter -> SUM(f64 expression)
 Filter(Date32/Decimal128 comparisons) -> SUM(Decimal128 * Decimal128)
   => CompiledAggregatePipelineExec
 ```
 
-The rule also handles the common DataFusion shape where a round-robin
-`RepartitionExec` sits between the filter and projection by placing the compiled
-node below the repartition. For plain aggregates, it rewrites the partial `SUM`
-node to a partition-preserving compiled filter/sum node and leaves DataFusion's
-final aggregate in place. `rule.rs` extracts the physical shape, then hands the
-recognized `PipelineIR` to `PipelineCompiler`; it no longer constructs the
-aggregate execution node directly. The same physical-plan shape is exposed as a
-`PipelineIR` candidate in debug traces, so future whole-pipeline lowering does
-not rely on string plan inspection. This lets the project measure real operator
-boundaries before taking on grouped aggregates, joins, hash repartitioning, or
-whole-query pipeline lowering. The decimal path now has both a DataFusion-safe
-fixed-width Arrow runtime specialization and an executable MLIR dispatch path
-for the same fixed-width column layout.
+`pipeline.rs` also recognizes the common DataFusion shape where a round-robin
+`RepartitionExec` sits between the filter and projection, and records that as
+an output adapter on the extracted pipeline. For plain aggregates, it extracts
+the partial `SUM` pipeline and leaves DataFusion's final aggregate in place.
+`rule.rs` only performs traversal and replacement; it no longer constructs
+shape-specific execution nodes directly. The recognized physical-plan shapes are
+also exposed as `PipelineIR` candidates in debug traces, so future
+whole-pipeline lowering does not rely on string plan inspection. This lets the
+project measure real operator boundaries before taking on grouped aggregates,
+joins, hash repartitioning, or whole-query pipeline lowering. The decimal path
+now has both a DataFusion-safe fixed-width Arrow runtime specialization and an
+executable MLIR dispatch path for the same fixed-width column layout.

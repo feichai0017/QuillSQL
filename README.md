@@ -66,10 +66,10 @@ The JIT package is intentionally separate from the DataFusion wrapper:
   JIT expression IR.
 - `src/jit/compiler.rs` compiles recognized `PipelineIR` shapes into DataFusion
   physical execution nodes.
-- `src/jit/exec.rs` provides the DataFusion physical node for compiled
-  filter/project islands and aggregate pipelines.
-- `src/jit/ir.rs` defines `KernelIR` and `PipelineIR`, including the first
-  `FilterProject` fusion pattern.
+- `src/jit/exec.rs` provides DataFusion physical nodes for compiled record and
+  aggregate pipelines.
+- `src/jit/ir.rs` defines `PipelineIR`; `src/jit/lowering.rs` lowers exact
+  pipeline shapes into executable record or aggregate kernels.
 - `src/jit/mlir/` owns MLIR emission, verification, and compiled kernel
   invocation. The current compiled path covers narrow fixed-width
   ExecutionEngine kernels.
@@ -80,7 +80,7 @@ The JIT package is intentionally separate from the DataFusion wrapper:
   such as filter/sum separate from the generic expression evaluator.
 
 Current scope: MLIR is parsed and verified, and the DataFusion optimizer rule
-replaces supported filter/project islands with `CompiledFilterProjectExec` and
+replaces supported filter/project pipelines with `CompiledRecordPipelineExec` and
 supported plain `SUM` pipelines with `CompiledAggregatePipelineExec`. Those nodes
 execute through QuillSQL's fixed-width Arrow kernel runtime while carrying MLIR
 kernel descriptors. Compiled scalar MLIR invocation is wired for the first
@@ -91,14 +91,15 @@ scan/filter/plain-aggregate path. It also has a Q6-shaped
 `Date32`/`Decimal128` filter/sum kernel that compiles and invokes through MLIR
 over fixed-width column slices. With `jit-mlir` and
 `DatabaseOptions { jit: JitOptions::mlir_execution(), .. }`,
-`CompiledFilterProjectExec` dispatches the single-column i64 filter/project path
+`CompiledRecordPipelineExec` dispatches the single-column i64 filter/project path
 through MLIR, and
 `CompiledAggregatePipelineExec` dispatches the f64 and decimal filter/sum paths through a
 thread-local MLIR execution cache when the input batch has no nulls or slice
 offsets; other cases keep the safe Arrow runtime fallback. CLI, server, and
 benchmark binaries read the same option once at startup from `QUILL_JIT=mlir`.
-Debug traces also expose the first `PipelineIR` candidate for `filter -> plain
-SUM`, which is the scaffold for the next whole-pipeline MLIR lowering step.
+Debug traces expose recognized `PipelineIR` candidates for record and aggregate
+pipelines, which is the scaffold for the next whole-pipeline MLIR lowering
+step.
 
 Run the MLIR path with:
 
@@ -119,7 +120,7 @@ Adjust the prefixes for your local LLVM/MLIR installation.
 
 QuillSQL keeps benchmark levels separate:
 
-- `jit_micro`: isolates JIT IR fusion, MLIR lowering, and small DataFusion
+- `jit_micro`: isolates pipeline lowering, MLIR lowering, and small DataFusion
   filter/project and filter/sum SQL paths over in-memory Arrow tables.
 - `tpch`: runs a small TPC-H ladder over external Parquet data. It currently
   includes Q6, Q1, and Q3 to cover scan/filter/plain aggregate, grouped
