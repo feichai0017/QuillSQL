@@ -53,9 +53,9 @@ kernel that compacts one projected column, an `f64` filter/sum kernel for the
 first plain-aggregate path, and a Q6-shaped `Date32`/`Decimal128` filter/sum
 kernel over fixed-width column slices. `CompiledFilterSumExec` can invoke that
 decimal kernel through a thread-local MLIR execution cache when `jit-mlir` is
-enabled and the input batch has no nulls or slice offsets. Unsupported
-expressions and unsafe batch layouts fall back to the normal DataFusion plan or
-the fixed-width Arrow runtime.
+enabled, `QUILL_JIT_MLIR_DISPATCH=1` is set, and the input batch has no nulls or
+slice offsets. Unsupported expressions and unsafe batch layouts fall back to the
+normal DataFusion plan or the fixed-width Arrow runtime.
 
 ## IR And Fusion
 

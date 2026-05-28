@@ -165,6 +165,7 @@ async fn debug_trace_reports_filter_sum_candidate() {
 
 #[tokio::test]
 async fn parquet_q6_shape_uses_decimal_filter_sum_candidate() {
+    enable_mlir_dispatch_for_test();
     let dir = TempDir::new().expect("temp dir");
     let parquet_path = dir.path().join("lineitem.parquet");
     write_q6_lineitem_parquet(parquet_path.to_str().unwrap()).await;
@@ -216,6 +217,7 @@ async fn parquet_q6_shape_uses_decimal_filter_sum_candidate() {
 #[cfg(feature = "jit-mlir")]
 #[tokio::test]
 async fn parquet_q6_mlir_execution_returns_null_for_empty_sum() {
+    enable_mlir_dispatch_for_test();
     let dir = TempDir::new().expect("temp dir");
     let parquet_path = dir.path().join("lineitem.parquet");
     write_q6_lineitem_parquet(parquet_path.to_str().unwrap()).await;
@@ -255,6 +257,10 @@ async fn parquet_q6_mlir_execution_returns_null_for_empty_sum() {
         "{:?}",
         trace.jit_candidates
     );
+}
+
+fn enable_mlir_dispatch_for_test() {
+    std::env::set_var("QUILL_JIT_MLIR_DISPATCH", "1");
 }
 
 async fn write_people_parquet(path: &str) {

@@ -11,10 +11,11 @@ QuillSQL uses benchmarks to separate three different claims:
 
 The current code has real `CompiledFilterProjectExec` and
 `CompiledFilterSumExec` nodes in the DataFusion hot path, and their execution
-bodies use QuillSQL's fixed-width Arrow batch kernels. With `jit-mlir`, the
-Q6-shaped decimal filter/sum path can dispatch to an executable MLIR kernel for
-null-free, offset-free fixed-width batches. Other compiled MLIR kernel speedups
-are intentionally not claimed as end-to-end query speedups yet.
+bodies use QuillSQL's fixed-width Arrow batch kernels. With `jit-mlir` and
+`QUILL_JIT_MLIR_DISPATCH=1`, the Q6-shaped decimal filter/sum path can dispatch
+to an executable MLIR kernel for null-free, offset-free fixed-width batches.
+Other compiled MLIR kernel speedups are intentionally not claimed as end-to-end
+query speedups yet.
 
 ## Microbenchmarks
 

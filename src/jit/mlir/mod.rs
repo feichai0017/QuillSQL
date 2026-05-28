@@ -145,6 +145,13 @@ impl MlirBackend {
     }
 }
 
+pub(crate) fn execution_enabled() -> bool {
+    cfg!(feature = "jit-mlir")
+        && std::env::var("QUILL_JIT_MLIR_DISPATCH")
+            .map(|value| value != "0" && !value.eq_ignore_ascii_case("false"))
+            .unwrap_or(false)
+}
+
 impl KernelBackend for MlirBackend {
     fn name(&self) -> &str {
         "mlir"

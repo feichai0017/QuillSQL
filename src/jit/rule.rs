@@ -306,27 +306,23 @@ impl MlirJitRule {
 
     fn filter_sum_kernel(&self, predicate: &JitExpr, measure: &JitExpr) -> CompiledKernel {
         if let Ok(module) = self.backend.lower_f64_filter_sum(predicate, measure) {
-            if self.backend.verify_module(&module).is_ok() {
-                return CompiledKernel::new(
-                    module.symbol,
-                    KernelKind::FilterSum,
-                    self.backend.name(),
-                    module.text,
-                    false,
-                );
-            }
+            return CompiledKernel::new(
+                module.symbol,
+                KernelKind::FilterSum,
+                self.backend.name(),
+                module.text,
+                false,
+            );
         }
 
         if let Ok(module) = self.backend.lower_decimal_filter_sum(predicate, measure) {
-            if self.backend.verify_module(&module).is_ok() {
-                return CompiledKernel::new(
-                    module.symbol,
-                    KernelKind::FilterSum,
-                    self.backend.name(),
-                    module.text,
-                    cfg!(feature = "jit-mlir"),
-                );
-            }
+            return CompiledKernel::new(
+                module.symbol,
+                KernelKind::FilterSum,
+                self.backend.name(),
+                module.text,
+                super::mlir::execution_enabled(),
+            );
         }
 
         CompiledKernel::new(

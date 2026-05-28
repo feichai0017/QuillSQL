@@ -87,10 +87,10 @@ kernel that emits a byte selection mask, an `i64` filter/project kernel that
 compacts one projected column, and an `f64` filter/sum kernel for the first
 scan/filter/plain-aggregate path. It also has a Q6-shaped
 `Date32`/`Decimal128` filter/sum kernel that compiles and invokes through MLIR
-over fixed-width column slices. With `jit-mlir`, `CompiledFilterSumExec`
-dispatches that decimal path through a thread-local MLIR execution cache when
-the input batch has no nulls or slice offsets; other cases keep the safe Arrow
-runtime fallback.
+over fixed-width column slices. With `jit-mlir` and
+`QUILL_JIT_MLIR_DISPATCH=1`, `CompiledFilterSumExec` dispatches that decimal
+path through a thread-local MLIR execution cache when the input batch has no
+nulls or slice offsets; other cases keep the safe Arrow runtime fallback.
 
 Run the MLIR path with:
 
@@ -98,6 +98,11 @@ Run the MLIR path with:
 MLIR_SYS_220_PREFIX=/opt/homebrew/opt/llvm \
 LLVM_SYS_220_PREFIX=/opt/homebrew/opt/llvm \
 cargo test --features jit-mlir
+
+QUILL_JIT_MLIR_DISPATCH=1 \
+MLIR_SYS_220_PREFIX=/opt/homebrew/opt/llvm \
+LLVM_SYS_220_PREFIX=/opt/homebrew/opt/llvm \
+cargo bench --features jit-mlir --bench tpch -- q6_scan_filter_aggregate
 ```
 
 Adjust the prefixes for your local LLVM/MLIR installation.
