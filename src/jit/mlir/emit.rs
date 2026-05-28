@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::jit::{JitBinaryOp, JitError, JitExpr, JitProjection, JitResult, JitScalar, JitType};
 
-use super::MlirModule;
+use super::{MlirColumn, MlirModule};
 
 static NEXT_KERNEL_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -239,6 +239,94 @@ pub(super) fn lower_f64_filter_sum(
     Ok(MlirModule { symbol, text })
 }
 
+pub(super) fn lower_decimal_filter_sum(
+    predicate: &JitExpr,
+    measure: &JitExpr,
+) -> JitResult<MlirModule> {
+    ensure_decimal_filter_sum(predicate, measure, "compiled decimal filter-sum kernel")?;
+
+    let symbol = next_symbol("quill_decimal_filter_sum");
+    let predicate_symbol = format!("{symbol}_predicate");
+    let measure_symbol = format!("{symbol}_measure");
+    let columns = decimal_filter_sum_columns(predicate, measure)?;
+    let column_args = columns
+        .iter()
+        .map(|column| format!("%c{}_values: !llvm.ptr", column.index))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let mut text = start_module();
+    text.push_str(&scalar_function(&predicate_symbol, predicate)?);
+    text.push_str(&scalar_function(&measure_symbol, measure)?);
+    let _ = writeln!(
+        text,
+        "  func.func @{symbol}(%len: i64, {column_args}, %out_sum: !llvm.ptr) -> i32 attributes {{ llvm.emit_c_interface }} {{"
+    );
+    text.push_str("    %c0_i64 = arith.constant 0 : i64\n");
+    text.push_str("    %c1_i64 = arith.constant 1 : i64\n");
+    text.push_str("    %zero_i128 = arith.constant 0 : i128\n");
+    text.push_str(
+        "    %final_sum = scf.for unsigned %i = %c0_i64 to %len step %c1_i64 iter_args(%sum = %zero_i128) -> (i128) : i64 {\n",
+    );
+    for column in &columns {
+        let _ = writeln!(
+            text,
+            "      %c{}_ptr = llvm.getelementptr %c{}_values[%i] : (!llvm.ptr, i64) -> !llvm.ptr, {}",
+            column.index,
+            column.index,
+            mlir_type(column.ty)
+        );
+        let _ = writeln!(
+            text,
+            "      %c{} = llvm.load %c{}_ptr : !llvm.ptr -> {}",
+            column.index,
+            column.index,
+            mlir_type(column.ty)
+        );
+    }
+    let _ = writeln!(
+        text,
+        "      %pred = func.call @{predicate_symbol}({}) : ({}) -> i1",
+        expr_call_args(predicate),
+        expr_call_types(predicate)
+    );
+    text.push_str("      %next_sum = scf.if %pred -> (i128) {\n");
+    let _ = writeln!(
+        text,
+        "        %measure = func.call @{measure_symbol}({}) : ({}) -> i128",
+        expr_call_args(measure),
+        expr_call_types(measure)
+    );
+    text.push_str("        %new_sum = arith.addi %sum, %measure : i128\n");
+    text.push_str("        scf.yield %new_sum : i128\n");
+    text.push_str("      } else {\n");
+    text.push_str("        scf.yield %sum : i128\n");
+    text.push_str("      }\n");
+    text.push_str("      scf.yield %next_sum : i128\n");
+    text.push_str("    }\n");
+    text.push_str("    llvm.store %final_sum, %out_sum : i128, !llvm.ptr\n");
+    text.push_str("    %ok = arith.constant 0 : i32\n");
+    text.push_str("    return %ok : i32\n");
+    text.push_str("  }\n}\n");
+    Ok(MlirModule { symbol, text })
+}
+
+pub(super) fn decimal_filter_sum_columns(
+    predicate: &JitExpr,
+    measure: &JitExpr,
+) -> JitResult<Vec<MlirColumn>> {
+    let mut columns = BTreeMap::new();
+    collect_columns(predicate, &mut columns);
+    collect_columns(measure, &mut columns);
+    columns
+        .into_iter()
+        .map(|(index, ty)| {
+            ensure_decimal_filter_sum_type(ty)?;
+            Ok(MlirColumn { index, ty })
+        })
+        .collect()
+}
+
 fn next_symbol(prefix: &str) -> String {
     let id = NEXT_KERNEL_ID.fetch_add(1, Ordering::Relaxed);
     format!("{prefix}_{id}")
@@ -356,6 +444,71 @@ fn ensure_f64_measure_pair(expr: &JitExpr, context: &str) -> JitResult<()> {
     Ok(())
 }
 
+fn ensure_decimal_filter_sum(
+    predicate: &JitExpr,
+    measure: &JitExpr,
+    context: &str,
+) -> JitResult<()> {
+    if predicate.ty() != JitType::Bool {
+        return Err(JitError::UnsupportedExpr(format!(
+            "{context} requires bool predicate output, got {}",
+            mlir_type(predicate.ty())
+        )));
+    }
+    if !matches!(measure.ty(), JitType::Decimal128 { .. }) {
+        return Err(JitError::UnsupportedExpr(format!(
+            "{context} requires decimal128 aggregate input, got {}",
+            mlir_type(measure.ty())
+        )));
+    }
+
+    decimal_filter_sum_columns(predicate, measure)?;
+    ensure_decimal_measure_pair(measure, context)?;
+    Ok(())
+}
+
+fn ensure_decimal_measure_pair(expr: &JitExpr, context: &str) -> JitResult<()> {
+    let JitExpr::Binary {
+        op: JitBinaryOp::Mul,
+        left,
+        right,
+        ..
+    } = expr
+    else {
+        return Err(JitError::UnsupportedExpr(format!(
+            "{context} currently supports decimal multiplication measures"
+        )));
+    };
+    if !matches!(
+        (&**left, &**right),
+        (
+            JitExpr::Column {
+                ty: JitType::Decimal128 { .. },
+                ..
+            },
+            JitExpr::Column {
+                ty: JitType::Decimal128 { .. },
+                ..
+            }
+        )
+    ) {
+        return Err(JitError::UnsupportedExpr(format!(
+            "{context} requires two decimal128 measure input columns"
+        )));
+    }
+    Ok(())
+}
+
+fn ensure_decimal_filter_sum_type(ty: JitType) -> JitResult<()> {
+    match ty {
+        JitType::Date32 | JitType::Int64 | JitType::Decimal128 { .. } => Ok(()),
+        other => Err(JitError::UnsupportedExpr(format!(
+            "compiled decimal filter-sum does not support {} input columns",
+            mlir_type(other)
+        ))),
+    }
+}
+
 fn ensure_single_i64_input(expr: &JitExpr, context: &str) -> JitResult<()> {
     let mut columns = BTreeMap::new();
     collect_columns(expr, &mut columns);
@@ -365,6 +518,26 @@ fn ensure_single_i64_input(expr: &JitExpr, context: &str) -> JitResult<()> {
         )));
     }
     Ok(())
+}
+
+fn expr_call_args(expr: &JitExpr) -> String {
+    let mut columns = BTreeMap::new();
+    collect_columns(expr, &mut columns);
+    columns
+        .keys()
+        .map(|index| format!("%c{index}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn expr_call_types(expr: &JitExpr) -> String {
+    let mut columns = BTreeMap::new();
+    collect_columns(expr, &mut columns);
+    columns
+        .values()
+        .map(|ty| mlir_type(*ty).to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 #[derive(Debug, Clone)]

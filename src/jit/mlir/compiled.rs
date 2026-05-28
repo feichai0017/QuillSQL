@@ -1,6 +1,6 @@
 #![cfg(feature = "jit-mlir")]
 
-use crate::jit::{JitError, JitResult, MlirModule};
+use crate::jit::{JitError, JitResult, JitType, MlirColumn, MlirModule};
 
 use melior::{ir::Module, pass, ExecutionEngine};
 
@@ -22,6 +22,19 @@ pub struct CompiledI64FilterProject {
 pub struct CompiledF64FilterSum {
     symbol: String,
     engine: ExecutionEngine,
+}
+
+pub struct CompiledDecimalFilterSum {
+    symbol: String,
+    engine: ExecutionEngine,
+    columns: Vec<MlirColumn>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum DecimalFilterSumInput<'a> {
+    Date32 { index: usize, values: &'a [i32] },
+    Int64 { index: usize, values: &'a [i64] },
+    Decimal128 { index: usize, values: &'a [i128] },
 }
 
 impl CompiledI64Predicate {
@@ -191,6 +204,103 @@ impl CompiledF64FilterSum {
     }
 }
 
+impl CompiledDecimalFilterSum {
+    pub fn invoke(&self, inputs: &[DecimalFilterSumInput<'_>]) -> JitResult<i128> {
+        let mut input_len = None;
+        let mut ptr_values = Vec::with_capacity(self.columns.len());
+
+        for column in &self.columns {
+            let input = inputs
+                .iter()
+                .find(|input| input.index() == column.index)
+                .ok_or_else(|| {
+                    JitError::Backend(format!(
+                        "compiled decimal filter-sum missing input column {}",
+                        column.index
+                    ))
+                })?;
+            if !input.matches_type(column.ty) {
+                return Err(JitError::Backend(format!(
+                    "compiled decimal filter-sum input column {} has incompatible type",
+                    column.index
+                )));
+            }
+
+            let len = input.len();
+            match input_len {
+                Some(expected) if expected != len => {
+                    return Err(JitError::Backend(format!(
+                        "compiled decimal filter-sum input column {} len {} does not match len {}",
+                        column.index, len, expected
+                    )));
+                }
+                Some(_) => {}
+                None => input_len = Some(len),
+            }
+            ptr_values.push(input.ptr());
+        }
+
+        let mut len = input_len.unwrap_or(0) as i64;
+        let mut output_sum = 0_i128;
+        let mut output_sum_ptr = &mut output_sum as *mut i128;
+        let mut result = -1_i32;
+        let mut packed_args = Vec::with_capacity(self.columns.len() + 3);
+        packed_args.push(&mut len as *mut i64 as *mut ());
+        for ptr in &mut ptr_values {
+            packed_args.push(ptr as *mut *const () as *mut ());
+        }
+        packed_args.push(&mut output_sum_ptr as *mut *mut i128 as *mut ());
+        packed_args.push(&mut result as *mut i32 as *mut ());
+
+        unsafe {
+            self.engine
+                .invoke_packed(&self.symbol, &mut packed_args)
+                .map_err(|err| JitError::Backend(format!("MLIR invocation failed: {err:?}")))?;
+        }
+        if result != 0 {
+            return Err(JitError::Backend(format!(
+                "compiled decimal filter-sum returned status {result}"
+            )));
+        }
+        Ok(output_sum)
+    }
+}
+
+impl DecimalFilterSumInput<'_> {
+    fn index(&self) -> usize {
+        match self {
+            Self::Date32 { index, .. }
+            | Self::Int64 { index, .. }
+            | Self::Decimal128 { index, .. } => *index,
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Self::Date32 { values, .. } => values.len(),
+            Self::Int64 { values, .. } => values.len(),
+            Self::Decimal128 { values, .. } => values.len(),
+        }
+    }
+
+    fn ptr(&self) -> *const () {
+        match self {
+            Self::Date32 { values, .. } => values.as_ptr().cast(),
+            Self::Int64 { values, .. } => values.as_ptr().cast(),
+            Self::Decimal128 { values, .. } => values.as_ptr().cast(),
+        }
+    }
+
+    fn matches_type(&self, ty: JitType) -> bool {
+        matches!(
+            (self, ty),
+            (Self::Date32 { .. }, JitType::Date32)
+                | (Self::Int64 { .. }, JitType::Int64)
+                | (Self::Decimal128 { .. }, JitType::Decimal128 { .. })
+        )
+    }
+}
+
 pub(super) fn compile_i64_predicate(compiled: &MlirModule) -> JitResult<CompiledI64Predicate> {
     Ok(CompiledI64Predicate {
         symbol: compiled.symbol.clone(),
@@ -220,6 +330,17 @@ pub fn compile_f64_filter_sum(compiled: &MlirModule) -> JitResult<CompiledF64Fil
     Ok(CompiledF64FilterSum {
         symbol: compiled.symbol.clone(),
         engine: compile_engine(compiled)?,
+    })
+}
+
+pub fn compile_decimal_filter_sum(
+    compiled: &MlirModule,
+    columns: Vec<MlirColumn>,
+) -> JitResult<CompiledDecimalFilterSum> {
+    Ok(CompiledDecimalFilterSum {
+        symbol: compiled.symbol.clone(),
+        engine: compile_engine(compiled)?,
+        columns,
     })
 }
 

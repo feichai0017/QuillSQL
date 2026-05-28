@@ -317,6 +317,18 @@ impl MlirJitRule {
             }
         }
 
+        if let Ok(module) = self.backend.lower_decimal_filter_sum(predicate, measure) {
+            if self.backend.verify_module(&module).is_ok() {
+                return CompiledKernel::new(
+                    module.symbol,
+                    KernelKind::FilterSum,
+                    self.backend.name(),
+                    module.text,
+                    false,
+                );
+            }
+        }
+
         CompiledKernel::new(
             "fixed_width_filter_sum",
             KernelKind::FilterSum,

@@ -206,7 +206,7 @@ async fn parquet_q6_shape_uses_decimal_filter_sum_candidate() {
             .jit_candidates
             .iter()
             .any(|candidate| candidate.kernel == KernelKind::FilterSum
-                && candidate.backend == "fixed-width-runtime"),
+                && (candidate.backend == "mlir" || candidate.backend == "fixed-width-runtime")),
         "{:?}",
         trace.jit_candidates
     );

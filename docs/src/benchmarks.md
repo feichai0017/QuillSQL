@@ -32,9 +32,11 @@ Benchmarks:
 | `mlir_compiled/compile_i64_filter` | MLIR parse/lower/JIT cost for the first compiled fixed-width filter kernel. Requires `jit-mlir`. |
 | `mlir_compiled/compile_i64_filter_project` | MLIR parse/lower/JIT cost for the first compiled fixed-width filter/project kernel. Requires `jit-mlir`. |
 | `mlir_compiled/compile_f64_filter_sum` | MLIR parse/lower/JIT cost for the first compiled fixed-width filter/sum kernel. Requires `jit-mlir`. |
+| `mlir_compiled/compile_decimal_filter_sum` | MLIR parse/lower/JIT cost for the Q6-shaped fixed-width `Date32`/`Decimal128` filter/sum kernel. Requires `jit-mlir`. |
 | `mlir_compiled/filter_64k` | Compiled MLIR i64 filter execution over a 64K-row values vector, writing a byte selection mask. Requires `jit-mlir`. |
 | `mlir_compiled/filter_project_64k` | Compiled MLIR i64 filter/project execution over 64K rows, compacting one projected i64 column. Requires `jit-mlir`. |
 | `mlir_compiled/filter_sum_64k` | Compiled MLIR f64 filter/sum execution over 64K rows. Requires `jit-mlir`. |
+| `mlir_compiled/decimal_filter_sum_64k` | Compiled MLIR Q6-shaped decimal filter/sum execution over 64K fixed-width column slices. Requires `jit-mlir`. |
 | `quill_kernel/filter_project_64k` | Direct fixed-width Arrow kernel execution outside DataFusion planning. |
 | `datafusion/sql_filter_project_64k` | DataFusion SQL planning/execution over a 64K-row in-memory Arrow table, including the compiled filter/project physical node when the pattern matches. |
 | `datafusion/sql_filter_sum_64k` | DataFusion SQL planning/execution over a 64K-row in-memory Arrow table, including the compiled filter/sum physical node when the pattern matches. |

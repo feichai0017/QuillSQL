@@ -5,6 +5,8 @@ use datafusion::arrow::array::{Float64Array, Int64Array};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
 use quill_sql::database::Database;
+#[cfg(feature = "jit-mlir")]
+use quill_sql::jit::DecimalFilterSumInput;
 use quill_sql::jit::{
     FilterProjectKernel, JitBinaryOp, JitExpr, JitProjection, JitScalar, JitType, KernelBackend,
     MlirBackend, PipelineIr, PipelineOp,
@@ -79,6 +81,108 @@ fn measure() -> JitExpr {
     }
 }
 
+#[cfg(feature = "jit-mlir")]
+fn q6_decimal_predicate() -> JitExpr {
+    and(
+        and(
+            compare(JitBinaryOp::GtEq, date_col(0, "shipdate"), date_lit(10)),
+            compare(JitBinaryOp::Lt, date_col(0, "shipdate"), date_lit(20)),
+        ),
+        and(
+            and(
+                compare(
+                    JitBinaryOp::GtEq,
+                    decimal_col(2, "discount", 2),
+                    decimal_lit(5, 15, 2),
+                ),
+                compare(
+                    JitBinaryOp::LtEq,
+                    decimal_col(2, "discount", 2),
+                    decimal_lit(7, 15, 2),
+                ),
+            ),
+            compare(
+                JitBinaryOp::Lt,
+                decimal_col(3, "quantity", 2),
+                decimal_lit(2_400, 15, 2),
+            ),
+        ),
+    )
+}
+
+#[cfg(feature = "jit-mlir")]
+fn q6_decimal_measure() -> JitExpr {
+    JitExpr::Binary {
+        op: JitBinaryOp::Mul,
+        left: Box::new(decimal_col(1, "extendedprice", 2)),
+        right: Box::new(decimal_col(2, "discount", 2)),
+        ty: JitType::Decimal128 {
+            precision: 38,
+            scale: 4,
+        },
+        nullable: false,
+    }
+}
+
+#[cfg(feature = "jit-mlir")]
+fn and(left: JitExpr, right: JitExpr) -> JitExpr {
+    JitExpr::Binary {
+        op: JitBinaryOp::And,
+        left: Box::new(left),
+        right: Box::new(right),
+        ty: JitType::Bool,
+        nullable: false,
+    }
+}
+
+#[cfg(feature = "jit-mlir")]
+fn compare(op: JitBinaryOp, left: JitExpr, right: JitExpr) -> JitExpr {
+    JitExpr::Binary {
+        op,
+        left: Box::new(left),
+        right: Box::new(right),
+        ty: JitType::Bool,
+        nullable: false,
+    }
+}
+
+#[cfg(feature = "jit-mlir")]
+fn date_col(index: usize, name: &str) -> JitExpr {
+    JitExpr::Column {
+        index,
+        name: name.to_string(),
+        ty: JitType::Date32,
+        nullable: false,
+    }
+}
+
+#[cfg(feature = "jit-mlir")]
+fn date_lit(value: i32) -> JitExpr {
+    JitExpr::Literal(JitScalar::Date32(value))
+}
+
+#[cfg(feature = "jit-mlir")]
+fn decimal_col(index: usize, name: &str, scale: i8) -> JitExpr {
+    JitExpr::Column {
+        index,
+        name: name.to_string(),
+        ty: JitType::Decimal128 {
+            precision: 15,
+            scale,
+        },
+        nullable: false,
+    }
+}
+
+#[cfg(feature = "jit-mlir")]
+fn decimal_lit(value: i128, precision: u8, scale: i8) -> JitExpr {
+    JitExpr::Literal(JitScalar::Decimal128 {
+        value,
+        precision,
+        scale,
+    })
+}
+
 fn bench_jit_ir_and_mlir(c: &mut Criterion) {
     let input_schema = schema();
     let predicate = predicate();
@@ -149,6 +253,19 @@ fn bench_jit_ir_and_mlir(c: &mut Criterion) {
                 backend
                     .compile_f64_filter_sum(black_box(&predicate), black_box(&measure))
                     .expect("compile f64 filter-sum"),
+            )
+        });
+    });
+
+    #[cfg(feature = "jit-mlir")]
+    c.bench_function("mlir_compiled/compile_decimal_filter_sum", |b| {
+        let predicate = q6_decimal_predicate();
+        let measure = q6_decimal_measure();
+        b.iter(|| {
+            black_box(
+                backend
+                    .compile_decimal_filter_sum(black_box(&predicate), black_box(&measure))
+                    .expect("compile decimal filter-sum"),
             )
         });
     });
@@ -335,6 +452,53 @@ fn bench_compiled_f64_filter_sum_kernel(c: &mut Criterion) {
     });
 }
 
+#[cfg(feature = "jit-mlir")]
+fn bench_compiled_decimal_filter_sum_kernel(c: &mut Criterion) {
+    let row_count = 65_536_i32;
+    let shipdates = (0..row_count)
+        .map(|value| 10 + (value % 12))
+        .collect::<Vec<_>>();
+    let prices = (0..row_count)
+        .map(|value| 10_000_i128 + i128::from(value % 1_000))
+        .collect::<Vec<_>>();
+    let discounts = (0..row_count)
+        .map(|value| 4_i128 + i128::from(value % 5))
+        .collect::<Vec<_>>();
+    let quantities = (0..row_count)
+        .map(|value| 2_000_i128 + i128::from(value % 600))
+        .collect::<Vec<_>>();
+    let kernel = MlirBackend::new()
+        .compile_decimal_filter_sum(&q6_decimal_predicate(), &q6_decimal_measure())
+        .expect("compiled decimal filter-sum");
+
+    c.bench_function("mlir_compiled/decimal_filter_sum_64k", |b| {
+        b.iter(|| {
+            black_box(
+                kernel
+                    .invoke(&[
+                        DecimalFilterSumInput::Date32 {
+                            index: 0,
+                            values: black_box(shipdates.as_slice()),
+                        },
+                        DecimalFilterSumInput::Decimal128 {
+                            index: 1,
+                            values: black_box(prices.as_slice()),
+                        },
+                        DecimalFilterSumInput::Decimal128 {
+                            index: 2,
+                            values: black_box(discounts.as_slice()),
+                        },
+                        DecimalFilterSumInput::Decimal128 {
+                            index: 3,
+                            values: black_box(quantities.as_slice()),
+                        },
+                    ])
+                    .expect("execute compiled decimal filter-sum"),
+            );
+        });
+    });
+}
+
 #[cfg(not(feature = "jit-mlir"))]
 criterion_group!(
     benches,
@@ -351,6 +515,7 @@ criterion_group!(
     bench_compiled_i64_filter_kernel,
     bench_compiled_i64_filter_project_kernel,
     bench_compiled_f64_filter_sum_kernel,
+    bench_compiled_decimal_filter_sum_kernel,
     bench_quill_filter_project_kernel,
     bench_datafusion_filter_project,
     bench_datafusion_filter_sum

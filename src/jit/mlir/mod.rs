@@ -6,7 +6,9 @@ mod verify;
 
 use datafusion::arrow::datatypes::SchemaRef as ArrowSchemaRef;
 
-use crate::jit::{CompiledKernel, JitExpr, JitProjection, JitResult, KernelBackend, KernelKind};
+use crate::jit::{
+    CompiledKernel, JitExpr, JitProjection, JitResult, JitType, KernelBackend, KernelKind,
+};
 
 #[derive(Debug, Clone)]
 pub struct MlirModule {
@@ -14,11 +16,20 @@ pub struct MlirModule {
     pub text: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MlirColumn {
+    pub index: usize,
+    pub ty: JitType,
+}
+
 #[derive(Debug, Default)]
 pub struct MlirBackend;
 
 #[cfg(feature = "jit-mlir")]
-pub use compiled::{CompiledF64FilterSum, CompiledI64Filter, CompiledI64FilterProject};
+pub use compiled::{
+    CompiledDecimalFilterSum, CompiledF64FilterSum, CompiledI64Filter, CompiledI64FilterProject,
+    DecimalFilterSumInput,
+};
 
 impl MlirBackend {
     pub fn new() -> Self {
@@ -69,6 +80,14 @@ impl MlirBackend {
         emit::lower_f64_filter_sum(predicate, measure)
     }
 
+    pub fn lower_decimal_filter_sum(
+        &self,
+        predicate: &JitExpr,
+        measure: &JitExpr,
+    ) -> JitResult<MlirModule> {
+        emit::lower_decimal_filter_sum(predicate, measure)
+    }
+
     #[cfg(feature = "jit-mlir")]
     pub fn invoke_i64_predicate(&self, predicate: &JitExpr, value: i64) -> JitResult<bool> {
         let module = self.lower_i64_predicate(predicate)?;
@@ -103,6 +122,18 @@ impl MlirBackend {
         let module = self.lower_f64_filter_sum(predicate, measure)?;
         self.verify_module(&module)?;
         compiled::compile_f64_filter_sum(&module)
+    }
+
+    #[cfg(feature = "jit-mlir")]
+    pub fn compile_decimal_filter_sum(
+        &self,
+        predicate: &JitExpr,
+        measure: &JitExpr,
+    ) -> JitResult<CompiledDecimalFilterSum> {
+        let columns = emit::decimal_filter_sum_columns(predicate, measure)?;
+        let module = self.lower_decimal_filter_sum(predicate, measure)?;
+        self.verify_module(&module)?;
+        compiled::compile_decimal_filter_sum(&module, columns)
     }
 
     pub fn verify_module(&self, module: &MlirModule) -> JitResult<()> {

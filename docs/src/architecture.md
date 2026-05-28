@@ -49,8 +49,9 @@ node runs a fixed-width Arrow batch kernel implemented in QuillSQL while carryin
 the MLIR kernel descriptor. A narrow compiled `i64 -> bool` MLIR ExecutionEngine
 probe validates scalar invocation. The compiled fixed-width path now has an
 `i64` filter kernel that writes a byte selection mask, an `i64` filter/project
-kernel that compacts one projected column, and an `f64` filter/sum kernel for
-the first plain-aggregate path. Wiring those function pointers into the
+kernel that compacts one projected column, an `f64` filter/sum kernel for the
+first plain-aggregate path, and a Q6-shaped `Date32`/`Decimal128` filter/sum
+kernel over fixed-width column slices. Wiring those function pointers into the
 DataFusion physical node is the next step, so unsupported expressions fall back
 to the normal DataFusion plan.
 
@@ -79,6 +80,6 @@ node below the repartition. For plain aggregates, it rewrites the partial `SUM`
 node to a partition-preserving compiled filter/sum node and leaves DataFusion's
 final aggregate in place. This lets the project measure real operator
 boundaries before taking on grouped aggregates, joins, hash repartitioning, or
-whole-query pipeline lowering. The decimal path is a fixed-width Arrow runtime
-specialization for Q6-shaped predicates; it is not yet lowered to executable
-MLIR.
+whole-query pipeline lowering. The decimal path now has both a DataFusion-safe
+fixed-width Arrow runtime specialization and a standalone executable MLIR kernel
+for the same fixed-width column layout.

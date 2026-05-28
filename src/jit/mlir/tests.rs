@@ -1,3 +1,5 @@
+#[cfg(feature = "jit-mlir")]
+use crate::jit::DecimalFilterSumInput;
 use crate::jit::{JitBinaryOp, JitExpr, JitProjection, JitScalar, JitType, MlirBackend};
 
 #[test]
@@ -100,6 +102,25 @@ fn emits_f64_filter_sum_module() {
     assert!(module.text.contains("scf.if"));
     assert!(module.text.contains("arith.mulf"));
     assert!(module.text.contains("arith.addf"));
+    assert!(module.text.contains("llvm.store"));
+    MlirBackend::new().verify_module(&module).unwrap();
+}
+
+#[test]
+fn emits_decimal_filter_sum_module() {
+    let predicate = q6_decimal_predicate();
+    let measure = q6_decimal_measure();
+
+    let module = MlirBackend::new()
+        .lower_decimal_filter_sum(&predicate, &measure)
+        .unwrap();
+
+    assert!(module.text.contains("func.func @quill_decimal_filter_sum_"));
+    assert!(module.text.contains("scf.for unsigned"));
+    assert!(module.text.contains("scf.if"));
+    assert!(module.text.contains("i128"));
+    assert!(module.text.contains("arith.muli"));
+    assert!(module.text.contains("arith.addi"));
     assert!(module.text.contains("llvm.store"));
     MlirBackend::new().verify_module(&module).unwrap();
 }
@@ -213,6 +234,43 @@ fn invokes_compiled_f64_filter_sum_kernel() {
     assert!((output - 13.0).abs() < 0.000_001);
 }
 
+#[cfg(feature = "jit-mlir")]
+#[test]
+fn invokes_compiled_decimal_filter_sum_kernel() {
+    let predicate = q6_decimal_predicate();
+    let measure = q6_decimal_measure();
+    let compiled = MlirBackend::new()
+        .compile_decimal_filter_sum(&predicate, &measure)
+        .unwrap();
+    let shipdates = [9_i32, 10, 12, 20];
+    let prices = [10_000_i128, 20_000, 30_000, 40_000];
+    let discounts = [4_i128, 5, 7, 6];
+    let quantities = [1_000_i128, 2_500, 2_000, 2_000];
+
+    let output = compiled
+        .invoke(&[
+            DecimalFilterSumInput::Date32 {
+                index: 0,
+                values: &shipdates,
+            },
+            DecimalFilterSumInput::Decimal128 {
+                index: 1,
+                values: &prices,
+            },
+            DecimalFilterSumInput::Decimal128 {
+                index: 2,
+                values: &discounts,
+            },
+            DecimalFilterSumInput::Decimal128 {
+                index: 3,
+                values: &quantities,
+            },
+        ])
+        .unwrap();
+
+    assert_eq!(output, 210_000);
+}
+
 fn i64_gt_ten(nullable: bool) -> JitExpr {
     JitExpr::Binary {
         op: JitBinaryOp::Gt,
@@ -264,4 +322,98 @@ fn f64_product_measure() -> JitExpr {
         ty: JitType::Float64,
         nullable: false,
     }
+}
+
+fn q6_decimal_predicate() -> JitExpr {
+    and(
+        and(
+            compare(JitBinaryOp::GtEq, date_col(0, "shipdate"), date_lit(10)),
+            compare(JitBinaryOp::Lt, date_col(0, "shipdate"), date_lit(20)),
+        ),
+        and(
+            and(
+                compare(
+                    JitBinaryOp::GtEq,
+                    decimal_col(2, "discount", 2),
+                    decimal_lit(5, 15, 2),
+                ),
+                compare(
+                    JitBinaryOp::LtEq,
+                    decimal_col(2, "discount", 2),
+                    decimal_lit(7, 15, 2),
+                ),
+            ),
+            compare(
+                JitBinaryOp::Lt,
+                decimal_col(3, "quantity", 2),
+                decimal_lit(2_400, 15, 2),
+            ),
+        ),
+    )
+}
+
+fn q6_decimal_measure() -> JitExpr {
+    JitExpr::Binary {
+        op: JitBinaryOp::Mul,
+        left: Box::new(decimal_col(1, "extendedprice", 2)),
+        right: Box::new(decimal_col(2, "discount", 2)),
+        ty: JitType::Decimal128 {
+            precision: 38,
+            scale: 4,
+        },
+        nullable: false,
+    }
+}
+
+fn and(left: JitExpr, right: JitExpr) -> JitExpr {
+    JitExpr::Binary {
+        op: JitBinaryOp::And,
+        left: Box::new(left),
+        right: Box::new(right),
+        ty: JitType::Bool,
+        nullable: false,
+    }
+}
+
+fn compare(op: JitBinaryOp, left: JitExpr, right: JitExpr) -> JitExpr {
+    JitExpr::Binary {
+        op,
+        left: Box::new(left),
+        right: Box::new(right),
+        ty: JitType::Bool,
+        nullable: false,
+    }
+}
+
+fn date_col(index: usize, name: &str) -> JitExpr {
+    JitExpr::Column {
+        index,
+        name: name.to_string(),
+        ty: JitType::Date32,
+        nullable: false,
+    }
+}
+
+fn date_lit(value: i32) -> JitExpr {
+    JitExpr::Literal(JitScalar::Date32(value))
+}
+
+fn decimal_col(index: usize, name: &str, scale: i8) -> JitExpr {
+    JitExpr::Column {
+        index,
+        name: name.to_string(),
+        ty: JitType::Decimal128 {
+            precision: 15,
+            scale,
+        },
+        nullable: false,
+    }
+}
+
+fn decimal_lit(value: i128, precision: u8, scale: i8) -> JitExpr {
+    JitExpr::Literal(JitScalar::Decimal128 {
+        value,
+        precision,
+        scale,
+    })
 }
