@@ -141,7 +141,7 @@ fn rejects_invalid_quill_filter_region_result() {
     let text = r#"
 module {
   func.func @bad_filter() {
-    %batch = quill.source.datafusion_batch : !quill.batch
+    %batch = quill.source.arrow_batch : !quill.batch
     %sel = quill.exec.filter %batch {
     ^bb0(%row: !quill.row):
       %v = quill.column %row { index = 0 : i64 } : !quill.row -> i64
@@ -167,7 +167,7 @@ fn rejects_invalid_quill_group_aggregate_region() {
     let text = r#"
 module {
   func.func @bad_group() {
-    %batch = quill.source.datafusion_batch : !quill.batch
+    %batch = quill.source.arrow_batch : !quill.batch
     %sel = quill.exec.filter %batch {
     ^bb0(%row: !quill.row):
       %ok = arith.constant true

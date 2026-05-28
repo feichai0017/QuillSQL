@@ -1,14 +1,14 @@
 use std::sync::Arc;
 
-use datafusion::arrow::array::{
+use arrow::array::{
     Array, ArrayRef, BooleanArray, BooleanBuilder, Date32Array, Date32Builder, Decimal128Array,
     Decimal128Builder, Float64Array, Float64Builder, Int32Array, Int32Builder, Int64Array,
     Int64Builder,
 };
-use datafusion::arrow::datatypes::DataType as ArrowDataType;
-use datafusion::arrow::record_batch::RecordBatch;
+use arrow::datatypes::DataType as ArrowDataType;
+use arrow::record_batch::RecordBatch;
 
-use crate::{JitError, JitResult, JitType};
+use quill_plan::{JitError, JitResult, JitType};
 
 use super::value::Scalar;
 

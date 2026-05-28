@@ -1,11 +1,11 @@
-use datafusion::arrow::array::{Array, Date32Array, Decimal128Array, Float64Array, Int64Array};
-use datafusion::arrow::record_batch::RecordBatch;
+use arrow::array::{Array, Date32Array, Decimal128Array, Float64Array, Int64Array};
+use arrow::record_batch::RecordBatch;
 
-use crate::{JitBinaryOp, JitError, JitExpr, JitResult, JitType, PipelineSpec, PredicateSpec};
+use quill_plan::{JitBinaryOp, JitError, JitExpr, JitResult, JitType};
 
 use super::eval::{ensure_supported_expr, eval_expr};
 use super::value::Scalar;
-use super::BatchView;
+use super::{BatchView, PipelineSpec, PredicateSpec};
 
 #[derive(Debug, Clone)]
 pub struct FilterSumKernel {

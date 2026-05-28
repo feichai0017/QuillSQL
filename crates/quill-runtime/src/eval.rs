@@ -1,4 +1,4 @@
-use crate::{JitBinaryOp, JitError, JitExpr, JitResult, JitScalar, JitType};
+use quill_plan::{JitBinaryOp, JitError, JitExpr, JitResult, JitScalar, JitType};
 
 use super::array::BatchView;
 use super::value::{option_zip, type_mismatch, Scalar};

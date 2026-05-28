@@ -169,17 +169,22 @@ fn warmup_and_bench(
         .block_on(prepared.run())
         .unwrap_or_else(|err| panic!("prepared warmup {}/{} failed: {}", mode, query.name, err));
 
-    group.bench_function(BenchmarkId::new(format!("sql/{mode}"), query.name), |b| {
-        b.iter(|| {
-            black_box(
-                runtime
-                    .block_on(db.run(black_box(query.sql)))
-                    .unwrap_or_else(|err| panic!("sql {}/{} failed: {}", mode, query.name, err)),
-            )
-        });
-    });
     group.bench_function(
-        BenchmarkId::new(format!("prepared/{mode}"), query.name),
+        BenchmarkId::new(format!("sql/df/{mode}"), query.name),
+        |b| {
+            b.iter(|| {
+                black_box(
+                    runtime
+                        .block_on(db.run(black_box(query.sql)))
+                        .unwrap_or_else(|err| {
+                            panic!("sql {}/{} failed: {}", mode, query.name, err)
+                        }),
+                )
+            });
+        },
+    );
+    group.bench_function(
+        BenchmarkId::new(format!("prepared/df/{mode}"), query.name),
         |b| {
             b.iter(|| {
                 black_box(runtime.block_on(prepared.run()).unwrap_or_else(|err| {

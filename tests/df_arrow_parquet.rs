@@ -8,7 +8,8 @@ use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::dataframe::DataFrameWriteOptions;
 use datafusion::execution::context::SessionContext;
 use quill_core::database::{Database, DatabaseOptions, QueryOutput};
-use quill_jit::{JitOptions, PipelineKind};
+use quill_jit::JitOptions;
+use quill_plan::PipelineKind;
 use tempfile::TempDir;
 
 fn rows(result: QueryOutput) -> Vec<Vec<String>> {

@@ -15,8 +15,9 @@ use datafusion::physical_plan::{
 };
 use futures::{ready, Stream, StreamExt};
 
-use crate::{
-    CompiledKernel, FilterProjectKernel, FilterSumKernel, FilterSumValue, KernelKind, PipelineKind,
+use quill_plan::PipelineKind;
+use quill_runtime::{
+    CompiledKernel, FilterProjectKernel, FilterSumKernel, FilterSumValue, KernelKind,
 };
 
 #[derive(Debug, Clone)]
@@ -133,11 +134,13 @@ impl CompiledPipelineExec {
         batch: RecordBatch,
     ) -> Result<RecordBatch> {
         #[cfg(feature = "jit-mlir")]
-        if let Some(output) = crate::mlir::execute_filter_project(&self.kernel, runtime, &batch)? {
+        if let Some(output) = quill_jit::execute_filter_project(&self.kernel, runtime, &batch)
+            .map_err(crate::map_jit_err)?
+        {
             return Ok(output);
         }
 
-        runtime.execute(&batch).map_err(Into::into)
+        runtime.execute(&batch).map_err(crate::map_jit_err)
     }
 
     fn execute_scalar_sum_batch(
@@ -146,11 +149,13 @@ impl CompiledPipelineExec {
         batch: &RecordBatch,
     ) -> Result<FilterSumValue> {
         #[cfg(feature = "jit-mlir")]
-        if let Some(partial) = crate::mlir::execute_filter_sum(&self.kernel, runtime, batch)? {
+        if let Some(partial) = quill_jit::execute_filter_sum(&self.kernel, runtime, batch)
+            .map_err(crate::map_jit_err)?
+        {
             return Ok(partial);
         }
 
-        runtime.execute(batch).map_err(Into::into)
+        runtime.execute(batch).map_err(crate::map_jit_err)
     }
 }
 
@@ -345,7 +350,7 @@ impl Stream for CompiledScalarSumStream {
                     Ok(partial) => {
                         if let Some(sum) = &mut self.sum {
                             if let Err(err) = sum.merge(partial) {
-                                return Poll::Ready(Some(Err(err.into())));
+                                return Poll::Ready(Some(Err(crate::map_jit_err(err))));
                             }
                         } else {
                             self.sum = Some(partial);

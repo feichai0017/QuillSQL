@@ -1,18 +1,11 @@
-use serde::Serialize;
+use quill_plan::{
+    JitExpr, JitProjection, PipelineGraph, PipelineKind, PipelineSink, PipelineSource,
+    PipelineStage,
+};
 
-use crate::{JitExpr, JitProjection, PipelineGraph, PipelineSink, PipelineSource, PipelineStage};
-
-mod compiler;
 mod options;
 
-pub(crate) use compiler::PipelineCompiler;
 pub use options::JitOptions;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-pub enum PipelineKind {
-    Record,
-    Aggregate,
-}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum PipelineLowering {
@@ -30,7 +23,7 @@ impl PipelineLowering {
     pub fn from_graph(graph: &PipelineGraph) -> Option<Self> {
         match (&graph.source, graph.stages.as_slice(), &graph.sink) {
             (
-                PipelineSource::DataFusionInput,
+                PipelineSource::ArrowBatch,
                 [PipelineStage::Filter(predicate), PipelineStage::Projection(projections)],
                 PipelineSink::RecordBatch,
             ) => Some(Self::Record {
@@ -38,7 +31,7 @@ impl PipelineLowering {
                 projections: projections.clone(),
             }),
             (
-                PipelineSource::DataFusionInput,
+                PipelineSource::ArrowBatch,
                 [PipelineStage::Filter(predicate)],
                 PipelineSink::Sum { measure },
             ) => Some(Self::PlainSum {

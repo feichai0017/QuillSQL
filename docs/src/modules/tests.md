@@ -8,7 +8,9 @@ MLIR JIT boundary.
 | Location | Purpose |
 | -------- | ------- |
 | `tests/df_arrow_parquet.rs` | End-to-end SQL over DataFusion memory tables and registered Parquet datasets. |
-| `crates/quill-jit/src/*` unit tests | JIT expression lowering plus MLIR module generation and verification. |
+| `crates/quill-plan/src/*` unit tests | Frontend-neutral expression and graph behavior. |
+| `crates/quill-runtime/src/*` unit tests | Arrow runtime kernels and aggregate behavior. |
+| `crates/quill-jit/src/*` unit tests | MLIR module generation, verification, and compiled invocation. |
 
 Common commands:
 
@@ -32,6 +34,6 @@ cargo test --features jit-mlir
 
 ## Documentation
 
-The `docs/` directory is an mdBook. It tracks the current DataFusion +
-Arrow/Parquet + MLIR architecture and intentionally omits the removed teaching
+The `docs/` directory is an mdBook. It tracks the current frontend-adapter +
+Arrow + MLIR architecture and intentionally omits the removed teaching
 database storage stack.

@@ -2,13 +2,14 @@
 name = "quill-core"
 version = "0.3.1"
 edition = "2021"
-description = "DataFusion shell and public database API for QuillSQL"
+description = "Public database API and shell integration for QuillSQL"
 license = "MIT"
 repository = "https://github.com/feichai0017/quillsql"
 
 [dependencies]
 comfy-table = { workspace = true }
 datafusion = { workspace = true }
+quill-df = { version = "0.3.1", path = "../quill-df" }
 quill-jit = { version = "0.3.1", path = "../quill-jit" }
 serde = { workspace = true }
 tempfile = { workspace = true }
@@ -16,4 +17,4 @@ thiserror = { workspace = true }
 
 [features]
 default = []
-jit-mlir = ["quill-jit/jit-mlir"]
+jit-mlir = ["quill-df/jit-mlir", "quill-jit/jit-mlir"]

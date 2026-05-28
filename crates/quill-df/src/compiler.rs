@@ -5,13 +5,14 @@ use datafusion::common::Result;
 use datafusion::physical_plan::repartition::RepartitionExec;
 use datafusion::physical_plan::ExecutionPlan;
 
-use crate::{
-    CompiledKernel, CompiledPipelineExec, FilterProjectKernel, FilterSumKernel, JitExpr,
-    JitOptions, JitProjection, KernelBackend, KernelKind, MlirBackend, PipelineLowering,
-    PipelineRuntime, PipelineSpec,
+use quill_jit::{JitOptions, MlirBackend, PipelineLowering};
+use quill_plan::{JitExpr, JitProjection};
+use quill_runtime::{
+    CompiledKernel, FilterProjectKernel, FilterSumKernel, KernelBackend, KernelKind, PipelineSpec,
 };
 
-use crate::pipeline::{OutputAdapter, PhysicalPipeline};
+use crate::extract::{OutputAdapter, PhysicalPipeline};
+use crate::{CompiledPipelineExec, PipelineRuntime};
 
 #[derive(Debug)]
 pub(crate) struct PipelineCompiler<'a> {

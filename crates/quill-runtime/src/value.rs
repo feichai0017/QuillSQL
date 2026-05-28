@@ -1,4 +1,4 @@
-use crate::{JitError, JitType};
+use quill_plan::{JitError, JitType};
 
 #[derive(Clone, Copy)]
 pub(super) enum Scalar {

@@ -3088,6 +3088,7 @@ version = "0.3.1"
 dependencies = [
  "comfy-table",
  "datafusion",
+ "quill-df",
  "quill-jit",
  "serde",
  "tempfile",
@@ -3095,15 +3096,27 @@ dependencies = [
 ]
 
 [[package]]
-name = "quill-jit"
+name = "quill-df"
 version = "0.3.1"
 dependencies = [
  "datafusion",
  "futures",
+ "quill-jit",
+ "quill-plan",
+ "quill-runtime",
+ "serde",
+]
+
+[[package]]
+name = "quill-jit"
+version = "0.3.1"
+dependencies = [
+ "arrow 58.3.0",
  "melior",
  "quill-mlir",
+ "quill-plan",
+ "quill-runtime",
  "serde",
- "thiserror",
 ]
 
 [[package]]
@@ -3116,9 +3129,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "quill-plan"
+version = "0.3.1"
+dependencies = [
+ "serde",
+ "thiserror",
+]
+
+[[package]]
+name = "quill-runtime"
+version = "0.3.1"
+dependencies = [
+ "arrow 58.3.0",
+ "quill-plan",
+ "serde",
+]
+
+[[package]]
 name = "quill-sql"
 version = "0.3.1"
 dependencies = [
+ "arrow 58.3.0",
  "axum",
  "clap",
  "criterion",
@@ -3126,6 +3157,8 @@ dependencies = [
  "env_logger",
  "quill-core",
  "quill-jit",
+ "quill-plan",
+ "quill-runtime",
  "rustyline",
  "serde",
  "tempfile",

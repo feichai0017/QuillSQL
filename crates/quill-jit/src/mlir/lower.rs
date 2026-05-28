@@ -112,7 +112,7 @@ fn verify_formal_quill_module(_module: &QuillDialectModule) -> JitResult<()> {
 fn filter_project_exprs(module: &QuillDialectModule) -> JitResult<(&JitExpr, &[JitProjection])> {
     match (&module.source, module.ops.as_slice(), &module.sink) {
         (
-            QuillDialectSource::DataFusionBatch,
+            QuillDialectSource::ArrowBatch,
             [QuillDialectOp::Filter { predicate }, QuillDialectOp::Project { projections }],
             QuillDialectSink::RecordBatch,
         ) => Ok((predicate, projections)),
@@ -126,7 +126,7 @@ fn filter_project_exprs(module: &QuillDialectModule) -> JitResult<(&JitExpr, &[J
 fn filter_sum_exprs(module: &QuillDialectModule) -> JitResult<(&JitExpr, &JitExpr)> {
     match (&module.source, module.ops.as_slice(), &module.sink) {
         (
-            QuillDialectSource::DataFusionBatch,
+            QuillDialectSource::ArrowBatch,
             [QuillDialectOp::Filter { predicate }],
             QuillDialectSink::PlainSum { measure },
         ) => Ok((predicate, measure)),

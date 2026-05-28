@@ -1,9 +1,25 @@
 [workspace]
-members = [".", "crates/quill-core", "crates/quill-jit", "crates/quill-mlir"]
-default-members = [".", "crates/quill-core", "crates/quill-jit"]
+members = [
+    ".",
+    "crates/quill-core",
+    "crates/quill-df",
+    "crates/quill-jit",
+    "crates/quill-mlir",
+    "crates/quill-plan",
+    "crates/quill-runtime",
+]
+default-members = [
+    ".",
+    "crates/quill-core",
+    "crates/quill-df",
+    "crates/quill-jit",
+    "crates/quill-plan",
+    "crates/quill-runtime",
+]
 resolver = "2"
 
 [workspace.dependencies]
+arrow = "58.3.0"
 axum = { version = "0.7", features = ["macros", "json"] }
 clap = { version = "4.3.19", features = ["derive", "cargo"] }
 comfy-table = "7.1.0"
@@ -25,7 +41,7 @@ tpchgen-cli = "2.0.2"
 name = "quill-sql"
 version = "0.3.1"
 edition = "2021"
-description = "A DataFusion, Arrow, Parquet, and MLIR SQL query compiler research engine"
+description = "Frontend-agnostic Arrow/MLIR query compiler and JIT execution engine"
 license = "MIT"
 repository = "https://github.com/feichai0017/quillsql"
 readme = "README.md"
@@ -46,8 +62,11 @@ default = []
 jit-mlir = ["quill-core/jit-mlir", "quill-jit/jit-mlir"]
 
 [dev-dependencies]
+arrow = { workspace = true }
 criterion = { workspace = true }
 datafusion = { workspace = true }
+quill-plan = { version = "0.3.1", path = "crates/quill-plan" }
+quill-runtime = { version = "0.3.1", path = "crates/quill-runtime" }
 tempfile = { workspace = true }
 tpchgen-cli = { workspace = true }
 

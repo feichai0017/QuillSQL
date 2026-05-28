@@ -10,7 +10,7 @@ def Quill_Dialect : Dialect {
   let name = "quill";
   let summary = "QuillSQL pipeline dialect";
   let description = [{
-    The Quill dialect models vectorized SQL pipelines between DataFusion
+    The Quill dialect models vectorized SQL pipelines between frontend
     physical plans and low-level MLIR loop lowering.  It keeps row, batch,
     selection, and sink semantics explicit while reusing arith for scalar
     expression trees.
@@ -45,9 +45,16 @@ def Quill_Scalar :
 class Quill_Op<string mnemonic, list<Trait> traits = []>
     : Op<Quill_Dialect, mnemonic, traits>;
 
-def Quill_SourceDataFusionBatchOp
-    : Quill_Op<"source.datafusion_batch", [Pure]> {
-  let summary = "DataFusion Arrow RecordBatch source";
+def Quill_SourceArrowBatchOp
+    : Quill_Op<"source.arrow_batch", [Pure]> {
+  let summary = "Arrow RecordBatch source";
+  let results = (outs Quill_Batch:$batch);
+  let assemblyFormat = "attr-dict `:` type($batch)";
+}
+
+def Quill_SourceArrowStreamOp
+    : Quill_Op<"source.arrow_stream", [Pure]> {
+  let summary = "Arrow RecordBatch stream source";
   let results = (outs Quill_Batch:$batch);
   let assemblyFormat = "attr-dict `:` type($batch)";
 }

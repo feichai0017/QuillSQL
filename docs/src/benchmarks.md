@@ -42,9 +42,9 @@ Benchmarks:
 | `kernel/decimal_filter_sum_64k` | Compiled MLIR Q6-shaped decimal filter/sum execution over 64K fixed-width column slices. Requires `jit-mlir`. |
 | `pipeline/record_filter_project_64k` | Direct fixed-width Arrow record pipeline execution outside DataFusion planning. |
 | `pipeline/scalar_sum_64k` | Direct fixed-width Arrow scalar-sum pipeline execution outside DataFusion planning. |
-| `sql/filter_project_64k` | DataFusion SQL planning/execution over a 64K-row in-memory Arrow table, including `CompiledPipelineExec` when the pattern matches. |
-| `sql/filter_sum_64k` | DataFusion SQL planning/execution over a 64K-row in-memory Arrow table, including `CompiledPipelineExec` when the pattern matches. |
-| `datafusion/prepared_filter_sum_64k` | Prepared-plan filter/sum execution that removes SQL parsing and logical-plan construction from the timed loop while still using DataFusion physical planning and execution. |
+| `sql/df/filter_project_64k` | DataFusion SQL planning/execution over a 64K-row in-memory Arrow table, including `CompiledPipelineExec` when the pattern matches. |
+| `sql/df/filter_sum_64k` | DataFusion SQL planning/execution over a 64K-row in-memory Arrow table, including `CompiledPipelineExec` when the pattern matches. |
+| `sql/df/prepared_filter_sum_64k` | Prepared-plan filter/sum execution that removes SQL parsing and logical-plan construction from the timed loop while still using DataFusion physical planning and execution. |
 
 Without `jit-mlir`, MLIR verification is a no-op. With `jit-mlir`, the same
 benchmark includes `melior` parse and verifier cost:
@@ -62,9 +62,9 @@ By default it uses the pure Rust `tpchgen-cli` generator to create SF0.01 data
 inside the repository under `benchdata/tpch-sf0.01`. Each query reports two
 measurements:
 
-- `sql/<query>` runs through `Database::run`, including SQL parsing, logical
+- `sql/df/<query>` runs through `Database::run`, including SQL parsing, logical
   optimization, physical planning, and execution.
-- `prepared/<query>` runs a `PreparedQuery`, reusing the SQL/logical plan while
+- `prepared/df/<query>` runs a `PreparedQuery`, reusing the SQL/logical plan while
   letting DataFusion create a fresh physical plan for each execution. DataFusion
   physical plans are not assumed to be reentrant.
 

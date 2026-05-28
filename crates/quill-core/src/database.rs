@@ -14,7 +14,8 @@ use serde::Serialize;
 use tempfile::TempDir;
 
 use crate::error::{QuillSQLError, QuillSQLResult};
-use quill_jit::{JitCandidate, JitOptions, MlirJitRule, PipelineCandidate};
+use quill_df::{JitCandidate, MlirJitRule, PipelineCandidate};
+use quill_jit::JitOptions;
 
 #[derive(Debug, Clone)]
 pub struct DatabaseOptions {

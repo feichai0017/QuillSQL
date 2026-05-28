@@ -1,9 +1,15 @@
-use datafusion::arrow::datatypes::SchemaRef as ArrowSchemaRef;
+use arrow::datatypes::SchemaRef as ArrowSchemaRef;
 use serde::Serialize;
 
 use std::collections::BTreeMap;
 
-use crate::{JitBinaryOp, JitExpr, JitProjection, JitResult, JitScalar, JitType, MlirColumn};
+use quill_plan::{JitBinaryOp, JitExpr, JitProjection, JitResult, JitScalar, JitType};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FixedColumn {
+    pub index: usize,
+    pub ty: JitType,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum KernelKind {
@@ -19,7 +25,7 @@ pub enum PipelineSpec {
         kind: KernelKind,
     },
     RecordProject {
-        columns: Vec<MlirColumn>,
+        columns: Vec<FixedColumn>,
         output_types: Vec<JitType>,
     },
     F64FilterSum {
@@ -81,7 +87,7 @@ impl PipelineSpec {
         Some(Self::RecordProject {
             columns: columns
                 .into_iter()
-                .map(|(index, ty)| MlirColumn { index, ty })
+                .map(|(index, ty)| FixedColumn { index, ty })
                 .collect(),
             output_types,
         })

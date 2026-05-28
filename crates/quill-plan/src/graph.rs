@@ -1,14 +1,17 @@
 use crate::{JitExpr, JitProjection, JitType};
+use serde::Serialize;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PipelineSource {
-    DataFusionInput,
+    ArrowBatch,
+    ArrowStream,
 }
 
 impl PipelineSource {
     pub fn name(&self) -> &'static str {
         match self {
-            Self::DataFusionInput => "arrow_batch",
+            Self::ArrowBatch => "arrow_batch",
+            Self::ArrowStream => "arrow_stream",
         }
     }
 }
@@ -30,6 +33,12 @@ pub enum PipelineSink {
         keys: Vec<JitExpr>,
         aggregates: Vec<GroupAggregate>,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum PipelineKind {
+    Record,
+    Aggregate,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,7 +94,7 @@ pub struct PipelineGraph {
 impl PipelineGraph {
     pub fn record(stages: Vec<PipelineStage>) -> Self {
         Self {
-            source: PipelineSource::DataFusionInput,
+            source: PipelineSource::ArrowBatch,
             stages,
             sink: PipelineSink::RecordBatch,
         }
@@ -93,7 +102,7 @@ impl PipelineGraph {
 
     pub fn filter_sum(predicate: JitExpr, measure: JitExpr) -> Self {
         Self {
-            source: PipelineSource::DataFusionInput,
+            source: PipelineSource::ArrowBatch,
             stages: vec![PipelineStage::Filter(predicate)],
             sink: PipelineSink::Sum { measure },
         }
@@ -105,7 +114,7 @@ impl PipelineGraph {
         aggregates: Vec<GroupAggregate>,
     ) -> Self {
         Self {
-            source: PipelineSource::DataFusionInput,
+            source: PipelineSource::ArrowBatch,
             stages,
             sink: PipelineSink::GroupAggregate { keys, aggregates },
         }

@@ -40,11 +40,11 @@ impl JitOptions {
             .unwrap_or_default()
     }
 
-    pub(crate) fn mlir_execution_enabled(self) -> bool {
+    pub fn mlir_execution_enabled(self) -> bool {
         self.enabled && self.mlir_execution && cfg!(feature = "jit-mlir")
     }
 
-    pub(crate) fn enabled(self) -> bool {
+    pub fn enabled(self) -> bool {
         self.enabled
     }
 

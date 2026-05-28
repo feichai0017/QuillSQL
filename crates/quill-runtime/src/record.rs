@@ -1,12 +1,13 @@
 use std::sync::Arc;
 
-use datafusion::arrow::datatypes::SchemaRef as ArrowSchemaRef;
-use datafusion::arrow::record_batch::RecordBatch;
+use arrow::datatypes::SchemaRef as ArrowSchemaRef;
+use arrow::record_batch::RecordBatch;
 
-use crate::{JitError, JitExpr, JitProjection, JitResult, JitType, PipelineSpec};
+use quill_plan::{JitError, JitExpr, JitProjection, JitResult, JitType};
 
 use super::array::{arrow_type, BatchView, OutputBuilder};
 use super::eval::{ensure_supported_expr, eval_expr};
+use super::PipelineSpec;
 
 #[derive(Debug, Clone)]
 pub struct FilterProjectKernel {
@@ -70,8 +71,7 @@ impl FilterProjectKernel {
         self.spec.as_ref()
     }
 
-    #[cfg(feature = "jit-mlir")]
-    pub(crate) fn schema(&self) -> ArrowSchemaRef {
+    pub fn schema(&self) -> ArrowSchemaRef {
         Arc::clone(&self.schema)
     }
 

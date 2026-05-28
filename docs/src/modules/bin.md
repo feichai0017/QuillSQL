@@ -1,7 +1,7 @@
 # Front-Ends (CLI / HTTP)
 
 The `bin/` directory contains the user-facing entry points. Both binaries embed
-the same `Database` type and therefore run the same DataFusion SQL path.
+the same `Database` type and therefore use the DataFusion frontend adapter.
 
 | Binary | Purpose |
 | ------ | ------- |

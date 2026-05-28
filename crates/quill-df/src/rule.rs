@@ -7,10 +7,13 @@ use datafusion::physical_optimizer::PhysicalOptimizerRule;
 use datafusion::physical_plan::ExecutionPlan;
 use serde::Serialize;
 
-use crate::{CompiledPipelineExec, JitOptions, KernelKind, MlirBackend, PipelineCandidate};
+use quill_jit::{FrontendAdapter, JitOptions, MlirBackend};
+use quill_runtime::KernelKind;
 
-use super::{extract_pipeline_from_node, pipeline_from_node};
-use crate::lower::PipelineCompiler;
+use crate::compiler::PipelineCompiler;
+use crate::{
+    extract_pipeline_from_node, pipeline_from_node, CompiledPipelineExec, PipelineCandidate,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct JitCandidate {
@@ -24,6 +27,19 @@ pub struct JitCandidate {
 pub struct MlirJitRule {
     backend: MlirBackend,
     options: JitOptions,
+}
+
+#[derive(Debug, Default)]
+pub struct DataFusionAdapter {
+    rule: MlirJitRule,
+}
+
+impl DataFusionAdapter {
+    pub fn with_options(options: JitOptions) -> Self {
+        Self {
+            rule: MlirJitRule::with_options(options),
+        }
+    }
 }
 
 impl MlirJitRule {
@@ -77,6 +93,26 @@ impl MlirJitRule {
         }
 
         None
+    }
+}
+
+impl FrontendAdapter for DataFusionAdapter {
+    type Plan = Arc<dyn ExecutionPlan>;
+    type Candidate = PipelineCandidate;
+    type Compiled = Arc<dyn ExecutionPlan>;
+    type Error = datafusion::common::DataFusionError;
+
+    fn extract(&self, plan: &Self::Plan) -> Vec<Self::Candidate> {
+        self.rule.inspect_pipelines(Arc::clone(plan))
+    }
+
+    fn replace(&self, plan: Self::Plan, compiled: Vec<Self::Compiled>) -> Result<Self::Plan> {
+        if !compiled.is_empty() {
+            return Err(datafusion::common::DataFusionError::Internal(
+                "DataFusionAdapter compiles replacements during physical optimization".to_string(),
+            ));
+        }
+        self.rule.optimize(plan, &ConfigOptions::new())
     }
 }
 

@@ -1,17 +1,14 @@
 use std::sync::Arc;
 
-use datafusion::arrow::array::{
-    Array, BooleanArray, Date32Array, Decimal128Array, Float64Array, Int64Array,
-};
-use datafusion::arrow::datatypes::{DataType, Field, Schema};
-use datafusion::arrow::record_batch::RecordBatch;
+use arrow::array::{Array, BooleanArray, Date32Array, Decimal128Array, Float64Array, Int64Array};
+use arrow::datatypes::{DataType, Field, Schema};
+use arrow::record_batch::RecordBatch;
 
-use crate::{
-    JitBinaryOp, JitExpr, JitProjection, JitScalar, JitType, MlirColumn, PipelineSpec,
-    PredicateSpec,
-};
+use quill_plan::{JitBinaryOp, JitExpr, JitProjection, JitScalar, JitType};
 
-use super::{FilterProjectKernel, FilterSumKernel, FilterSumValue};
+use super::{
+    FilterProjectKernel, FilterSumKernel, FilterSumValue, FixedColumn, PipelineSpec, PredicateSpec,
+};
 
 #[test]
 fn executes_filter_project_with_nulls() {
@@ -68,11 +65,11 @@ fn executes_filter_project_with_nulls() {
         kernel.spec(),
         Some(&PipelineSpec::RecordProject {
             columns: vec![
-                MlirColumn {
+                FixedColumn {
                     index: 0,
                     ty: JitType::Int64
                 },
-                MlirColumn {
+                FixedColumn {
                     index: 1,
                     ty: JitType::Int64
                 }

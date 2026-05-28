@@ -7,11 +7,11 @@ mod lower;
 mod tests;
 mod verify;
 
-use datafusion::arrow::datatypes::SchemaRef as ArrowSchemaRef;
+use arrow::datatypes::SchemaRef as ArrowSchemaRef;
 
 use crate::{
-    CompiledKernel, JitExpr, JitProjection, JitResult, JitType, KernelBackend, KernelKind,
-    PipelineGraph, QuillDialectModule,
+    CompiledKernel, JitExpr, JitProjection, JitResult, KernelBackend, KernelKind, PipelineGraph,
+    QuillDialectModule,
 };
 
 #[derive(Debug, Clone)]
@@ -20,11 +20,7 @@ pub struct MlirModule {
     pub text: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MlirColumn {
-    pub index: usize,
-    pub ty: JitType,
-}
+pub type MlirColumn = quill_runtime::FixedColumn;
 
 #[derive(Debug, Default)]
 pub struct MlirBackend;
@@ -35,7 +31,7 @@ pub use compiled::{
     DecimalFilterSumOutput, F64FilterSumOutput, FixedColumnInput, RecordPipelineOutput,
 };
 #[cfg(feature = "jit-mlir")]
-pub(crate) use dispatch::{execute_filter_project, execute_filter_sum};
+pub use dispatch::{execute_filter_project, execute_filter_sum};
 
 impl MlirBackend {
     pub fn new() -> Self {

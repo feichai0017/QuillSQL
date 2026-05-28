@@ -2,12 +2,11 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use datafusion::arrow::array::{
-    Array, ArrayRef, Date32Array, Decimal128Array, Float64Array, Int64Array,
-};
-use datafusion::arrow::datatypes::DataType as ArrowDataType;
-use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::common::{DataFusionError, Result};
+use arrow::array::{Array, ArrayRef, Date32Array, Decimal128Array, Float64Array, Int64Array};
+use arrow::datatypes::DataType as ArrowDataType;
+use arrow::record_batch::RecordBatch;
+use quill_plan::{JitError, JitResult};
+type Result<T> = JitResult<T>;
 
 use crate::{
     CompiledDecimalFilterSum, CompiledF64FilterSum, CompiledKernel, CompiledRecordPipeline,
@@ -24,7 +23,7 @@ thread_local! {
         RefCell::new(HashMap::new());
 }
 
-pub(crate) fn execute_filter_project(
+pub fn execute_filter_project(
     kernel: &CompiledKernel,
     runtime: &FilterProjectKernel,
     batch: &RecordBatch,
@@ -73,10 +72,10 @@ pub(crate) fn execute_filter_project(
         .collect::<Result<Vec<_>>>()?;
     RecordBatch::try_new(runtime.schema(), arrays)
         .map(Some)
-        .map_err(|err| DataFusionError::Execution(err.to_string()))
+        .map_err(|err| JitError::Backend(err.to_string()))
 }
 
-pub(crate) fn execute_filter_sum(
+pub fn execute_filter_sum(
     kernel: &CompiledKernel,
     runtime: &FilterSumKernel,
     batch: &RecordBatch,
@@ -253,7 +252,7 @@ fn fixed_input<'a>(
         JitType::Decimal128 { scale, .. } => {
             let array = decimal128_column(batch, column.index)?;
             if array.scale() != scale {
-                return Err(DataFusionError::Execution(format!(
+                return Err(JitError::Backend(format!(
                     "decimal input scale {} does not match column scale {}",
                     scale,
                     array.scale()
@@ -266,7 +265,7 @@ fn fixed_input<'a>(
                 }),
             )
         }
-        other => Err(DataFusionError::Execution(format!(
+        other => Err(JitError::Backend(format!(
             "unsupported fixed-width input type {other:?}"
         ))),
     }
@@ -286,7 +285,7 @@ impl OutputBuffer {
             JitType::Int64 => Ok(Self::Int64(vec![0; capacity])),
             JitType::Float64 => Ok(Self::Float64(vec![0.0; capacity])),
             JitType::Decimal128 { .. } => Ok(Self::Decimal128(vec![0; capacity])),
-            other => Err(DataFusionError::Execution(format!(
+            other => Err(JitError::Backend(format!(
                 "unsupported record output type {other:?}"
             ))),
         }
@@ -315,11 +314,11 @@ impl OutputBuffer {
             (Self::Decimal128(values), ArrowDataType::Decimal128(precision, scale)) => Arc::new(
                 Decimal128Array::from(values[..len].to_vec())
                     .with_precision_and_scale(*precision, *scale)
-                    .map_err(|err| DataFusionError::Execution(err.to_string()))?,
+                    .map_err(|err| JitError::Backend(err.to_string()))?,
             )
                 as ArrayRef,
             (_, other) => {
-                return Err(DataFusionError::Execution(format!(
+                return Err(JitError::Backend(format!(
                     "record output buffer does not match schema type {other:?}"
                 )));
             }
@@ -350,7 +349,7 @@ fn decimal_filter_sum_inputs<'a>(
     let left = decimal128_column(batch, left_col)?;
     let right = decimal128_column(batch, right_col)?;
     if left.scale().saturating_add(right.scale()) != scale {
-        return Err(DataFusionError::Execution(format!(
+        return Err(JitError::Backend(format!(
             "decimal multiply scale {} + {} does not match output scale {}",
             left.scale(),
             right.scale(),
@@ -418,7 +417,7 @@ fn push_decimal_input<'a>(
     let array = decimal128_column(batch, index)?;
     if let Some(expected_scale) = expected_scale {
         if array.scale() != expected_scale {
-            return Err(DataFusionError::Execution(format!(
+            return Err(JitError::Backend(format!(
                 "decimal predicate scale {} does not match column scale {}",
                 expected_scale,
                 array.scale()
@@ -482,7 +481,7 @@ fn float64_column(batch: &RecordBatch, index: usize) -> Result<&Float64Array> {
         .column(index)
         .as_any()
         .downcast_ref::<Float64Array>()
-        .ok_or_else(|| DataFusionError::Execution(format!("column {index} is not Float64")))
+        .ok_or_else(|| JitError::Backend(format!("column {index} is not Float64")))
 }
 
 fn date32_column(batch: &RecordBatch, index: usize) -> Result<&Date32Array> {
@@ -490,7 +489,7 @@ fn date32_column(batch: &RecordBatch, index: usize) -> Result<&Date32Array> {
         .column(index)
         .as_any()
         .downcast_ref::<Date32Array>()
-        .ok_or_else(|| DataFusionError::Execution(format!("column {index} is not Date32")))
+        .ok_or_else(|| JitError::Backend(format!("column {index} is not Date32")))
 }
 
 fn decimal128_column(batch: &RecordBatch, index: usize) -> Result<&Decimal128Array> {
@@ -498,7 +497,7 @@ fn decimal128_column(batch: &RecordBatch, index: usize) -> Result<&Decimal128Arr
         .column(index)
         .as_any()
         .downcast_ref::<Decimal128Array>()
-        .ok_or_else(|| DataFusionError::Execution(format!("column {index} is not Decimal128")))
+        .ok_or_else(|| JitError::Backend(format!("column {index} is not Decimal128")))
 }
 
 fn int64_column(batch: &RecordBatch, index: usize) -> Result<&Int64Array> {
@@ -506,5 +505,5 @@ fn int64_column(batch: &RecordBatch, index: usize) -> Result<&Int64Array> {
         .column(index)
         .as_any()
         .downcast_ref::<Int64Array>()
-        .ok_or_else(|| DataFusionError::Execution(format!("column {index} is not Int64")))
+        .ok_or_else(|| JitError::Backend(format!("column {index} is not Int64")))
 }

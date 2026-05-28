@@ -13,10 +13,10 @@ use datafusion::physical_plan::repartition::RepartitionExec;
 use datafusion::physical_plan::ExecutionPlan;
 use serde::Serialize;
 
-use crate::{
-    CompiledPipelineExec, JitExpr, JitProjection, PipelineGraph, PipelineKind, PipelineLowering,
-    PipelineRuntime, PipelineStage,
-};
+use quill_jit::PipelineLowering;
+use quill_plan::{JitExpr, JitProjection, JitResult, PipelineGraph, PipelineKind, PipelineStage};
+
+use crate::{CompiledPipelineExec, PipelineRuntime};
 
 #[derive(Debug, Clone)]
 pub(crate) struct PipelineMatch {
@@ -176,7 +176,7 @@ fn filter_project_pipeline_from_filter(
     }
 
     let input_schema = filter.input().schema();
-    let predicate = JitExpr::from_physical(filter.predicate(), input_schema.as_ref()).ok()?;
+    let predicate = crate::expr::from_physical(filter.predicate(), input_schema.as_ref()).ok()?;
     let projections = lower_projection_exprs(projection, input_schema.as_ref())?;
     Some(PhysicalPipeline::filter_project(
         Arc::clone(filter.input()),
@@ -205,7 +205,7 @@ pub(crate) fn extract_filter_sum_pipeline(aggregate: &AggregateExec) -> Option<P
     }
 
     let predicate =
-        JitExpr::from_physical(filter.predicate(), filter.input().schema().as_ref()).ok()?;
+        crate::expr::from_physical(filter.predicate(), filter.input().schema().as_ref()).ok()?;
     let measure = lower_sum_measure(aggregate, aggregate.input().schema().as_ref())?;
     let measure = remap_projection_columns(
         &measure,
@@ -229,10 +229,10 @@ fn lower_projection_exprs(
         .expr()
         .iter()
         .map(|expr| {
-            JitExpr::from_physical(&expr.expr, input_schema)
+            crate::expr::from_physical(&expr.expr, input_schema)
                 .map(|jit_expr| JitProjection::new(jit_expr, expr.alias.clone()))
         })
-        .collect::<crate::JitResult<Vec<_>>>()
+        .collect::<JitResult<Vec<_>>>()
         .ok()
 }
 
@@ -268,7 +268,7 @@ fn lower_sum_measure(aggregate: &AggregateExec, input_schema: &ArrowSchema) -> O
     if expressions.len() != 1 {
         return None;
     }
-    JitExpr::from_physical(&expressions[0], input_schema).ok()
+    crate::expr::from_physical(&expressions[0], input_schema).ok()
 }
 
 fn remap_projection_columns(

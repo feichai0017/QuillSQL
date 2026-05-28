@@ -16,7 +16,8 @@ pub struct QuillDialectModule {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuillDialectSource {
-    DataFusionBatch,
+    ArrowBatch,
+    ArrowStream,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -41,7 +42,8 @@ pub enum QuillDialectSink {
 impl QuillDialectModule {
     pub fn from_graph(symbol: impl Into<String>, graph: &PipelineGraph) -> Self {
         let source = match &graph.source {
-            PipelineSource::DataFusionInput => QuillDialectSource::DataFusionBatch,
+            PipelineSource::ArrowBatch => QuillDialectSource::ArrowBatch,
+            PipelineSource::ArrowStream => QuillDialectSource::ArrowStream,
         };
         let ops = graph
             .stages
@@ -175,12 +177,12 @@ impl QuillDialectModule {
     pub fn pipeline_spec(&self) -> Option<PipelineSpec> {
         match (&self.source, self.ops.as_slice(), &self.sink) {
             (
-                QuillDialectSource::DataFusionBatch,
+                QuillDialectSource::ArrowBatch,
                 [QuillDialectOp::Filter { predicate }, QuillDialectOp::Project { projections }],
                 QuillDialectSink::RecordBatch,
             ) => PipelineSpec::record_project(predicate, projections),
             (
-                QuillDialectSource::DataFusionBatch,
+                QuillDialectSource::ArrowBatch,
                 [QuillDialectOp::Filter { predicate }],
                 QuillDialectSink::PlainSum { measure },
             ) => PipelineSpec::filter_sum(predicate, measure),
@@ -192,7 +194,8 @@ impl QuillDialectModule {
 impl QuillDialectSource {
     fn name(self) -> &'static str {
         match self {
-            Self::DataFusionBatch => "quill.source.datafusion_batch",
+            Self::ArrowBatch => "quill.source.arrow_batch",
+            Self::ArrowStream => "quill.source.arrow_stream",
         }
     }
 }
@@ -689,7 +692,7 @@ mod tests {
 
         assert_eq!(module.kind, PipelineKind::Record);
         assert!(text.contains("func.func @record0"));
-        assert!(text.contains("quill.source.datafusion_batch"));
+        assert!(text.contains("quill.source.arrow_batch"));
         assert!(text.contains("quill.exec.filter"));
         assert!(text.contains("quill.exec.project"));
         assert!(text.contains("quill.sink.record_batch"));

@@ -5,12 +5,13 @@ use datafusion::arrow::array::{Float64Array, Int64Array};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
 use quill_core::database::{Database, DatabaseOptions};
-use quill_jit::{
-    FilterProjectKernel, FilterSumKernel, JitBinaryOp, JitExpr, JitOptions, JitProjection,
-    JitScalar, JitType, KernelBackend, MlirBackend, PipelineGraph, PipelineLowering, PipelineStage,
-};
 #[cfg(feature = "jit-mlir")]
 use quill_jit::{FixedColumnInput, RecordPipelineOutput};
+use quill_jit::{JitOptions, MlirBackend, PipelineLowering};
+use quill_plan::{
+    JitBinaryOp, JitExpr, JitProjection, JitScalar, JitType, PipelineGraph, PipelineStage,
+};
+use quill_runtime::{FilterProjectKernel, FilterSumKernel, KernelBackend};
 
 fn schema() -> Arc<Schema> {
     Arc::new(Schema::new(vec![
@@ -319,7 +320,7 @@ fn bench_datafusion_filter_project(c: &mut Criterion) {
         .block_on(db.run("select id + 1 as next_id from t where v > 500"))
         .expect("warmup");
 
-    c.bench_function("sql/filter_project_64k", |b| {
+    c.bench_function("sql/df/filter_project_64k", |b| {
         b.iter(|| {
             black_box(
                 runtime
@@ -364,7 +365,7 @@ fn bench_datafusion_filter_sum(c: &mut Criterion) {
         .expect("prepare");
     runtime.block_on(prepared.run()).expect("prepared warmup");
 
-    c.bench_function("sql/filter_sum_64k", |b| {
+    c.bench_function("sql/df/filter_sum_64k", |b| {
         b.iter(|| {
             black_box(
                 runtime
@@ -375,7 +376,7 @@ fn bench_datafusion_filter_sum(c: &mut Criterion) {
             )
         });
     });
-    c.bench_function("sql/prepared_filter_sum_64k", |b| {
+    c.bench_function("sql/df/prepared_filter_sum_64k", |b| {
         b.iter(|| black_box(runtime.block_on(prepared.run()).expect("query")));
     });
 }
