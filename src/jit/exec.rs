@@ -81,6 +81,13 @@ impl CompiledFilterProjectExec {
     }
 
     fn execute_batch(&self, batch: RecordBatch) -> Result<RecordBatch> {
+        #[cfg(feature = "jit-mlir")]
+        if let Some(output) =
+            super::mlir::execute_filter_project(&self.kernel, &self.runtime, &batch)?
+        {
+            return Ok(output);
+        }
+
         self.runtime.execute(&batch).map_err(Into::into)
     }
 }

@@ -33,7 +33,7 @@ pub use compiled::{
     DecimalFilterSumInput, DecimalFilterSumOutput, F64FilterSumOutput,
 };
 #[cfg(feature = "jit-mlir")]
-pub(crate) use dispatch::execute_filter_sum;
+pub(crate) use dispatch::{execute_filter_project, execute_filter_sum};
 
 impl MlirBackend {
     pub fn new() -> Self {

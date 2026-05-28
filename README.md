@@ -89,6 +89,8 @@ scan/filter/plain-aggregate path. It also has a Q6-shaped
 `Date32`/`Decimal128` filter/sum kernel that compiles and invokes through MLIR
 over fixed-width column slices. With `jit-mlir` and
 `DatabaseOptions { jit: JitOptions::mlir_execution(), .. }`,
+`CompiledFilterProjectExec` dispatches the single-column i64 filter/project path
+through MLIR, and
 `CompiledFilterSumExec` dispatches the f64 and decimal filter/sum paths through a
 thread-local MLIR execution cache when the input batch has no nulls or slice
 offsets; other cases keep the safe Arrow runtime fallback. CLI, server, and

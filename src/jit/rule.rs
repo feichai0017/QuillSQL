@@ -233,14 +233,7 @@ impl MlirJitRule {
             Ok(predicate) => predicate,
             Err(_) => return Ok(None),
         };
-        let kernel = match self.backend.compile_filter_project(
-            Arc::clone(&input_schema),
-            &predicate,
-            &projections,
-        ) {
-            Ok(kernel) => kernel,
-            Err(_) => return Ok(None),
-        };
+        let kernel = self.filter_project_kernel(&predicate, &projections);
 
         let runtime =
             match FilterProjectKernel::try_new(predicate, projections, projection.schema()) {
@@ -254,6 +247,42 @@ impl MlirJitRule {
             kernel,
         )?;
         Ok(Some(Arc::new(compiled) as Arc<dyn ExecutionPlan>))
+    }
+
+    fn filter_project_kernel(
+        &self,
+        predicate: &JitExpr,
+        projections: &[JitProjection],
+    ) -> CompiledKernel {
+        if let Ok(module) = self
+            .backend
+            .lower_i64_filter_project(predicate, projections)
+        {
+            let executable = self.backend.verify_module(&module).is_ok()
+                && self.options.mlir_execution_enabled();
+            return CompiledKernel::new(
+                module.symbol,
+                KernelKind::FilterProject,
+                self.backend.name(),
+                module.text,
+                executable,
+            );
+        }
+
+        match self.backend.compile_filter_project(
+            Arc::new(ArrowSchema::empty()),
+            predicate,
+            projections,
+        ) {
+            Ok(kernel) => kernel,
+            Err(_) => CompiledKernel::new(
+                "filter_project_runtime",
+                KernelKind::FilterProject,
+                "fixed-width-runtime",
+                format!("predicate={predicate:?}; projections={projections:?}"),
+                false,
+            ),
+        }
     }
 
     fn compile_filter_sum(

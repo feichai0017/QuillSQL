@@ -1,22 +1,68 @@
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
+use std::sync::Arc;
 
 use datafusion::arrow::array::{Array, Date32Array, Decimal128Array, Float64Array, Int64Array};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::{DataFusionError, Result};
 
 use crate::jit::{
-    CompiledDecimalFilterSum, CompiledF64FilterSum, CompiledKernel, DecimalFilterSumInput,
-    FilterSumKernel, FilterSumValue, MlirBackend,
+    CompiledDecimalFilterSum, CompiledF64FilterSum, CompiledI64FilterProject, CompiledKernel,
+    DecimalFilterSumInput, FilterProjectKernel, FilterSumKernel, FilterSumValue, JitExpr, JitType,
+    MlirBackend,
 };
 
 use super::super::runtime::{FilterSumPlan, FixedPredicate};
 
 thread_local! {
+    static I64_FILTER_PROJECT_CACHE: RefCell<HashMap<String, CompiledI64FilterProject>> =
+        RefCell::new(HashMap::new());
     static F64_FILTER_SUM_CACHE: RefCell<HashMap<String, CompiledF64FilterSum>> =
         RefCell::new(HashMap::new());
     static DECIMAL_FILTER_SUM_CACHE: RefCell<HashMap<String, CompiledDecimalFilterSum>> =
         RefCell::new(HashMap::new());
+}
+
+pub(crate) fn execute_filter_project(
+    kernel: &CompiledKernel,
+    runtime: &FilterProjectKernel,
+    batch: &RecordBatch,
+) -> Result<Option<RecordBatch>> {
+    if !kernel.executable || kernel.backend != "mlir" {
+        return Ok(None);
+    }
+
+    let Some((predicate_col, projection_col)) = filter_project_input_columns(runtime) else {
+        return Ok(None);
+    };
+    let predicate = int64_column(batch, predicate_col)?;
+    let projection = int64_column(batch, projection_col)?;
+    let Some(predicate_values) = int64_values(predicate) else {
+        return Ok(None);
+    };
+    let Some(projection_values) = int64_values(projection) else {
+        return Ok(None);
+    };
+
+    let mut output = vec![0_i64; batch.num_rows()];
+    let cache_key = filter_project_cache_key(runtime);
+    let output_len = I64_FILTER_PROJECT_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if !cache.contains_key(&cache_key) {
+            let compiled = MlirBackend::new()
+                .compile_i64_filter_project(runtime.predicate(), runtime.projections())?;
+            cache.insert(cache_key.clone(), compiled);
+        }
+        cache
+            .get(&cache_key)
+            .expect("compiled kernel was inserted")
+            .invoke(predicate_values, projection_values, &mut output)
+    })?;
+
+    let array = Int64Array::from(output[..output_len].to_vec());
+    RecordBatch::try_new(runtime.schema(), vec![Arc::new(array)])
+        .map(Some)
+        .map_err(|err| DataFusionError::Execution(err.to_string()))
 }
 
 pub(crate) fn execute_filter_sum(
@@ -43,6 +89,49 @@ pub(crate) fn execute_filter_sum(
         }) => execute_decimal_filter_sum(runtime, batch, predicates, *left_col, *right_col, *scale),
         None => Ok(None),
     }
+}
+
+fn filter_project_input_columns(runtime: &FilterProjectKernel) -> Option<(usize, usize)> {
+    let [projection] = runtime.projections() else {
+        return None;
+    };
+    if projection.expr.ty() != JitType::Int64 {
+        return None;
+    }
+    Some((
+        single_i64_column(runtime.predicate())?,
+        single_i64_column(&projection.expr)?,
+    ))
+}
+
+fn single_i64_column(expr: &JitExpr) -> Option<usize> {
+    let mut columns = BTreeSet::new();
+    collect_i64_columns(expr, &mut columns)?;
+    if columns.len() == 1 {
+        columns.first().copied()
+    } else {
+        None
+    }
+}
+
+fn collect_i64_columns(expr: &JitExpr, columns: &mut BTreeSet<usize>) -> Option<()> {
+    match expr {
+        JitExpr::Column { index, ty, .. } if *ty == JitType::Int64 => {
+            columns.insert(*index);
+            Some(())
+        }
+        JitExpr::Column { .. } => None,
+        JitExpr::Literal(_) => Some(()),
+        JitExpr::Binary { left, right, .. } => {
+            collect_i64_columns(left, columns)?;
+            collect_i64_columns(right, columns)
+        }
+        JitExpr::IsNull(expr) => collect_i64_columns(expr, columns),
+    }
+}
+
+fn filter_project_cache_key(runtime: &FilterProjectKernel) -> String {
+    format!("{:?}|{:?}", runtime.predicate(), runtime.projections())
 }
 
 fn execute_f64_filter_sum(

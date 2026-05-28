@@ -54,10 +54,11 @@ probe validates scalar invocation. The compiled fixed-width path now has an
 `i64` filter kernel that writes a byte selection mask, an `i64` filter/project
 kernel that compacts one projected column, an `f64` filter/sum kernel for the
 first plain-aggregate path, and a Q6-shaped `Date32`/`Decimal128` filter/sum
-kernel over fixed-width column slices. `CompiledFilterSumExec` can invoke those
-filter/sum kernels through a thread-local MLIR execution cache when `jit-mlir`
-is enabled, `JitOptions::mlir_execution()` is selected, and the input batch has
-no nulls or slice offsets. CLI, server, and benchmark binaries map
+kernel over fixed-width column slices. `CompiledFilterProjectExec` can invoke
+the i64 filter/project kernel, and `CompiledFilterSumExec` can invoke the
+filter/sum kernels through thread-local MLIR execution caches when `jit-mlir` is
+enabled, `JitOptions::mlir_execution()` is selected, and the input batch has no
+nulls or slice offsets. CLI, server, and benchmark binaries map
 `QUILL_JIT=mlir` to that option at startup. Unsupported expressions and unsafe
 batch layouts fall back to the normal DataFusion plan or the fixed-width Arrow
 runtime.

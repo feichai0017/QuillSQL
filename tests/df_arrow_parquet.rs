@@ -161,6 +161,47 @@ async fn debug_trace_reports_jit_candidates() {
     );
 }
 
+#[cfg(feature = "jit-mlir")]
+#[tokio::test]
+async fn filter_project_mlir_execution_returns_expected_rows() {
+    let db = database_with_mlir_execution();
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int64, false),
+        Field::new("v", DataType::Int64, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![
+            Arc::new(Int64Array::from(vec![1, 2, 3])),
+            Arc::new(Int64Array::from(vec![10, 20, 30])),
+        ],
+    )
+    .expect("batch");
+    db.register_batches("t", schema, vec![batch])
+        .expect("table");
+
+    assert_eq!(
+        rows(
+            db.run("select id + 1 as next_id from t where v > 10")
+                .await
+                .expect("query")
+        ),
+        vec![vec!["3".to_string()], vec!["4".to_string()]]
+    );
+
+    let trace = db.debug_last_trace().expect("trace");
+    assert!(
+        trace
+            .jit_candidates
+            .iter()
+            .any(|candidate| candidate.kernel == KernelKind::FilterProject
+                && candidate.backend == "mlir"
+                && candidate.executable),
+        "{:?}",
+        trace.jit_candidates
+    );
+}
+
 #[tokio::test]
 async fn debug_trace_reports_filter_sum_candidate() {
     let db = Database::new_temp().expect("database");

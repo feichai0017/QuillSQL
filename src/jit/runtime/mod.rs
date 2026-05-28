@@ -73,6 +73,11 @@ impl FilterProjectKernel {
         &self.projections
     }
 
+    #[cfg(feature = "jit-mlir")]
+    pub(crate) fn schema(&self) -> ArrowSchemaRef {
+        Arc::clone(&self.schema)
+    }
+
     pub fn execute(&self, batch: &RecordBatch) -> JitResult<RecordBatch> {
         let view = BatchView::try_new(batch)?;
         let mut builders = self
