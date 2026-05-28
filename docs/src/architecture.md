@@ -50,7 +50,8 @@ The MLIR backend then emits scalar `arith` functions and verifies them through
 `melior` when `jit-mlir` is enabled. The physical optimizer can replace
 filter/project pipelines with `CompiledRecordPipelineExec`; the current executable
 node runs a fixed-width Arrow batch kernel implemented in QuillSQL while carrying
-the MLIR kernel descriptor. A narrow compiled `i64 -> bool` MLIR ExecutionEngine
+the MLIR kernel descriptor and a structured `KernelSpec`. A narrow compiled
+`i64 -> bool` MLIR ExecutionEngine
 probe validates scalar invocation. The compiled fixed-width path now has an
 `i64` filter kernel that writes a byte selection mask, an `i64` filter/project
 kernel that compacts one projected column, an `f64` filter/sum kernel for the
@@ -59,7 +60,8 @@ kernel over fixed-width column slices. `CompiledRecordPipelineExec` can invoke
 the i64 filter/project kernel, and `CompiledAggregatePipelineExec` can invoke the
 filter/sum kernels through thread-local MLIR execution caches when `jit-mlir` is
 enabled, `JitOptions::mlir_execution()` is selected, and the input batch has no
-nulls or slice offsets. CLI, server, and benchmark binaries map
+nulls or slice offsets. The dispatch layer consumes `KernelSpec`; it no longer
+re-parses runtime expressions to guess input columns. CLI, server, and benchmark binaries map
 `QUILL_JIT=mlir` to that option at startup. Unsupported expressions and unsafe
 batch layouts fall back to the normal DataFusion plan or the fixed-width Arrow
 runtime.
@@ -100,7 +102,8 @@ whole-pipeline lowering does not rely on string plan inspection. This lets the
 project measure real operator boundaries before taking on grouped aggregates,
 joins, hash repartitioning, or whole-query pipeline lowering. The decimal path
 now has both a DataFusion-safe fixed-width Arrow runtime specialization and an
-executable MLIR dispatch path for the same fixed-width column layout.
+executable MLIR dispatch path for the same fixed-width column layout, using the
+same Q6-shaped decimal `KernelSpec`.
 
 The intended compiler path is:
 

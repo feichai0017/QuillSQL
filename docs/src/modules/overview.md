@@ -32,7 +32,7 @@ Parquet dataset as a DataFusion table.
 | `pipeline/` | Expression IR, `PipelineIR`, DataFusion physical-plan extraction, and the physical optimizer rule. |
 | `dialect/` | Quill pipeline dialect skeleton used as the next lowering boundary. |
 | `lower/` | Exact pipeline pattern lowering, compiled-plan construction, and JIT options. |
-| `runtime/` | DataFusion physical execution nodes, compiled-kernel descriptors, and fixed-width Arrow batch kernels. |
+| `runtime/` | DataFusion physical execution nodes, compiled-kernel specs, and fixed-width Arrow batch kernels. |
 | `mlir/` | MLIR emission, verification, and compiled ExecutionEngine invocation. |
 
 The JIT subdirectories have stricter internal boundaries:
@@ -53,8 +53,11 @@ The JIT subdirectories have stricter internal boundaries:
 - `mlir/compiled.rs`: feature-gated `ExecutionEngine` invocation artifacts.
 - `runtime/exec.rs`: DataFusion physical execution nodes for compiled record and
   aggregate pipelines.
-- `runtime/kernel.rs`: future Arrow kernel ABI and compiled-kernel descriptor.
-- `runtime/mod.rs`: public fixed-width filter/project runtime surface.
+- `runtime/kernel.rs`: `KernelSpec`, `PredicateSpec`, and compiled-kernel
+  metadata.
+- `runtime/record.rs`: fixed-width filter/project record-batch runtime.
+- `runtime/sum.rs`: fixed-width plain `SUM` runtime and Q6-shaped decimal
+  filter/sum specialization.
 - `runtime/array.rs`: Arrow array views and output builders.
 - `runtime/eval.rs`: expression evaluation and SQL boolean/null semantics.
 - `runtime/value.rs`: scalar value representation.

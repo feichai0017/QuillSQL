@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use datafusion::arrow::array::{Array, Date32Array, Decimal128Array, Float64Array, Int64Array};
@@ -8,11 +8,9 @@ use datafusion::common::{DataFusionError, Result};
 
 use crate::{
     CompiledDecimalFilterSum, CompiledF64FilterSum, CompiledI64FilterProject, CompiledKernel,
-    DecimalFilterSumInput, FilterProjectKernel, FilterSumKernel, FilterSumValue, JitExpr, JitType,
-    MlirBackend,
+    DecimalFilterSumInput, FilterProjectKernel, FilterSumKernel, FilterSumValue, KernelSpec,
+    MlirBackend, PredicateSpec,
 };
-
-use super::super::runtime::{FilterSumPlan, FixedPredicate};
 
 thread_local! {
     static I64_FILTER_PROJECT_CACHE: RefCell<HashMap<String, CompiledI64FilterProject>> =
@@ -32,11 +30,15 @@ pub(crate) fn execute_filter_project(
         return Ok(None);
     }
 
-    let Some((predicate_col, projection_col)) = filter_project_input_columns(runtime) else {
+    let KernelSpec::I64FilterProject {
+        predicate_column,
+        projection_column,
+    } = &kernel.spec
+    else {
         return Ok(None);
     };
-    let predicate = int64_column(batch, predicate_col)?;
-    let projection = int64_column(batch, projection_col)?;
+    let predicate = int64_column(batch, *predicate_column)?;
+    let projection = int64_column(batch, *projection_column)?;
     let Some(predicate_values) = int64_values(predicate) else {
         return Ok(None);
     };
@@ -74,59 +76,33 @@ pub(crate) fn execute_filter_sum(
         return Ok(None);
     }
 
-    match runtime.plan() {
-        Some(FilterSumPlan::I64CompareF64Mul {
-            predicate_col,
-            left_col,
-            right_col,
+    match &kernel.spec {
+        KernelSpec::F64FilterSum {
+            predicate_column,
+            measure_left_column,
+            measure_right_column,
             ..
-        }) => execute_f64_filter_sum(runtime, batch, *predicate_col, *left_col, *right_col),
-        Some(FilterSumPlan::FixedCompareDecimalMul {
+        } => execute_f64_filter_sum(
+            runtime,
+            batch,
+            *predicate_column,
+            *measure_left_column,
+            *measure_right_column,
+        ),
+        KernelSpec::DecimalFilterSum {
             predicates,
-            left_col,
-            right_col,
-            scale,
-        }) => execute_decimal_filter_sum(runtime, batch, predicates, *left_col, *right_col, *scale),
-        None => Ok(None),
-    }
-}
-
-fn filter_project_input_columns(runtime: &FilterProjectKernel) -> Option<(usize, usize)> {
-    let [projection] = runtime.projections() else {
-        return None;
-    };
-    if projection.expr.ty() != JitType::Int64 {
-        return None;
-    }
-    Some((
-        single_i64_column(runtime.predicate())?,
-        single_i64_column(&projection.expr)?,
-    ))
-}
-
-fn single_i64_column(expr: &JitExpr) -> Option<usize> {
-    let mut columns = BTreeSet::new();
-    collect_i64_columns(expr, &mut columns)?;
-    if columns.len() == 1 {
-        columns.first().copied()
-    } else {
-        None
-    }
-}
-
-fn collect_i64_columns(expr: &JitExpr, columns: &mut BTreeSet<usize>) -> Option<()> {
-    match expr {
-        JitExpr::Column { index, ty, .. } if *ty == JitType::Int64 => {
-            columns.insert(*index);
-            Some(())
-        }
-        JitExpr::Column { .. } => None,
-        JitExpr::Literal(_) => Some(()),
-        JitExpr::Binary { left, right, .. } => {
-            collect_i64_columns(left, columns)?;
-            collect_i64_columns(right, columns)
-        }
-        JitExpr::IsNull(expr) => collect_i64_columns(expr, columns),
+            measure_left_column,
+            measure_right_column,
+            output_scale,
+        } => execute_decimal_filter_sum(
+            runtime,
+            batch,
+            predicates,
+            *measure_left_column,
+            *measure_right_column,
+            *output_scale,
+        ),
+        _ => Ok(None),
     }
 }
 
@@ -176,7 +152,7 @@ fn execute_f64_filter_sum(
 fn execute_decimal_filter_sum(
     runtime: &FilterSumKernel,
     batch: &RecordBatch,
-    predicates: &[FixedPredicate],
+    predicates: &[PredicateSpec],
     left_col: usize,
     right_col: usize,
     scale: i8,
@@ -211,7 +187,7 @@ fn filter_sum_cache_key(runtime: &FilterSumKernel) -> String {
 
 fn decimal_filter_sum_inputs<'a>(
     batch: &'a RecordBatch,
-    predicates: &[FixedPredicate],
+    predicates: &[PredicateSpec],
     left_col: usize,
     right_col: usize,
     scale: i8,
@@ -244,14 +220,14 @@ fn decimal_filter_sum_inputs<'a>(
 fn push_predicate_input<'a>(
     inputs: &mut Vec<DecimalFilterSumInput<'a>>,
     batch: &'a RecordBatch,
-    predicate: &FixedPredicate,
+    predicate: &PredicateSpec,
 ) -> Result<Option<()>> {
     match *predicate {
-        FixedPredicate::Date32 { col, .. } => push_date32_input(inputs, batch, col),
-        FixedPredicate::Decimal128 { col, scale, .. } => {
-            push_decimal_input(inputs, batch, col, Some(scale))
+        PredicateSpec::Date32 { column, .. } => push_date32_input(inputs, batch, column),
+        PredicateSpec::Decimal128 { column, scale, .. } => {
+            push_decimal_input(inputs, batch, column, Some(scale))
         }
-        FixedPredicate::Int64 { col, .. } => push_int64_input(inputs, batch, col),
+        PredicateSpec::Int64 { column, .. } => push_int64_input(inputs, batch, column),
     }
 }
 

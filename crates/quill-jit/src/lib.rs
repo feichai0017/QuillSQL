@@ -17,9 +17,8 @@ pub use pipeline::{
     PipelineCandidate, PipelineIr, PipelineOp, PipelineSink, PipelineSource,
 };
 pub use runtime::{
-    ArrowArrayView, ArrowMutableArrayView, CompiledAggregatePipelineExec, CompiledKernel,
-    CompiledRecordPipelineExec, FilterKernelFn, FilterProjectKernel, FilterSumKernel,
-    FilterSumValue, JitTypeTag, KernelBackend, KernelKind, ProjectionKernelFn,
+    CompiledAggregatePipelineExec, CompiledKernel, CompiledRecordPipelineExec, FilterProjectKernel,
+    FilterSumKernel, FilterSumValue, KernelBackend, KernelKind, KernelSpec, PredicateSpec,
 };
 
 use datafusion::common::DataFusionError;

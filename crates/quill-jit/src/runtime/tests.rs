@@ -6,7 +6,7 @@ use datafusion::arrow::array::{
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
 
-use crate::{JitBinaryOp, JitExpr, JitProjection, JitScalar, JitType};
+use crate::{JitBinaryOp, JitExpr, JitProjection, JitScalar, JitType, KernelSpec, PredicateSpec};
 
 use super::{FilterProjectKernel, FilterSumKernel, FilterSumValue};
 
@@ -60,6 +60,14 @@ fn executes_filter_project_with_nulls() {
         output_schema,
     )
     .unwrap();
+
+    assert_eq!(
+        kernel.spec(),
+        Some(&KernelSpec::I64FilterProject {
+            predicate_column: 1,
+            projection_column: 0
+        })
+    );
 
     let output = kernel.execute(&batch).unwrap();
     let values = output
@@ -194,6 +202,17 @@ fn executes_filter_sum_fast_path_with_nulls() {
     )
     .unwrap();
 
+    assert_eq!(
+        kernel.spec(),
+        Some(&KernelSpec::F64FilterSum {
+            predicate_column: 0,
+            predicate_op: JitBinaryOp::Gt,
+            predicate_value: 10,
+            measure_left_column: 1,
+            measure_right_column: 2
+        })
+    );
+
     let output = kernel.execute(&batch).unwrap();
     assert_eq!(output, FilterSumValue::Float64(Some(4.0)));
 }
@@ -259,6 +278,40 @@ fn executes_decimal_filter_sum_with_date_predicate() {
         nullable: true,
     };
     let kernel = FilterSumKernel::try_new(predicate, measure).unwrap();
+
+    assert_eq!(
+        kernel.spec(),
+        Some(&KernelSpec::DecimalFilterSum {
+            predicates: vec![
+                PredicateSpec::Date32 {
+                    column: 0,
+                    op: JitBinaryOp::GtEq,
+                    value: 10
+                },
+                PredicateSpec::Decimal128 {
+                    column: 2,
+                    op: JitBinaryOp::GtEq,
+                    value: 5,
+                    scale: 2
+                },
+                PredicateSpec::Decimal128 {
+                    column: 2,
+                    op: JitBinaryOp::LtEq,
+                    value: 7,
+                    scale: 2
+                },
+                PredicateSpec::Decimal128 {
+                    column: 3,
+                    op: JitBinaryOp::Lt,
+                    value: 2_400,
+                    scale: 2
+                },
+            ],
+            measure_left_column: 1,
+            measure_right_column: 2,
+            output_scale: 4
+        })
+    );
 
     let output = kernel.execute(&batch).unwrap();
     assert_eq!(

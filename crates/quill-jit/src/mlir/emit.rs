@@ -12,7 +12,7 @@ pub(super) fn lower_filter(predicate: &JitExpr) -> JitResult<MlirModule> {
     let symbol = next_symbol("quill_filter");
     let mut text = start_module();
     text.push_str(&scalar_function(&format!("{symbol}_expr"), predicate)?);
-    append_abi_function_header(&mut text, &symbol);
+    append_batch_function_header(&mut text, &symbol);
     let _ = writeln!(text, "    // qjit.kind = filter");
     let _ = writeln!(text, "    // qjit.predicate = {}", format_expr(predicate));
     text.push_str("    %ok = arith.constant 0 : i32\n");
@@ -25,7 +25,7 @@ pub(super) fn lower_projection(projections: &[JitProjection]) -> JitResult<MlirM
     let symbol = next_symbol("quill_project");
     let mut text = start_module();
     append_projection_scalar_functions(&mut text, &symbol, projections)?;
-    append_abi_function_header(&mut text, &symbol);
+    append_batch_function_header(&mut text, &symbol);
     let _ = writeln!(text, "    // qjit.kind = projection");
     for projection in projections {
         let _ = writeln!(
@@ -49,7 +49,7 @@ pub(super) fn lower_filter_project(
     let mut text = start_module();
     text.push_str(&scalar_function(&format!("{symbol}_predicate"), predicate)?);
     append_projection_scalar_functions(&mut text, &symbol, projections)?;
-    append_abi_function_header(&mut text, &symbol);
+    append_batch_function_header(&mut text, &symbol);
     let _ = writeln!(text, "    // qjit.kind = filter_project");
     let _ = writeln!(text, "    // qjit.predicate = {}", format_expr(predicate));
     for projection in projections {
@@ -340,7 +340,7 @@ fn start_module() -> String {
     "module {\n".to_string()
 }
 
-fn append_abi_function_header(text: &mut String, symbol: &str) {
+fn append_batch_function_header(text: &mut String, symbol: &str) {
     let _ = writeln!(
         text,
         "  func.func @{symbol}(%len: index, %input: !llvm.ptr, %output: !llvm.ptr) -> i32 {{"

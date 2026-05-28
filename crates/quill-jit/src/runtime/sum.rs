@@ -1,7 +1,7 @@
 use datafusion::arrow::array::{Array, Date32Array, Decimal128Array, Float64Array, Int64Array};
 use datafusion::arrow::record_batch::RecordBatch;
 
-use crate::{JitBinaryOp, JitError, JitExpr, JitResult, JitScalar, JitType};
+use crate::{JitBinaryOp, JitError, JitExpr, JitResult, JitType, KernelSpec, PredicateSpec};
 
 use super::eval::{ensure_supported_expr, eval_expr};
 use super::value::Scalar;
@@ -11,50 +11,13 @@ use super::BatchView;
 pub struct FilterSumKernel {
     predicate: JitExpr,
     measure: JitExpr,
-    plan: Option<FilterSumPlan>,
+    spec: Option<KernelSpec>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum FilterSumValue {
     Float64(Option<f64>),
     Decimal128 { value: Option<i128>, scale: i8 },
-}
-
-#[derive(Debug, Clone)]
-pub(crate) enum FilterSumPlan {
-    I64CompareF64Mul {
-        predicate_col: usize,
-        op: JitBinaryOp,
-        threshold: i64,
-        left_col: usize,
-        right_col: usize,
-    },
-    FixedCompareDecimalMul {
-        predicates: Vec<FixedPredicate>,
-        left_col: usize,
-        right_col: usize,
-        scale: i8,
-    },
-}
-
-#[derive(Debug, Clone)]
-pub(crate) enum FixedPredicate {
-    Date32 {
-        col: usize,
-        op: JitBinaryOp,
-        value: i32,
-    },
-    Decimal128 {
-        col: usize,
-        op: JitBinaryOp,
-        value: i128,
-        scale: i8,
-    },
-    Int64 {
-        col: usize,
-        op: JitBinaryOp,
-        value: i64,
-    },
 }
 
 impl FilterSumKernel {
@@ -73,11 +36,11 @@ impl FilterSumKernel {
         }
         ensure_supported_expr(&predicate)?;
         ensure_supported_expr(&measure)?;
-        let plan = compile_filter_sum_plan(&predicate, &measure);
+        let spec = KernelSpec::filter_sum(&predicate, &measure);
         Ok(Self {
             predicate,
             measure,
-            plan,
+            spec,
         })
     }
 
@@ -89,14 +52,13 @@ impl FilterSumKernel {
         &self.measure
     }
 
-    #[cfg(feature = "jit-mlir")]
-    pub(crate) fn plan(&self) -> Option<&FilterSumPlan> {
-        self.plan.as_ref()
+    pub fn spec(&self) -> Option<&KernelSpec> {
+        self.spec.as_ref()
     }
 
     pub fn execute(&self, batch: &RecordBatch) -> JitResult<FilterSumValue> {
-        if let Some(plan) = &self.plan {
-            return execute_filter_sum_plan(plan, batch);
+        if let Some(spec) = &self.spec {
+            return execute_filter_sum_spec(spec, batch);
         }
 
         let view = BatchView::try_new(batch)?;
@@ -208,232 +170,38 @@ impl FilterSumValue {
     }
 }
 
-fn compile_filter_sum_plan(predicate: &JitExpr, measure: &JitExpr) -> Option<FilterSumPlan> {
-    if let (Some((predicate_col, op, threshold)), Some((left_col, right_col))) =
-        (parse_i64_compare(predicate), parse_f64_mul(measure))
-    {
-        return Some(FilterSumPlan::I64CompareF64Mul {
-            predicate_col,
-            op,
-            threshold,
-            left_col,
-            right_col,
-        });
-    }
-
-    let predicates = parse_fixed_predicates(predicate)?;
-    let (left_col, right_col, scale) = parse_decimal_mul(measure)?;
-    Some(FilterSumPlan::FixedCompareDecimalMul {
-        predicates,
-        left_col,
-        right_col,
-        scale,
-    })
-}
-
-fn parse_i64_compare(expr: &JitExpr) -> Option<(usize, JitBinaryOp, i64)> {
-    let JitExpr::Binary {
-        op, left, right, ..
-    } = expr
-    else {
-        return None;
-    };
-    if !is_compare_op(*op) {
-        return None;
-    }
-
-    if let Some((column, threshold)) = parse_i64_column_literal(left, right) {
-        return Some((column, *op, threshold));
-    }
-    if let Some((column, threshold)) = parse_i64_column_literal(right, left) {
-        return Some((column, reverse_compare_op(*op), threshold));
-    }
-    None
-}
-
-fn parse_i64_column_literal(column: &JitExpr, literal: &JitExpr) -> Option<(usize, i64)> {
-    let JitExpr::Column {
-        index,
-        ty: JitType::Int64,
-        ..
-    } = column
-    else {
-        return None;
-    };
-    let JitExpr::Literal(JitScalar::Int64(value)) = literal else {
-        return None;
-    };
-    Some((*index, *value))
-}
-
-fn parse_fixed_predicates(expr: &JitExpr) -> Option<Vec<FixedPredicate>> {
-    let mut predicates = Vec::new();
-    collect_fixed_predicates(expr, &mut predicates)?;
-    Some(predicates)
-}
-
-fn collect_fixed_predicates(expr: &JitExpr, predicates: &mut Vec<FixedPredicate>) -> Option<()> {
-    if let JitExpr::Binary {
-        op: JitBinaryOp::And,
-        left,
-        right,
-        ..
-    } = expr
-    {
-        collect_fixed_predicates(left, predicates)?;
-        collect_fixed_predicates(right, predicates)?;
-        return Some(());
-    }
-
-    predicates.push(parse_fixed_predicate(expr)?);
-    Some(())
-}
-
-fn parse_fixed_predicate(expr: &JitExpr) -> Option<FixedPredicate> {
-    let JitExpr::Binary {
-        op, left, right, ..
-    } = expr
-    else {
-        return None;
-    };
-    if !is_compare_op(*op) {
-        return None;
-    }
-
-    if let Some(predicate) = parse_fixed_column_literal(left, *op, right) {
-        return Some(predicate);
-    }
-    parse_fixed_column_literal(right, reverse_compare_op(*op), left)
-}
-
-fn parse_fixed_column_literal(
-    column: &JitExpr,
-    op: JitBinaryOp,
-    literal: &JitExpr,
-) -> Option<FixedPredicate> {
-    match (column, literal) {
-        (
-            JitExpr::Column {
-                index,
-                ty: JitType::Date32,
-                ..
-            },
-            JitExpr::Literal(JitScalar::Date32(value)),
-        ) => Some(FixedPredicate::Date32 {
-            col: *index,
-            op,
-            value: *value,
-        }),
-        (
-            JitExpr::Column {
-                index,
-                ty: JitType::Decimal128 { scale, .. },
-                ..
-            },
-            JitExpr::Literal(JitScalar::Decimal128 {
-                value,
-                scale: literal_scale,
-                ..
-            }),
-        ) if scale == literal_scale => Some(FixedPredicate::Decimal128 {
-            col: *index,
-            op,
-            value: *value,
-            scale: *scale,
-        }),
-        (
-            JitExpr::Column {
-                index,
-                ty: JitType::Int64,
-                ..
-            },
-            JitExpr::Literal(JitScalar::Int64(value)),
-        ) => Some(FixedPredicate::Int64 {
-            col: *index,
-            op,
-            value: *value,
-        }),
-        _ => None,
-    }
-}
-
-fn parse_f64_mul(expr: &JitExpr) -> Option<(usize, usize)> {
-    let JitExpr::Binary {
-        op: JitBinaryOp::Mul,
-        left,
-        right,
-        ..
-    } = expr
-    else {
-        return None;
-    };
-    Some((parse_f64_column(left)?, parse_f64_column(right)?))
-}
-
-fn parse_f64_column(expr: &JitExpr) -> Option<usize> {
-    let JitExpr::Column {
-        index,
-        ty: JitType::Float64,
-        ..
-    } = expr
-    else {
-        return None;
-    };
-    Some(*index)
-}
-
-fn parse_decimal_mul(expr: &JitExpr) -> Option<(usize, usize, i8)> {
-    let JitExpr::Binary {
-        op: JitBinaryOp::Mul,
-        left,
-        right,
-        ty: JitType::Decimal128 { scale, .. },
-        ..
-    } = expr
-    else {
-        return None;
-    };
-    Some((
-        parse_decimal_column(left)?,
-        parse_decimal_column(right)?,
-        *scale,
-    ))
-}
-
-fn parse_decimal_column(expr: &JitExpr) -> Option<usize> {
-    let JitExpr::Column {
-        index,
-        ty: JitType::Decimal128 { .. },
-        ..
-    } = expr
-    else {
-        return None;
-    };
-    Some(*index)
-}
-
-fn execute_filter_sum_plan(plan: &FilterSumPlan, batch: &RecordBatch) -> JitResult<FilterSumValue> {
-    match plan {
-        FilterSumPlan::I64CompareF64Mul {
-            predicate_col,
-            op,
-            threshold,
-            left_col,
-            right_col,
+fn execute_filter_sum_spec(spec: &KernelSpec, batch: &RecordBatch) -> JitResult<FilterSumValue> {
+    match spec {
+        KernelSpec::F64FilterSum {
+            predicate_column,
+            predicate_op,
+            predicate_value,
+            measure_left_column,
+            measure_right_column,
         } => execute_i64_filter_f64_sum(
             batch,
-            *predicate_col,
-            *op,
-            *threshold,
-            *left_col,
-            *right_col,
+            *predicate_column,
+            *predicate_op,
+            *predicate_value,
+            *measure_left_column,
+            *measure_right_column,
         ),
-        FilterSumPlan::FixedCompareDecimalMul {
+        KernelSpec::DecimalFilterSum {
             predicates,
-            left_col,
-            right_col,
-            scale,
-        } => execute_fixed_filter_decimal_sum(batch, predicates, *left_col, *right_col, *scale),
+            measure_left_column,
+            measure_right_column,
+            output_scale,
+        } => execute_fixed_filter_decimal_sum(
+            batch,
+            predicates,
+            *measure_left_column,
+            *measure_right_column,
+            *output_scale,
+        ),
+        _ => Err(JitError::UnsupportedExpr(format!(
+            "kernel spec {:?} cannot execute filter-sum",
+            spec.kind()
+        ))),
     }
 }
 
@@ -466,7 +234,7 @@ fn execute_i64_filter_f64_sum(
 
 fn execute_fixed_filter_decimal_sum(
     batch: &RecordBatch,
-    predicates: &[FixedPredicate],
+    predicates: &[PredicateSpec],
     left_col: usize,
     right_col: usize,
     scale: i8,
@@ -537,23 +305,23 @@ impl BoundPredicate<'_> {
 
 fn bind_predicates<'a>(
     batch: &'a RecordBatch,
-    predicates: &[FixedPredicate],
+    predicates: &[PredicateSpec],
 ) -> JitResult<Vec<BoundPredicate<'a>>> {
     predicates
         .iter()
         .map(|predicate| match *predicate {
-            FixedPredicate::Date32 { col, op, value } => Ok(BoundPredicate::Date32 {
-                array: date32_column(batch, col)?,
+            PredicateSpec::Date32 { column, op, value } => Ok(BoundPredicate::Date32 {
+                array: date32_column(batch, column)?,
                 op,
                 value,
             }),
-            FixedPredicate::Decimal128 {
-                col,
+            PredicateSpec::Decimal128 {
+                column,
                 op,
                 value,
                 scale,
             } => {
-                let array = decimal128_column(batch, col)?;
+                let array = decimal128_column(batch, column)?;
                 if array.scale() != scale {
                     return Err(JitError::UnsupportedExpr(format!(
                         "decimal predicate scale {} does not match column scale {}",
@@ -563,8 +331,8 @@ fn bind_predicates<'a>(
                 }
                 Ok(BoundPredicate::Decimal128 { array, op, value })
             }
-            FixedPredicate::Int64 { col, op, value } => Ok(BoundPredicate::Int64 {
-                array: int64_column(batch, col)?,
+            PredicateSpec::Int64 { column, op, value } => Ok(BoundPredicate::Int64 {
+                array: int64_column(batch, column)?,
                 op,
                 value,
             }),
@@ -602,29 +370,6 @@ fn float64_column(batch: &RecordBatch, index: usize) -> JitResult<&Float64Array>
         .as_any()
         .downcast_ref::<Float64Array>()
         .ok_or_else(|| JitError::Backend(format!("column {index} is not Float64")))
-}
-
-fn is_compare_op(op: JitBinaryOp) -> bool {
-    matches!(
-        op,
-        JitBinaryOp::Eq
-            | JitBinaryOp::NotEq
-            | JitBinaryOp::Lt
-            | JitBinaryOp::LtEq
-            | JitBinaryOp::Gt
-            | JitBinaryOp::GtEq
-    )
-}
-
-fn reverse_compare_op(op: JitBinaryOp) -> JitBinaryOp {
-    match op {
-        JitBinaryOp::Lt => JitBinaryOp::Gt,
-        JitBinaryOp::LtEq => JitBinaryOp::GtEq,
-        JitBinaryOp::Gt => JitBinaryOp::Lt,
-        JitBinaryOp::GtEq => JitBinaryOp::LtEq,
-        JitBinaryOp::Eq | JitBinaryOp::NotEq => op,
-        _ => unreachable!("non-comparison operator cannot be reversed"),
-    }
 }
 
 fn compare_i64(op: JitBinaryOp, lhs: i64, rhs: i64) -> bool {

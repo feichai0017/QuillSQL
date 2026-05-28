@@ -7,8 +7,8 @@ use datafusion::physical_plan::ExecutionPlan;
 
 use crate::{
     CompiledAggregatePipelineExec, CompiledKernel, CompiledRecordPipelineExec, FilterProjectKernel,
-    FilterSumKernel, JitExpr, JitOptions, JitProjection, KernelBackend, KernelKind, MlirBackend,
-    PipelineLowering,
+    FilterSumKernel, JitExpr, JitOptions, JitProjection, KernelBackend, KernelKind, KernelSpec,
+    MlirBackend, PipelineLowering,
 };
 
 use crate::pipeline::{OutputAdapter, PhysicalPipeline};
@@ -45,7 +45,7 @@ impl<'a> PipelineCompiler<'a> {
                     Ok(runtime) => runtime,
                     Err(_) => return Ok(None),
                 };
-                let kernel = self.filter_project_kernel(&predicate, &projections);
+                let kernel = self.filter_project_kernel(&runtime, &predicate, &projections);
                 let exec =
                     CompiledRecordPipelineExec::try_new(input, runtime, output_schema, kernel)?;
                 let exec = Arc::new(exec) as Arc<dyn ExecutionPlan>;
@@ -56,7 +56,7 @@ impl<'a> PipelineCompiler<'a> {
                     Ok(runtime) => runtime,
                     Err(_) => return Ok(None),
                 };
-                let kernel = self.filter_sum_kernel(&predicate, &measure);
+                let kernel = self.filter_sum_kernel(&runtime, &predicate, &measure);
                 let exec =
                     CompiledAggregatePipelineExec::try_new(input, runtime, output_schema, kernel)?;
                 Ok(Some(Arc::new(exec) as Arc<dyn ExecutionPlan>))
@@ -82,6 +82,7 @@ impl<'a> PipelineCompiler<'a> {
 
     fn filter_project_kernel(
         &self,
+        runtime: &FilterProjectKernel,
         predicate: &JitExpr,
         projections: &[JitProjection],
     ) -> CompiledKernel {
@@ -91,9 +92,13 @@ impl<'a> PipelineCompiler<'a> {
         {
             let executable = self.backend.verify_module(&module).is_ok()
                 && self.options.mlir_execution_enabled();
-            return CompiledKernel::new(
+            let spec = runtime
+                .spec()
+                .cloned()
+                .unwrap_or_else(|| KernelSpec::generic(KernelKind::FilterProject));
+            return CompiledKernel::with_spec(
                 module.symbol,
-                KernelKind::FilterProject,
+                spec,
                 self.backend.name(),
                 module.text,
                 executable,
@@ -116,11 +121,22 @@ impl<'a> PipelineCompiler<'a> {
         }
     }
 
-    fn filter_sum_kernel(&self, predicate: &JitExpr, measure: &JitExpr) -> CompiledKernel {
+    fn filter_sum_kernel(
+        &self,
+        runtime: &FilterSumKernel,
+        predicate: &JitExpr,
+        measure: &JitExpr,
+    ) -> CompiledKernel {
+        let spec = || {
+            runtime
+                .spec()
+                .cloned()
+                .unwrap_or_else(|| KernelSpec::generic(KernelKind::FilterSum))
+        };
         if let Ok(module) = self.backend.lower_f64_filter_sum(predicate, measure) {
-            return CompiledKernel::new(
+            return CompiledKernel::with_spec(
                 module.symbol,
-                KernelKind::FilterSum,
+                spec(),
                 self.backend.name(),
                 module.text,
                 self.options.mlir_execution_enabled(),
@@ -128,9 +144,9 @@ impl<'a> PipelineCompiler<'a> {
         }
 
         if let Ok(module) = self.backend.lower_decimal_filter_sum(predicate, measure) {
-            return CompiledKernel::new(
+            return CompiledKernel::with_spec(
                 module.symbol,
-                KernelKind::FilterSum,
+                spec(),
                 self.backend.name(),
                 module.text,
                 self.options.mlir_execution_enabled(),
