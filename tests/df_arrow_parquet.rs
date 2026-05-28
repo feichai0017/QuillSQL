@@ -248,6 +248,16 @@ async fn debug_trace_reports_filter_sum_candidate() {
         "{:?}",
         trace.jit_candidates
     );
+    assert!(
+        trace
+            .pipeline_candidates
+            .iter()
+            .any(|candidate| candidate.kernel == KernelKind::FilterSum
+                && candidate.operators == vec!["filter"]
+                && candidate.sink == "sum"),
+        "{:?}",
+        trace.pipeline_candidates
+    );
 }
 
 #[cfg(feature = "jit-mlir")]

@@ -4,6 +4,7 @@ mod ir;
 mod kernel;
 mod mlir;
 mod options;
+mod pipeline;
 mod rule;
 mod runtime;
 
@@ -21,6 +22,7 @@ pub use mlir::{
 };
 pub use mlir::{MlirBackend, MlirColumn, MlirModule};
 pub use options::JitOptions;
+pub use pipeline::PipelineCandidate;
 pub use rule::{JitCandidate, MlirJitRule};
 pub use runtime::{FilterProjectKernel, FilterSumKernel, FilterSumValue};
 

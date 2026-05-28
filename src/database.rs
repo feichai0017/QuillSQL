@@ -14,7 +14,7 @@ use serde::Serialize;
 use tempfile::TempDir;
 
 use crate::error::{QuillSQLError, QuillSQLResult};
-use crate::jit::{JitCandidate, JitOptions, MlirJitRule};
+use crate::jit::{JitCandidate, JitOptions, MlirJitRule, PipelineCandidate};
 
 #[derive(Debug, Clone)]
 pub struct DatabaseOptions {
@@ -76,6 +76,7 @@ pub struct DebugTrace {
     pub logical_plan: String,
     pub physical_plan: String,
     pub jit_candidates: Vec<JitCandidate>,
+    pub pipeline_candidates: Vec<PipelineCandidate>,
     pub rows: usize,
     pub duration_ms: u128,
     pub logical_tree: DebugPlanNode,
@@ -191,15 +192,21 @@ impl Database {
                 .unwrap_or_else(|| {
                     "DataFusion physical plan unavailable for this statement".into()
                 });
+            let jit_rule = MlirJitRule::new();
             let jit_candidates = physical_plan
                 .as_ref()
-                .map(|plan| MlirJitRule::new().inspect_plan(Arc::clone(plan)))
+                .map(|plan| jit_rule.inspect_plan(Arc::clone(plan)))
+                .unwrap_or_default();
+            let pipeline_candidates = physical_plan
+                .as_ref()
+                .map(|plan| jit_rule.inspect_pipelines(Arc::clone(plan)))
                 .unwrap_or_default();
             Some((
                 logical_tree,
                 logical_plan_str,
                 physical_plan_str,
                 jit_candidates,
+                pipeline_candidates,
             ))
         } else {
             None
@@ -212,11 +219,19 @@ impl Database {
             .map_err(map_datafusion_err)?;
         let batches = df.collect().await.map_err(map_datafusion_err)?;
         let rows = batches.iter().map(|batch| batch.num_rows()).sum();
-        if let Some((logical_tree, logical_plan, physical_plan, jit_candidates)) = trace_input {
+        if let Some((
+            logical_tree,
+            logical_plan,
+            physical_plan,
+            jit_candidates,
+            pipeline_candidates,
+        )) = trace_input
+        {
             self.record_trace(DebugTrace {
                 logical_plan,
                 physical_plan: physical_plan.clone(),
                 jit_candidates,
+                pipeline_candidates,
                 rows,
                 duration_ms: start.elapsed().as_millis(),
                 logical_tree,

@@ -12,6 +12,10 @@ pub enum KernelIr {
         predicate: JitExpr,
         projections: Vec<JitProjection>,
     },
+    FilterSum {
+        predicate: JitExpr,
+        measure: JitExpr,
+    },
 }
 
 impl KernelIr {
@@ -20,6 +24,7 @@ impl KernelIr {
             Self::Filter { .. } => KernelKind::Filter,
             Self::Projection { .. } => KernelKind::Projection,
             Self::FilterProject { .. } => KernelKind::FilterProject,
+            Self::FilterSum { .. } => KernelKind::FilterSum,
         }
     }
 
@@ -28,6 +33,7 @@ impl KernelIr {
             Self::Filter { .. } => "filter",
             Self::Projection { .. } => "projection",
             Self::FilterProject { .. } => "filter_project",
+            Self::FilterSum { .. } => "filter_sum",
         }
     }
 }
@@ -44,9 +50,10 @@ pub enum PipelineOp {
     Limit(usize),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum PipelineSink {
     RecordBatch,
+    Sum { measure: JitExpr },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -65,21 +72,58 @@ impl PipelineIr {
         }
     }
 
+    pub fn filter_sum(predicate: JitExpr, measure: JitExpr) -> Self {
+        Self {
+            source: PipelineSource::DataFusionInput,
+            operators: vec![PipelineOp::Filter(predicate)],
+            sink: PipelineSink::Sum { measure },
+        }
+    }
+
     pub fn first_kernel(&self) -> Option<KernelIr> {
-        match self.operators.as_slice() {
-            [PipelineOp::Filter(predicate), PipelineOp::Projection(projections), ..] => {
-                Some(KernelIr::FilterProject {
+        match (self.operators.as_slice(), &self.sink) {
+            ([PipelineOp::Filter(predicate), ..], PipelineSink::Sum { measure }) => {
+                Some(KernelIr::FilterSum {
                     predicate: predicate.clone(),
+                    measure: measure.clone(),
+                })
+            }
+            (
+                [PipelineOp::Filter(predicate), PipelineOp::Projection(projections), ..],
+                PipelineSink::RecordBatch,
+            ) => Some(KernelIr::FilterProject {
+                predicate: predicate.clone(),
+                projections: projections.clone(),
+            }),
+            ([PipelineOp::Filter(predicate), ..], PipelineSink::RecordBatch) => {
+                Some(KernelIr::Filter {
+                    predicate: predicate.clone(),
+                })
+            }
+            ([PipelineOp::Projection(projections), ..], PipelineSink::RecordBatch) => {
+                Some(KernelIr::Projection {
                     projections: projections.clone(),
                 })
             }
-            [PipelineOp::Filter(predicate), ..] => Some(KernelIr::Filter {
-                predicate: predicate.clone(),
-            }),
-            [PipelineOp::Projection(projections), ..] => Some(KernelIr::Projection {
-                projections: projections.clone(),
-            }),
             _ => None,
+        }
+    }
+
+    pub fn operator_names(&self) -> Vec<&'static str> {
+        self.operators
+            .iter()
+            .map(|operator| match operator {
+                PipelineOp::Filter(_) => "filter",
+                PipelineOp::Projection(_) => "projection",
+                PipelineOp::Limit(_) => "limit",
+            })
+            .collect()
+    }
+
+    pub fn sink_name(&self) -> &'static str {
+        match &self.sink {
+            PipelineSink::RecordBatch => "record_batch",
+            PipelineSink::Sum { .. } => "sum",
         }
     }
 }
@@ -114,5 +158,19 @@ mod tests {
             pipeline.first_kernel().expect("kernel").kind(),
             KernelKind::Projection
         );
+    }
+
+    #[test]
+    fn recognizes_filter_sum_pipeline_kernel() {
+        let predicate = JitExpr::Literal(JitScalar::Bool(true));
+        let measure = JitExpr::Literal(JitScalar::Float64(1.0));
+        let pipeline = PipelineIr::filter_sum(predicate, measure);
+
+        assert_eq!(
+            pipeline.first_kernel().expect("kernel").kind(),
+            KernelKind::FilterSum
+        );
+        assert_eq!(pipeline.operator_names(), vec!["filter"]);
+        assert_eq!(pipeline.sink_name(), "sum");
     }
 }

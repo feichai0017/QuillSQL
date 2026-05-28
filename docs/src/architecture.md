@@ -67,9 +67,11 @@ runtime.
 
 QuillSQL keeps two JIT-level IRs:
 
-- `KernelIR`: a single compilable kernel such as filter, projection, or fused
-  filter/project.
-- `PipelineIR`: a linear pipeline prefix from a DataFusion physical plan.
+- `KernelIR`: a single compilable kernel such as filter, projection, fused
+  filter/project, or the current filter/sum aggregate kernel.
+- `PipelineIR`: a linear pipeline prefix from a DataFusion physical plan,
+  including the first `filter -> plain SUM` sink shape used as the stepping
+  stone toward whole-pipeline lowering.
 
 The first fusion patterns are deliberately small:
 
@@ -86,8 +88,11 @@ The rule also handles the common DataFusion shape where a round-robin
 `RepartitionExec` sits between the filter and projection by placing the compiled
 node below the repartition. For plain aggregates, it rewrites the partial `SUM`
 node to a partition-preserving compiled filter/sum node and leaves DataFusion's
-final aggregate in place. This lets the project measure real operator
-boundaries before taking on grouped aggregates, joins, hash repartitioning, or
-whole-query pipeline lowering. The decimal path now has both a DataFusion-safe
-fixed-width Arrow runtime specialization and an executable MLIR dispatch path
-for the same fixed-width column layout.
+final aggregate in place. The same physical-plan shape is also exposed as a
+`PipelineIR` candidate in debug traces, so the next step can lower the whole
+`filter -> sum` pipeline without relying on string plan inspection. This lets
+the project measure real operator boundaries before taking on grouped
+aggregates, joins, hash repartitioning, or whole-query pipeline lowering. The
+decimal path now has both a DataFusion-safe fixed-width Arrow runtime
+specialization and an executable MLIR dispatch path for the same fixed-width
+column layout.

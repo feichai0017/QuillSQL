@@ -95,6 +95,8 @@ through MLIR, and
 thread-local MLIR execution cache when the input batch has no nulls or slice
 offsets; other cases keep the safe Arrow runtime fallback. CLI, server, and
 benchmark binaries read the same option once at startup from `QUILL_JIT=mlir`.
+Debug traces also expose the first `PipelineIR` candidate for `filter -> plain
+SUM`, which is the scaffold for the next whole-pipeline MLIR lowering step.
 
 Run the MLIR path with:
 
