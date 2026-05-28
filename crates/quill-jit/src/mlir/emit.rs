@@ -251,6 +251,7 @@ pub(super) fn lower_f64_filter_sum_with_symbol(
     Ok(MlirModule { symbol, text })
 }
 
+#[cfg(not(feature = "jit-mlir"))]
 pub(super) fn lower_decimal_filter_sum_with_symbol(
     symbol: String,
     predicate: &JitExpr,
@@ -463,6 +464,7 @@ fn ensure_f64_measure_pair(expr: &JitExpr, context: &str) -> JitResult<()> {
     Ok(())
 }
 
+#[cfg(not(feature = "jit-mlir"))]
 fn ensure_decimal_filter_sum(
     predicate: &JitExpr,
     measure: &JitExpr,
@@ -486,6 +488,7 @@ fn ensure_decimal_filter_sum(
     Ok(())
 }
 
+#[cfg(not(feature = "jit-mlir"))]
 fn ensure_decimal_measure_pair(expr: &JitExpr, context: &str) -> JitResult<()> {
     let JitExpr::Binary {
         op: JitBinaryOp::Mul,
@@ -539,6 +542,7 @@ fn ensure_single_i64_input(expr: &JitExpr, context: &str) -> JitResult<()> {
     Ok(())
 }
 
+#[cfg(not(feature = "jit-mlir"))]
 fn expr_call_args(expr: &JitExpr) -> String {
     let mut columns = BTreeMap::new();
     collect_columns(expr, &mut columns);
@@ -549,6 +553,7 @@ fn expr_call_args(expr: &JitExpr) -> String {
         .join(", ")
 }
 
+#[cfg(not(feature = "jit-mlir"))]
 fn expr_call_types(expr: &JitExpr) -> String {
     let mut columns = BTreeMap::new();
     collect_columns(expr, &mut columns);

@@ -141,8 +141,15 @@ fn lowers_q6_quill_dialect_to_mlir() {
 
     assert_eq!(module.symbol, "q6_decimal_pipeline");
     assert!(module.text.contains("func.func @q6_decimal_pipeline"));
-    assert!(module.text.contains("qjit.lowering = quill_dialect"));
     assert!(module.text.contains("i128"));
+    #[cfg(feature = "jit-mlir")]
+    {
+        assert!(module.text.contains("llvm.emit_c_interface"));
+        assert!(module.text.contains("scf.for"));
+        assert!(!module.text.contains("quill."));
+    }
+    #[cfg(not(feature = "jit-mlir"))]
+    assert!(module.text.contains("qjit.lowering = quill_dialect"));
     MlirBackend::new().verify_module(&module).unwrap();
 }
 
@@ -213,8 +220,17 @@ fn emits_decimal_filter_sum_module() {
         .unwrap();
 
     assert!(module.text.contains("func.func @quill_decimal_filter_sum_"));
-    assert!(module.text.contains("qjit.lowering = quill_dialect"));
-    assert!(module.text.contains("scf.for unsigned"));
+    #[cfg(feature = "jit-mlir")]
+    {
+        assert!(module.text.contains("llvm.emit_c_interface"));
+        assert!(module.text.contains("scf.for"));
+        assert!(!module.text.contains("quill."));
+    }
+    #[cfg(not(feature = "jit-mlir"))]
+    {
+        assert!(module.text.contains("qjit.lowering = quill_dialect"));
+        assert!(module.text.contains("scf.for unsigned"));
+    }
     assert!(module.text.contains("scf.if"));
     assert!(module.text.contains("i128"));
     assert!(module.text.contains("arith.muli"));

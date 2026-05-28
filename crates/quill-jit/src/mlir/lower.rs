@@ -26,6 +26,49 @@ pub(super) fn lower_quill_dialect(module: &QuillDialectModule) -> JitResult<Mlir
                 Some("quill_dialect"),
             )
         }
+        Some(PipelineSpec::DecimalFilterSum { .. }) => lower_plain_sum_with_native_pass(module),
+        Some(spec) => Err(JitError::UnsupportedExpr(format!(
+            "quill dialect lowering does not yet support {}",
+            spec.name()
+        ))),
+        None => Err(JitError::UnsupportedExpr(
+            "quill dialect lowering requires a supported pipeline spec".to_string(),
+        )),
+    }
+}
+
+#[cfg(feature = "jit-mlir")]
+fn lower_plain_sum_with_native_pass(module: &QuillDialectModule) -> JitResult<MlirModule> {
+    use melior::{ir::Module, pass, utility};
+
+    let context = super::verify::mlir_context();
+    let mut parsed = Module::parse(&context, &module.to_mlir_text()?).ok_or_else(|| {
+        JitError::Backend("MLIR parser rejected Quill dialect module".to_string())
+    })?;
+    let pass_manager = pass::PassManager::new(&context);
+    utility::parse_pass_pipeline(
+        pass_manager.as_operation_pass_manager(),
+        "builtin.module(convert-quill-to-loops)",
+    )
+    .map_err(|err| JitError::Backend(format!("Quill pass pipeline parse failed: {err:?}")))?;
+    pass_manager
+        .run(&mut parsed)
+        .map_err(|err| JitError::Backend(format!("Quill to loops lowering failed: {err:?}")))?;
+    let text = parsed.as_operation().to_string();
+    if text.contains("quill.") {
+        return Err(JitError::Backend(
+            "Quill to loops lowering left Quill dialect operations in the module".to_string(),
+        ));
+    }
+    Ok(MlirModule {
+        symbol: module.symbol.clone(),
+        text,
+    })
+}
+
+#[cfg(not(feature = "jit-mlir"))]
+fn lower_plain_sum_with_native_pass(module: &QuillDialectModule) -> JitResult<MlirModule> {
+    match module.pipeline_spec() {
         Some(PipelineSpec::DecimalFilterSum { .. }) => {
             let (predicate, measure) = filter_sum_exprs(module)?;
             emit::lower_decimal_filter_sum_with_symbol(
@@ -35,12 +78,8 @@ pub(super) fn lower_quill_dialect(module: &QuillDialectModule) -> JitResult<Mlir
                 Some("quill_dialect"),
             )
         }
-        Some(spec) => Err(JitError::UnsupportedExpr(format!(
-            "quill dialect lowering does not yet support {}",
-            spec.name()
-        ))),
-        None => Err(JitError::UnsupportedExpr(
-            "quill dialect lowering requires a supported pipeline spec".to_string(),
+        _ => Err(JitError::UnsupportedExpr(
+            "native Quill lowering fallback only supports decimal plain_sum".to_string(),
         )),
     }
 }

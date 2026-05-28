@@ -58,6 +58,13 @@ struct TpchQuery {
     name: &'static str,
     sql: &'static str,
     tables: &'static [&'static str],
+    compare_jit_modes: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TpchMode {
+    name: &'static str,
+    jit: JitOptions,
 }
 
 const TPCH_QUERIES: &[TpchQuery] = &[
@@ -65,16 +72,19 @@ const TPCH_QUERIES: &[TpchQuery] = &[
         name: "q6_scan_filter_aggregate",
         sql: Q6,
         tables: &["lineitem"],
+        compare_jit_modes: true,
     },
     TpchQuery {
         name: "q1_grouped_aggregate_sort",
         sql: Q1,
         tables: &["lineitem"],
+        compare_jit_modes: false,
     },
     TpchQuery {
         name: "q3_join_aggregate",
         sql: Q3,
         tables: &["customer", "orders", "lineitem"],
+        compare_jit_modes: false,
     },
 ];
 
@@ -87,44 +97,97 @@ fn bench_tpch(c: &mut Criterion) {
     group.sample_size(10);
 
     for query in TPCH_QUERIES {
-        let db = match runtime.block_on(prepare_database(&root, query.tables)) {
-            Ok(db) => db,
-            Err(err) => {
-                eprintln!("skipping {}: {}", query.name, err);
-                continue;
-            }
-        };
-        runtime
-            .block_on(db.run(query.sql))
-            .unwrap_or_else(|err| panic!("sql warmup {} failed: {}", query.name, err));
-        let prepared = runtime
-            .block_on(db.prepare(query.sql))
-            .unwrap_or_else(|err| panic!("prepare {} failed: {}", query.name, err));
-        runtime
-            .block_on(prepared.run())
-            .unwrap_or_else(|err| panic!("prepared warmup {} failed: {}", query.name, err));
-
-        group.bench_function(BenchmarkId::new("sql", query.name), |b| {
-            b.iter(|| {
-                black_box(
-                    runtime
-                        .block_on(db.run(black_box(query.sql)))
-                        .unwrap_or_else(|err| panic!("sql {} failed: {}", query.name, err)),
-                )
-            });
-        });
-        group.bench_function(BenchmarkId::new("prepared", query.name), |b| {
-            b.iter(|| {
-                black_box(
-                    runtime
-                        .block_on(prepared.run())
-                        .unwrap_or_else(|err| panic!("prepared {} failed: {}", query.name, err)),
-                )
-            });
-        });
+        for mode in query_modes(query) {
+            let db = match runtime.block_on(prepare_database(&root, query.tables, mode.jit)) {
+                Ok(db) => db,
+                Err(err) => {
+                    eprintln!("skipping {}/{}: {}", query.name, mode.name, err);
+                    continue;
+                }
+            };
+            warmup_and_bench(&mut group, &runtime, &db, query, mode.name);
+        }
     }
 
     group.finish();
+}
+
+fn query_modes(query: &TpchQuery) -> Vec<TpchMode> {
+    if query.compare_jit_modes {
+        #[cfg(feature = "jit-mlir")]
+        {
+            vec![
+                TpchMode {
+                    name: "datafusion",
+                    jit: JitOptions::disabled(),
+                },
+                TpchMode {
+                    name: "runtime",
+                    jit: JitOptions::runtime(),
+                },
+                TpchMode {
+                    name: "mlir",
+                    jit: JitOptions::mlir_execution(),
+                },
+            ]
+        }
+        #[cfg(not(feature = "jit-mlir"))]
+        {
+            vec![
+                TpchMode {
+                    name: "datafusion",
+                    jit: JitOptions::disabled(),
+                },
+                TpchMode {
+                    name: "runtime",
+                    jit: JitOptions::runtime(),
+                },
+            ]
+        }
+    } else {
+        vec![TpchMode {
+            name: "datafusion",
+            jit: JitOptions::disabled(),
+        }]
+    }
+}
+
+fn warmup_and_bench(
+    group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
+    runtime: &tokio::runtime::Runtime,
+    db: &Database,
+    query: &TpchQuery,
+    mode: &str,
+) {
+    runtime
+        .block_on(db.run(query.sql))
+        .unwrap_or_else(|err| panic!("sql warmup {}/{} failed: {}", mode, query.name, err));
+    let prepared = runtime
+        .block_on(db.prepare(query.sql))
+        .unwrap_or_else(|err| panic!("prepare {}/{} failed: {}", mode, query.name, err));
+    runtime
+        .block_on(prepared.run())
+        .unwrap_or_else(|err| panic!("prepared warmup {}/{} failed: {}", mode, query.name, err));
+
+    group.bench_function(BenchmarkId::new(format!("sql/{mode}"), query.name), |b| {
+        b.iter(|| {
+            black_box(
+                runtime
+                    .block_on(db.run(black_box(query.sql)))
+                    .unwrap_or_else(|err| panic!("sql {}/{} failed: {}", mode, query.name, err)),
+            )
+        });
+    });
+    group.bench_function(
+        BenchmarkId::new(format!("prepared/{mode}"), query.name),
+        |b| {
+            b.iter(|| {
+                black_box(runtime.block_on(prepared.run()).unwrap_or_else(|err| {
+                    panic!("prepared {}/{} failed: {}", mode, query.name, err)
+                }))
+            });
+        },
+    );
 }
 
 async fn load_or_generate_data() -> Result<PathBuf, String> {
@@ -168,10 +231,14 @@ async fn load_or_generate_data() -> Result<PathBuf, String> {
     Ok(root)
 }
 
-async fn prepare_database(root: &Path, tables: &[&str]) -> Result<Database, String> {
+async fn prepare_database(
+    root: &Path,
+    tables: &[&str],
+    jit: JitOptions,
+) -> Result<Database, String> {
     let db = Database::new(DatabaseOptions {
         debug_trace: false,
-        jit: JitOptions::from_env(),
+        jit,
         ..Default::default()
     })
     .map_err(|err| err.to_string())?;
