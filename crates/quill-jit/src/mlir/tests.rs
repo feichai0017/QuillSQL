@@ -1,6 +1,6 @@
 #[cfg(feature = "jit-mlir")]
-use crate::jit::DecimalFilterSumInput;
-use crate::jit::{
+use crate::DecimalFilterSumInput;
+use crate::{
     JitBinaryOp, JitExpr, JitProjection, JitScalar, JitType, MlirBackend, PipelineIr, PipelineKind,
     PipelineOp,
 };

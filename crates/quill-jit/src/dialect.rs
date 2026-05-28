@@ -1,6 +1,6 @@
 use std::fmt::Write;
 
-use crate::jit::{
+use crate::{
     JitExpr, JitProjection, PipelineIr, PipelineKind, PipelineOp, PipelineSink, PipelineSource,
 };
 
@@ -223,7 +223,7 @@ fn string_attr(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use crate::jit::{
+    use crate::{
         JitBinaryOp, JitExpr, JitProjection, JitScalar, JitType, PipelineIr, PipelineKind,
         PipelineOp, QuillDialectModule,
     };

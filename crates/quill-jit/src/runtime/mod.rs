@@ -10,7 +10,7 @@ use std::sync::Arc;
 use datafusion::arrow::datatypes::SchemaRef as ArrowSchemaRef;
 use datafusion::arrow::record_batch::RecordBatch;
 
-use crate::jit::{JitError, JitExpr, JitProjection, JitResult, JitType};
+use crate::{JitError, JitExpr, JitProjection, JitResult, JitType};
 
 use self::array::{arrow_type, BatchView, OutputBuilder};
 use self::eval::{ensure_supported_expr, eval_expr};

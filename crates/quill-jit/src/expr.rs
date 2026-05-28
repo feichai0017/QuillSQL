@@ -7,7 +7,7 @@ use datafusion::logical_expr::Operator;
 use datafusion::physical_expr::expressions::{BinaryExpr, Column, IsNullExpr, Literal};
 use datafusion::physical_expr::PhysicalExpr;
 
-use crate::jit::{JitError, JitResult};
+use crate::{JitError, JitResult};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum JitType {

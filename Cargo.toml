@@ -1,3 +1,24 @@
+[workspace]
+members = [".", "crates/quill-core", "crates/quill-jit"]
+default-members = [".", "crates/quill-core", "crates/quill-jit"]
+resolver = "2"
+
+[workspace.dependencies]
+axum = { version = "0.7", features = ["macros", "json"] }
+clap = { version = "4.3.19", features = ["derive", "cargo"] }
+comfy-table = "7.1.0"
+criterion = { version = "0.5", features = ["html_reports"] }
+datafusion = { version = "53.1.0", default-features = false, features = ["parquet", "sql"] }
+env_logger = "0.11.5"
+futures = "0.3.31"
+melior = "0.27.0"
+rustyline = "15.0.0"
+serde = { version = "1.0", features = ["derive"] }
+tempfile = "3.12.0"
+thiserror = "2.0.12"
+tokio = { version = "1.41.1", features = ["full"] }
+tower-http = { version = "0.5", features = ["fs", "trace", "cors"] }
+tpchgen-cli = "2.0.2"
 
 [package]
 name = "quill-sql"
@@ -9,27 +30,25 @@ repository = "https://github.com/feichai0017/quillsql"
 readme = "README.md"
 
 [dependencies]
-comfy-table = "7.1.0"
-thiserror = "2.0.12"
-clap = { version = "4.3.19", features = ["derive", "cargo"] }
-env_logger = "0.11.5"
-serde = { version = "1.0", features = ["derive"] }
-tempfile = "3.12.0"
-tokio = { version = "1.41.1", features = ["full"] }
-futures = "0.3.31"
-rustyline = "15.0.0"
-axum = { version = "0.7", features = ["macros", "json"] }
-tower-http = { version = "0.5", features = ["fs", "trace", "cors"] }
-datafusion = { version = "53.1.0", default-features = false, features = ["parquet", "sql"] }
-melior = { version = "0.27.0", optional = true }
+axum = { workspace = true }
+clap = { workspace = true }
+env_logger = { workspace = true }
+quill-core = { version = "0.3.1", path = "crates/quill-core" }
+quill-jit = { version = "0.3.1", path = "crates/quill-jit" }
+rustyline = { workspace = true }
+serde = { workspace = true }
+tokio = { workspace = true }
+tower-http = { workspace = true }
 
 [features]
 default = []
-jit-mlir = ["dep:melior"]
+jit-mlir = ["quill-core/jit-mlir", "quill-jit/jit-mlir"]
 
 [dev-dependencies]
-criterion = { version = "0.5", features = ["html_reports"] }
-tpchgen-cli = "2.0.2"
+criterion = { workspace = true }
+datafusion = { workspace = true }
+tempfile = { workspace = true }
+tpchgen-cli = { workspace = true }
 
 [[bench]]
 name = "jit_micro"

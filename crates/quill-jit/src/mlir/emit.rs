@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::jit::{JitBinaryOp, JitError, JitExpr, JitProjection, JitResult, JitScalar, JitType};
+use crate::{JitBinaryOp, JitError, JitExpr, JitProjection, JitResult, JitScalar, JitType};
 
 use super::{MlirColumn, MlirModule};
 

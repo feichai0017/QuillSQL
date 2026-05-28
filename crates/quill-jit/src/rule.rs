@@ -7,7 +7,7 @@ use datafusion::physical_optimizer::PhysicalOptimizerRule;
 use datafusion::physical_plan::ExecutionPlan;
 use serde::Serialize;
 
-use crate::jit::{
+use crate::{
     CompiledAggregatePipelineExec, CompiledRecordPipelineExec, JitOptions, KernelKind, MlirBackend,
     PipelineCandidate,
 };

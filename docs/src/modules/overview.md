@@ -1,9 +1,18 @@
 # Module Overview
 
-The current codebase is intentionally small. DataFusion provides the SQL engine;
-QuillSQL provides the embedding API, front ends, and MLIR research hooks.
+The current codebase is a small Cargo workspace. DataFusion provides the SQL
+engine; QuillSQL provides the embedding API, front ends, and MLIR research
+hooks.
 
-## Database (`src/database.rs`)
+## Workspace Packages
+
+| Package | Role |
+| ------- | ---- |
+| `quill-sql` | Public facade crate plus CLI/server binaries and benchmarks. |
+| `quill-core` | DataFusion-backed `Database` API, query execution, Parquet registration, and debug traces. |
+| `quill-jit` | Pipeline extraction, Quill dialect skeleton, MLIR emission, compiled execution nodes, and Arrow kernel runtime. |
+
+## Database (`crates/quill-core/src/database.rs`)
 
 `Database::run` is the interactive SQL entry point. It asks DataFusion to create
 the logical plan, captures a debug snapshot of the logical/physical plan,
@@ -16,7 +25,7 @@ still giving DataFusion a fresh physical plan for each execution.
 `Database::register_parquet` exposes the durable storage path by registering a
 Parquet dataset as a DataFusion table.
 
-## JIT (`src/jit`)
+## JIT (`crates/quill-jit/src`)
 
 | File | Role |
 | ---- | ---- |

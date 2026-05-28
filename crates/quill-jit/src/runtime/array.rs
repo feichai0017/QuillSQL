@@ -8,7 +8,7 @@ use datafusion::arrow::array::{
 use datafusion::arrow::datatypes::DataType as ArrowDataType;
 use datafusion::arrow::record_batch::RecordBatch;
 
-use crate::jit::{JitError, JitResult, JitType};
+use crate::{JitError, JitResult, JitType};
 
 use super::value::Scalar;
 

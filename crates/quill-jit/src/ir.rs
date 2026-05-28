@@ -1,4 +1,4 @@
-use crate::jit::{JitExpr, JitProjection};
+use crate::{JitExpr, JitProjection};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PipelineSource {
@@ -63,15 +63,15 @@ impl PipelineIr {
 
 #[cfg(test)]
 mod tests {
-    use crate::jit::{JitExpr, JitProjection, JitScalar, JitType, PipelineIr};
+    use crate::{JitExpr, JitProjection, JitScalar, JitType, PipelineIr};
 
     #[test]
     fn records_filter_project_pipeline() {
         let predicate = JitExpr::Literal(JitScalar::Bool(true));
         let projection = JitProjection::new(JitExpr::Literal(JitScalar::Int64(1)), "one");
         let pipeline = PipelineIr::new(vec![
-            crate::jit::PipelineOp::Filter(predicate),
-            crate::jit::PipelineOp::Projection(vec![projection]),
+            crate::PipelineOp::Filter(predicate),
+            crate::PipelineOp::Projection(vec![projection]),
         ]);
 
         assert_eq!(pipeline.operator_names(), vec!["filter", "projection"]);
@@ -82,7 +82,7 @@ mod tests {
     fn records_projection_pipeline() {
         let projection =
             JitProjection::new(JitExpr::Literal(JitScalar::Null(JitType::Int64)), "value");
-        let pipeline = PipelineIr::new(vec![crate::jit::PipelineOp::Projection(vec![projection])]);
+        let pipeline = PipelineIr::new(vec![crate::PipelineOp::Projection(vec![projection])]);
 
         assert_eq!(pipeline.operator_names(), vec!["projection"]);
         assert_eq!(pipeline.sink_name(), "record_batch");

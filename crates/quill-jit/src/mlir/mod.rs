@@ -8,7 +8,7 @@ mod verify;
 
 use datafusion::arrow::datatypes::SchemaRef as ArrowSchemaRef;
 
-use crate::jit::{
+use crate::{
     CompiledKernel, JitExpr, JitProjection, JitResult, JitType, KernelBackend, KernelKind,
     PipelineIr, QuillDialectModule,
 };

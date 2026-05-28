@@ -13,7 +13,7 @@ use datafusion::physical_plan::repartition::RepartitionExec;
 use datafusion::physical_plan::ExecutionPlan;
 use serde::Serialize;
 
-use crate::jit::{
+use crate::{
     CompiledAggregatePipelineExec, CompiledRecordPipelineExec, JitExpr, JitProjection, PipelineIr,
     PipelineKind, PipelineLowering, PipelineOp,
 };
@@ -222,7 +222,7 @@ fn lower_projection_exprs(
             JitExpr::from_physical(&expr.expr, input_schema)
                 .map(|jit_expr| JitProjection::new(jit_expr, expr.alias.clone()))
         })
-        .collect::<crate::jit::JitResult<Vec<_>>>()
+        .collect::<crate::JitResult<Vec<_>>>()
         .ok()
 }
 

@@ -1,7 +1,7 @@
 use datafusion::arrow::datatypes::SchemaRef as ArrowSchemaRef;
 use serde::Serialize;
 
-use crate::jit::{JitExpr, JitProjection, JitResult};
+use crate::{JitExpr, JitProjection, JitResult};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]

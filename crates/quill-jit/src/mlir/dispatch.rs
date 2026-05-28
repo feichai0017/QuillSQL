@@ -6,7 +6,7 @@ use datafusion::arrow::array::{Array, Date32Array, Decimal128Array, Float64Array
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::{DataFusionError, Result};
 
-use crate::jit::{
+use crate::{
     CompiledDecimalFilterSum, CompiledF64FilterSum, CompiledI64FilterProject, CompiledKernel,
     DecimalFilterSumInput, FilterProjectKernel, FilterSumKernel, FilterSumValue, JitExpr, JitType,
     MlirBackend,

@@ -6,7 +6,7 @@ use datafusion::arrow::array::{
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
 
-use crate::jit::{JitBinaryOp, JitExpr, JitProjection, JitScalar, JitType};
+use crate::{JitBinaryOp, JitExpr, JitProjection, JitScalar, JitType};
 
 use super::{FilterProjectKernel, FilterSumKernel, FilterSumValue};
 

@@ -1,4 +1,4 @@
-use crate::jit::{JitError, JitType};
+use crate::{JitError, JitType};
 
 #[derive(Clone, Copy)]
 pub(super) enum Scalar {

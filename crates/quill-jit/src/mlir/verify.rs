@@ -1,6 +1,6 @@
 #[cfg(feature = "jit-mlir")]
-use crate::jit::JitError;
-use crate::jit::JitResult;
+use crate::JitError;
+use crate::JitResult;
 
 use super::MlirModule;
 

@@ -1,6 +1,6 @@
 use serde::Serialize;
 
-use crate::jit::{JitExpr, JitProjection, PipelineIr, PipelineOp, PipelineSink, PipelineSource};
+use crate::{JitExpr, JitProjection, PipelineIr, PipelineOp, PipelineSink, PipelineSource};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum PipelineKind {
@@ -53,7 +53,7 @@ impl PipelineLowering {
 
 #[cfg(test)]
 mod tests {
-    use crate::jit::{
+    use crate::{
         JitExpr, JitProjection, JitScalar, PipelineIr, PipelineKind, PipelineLowering, PipelineOp,
     };
 

@@ -1,7 +1,7 @@
 use datafusion::arrow::array::{Array, Date32Array, Decimal128Array, Float64Array, Int64Array};
 use datafusion::arrow::record_batch::RecordBatch;
 
-use crate::jit::{JitBinaryOp, JitError, JitExpr, JitResult, JitScalar, JitType};
+use crate::{JitBinaryOp, JitError, JitExpr, JitResult, JitScalar, JitType};
 
 use super::eval::{ensure_supported_expr, eval_expr};
 use super::value::Scalar;

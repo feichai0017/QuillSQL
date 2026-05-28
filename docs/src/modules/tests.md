@@ -8,7 +8,7 @@ MLIR JIT boundary.
 | Location | Purpose |
 | -------- | ------- |
 | `tests/df_arrow_parquet.rs` | End-to-end SQL over DataFusion memory tables and registered Parquet datasets. |
-| `src/jit/*` unit tests | JIT expression lowering plus MLIR module generation and verification. |
+| `crates/quill-jit/src/*` unit tests | JIT expression lowering plus MLIR module generation and verification. |
 
 Common commands:
 

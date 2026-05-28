@@ -60,24 +60,32 @@ let out = db.run("SELECT count(*) FROM events WHERE user_id IS NOT NULL").await?
 
 ## MLIR JIT
 
-The JIT package is intentionally separate from the DataFusion wrapper:
+The workspace is split into focused packages:
 
-- `src/jit/expr.rs` lowers supported DataFusion physical expressions to a small
-  JIT expression IR.
-- `src/jit/compiler.rs` compiles recognized `PipelineIR` shapes into DataFusion
-  physical execution nodes.
-- `src/jit/dialect.rs` defines the first Quill pipeline dialect skeleton:
-  source, exec, and sink ops for future MLIR dialect lowering.
-- `src/jit/exec.rs` provides DataFusion physical nodes for compiled record and
-  aggregate pipelines.
-- `src/jit/ir.rs` defines `PipelineIR`; `src/jit/lowering.rs` lowers exact
-  pipeline shapes into executable record or aggregate kernels.
-- `src/jit/mlir/` owns MLIR emission, verification, and compiled kernel
+- `quill-sql`: the public facade crate plus CLI/server binaries.
+- `quill-core`: the DataFusion-backed `Database` API, query execution, Parquet
+  registration, and debug trace capture.
+- `quill-jit`: pipeline extraction, Quill pipeline dialect skeleton, MLIR
+  emission, compiled execution nodes, and fixed-width Arrow kernels.
+
+Inside `crates/quill-jit/src`:
+
+- `expr.rs` lowers supported DataFusion physical expressions to a small JIT
+  expression IR.
+- `compiler.rs` compiles recognized `PipelineIR` shapes into DataFusion physical
+  execution nodes.
+- `dialect.rs` defines the first Quill pipeline dialect skeleton: source, exec,
+  and sink ops for future MLIR dialect lowering.
+- `exec.rs` provides DataFusion physical nodes for compiled record and aggregate
+  pipelines.
+- `ir.rs` defines `PipelineIR`; `lowering.rs` lowers exact pipeline shapes into
+  executable record or aggregate kernels.
+- `mlir/` owns MLIR emission, verification, and compiled kernel
   invocation. The current compiled path covers narrow fixed-width
   ExecutionEngine kernels.
-- `src/jit/rule.rs` is the DataFusion physical optimizer rule that delegates
-  supported rewrites to the JIT compiler boundary.
-- `src/jit/runtime/` is the fixed-width Arrow batch kernel runtime. It includes
+- `rule.rs` is the DataFusion physical optimizer rule that delegates supported
+  rewrites to the JIT compiler boundary.
+- `runtime/` is the fixed-width Arrow batch kernel runtime. It includes
   the current DataFusion execution-node kernels and keeps specialized paths
   such as filter/sum separate from the generic expression evaluator.
 

@@ -16,9 +16,7 @@ use datafusion::physical_plan::{
 };
 use futures::{ready, Stream, StreamExt};
 
-use crate::jit::{
-    CompiledKernel, FilterProjectKernel, FilterSumKernel, FilterSumValue, KernelKind,
-};
+use crate::{CompiledKernel, FilterProjectKernel, FilterSumKernel, FilterSumValue, KernelKind};
 
 #[derive(Debug, Clone)]
 pub struct CompiledRecordPipelineExec {

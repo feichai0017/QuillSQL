@@ -1,6 +1,6 @@
 #![cfg(feature = "jit-mlir")]
 
-use crate::jit::{JitError, JitResult, JitType, MlirColumn, MlirModule};
+use crate::{JitError, JitResult, JitType, MlirColumn, MlirModule};
 
 use melior::{ir::Module, pass, ExecutionEngine};
 

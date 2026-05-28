@@ -3074,21 +3074,42 @@ dependencies = [
 ]
 
 [[package]]
+name = "quill-core"
+version = "0.3.1"
+dependencies = [
+ "comfy-table",
+ "datafusion",
+ "quill-jit",
+ "serde",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
+name = "quill-jit"
+version = "0.3.1"
+dependencies = [
+ "datafusion",
+ "futures",
+ "melior",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
 name = "quill-sql"
 version = "0.3.1"
 dependencies = [
  "axum",
  "clap",
- "comfy-table",
  "criterion",
  "datafusion",
  "env_logger",
- "futures",
- "melior",
+ "quill-core",
+ "quill-jit",
  "rustyline",
  "serde",
  "tempfile",
- "thiserror",
  "tokio",
  "tower-http",
  "tpchgen-cli",

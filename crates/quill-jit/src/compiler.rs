@@ -5,7 +5,7 @@ use datafusion::common::Result;
 use datafusion::physical_plan::repartition::RepartitionExec;
 use datafusion::physical_plan::ExecutionPlan;
 
-use crate::jit::{
+use crate::{
     CompiledAggregatePipelineExec, CompiledKernel, CompiledRecordPipelineExec, FilterProjectKernel,
     FilterSumKernel, JitExpr, JitOptions, JitProjection, KernelBackend, KernelKind, MlirBackend,
     PipelineLowering,
