@@ -236,7 +236,9 @@ async fn debug_trace_reports_filter_sum_candidate() {
 
     let trace = db.debug_last_trace().expect("trace");
     assert!(
-        trace.physical_plan.contains("CompiledFilterSumExec"),
+        trace
+            .physical_plan
+            .contains("CompiledAggregatePipelineExec"),
         "{}",
         trace.physical_plan
     );
@@ -253,6 +255,7 @@ async fn debug_trace_reports_filter_sum_candidate() {
             .pipeline_candidates
             .iter()
             .any(|candidate| candidate.kernel == KernelKind::FilterSum
+                && candidate.node == "CompiledAggregatePipelineExec"
                 && candidate.operators == vec!["filter"]
                 && candidate.sink == "sum"),
         "{:?}",
@@ -340,7 +343,9 @@ async fn parquet_q6_shape_uses_decimal_filter_sum_candidate() {
 
     let trace = db.debug_last_trace().expect("trace");
     assert!(
-        trace.physical_plan.contains("CompiledFilterSumExec"),
+        trace
+            .physical_plan
+            .contains("CompiledAggregatePipelineExec"),
         "{}",
         trace.physical_plan
     );

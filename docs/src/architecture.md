@@ -55,7 +55,7 @@ probe validates scalar invocation. The compiled fixed-width path now has an
 kernel that compacts one projected column, an `f64` filter/sum kernel for the
 first plain-aggregate path, and a Q6-shaped `Date32`/`Decimal128` filter/sum
 kernel over fixed-width column slices. `CompiledFilterProjectExec` can invoke
-the i64 filter/project kernel, and `CompiledFilterSumExec` can invoke the
+the i64 filter/project kernel, and `CompiledAggregatePipelineExec` can invoke the
 filter/sum kernels through thread-local MLIR execution caches when `jit-mlir` is
 enabled, `JitOptions::mlir_execution()` is selected, and the input batch has no
 nulls or slice offsets. CLI, server, and benchmark binaries map
@@ -81,18 +81,19 @@ Filter -> Projection
 
 Filter -> SUM(f64 expression)
 Filter(Date32/Decimal128 comparisons) -> SUM(Decimal128 * Decimal128)
-  => CompiledFilterSumExec
+  => CompiledAggregatePipelineExec
 ```
 
 The rule also handles the common DataFusion shape where a round-robin
 `RepartitionExec` sits between the filter and projection by placing the compiled
 node below the repartition. For plain aggregates, it rewrites the partial `SUM`
 node to a partition-preserving compiled filter/sum node and leaves DataFusion's
-final aggregate in place. The same physical-plan shape is also exposed as a
-`PipelineIR` candidate in debug traces, so the next step can lower the whole
-`filter -> sum` pipeline without relying on string plan inspection. This lets
-the project measure real operator boundaries before taking on grouped
-aggregates, joins, hash repartitioning, or whole-query pipeline lowering. The
-decimal path now has both a DataFusion-safe fixed-width Arrow runtime
-specialization and an executable MLIR dispatch path for the same fixed-width
-column layout.
+final aggregate in place. `rule.rs` extracts the physical shape, then hands the
+recognized `PipelineIR` to `PipelineCompiler`; it no longer constructs the
+aggregate execution node directly. The same physical-plan shape is exposed as a
+`PipelineIR` candidate in debug traces, so future whole-pipeline lowering does
+not rely on string plan inspection. This lets the project measure real operator
+boundaries before taking on grouped aggregates, joins, hash repartitioning, or
+whole-query pipeline lowering. The decimal path now has both a DataFusion-safe
+fixed-width Arrow runtime specialization and an executable MLIR dispatch path
+for the same fixed-width column layout.

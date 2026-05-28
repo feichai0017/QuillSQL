@@ -14,11 +14,11 @@ use datafusion::physical_plan::ExecutionPlan;
 use serde::Serialize;
 
 use crate::jit::{
-    CompiledFilterProjectExec, CompiledFilterSumExec, CompiledKernel, FilterProjectKernel,
-    FilterSumKernel, JitExpr, JitOptions, JitProjection, KernelBackend, KernelKind, MlirBackend,
-    PipelineCandidate,
+    CompiledAggregatePipelineExec, CompiledFilterProjectExec, CompiledKernel, FilterProjectKernel,
+    JitExpr, JitOptions, JitProjection, KernelBackend, KernelKind, MlirBackend, PipelineCandidate,
 };
 
+use super::compiler::PipelineCompiler;
 use super::pipeline::{extract_filter_sum_pipeline, pipeline_from_node};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -85,9 +85,12 @@ impl MlirJitRule {
             });
         }
 
-        if let Some(compiled) = plan.as_any().downcast_ref::<CompiledFilterSumExec>() {
+        if let Some(compiled) = plan
+            .as_any()
+            .downcast_ref::<CompiledAggregatePipelineExec>()
+        {
             return Some(JitCandidate {
-                node: "CompiledFilterSumExec",
+                node: "CompiledAggregatePipelineExec",
                 kernel: compiled.kernel().kind,
                 backend: compiled.kernel().backend.clone(),
                 executable: compiled.kernel().executable,
@@ -307,44 +310,6 @@ impl MlirJitRule {
             return Ok(None);
         };
 
-        let runtime =
-            match FilterSumKernel::try_new(pipeline.predicate.clone(), pipeline.measure.clone()) {
-                Ok(runtime) => runtime,
-                Err(_) => return Ok(None),
-            };
-        let kernel = self.filter_sum_kernel(&pipeline.predicate, &pipeline.measure);
-        let compiled =
-            CompiledFilterSumExec::try_new(pipeline.input, runtime, aggregate.schema(), kernel)?;
-        Ok(Some(Arc::new(compiled) as Arc<dyn ExecutionPlan>))
-    }
-
-    fn filter_sum_kernel(&self, predicate: &JitExpr, measure: &JitExpr) -> CompiledKernel {
-        if let Ok(module) = self.backend.lower_f64_filter_sum(predicate, measure) {
-            return CompiledKernel::new(
-                module.symbol,
-                KernelKind::FilterSum,
-                self.backend.name(),
-                module.text,
-                self.options.mlir_execution_enabled(),
-            );
-        }
-
-        if let Ok(module) = self.backend.lower_decimal_filter_sum(predicate, measure) {
-            return CompiledKernel::new(
-                module.symbol,
-                KernelKind::FilterSum,
-                self.backend.name(),
-                module.text,
-                self.options.mlir_execution_enabled(),
-            );
-        }
-
-        CompiledKernel::new(
-            "fixed_width_filter_sum",
-            KernelKind::FilterSum,
-            "fixed-width-runtime",
-            format!("predicate={predicate:?}; measure={measure:?}"),
-            false,
-        )
+        PipelineCompiler::new(&self.backend, &self.options).compile(pipeline)
     }
 }

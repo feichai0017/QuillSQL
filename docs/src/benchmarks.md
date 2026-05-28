@@ -5,12 +5,11 @@ QuillSQL uses benchmarks to separate three different claims:
 - JIT lowering cost: how much time QuillSQL spends building JIT IR and MLIR.
 - DataFusion execution cost: how the current DataFusion path behaves on Arrow
   batches or Parquet datasets, separately from SQL parsing and planning.
-- Compiled-node cost: how rewritten physical islands such as filter/project and
-  filter/sum behave before and after compiled MLIR function pointers are
-  enabled.
+- Compiled pipeline cost: how rewritten physical islands and aggregate
+  pipelines behave before and after compiled MLIR function pointers are enabled.
 
 The current code has real `CompiledFilterProjectExec` and
-`CompiledFilterSumExec` nodes in the DataFusion hot path, and their execution
+`CompiledAggregatePipelineExec` nodes in the DataFusion hot path, and their execution
 bodies use QuillSQL's fixed-width Arrow batch kernels. With `jit-mlir` and
 `QUILL_JIT=mlir`, the single-column i64 filter/project path and the f64 and
 Q6-shaped decimal filter/sum paths can dispatch to executable MLIR kernels for
@@ -41,8 +40,10 @@ Benchmarks:
 | `mlir_compiled/filter_sum_64k` | Compiled MLIR f64 filter/sum execution over 64K rows. Requires `jit-mlir`. |
 | `mlir_compiled/decimal_filter_sum_64k` | Compiled MLIR Q6-shaped decimal filter/sum execution over 64K fixed-width column slices. Requires `jit-mlir`. |
 | `quill_kernel/filter_project_64k` | Direct fixed-width Arrow kernel execution outside DataFusion planning. |
+| `quill_kernel/filter_sum_64k` | Direct fixed-width Arrow filter/sum kernel execution outside DataFusion planning. |
 | `datafusion/sql_filter_project_64k` | DataFusion SQL planning/execution over a 64K-row in-memory Arrow table, including the compiled filter/project physical node when the pattern matches. |
 | `datafusion/sql_filter_sum_64k` | DataFusion SQL planning/execution over a 64K-row in-memory Arrow table, including the compiled filter/sum physical node when the pattern matches. |
+| `datafusion/prepared_filter_sum_64k` | Prepared-plan filter/sum execution that removes SQL parsing and logical-plan construction from the timed loop while still using DataFusion physical planning and execution. |
 
 Without `jit-mlir`, MLIR verification is a no-op. With `jit-mlir`, the same
 benchmark includes `melior` parse and verifier cost:

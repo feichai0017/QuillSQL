@@ -30,7 +30,7 @@ pub struct CompiledFilterProjectExec {
 }
 
 #[derive(Debug, Clone)]
-pub struct CompiledFilterSumExec {
+pub struct CompiledAggregatePipelineExec {
     input: Arc<dyn ExecutionPlan>,
     runtime: FilterSumKernel,
     kernel: CompiledKernel,
@@ -92,7 +92,7 @@ impl CompiledFilterProjectExec {
     }
 }
 
-impl CompiledFilterSumExec {
+impl CompiledAggregatePipelineExec {
     pub fn try_new(
         input: Arc<dyn ExecutionPlan>,
         runtime: FilterSumKernel,
@@ -107,7 +107,7 @@ impl CompiledFilterSumExec {
         }
         if schema.fields().len() != 1 {
             return Err(DataFusionError::Internal(format!(
-                "CompiledFilterSumExec expected one output field, got {}",
+                "CompiledAggregatePipelineExec expected one output field, got {}",
                 schema.fields().len()
             )));
         }
@@ -183,13 +183,13 @@ impl DisplayAs for CompiledFilterProjectExec {
     }
 }
 
-impl DisplayAs for CompiledFilterSumExec {
+impl DisplayAs for CompiledAggregatePipelineExec {
     fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match t {
             DisplayFormatType::Default | DisplayFormatType::Verbose => {
                 write!(
                     f,
-                    "CompiledFilterSumExec: backend={}, executable={}, predicate={:?}, measure={:?}",
+                    "CompiledAggregatePipelineExec: backend={}, executable={}, predicate={:?}, measure={:?}",
                     self.kernel.backend,
                     self.kernel.executable,
                     self.runtime.predicate(),
@@ -267,9 +267,9 @@ impl ExecutionPlan for CompiledFilterProjectExec {
     }
 }
 
-impl ExecutionPlan for CompiledFilterSumExec {
+impl ExecutionPlan for CompiledAggregatePipelineExec {
     fn name(&self) -> &str {
-        "CompiledFilterSumExec"
+        "CompiledAggregatePipelineExec"
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -298,7 +298,7 @@ impl ExecutionPlan for CompiledFilterSumExec {
     ) -> Result<Arc<dyn ExecutionPlan>> {
         if children.len() != 1 {
             return Err(DataFusionError::Internal(format!(
-                "CompiledFilterSumExec expected one child, got {}",
+                "CompiledAggregatePipelineExec expected one child, got {}",
                 children.len()
             )));
         }
@@ -336,7 +336,7 @@ struct CompiledFilterProjectStream {
 struct CompiledFilterSumStream {
     schema: ArrowSchemaRef,
     input: SendableRecordBatchStream,
-    exec: CompiledFilterSumExec,
+    exec: CompiledAggregatePipelineExec,
     sum: Option<FilterSumValue>,
     emitted: bool,
 }

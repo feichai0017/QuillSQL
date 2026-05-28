@@ -1,3 +1,4 @@
+mod compiler;
 mod exec;
 mod expr;
 mod ir;
@@ -8,7 +9,7 @@ mod pipeline;
 mod rule;
 mod runtime;
 
-pub use exec::{CompiledFilterProjectExec, CompiledFilterSumExec};
+pub use exec::{CompiledAggregatePipelineExec, CompiledFilterProjectExec};
 pub use expr::{JitBinaryOp, JitExpr, JitProjection, JitScalar, JitType};
 pub use ir::{KernelIr, PipelineIr, PipelineOp, PipelineSink, PipelineSource};
 pub use kernel::{

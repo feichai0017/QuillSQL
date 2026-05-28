@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use datafusion::arrow::datatypes::{DataType as ArrowDataType, Schema as ArrowSchema};
+use datafusion::arrow::datatypes::{
+    DataType as ArrowDataType, Schema as ArrowSchema, SchemaRef as ArrowSchemaRef,
+};
 use datafusion::physical_expr::Partitioning;
 use datafusion::physical_plan::aggregates::{AggregateExec, AggregateMode};
 #[allow(deprecated)]
@@ -10,7 +12,7 @@ use datafusion::physical_plan::repartition::RepartitionExec;
 use datafusion::physical_plan::ExecutionPlan;
 use serde::Serialize;
 
-use crate::jit::{CompiledFilterSumExec, JitExpr, KernelKind, PipelineIr};
+use crate::jit::{CompiledAggregatePipelineExec, JitExpr, KernelKind, PipelineIr};
 
 #[derive(Debug, Clone)]
 pub(crate) struct PipelineMatch {
@@ -27,10 +29,10 @@ pub struct PipelineCandidate {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct FilterSumPipeline {
+pub(crate) struct PhysicalPipeline {
     pub input: Arc<dyn ExecutionPlan>,
-    pub predicate: JitExpr,
-    pub measure: JitExpr,
+    pub output_schema: ArrowSchemaRef,
+    pub ir: PipelineIr,
 }
 
 impl PipelineMatch {
@@ -45,16 +47,28 @@ impl PipelineMatch {
     }
 }
 
-impl FilterSumPipeline {
-    pub fn pipeline_ir(&self) -> PipelineIr {
-        PipelineIr::filter_sum(self.predicate.clone(), self.measure.clone())
+impl PhysicalPipeline {
+    pub fn filter_sum(
+        input: Arc<dyn ExecutionPlan>,
+        output_schema: ArrowSchemaRef,
+        predicate: JitExpr,
+        measure: JitExpr,
+    ) -> Self {
+        Self {
+            input,
+            output_schema,
+            ir: PipelineIr::filter_sum(predicate, measure),
+        }
     }
 }
 
 pub(crate) fn pipeline_from_node(plan: &Arc<dyn ExecutionPlan>) -> Option<PipelineMatch> {
-    if let Some(compiled) = plan.as_any().downcast_ref::<CompiledFilterSumExec>() {
+    if let Some(compiled) = plan
+        .as_any()
+        .downcast_ref::<CompiledAggregatePipelineExec>()
+    {
         return Some(PipelineMatch {
-            node: "CompiledFilterSumExec",
+            node: "CompiledAggregatePipelineExec",
             pipeline: PipelineIr::filter_sum(
                 compiled.runtime().predicate().clone(),
                 compiled.runtime().measure().clone(),
@@ -66,11 +80,11 @@ pub(crate) fn pipeline_from_node(plan: &Arc<dyn ExecutionPlan>) -> Option<Pipeli
     let pipeline = extract_filter_sum_pipeline(aggregate)?;
     Some(PipelineMatch {
         node: "AggregateExec",
-        pipeline: pipeline.pipeline_ir(),
+        pipeline: pipeline.ir,
     })
 }
 
-pub(crate) fn extract_filter_sum_pipeline(aggregate: &AggregateExec) -> Option<FilterSumPipeline> {
+pub(crate) fn extract_filter_sum_pipeline(aggregate: &AggregateExec) -> Option<PhysicalPipeline> {
     if *aggregate.mode() != AggregateMode::Partial
         || !aggregate.group_expr().is_true_no_grouping()
         || aggregate.aggr_expr().len() != 1
@@ -96,11 +110,12 @@ pub(crate) fn extract_filter_sum_pipeline(aggregate: &AggregateExec) -> Option<F
         filter.input().schema().as_ref(),
     )?;
 
-    Some(FilterSumPipeline {
-        input: Arc::clone(filter.input()),
+    Some(PhysicalPipeline::filter_sum(
+        Arc::clone(filter.input()),
+        aggregate.schema(),
         predicate,
         measure,
-    })
+    ))
 }
 
 fn is_supported_sum_output(data_type: &ArrowDataType) -> bool {

@@ -64,22 +64,24 @@ The JIT package is intentionally separate from the DataFusion wrapper:
 
 - `src/jit/expr.rs` lowers supported DataFusion physical expressions to a small
   JIT expression IR.
+- `src/jit/compiler.rs` compiles recognized `PipelineIR` shapes into DataFusion
+  physical execution nodes.
 - `src/jit/exec.rs` provides the DataFusion physical node for compiled
-  filter/project islands.
+  filter/project islands and aggregate pipelines.
 - `src/jit/ir.rs` defines `KernelIR` and `PipelineIR`, including the first
   `FilterProject` fusion pattern.
 - `src/jit/mlir/` owns MLIR emission, verification, and compiled kernel
   invocation. The current compiled path covers narrow fixed-width
   ExecutionEngine kernels.
-- `src/jit/rule.rs` is the DataFusion physical optimizer rule that rewrites
-  supported filter/project islands.
+- `src/jit/rule.rs` is the DataFusion physical optimizer rule that delegates
+  supported rewrites to the JIT compiler boundary.
 - `src/jit/runtime/` is the fixed-width Arrow batch kernel runtime. It includes
   the current DataFusion execution-node kernels and keeps specialized paths
   such as filter/sum separate from the generic expression evaluator.
 
 Current scope: MLIR is parsed and verified, and the DataFusion optimizer rule
 replaces supported filter/project islands with `CompiledFilterProjectExec` and
-supported plain `SUM` pipelines with `CompiledFilterSumExec`. Those nodes
+supported plain `SUM` pipelines with `CompiledAggregatePipelineExec`. Those nodes
 execute through QuillSQL's fixed-width Arrow kernel runtime while carrying MLIR
 kernel descriptors. Compiled scalar MLIR invocation is wired for the first
 `i64 -> bool` probe. The compiled batch path now includes an `i64` filter
@@ -91,7 +93,7 @@ over fixed-width column slices. With `jit-mlir` and
 `DatabaseOptions { jit: JitOptions::mlir_execution(), .. }`,
 `CompiledFilterProjectExec` dispatches the single-column i64 filter/project path
 through MLIR, and
-`CompiledFilterSumExec` dispatches the f64 and decimal filter/sum paths through a
+`CompiledAggregatePipelineExec` dispatches the f64 and decimal filter/sum paths through a
 thread-local MLIR execution cache when the input batch has no nulls or slice
 offsets; other cases keep the safe Arrow runtime fallback. CLI, server, and
 benchmark binaries read the same option once at startup from `QUILL_JIT=mlir`.

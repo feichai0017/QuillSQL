@@ -9,8 +9,8 @@ use quill_sql::database::{Database, DatabaseOptions};
 use quill_sql::jit::DecimalFilterSumInput;
 use quill_sql::jit::JitOptions;
 use quill_sql::jit::{
-    FilterProjectKernel, JitBinaryOp, JitExpr, JitProjection, JitScalar, JitType, KernelBackend,
-    MlirBackend, PipelineIr, PipelineOp,
+    FilterProjectKernel, FilterSumKernel, JitBinaryOp, JitExpr, JitProjection, JitScalar, JitType,
+    KernelBackend, MlirBackend, PipelineIr, PipelineOp,
 };
 
 fn schema() -> Arc<Schema> {
@@ -70,18 +70,32 @@ fn benchmark_database() -> Database {
     .expect("database")
 }
 
-#[cfg(feature = "jit-mlir")]
+fn sum_predicate() -> JitExpr {
+    JitExpr::Binary {
+        op: JitBinaryOp::Gt,
+        left: Box::new(JitExpr::Column {
+            index: 0,
+            name: "v".to_string(),
+            ty: JitType::Int64,
+            nullable: false,
+        }),
+        right: Box::new(JitExpr::Literal(JitScalar::Int64(500))),
+        ty: JitType::Bool,
+        nullable: false,
+    }
+}
+
 fn measure() -> JitExpr {
     JitExpr::Binary {
         op: JitBinaryOp::Mul,
         left: Box::new(JitExpr::Column {
-            index: 0,
+            index: 1,
             name: "price".to_string(),
             ty: JitType::Float64,
             nullable: false,
         }),
         right: Box::new(JitExpr::Column {
-            index: 1,
+            index: 2,
             name: "discount".to_string(),
             ty: JitType::Float64,
             nullable: false,
@@ -258,6 +272,7 @@ fn bench_jit_ir_and_mlir(c: &mut Criterion) {
     #[cfg(feature = "jit-mlir")]
     c.bench_function("mlir_compiled/compile_f64_filter_sum", |b| {
         let measure = measure();
+        let predicate = sum_predicate();
         b.iter(|| {
             black_box(
                 backend
@@ -345,6 +360,10 @@ fn bench_datafusion_filter_sum(c: &mut Criterion) {
     runtime
         .block_on(db.run("select sum(price * discount) from t where v > 500"))
         .expect("warmup");
+    let prepared = runtime
+        .block_on(db.prepare("select sum(price * discount) from t where v > 500"))
+        .expect("prepare");
+    runtime.block_on(prepared.run()).expect("prepared warmup");
 
     c.bench_function("datafusion/sql_filter_sum_64k", |b| {
         b.iter(|| {
@@ -356,6 +375,9 @@ fn bench_datafusion_filter_sum(c: &mut Criterion) {
                     .expect("query"),
             )
         });
+    });
+    c.bench_function("datafusion/prepared_filter_sum_64k", |b| {
+        b.iter(|| black_box(runtime.block_on(prepared.run()).expect("query")));
     });
 }
 
@@ -383,6 +405,34 @@ fn bench_quill_filter_project_kernel(c: &mut Criterion) {
         FilterProjectKernel::try_new(predicate(), projections(), output_schema).expect("kernel");
 
     c.bench_function("quill_kernel/filter_project_64k", |b| {
+        b.iter(|| black_box(kernel.execute(black_box(&batch)).expect("execute kernel")));
+    });
+}
+
+fn bench_quill_filter_sum_kernel(c: &mut Criterion) {
+    let input_schema = sum_schema();
+    let row_count = 65_536_i64;
+    let values = (0..row_count)
+        .map(|value| value % 1_000)
+        .collect::<Vec<_>>();
+    let prices = (0..row_count)
+        .map(|value| 100.0 + (value % 10) as f64)
+        .collect::<Vec<_>>();
+    let discounts = (0..row_count)
+        .map(|value| 0.01 * ((value % 7) as f64))
+        .collect::<Vec<_>>();
+    let batch = RecordBatch::try_new(
+        input_schema,
+        vec![
+            Arc::new(Int64Array::from(values)),
+            Arc::new(Float64Array::from(prices)),
+            Arc::new(Float64Array::from(discounts)),
+        ],
+    )
+    .expect("record batch");
+    let kernel = FilterSumKernel::try_new(sum_predicate(), measure()).expect("kernel");
+
+    c.bench_function("quill_kernel/filter_sum_64k", |b| {
         b.iter(|| black_box(kernel.execute(black_box(&batch)).expect("execute kernel")));
     });
 }
@@ -444,7 +494,7 @@ fn bench_compiled_f64_filter_sum_kernel(c: &mut Criterion) {
         .map(|value| 0.01 * ((value % 7) as f64))
         .collect::<Vec<_>>();
     let kernel = MlirBackend::new()
-        .compile_f64_filter_sum(&predicate(), &measure())
+        .compile_f64_filter_sum(&sum_predicate(), &measure())
         .expect("compiled f64 filter-sum");
 
     c.bench_function("mlir_compiled/filter_sum_64k", |b| {
@@ -515,6 +565,7 @@ criterion_group!(
     benches,
     bench_jit_ir_and_mlir,
     bench_quill_filter_project_kernel,
+    bench_quill_filter_sum_kernel,
     bench_datafusion_filter_project,
     bench_datafusion_filter_sum
 );
@@ -528,6 +579,7 @@ criterion_group!(
     bench_compiled_f64_filter_sum_kernel,
     bench_compiled_decimal_filter_sum_kernel,
     bench_quill_filter_project_kernel,
+    bench_quill_filter_sum_kernel,
     bench_datafusion_filter_project,
     bench_datafusion_filter_sum
 );
