@@ -1,6 +1,6 @@
 use clap::Parser;
-use quill_sql::database::{Database, DatabaseOptions};
-use quill_sql::jit::JitOptions;
+use quill_core::database::{Database, DatabaseOptions};
+use quill_jit::JitOptions;
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
 

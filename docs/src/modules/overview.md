@@ -8,9 +8,10 @@ hooks.
 
 | Package | Role |
 | ------- | ---- |
-| `quill-sql` | Public facade crate plus CLI/server binaries and benchmarks. |
+| `quill-sql` | CLI/server binaries, benchmarks, and release metadata. |
 | `quill-core` | DataFusion-backed `Database` API, query execution, Parquet registration, and debug traces. |
-| `quill-jit` | Pipeline extraction, Quill dialect model, MLIR emission, compiled execution nodes, and Arrow kernel runtime. |
+| `quill-jit` | Pipeline extraction, Quill dialect emission, MLIR lowering, compiled execution nodes, and Arrow kernel runtime. |
+| `quill-mlir` | Optional native C++/TableGen Quill dialect registration and MLIR pass extension points. |
 
 ## Database (`crates/quill-core/src/database.rs`)
 
@@ -29,23 +30,23 @@ Parquet dataset as a DataFusion table.
 
 | Directory | Role |
 | --------- | ---- |
-| `pipeline/` | Expression IR, `PipelineIR`, DataFusion physical-plan extraction, and the physical optimizer rule. |
+| `pipeline/` | Expression lowering, `PipelineGraph`, DataFusion physical-plan extraction, and the physical optimizer rule. |
 | `dialect/` | Quill pipeline dialect model used as the explicit lowering boundary. |
 | `lower/` | Exact pipeline pattern lowering, compiled-plan construction, and JIT options. |
 | `runtime/` | DataFusion compiled pipeline node, pipeline specs, and fixed-width Arrow batch kernels. |
-| `mlir/` | MLIR emission, verification, and compiled ExecutionEngine invocation. |
+| `mlir/` | MLIR emission, formal Quill dialect verification, and compiled ExecutionEngine invocation. |
 
 The JIT subdirectories have stricter internal boundaries:
 
 - `pipeline/expr.rs`: lowers supported DataFusion physical expressions into the
   small JIT expression IR.
-- `pipeline/ir.rs`: defines the semantic `PipelineIR` shape extracted from
+- `pipeline/graph.rs`: defines the semantic `PipelineGraph` shape extracted from
   DataFusion plans.
 - `pipeline/extract.rs`: extracts recognizable physical-plan pipelines such as
   `filter -> projection` and `filter -> plain SUM`.
 - `pipeline/rule.rs`: physical optimizer rule that delegates supported pipeline
   rewrites to the compiler.
-- `lower/compiler.rs`: compiles recognized `PipelineIR` shapes into DataFusion
+- `lower/compiler.rs`: compiles recognized `PipelineGraph` shapes into DataFusion
   execution nodes.
 - `mlir/mod.rs`: public backend surface and `KernelBackend` implementation.
 - `mlir/lower.rs`: lowers supported Quill dialect modules to executable MLIR;

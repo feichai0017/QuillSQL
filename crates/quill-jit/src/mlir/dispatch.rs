@@ -8,8 +8,8 @@ use datafusion::common::{DataFusionError, Result};
 
 use crate::{
     CompiledDecimalFilterSum, CompiledF64FilterSum, CompiledI64FilterProject, CompiledKernel,
-    DecimalFilterSumInput, FilterProjectKernel, FilterSumKernel, FilterSumValue, PipelineSpec,
-    MlirBackend, PredicateSpec,
+    DecimalFilterSumInput, FilterProjectKernel, FilterSumKernel, FilterSumValue, MlirBackend,
+    PipelineSpec, PredicateSpec,
 };
 
 thread_local! {

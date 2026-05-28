@@ -41,6 +41,8 @@ pub(super) fn mlir_context() -> Context {
     let registry = DialectRegistry::new();
     register_all_dialects(&registry);
     context.append_dialect_registry(&registry);
+    quill_mlir::register_dialect(&context);
+    quill_mlir::register_passes();
     context.load_all_available_dialects();
     register_all_llvm_translations(&context);
     context

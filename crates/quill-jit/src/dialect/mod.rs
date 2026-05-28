@@ -1,8 +1,8 @@
 use std::fmt::Write;
 
 use crate::{
-    JitExpr, JitProjection, PipelineSpec, PipelineIr, PipelineKind, PipelineSink, PipelineSource,
-    PipelineStage,
+    JitBinaryOp, JitError, JitExpr, JitProjection, JitResult, JitScalar, JitType, PipelineGraph,
+    PipelineKind, PipelineSink, PipelineSource, PipelineSpec, PipelineStage,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -33,11 +33,11 @@ pub enum QuillDialectSink {
 }
 
 impl QuillDialectModule {
-    pub fn from_pipeline(symbol: impl Into<String>, pipeline: &PipelineIr) -> Self {
-        let source = match &pipeline.source {
+    pub fn from_graph(symbol: impl Into<String>, graph: &PipelineGraph) -> Self {
+        let source = match &graph.source {
             PipelineSource::DataFusionInput => QuillDialectSource::DataFusionBatch,
         };
-        let ops = pipeline
+        let ops = graph
             .stages
             .iter()
             .map(|stage| match stage {
@@ -50,7 +50,7 @@ impl QuillDialectModule {
                 PipelineStage::Limit(fetch) => QuillDialectOp::Limit { fetch: *fetch },
             })
             .collect();
-        let sink = match &pipeline.sink {
+        let sink = match &graph.sink {
             PipelineSink::RecordBatch => QuillDialectSink::RecordBatch,
             PipelineSink::Sum { measure } => QuillDialectSink::PlainSum {
                 measure: measure.clone(),
@@ -66,15 +66,11 @@ impl QuillDialectModule {
         }
     }
 
-    pub fn text(&self) -> String {
+    pub fn to_mlir_text(&self) -> JitResult<String> {
         let mut text = String::new();
         let _ = writeln!(text, "module {{");
-        let _ = writeln!(text, "  \"quill.pipeline\"() ({{ // @{}", self.symbol);
-        let _ = writeln!(
-            text,
-            "    %batch0 = \"{}\"() : () -> !quill.batch",
-            self.source.name()
-        );
+        let _ = writeln!(text, "  func.func @{}() {{", self.symbol);
+        let _ = writeln!(text, "    %batch0 = {} : !quill.batch", self.source.name());
         if let Some(spec) = self.pipeline_spec() {
             let _ = writeln!(text, "    // qjit.pipeline = {}", spec.name());
         }
@@ -89,85 +85,71 @@ impl QuillDialectModule {
                 QuillDialectOp::Filter { predicate } => {
                     let out = format!("%sel{next_selection}");
                     next_selection += 1;
-                    let _ = writeln!(
-                        text,
-                        "    {out} = \"quill.exec.filter\"({batch}) {{ predicate = {} }} : (!quill.batch) -> !quill.selection",
-                        string_attr(&predicate.to_string())
-                    );
+                    append_filter(&mut text, &out, &batch, predicate)?;
                     selection = Some(out);
                 }
                 QuillDialectOp::Project { projections } => {
                     let sel =
-                        ensure_selection(&mut text, &batch, &mut selection, &mut next_selection);
+                        ensure_selection(&mut text, &batch, &mut selection, &mut next_selection)?;
                     let out = format!("%batch{next_batch}");
                     next_batch += 1;
-                    let _ = writeln!(
-                        text,
-                        "    {out} = \"quill.exec.project\"({batch}, {sel}) {{ exprs = [{}] }} : (!quill.batch, !quill.selection) -> !quill.batch",
-                        projections
-                            .iter()
-                            .map(project_attr)
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    );
+                    append_project(&mut text, &out, &batch, &sel, projections)?;
                     batch = out;
                 }
                 QuillDialectOp::Limit { fetch } => {
                     let sel =
-                        ensure_selection(&mut text, &batch, &mut selection, &mut next_selection);
+                        ensure_selection(&mut text, &batch, &mut selection, &mut next_selection)?;
                     let out = format!("%sel{next_selection}");
                     next_selection += 1;
                     let _ = writeln!(
                         text,
-                        "    {out} = \"quill.exec.limit\"({sel}) {{ fetch = {fetch} : i64 }} : (!quill.selection) -> !quill.selection"
+                        "    {out} = quill.exec.limit {sel} {{ fetch = {fetch} : i64 }} : !quill.selection -> !quill.selection"
                     );
                     selection = Some(out);
                 }
             }
         }
 
-        self.append_sink(&mut text, &batch, selection.as_deref());
-        let _ = writeln!(
-            text,
-            "  }}) {{ name = {}, kind = {} }} : () -> ()",
-            string_attr(&self.symbol),
-            string_attr(self.kind.name())
-        );
+        self.append_sink(&mut text, &batch, selection.as_deref(), &mut next_selection)?;
+        let _ = writeln!(text, "    return");
+        let _ = writeln!(text, "  }}");
         let _ = writeln!(text, "}}");
-        text
+        Ok(text)
     }
 
-    fn append_sink(&self, text: &mut String, batch: &str, selection: Option<&str>) {
+    fn append_sink(
+        &self,
+        text: &mut String,
+        batch: &str,
+        selection: Option<&str>,
+        next_selection: &mut usize,
+    ) -> JitResult<()> {
         match &self.sink {
             QuillDialectSink::RecordBatch => {
-                if let Some(selection) = selection {
-                    let _ = writeln!(
-                        text,
-                        "    \"quill.sink.record_batch\"({batch}, {selection}) : (!quill.batch, !quill.selection) -> ()"
-                    );
-                } else {
-                    let _ = writeln!(
-                        text,
-                        "    \"quill.sink.record_batch\"({batch}) : (!quill.batch) -> ()"
-                    );
-                }
+                let selection = match selection {
+                    Some(selection) => selection.to_string(),
+                    None => {
+                        let mut selection = None;
+                        ensure_selection(text, batch, &mut selection, next_selection)?
+                    }
+                };
+                let _ = writeln!(
+                    text,
+                    "    quill.sink.record_batch {batch}, {selection} : !quill.batch, !quill.selection"
+                );
             }
             QuillDialectSink::PlainSum { measure } => {
-                if let Some(selection) = selection {
-                    let _ = writeln!(
-                        text,
-                        "    \"quill.sink.plain_sum\"({batch}, {selection}) {{ measure = {} }} : (!quill.batch, !quill.selection) -> !quill.scalar",
-                        string_attr(&measure.to_string())
-                    );
-                } else {
-                    let _ = writeln!(
-                        text,
-                        "    \"quill.sink.plain_sum\"({batch}) {{ measure = {} }} : (!quill.batch) -> !quill.scalar",
-                        string_attr(&measure.to_string())
-                    );
-                }
+                let selection = match selection {
+                    Some(selection) => selection.to_string(),
+                    None => {
+                        let mut selection = None;
+                        ensure_selection(text, batch, &mut selection, next_selection)?
+                    }
+                };
+                append_plain_sum(text, "%sum0", batch, &selection, measure)?;
             }
         }
+        Ok(())
     }
 
     pub fn pipeline_spec(&self) -> Option<PipelineSpec> {
@@ -204,47 +186,406 @@ impl QuillDialectSink {
     }
 }
 
-impl PipelineKind {
-    fn name(self) -> &'static str {
-        match self {
-            Self::Record => "record",
-            Self::Aggregate => "aggregate",
-        }
-    }
-}
-
 fn ensure_selection(
     text: &mut String,
     batch: &str,
     selection: &mut Option<String>,
     next_selection: &mut usize,
-) -> String {
+) -> JitResult<String> {
     if let Some(selection) = selection {
-        return selection.clone();
+        return Ok(selection.clone());
     }
 
     let out = format!("%sel{next_selection}");
     *next_selection += 1;
+    append_filter(text, &out, batch, &JitExpr::Literal(JitScalar::Bool(true)))?;
+    *selection = Some(out.clone());
+    Ok(out)
+}
+
+fn append_filter(text: &mut String, out: &str, batch: &str, predicate: &JitExpr) -> JitResult<()> {
+    let mut emitter = RegionEmitter::new("row");
+    let value = emitter.emit_expr(predicate)?;
+    if value.ty != JitType::Bool {
+        return Err(JitError::UnsupportedExpr(
+            "filter region must yield i1".to_string(),
+        ));
+    }
+    let _ = writeln!(text, "    {out} = quill.exec.filter {batch} {{");
+    append_region_body(text, &emitter, &value)?;
+    let _ = writeln!(text, "    }} : !quill.batch -> !quill.selection");
+    Ok(())
+}
+
+fn append_project(
+    text: &mut String,
+    out: &str,
+    batch: &str,
+    selection: &str,
+    projections: &[JitProjection],
+) -> JitResult<()> {
+    let mut emitter = RegionEmitter::new("row");
+    let values = projections
+        .iter()
+        .map(|projection| emitter.emit_expr(&projection.expr))
+        .collect::<JitResult<Vec<_>>>()?;
+    if values.is_empty() {
+        return Err(JitError::UnsupportedExpr(
+            "project region must yield at least one value".to_string(),
+        ));
+    }
     let _ = writeln!(
         text,
-        "    {out} = \"quill.selection.all\"({batch}) : (!quill.batch) -> !quill.selection"
+        "    {out} = quill.exec.project {batch}, {selection} {{"
     );
-    *selection = Some(out.clone());
-    out
+    append_region_values(text, &emitter, &values)?;
+    let _ = writeln!(
+        text,
+        "    }} : !quill.batch, !quill.selection -> !quill.batch"
+    );
+    Ok(())
 }
 
-fn project_attr(projection: &JitProjection) -> String {
-    string_attr(&format!("{} = {}", projection.alias, projection.expr))
+fn append_plain_sum(
+    text: &mut String,
+    out: &str,
+    batch: &str,
+    selection: &str,
+    measure: &JitExpr,
+) -> JitResult<()> {
+    let mut emitter = RegionEmitter::new("row");
+    let value = emitter.emit_expr(measure)?;
+    if !is_numeric_type(value.ty) {
+        return Err(JitError::UnsupportedExpr(
+            "plain_sum region must yield a numeric scalar".to_string(),
+        ));
+    }
+    let _ = writeln!(
+        text,
+        "    {out} = quill.sink.plain_sum {batch}, {selection} {{"
+    );
+    append_region_body(text, &emitter, &value)?;
+    let _ = writeln!(
+        text,
+        "    }} : !quill.batch, !quill.selection -> !quill.scalar"
+    );
+    Ok(())
 }
 
-fn string_attr(value: &str) -> String {
-    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+fn append_region_body(
+    text: &mut String,
+    emitter: &RegionEmitter,
+    value: &ScalarValueRef,
+) -> JitResult<()> {
+    append_region_values(text, emitter, std::slice::from_ref(value))
+}
+
+fn append_region_values(
+    text: &mut String,
+    emitter: &RegionEmitter,
+    values: &[ScalarValueRef],
+) -> JitResult<()> {
+    let _ = writeln!(text, "    ^bb0(%{}: !quill.row):", emitter.row_name);
+    for line in &emitter.lines {
+        let _ = writeln!(text, "      {line}");
+    }
+    let value_names = values
+        .iter()
+        .map(|value| value.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let value_types = values
+        .iter()
+        .map(|value| mlir_type(value.ty))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let _ = writeln!(text, "      quill.yield {value_names} : {value_types}");
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct ScalarValueRef {
+    name: String,
+    ty: JitType,
+}
+
+#[derive(Debug)]
+struct RegionEmitter {
+    row_name: String,
+    next_id: usize,
+    lines: Vec<String>,
+}
+
+impl RegionEmitter {
+    fn new(row_name: impl Into<String>) -> Self {
+        Self {
+            row_name: row_name.into(),
+            next_id: 0,
+            lines: Vec::new(),
+        }
+    }
+
+    fn emit_expr(&mut self, expr: &JitExpr) -> JitResult<ScalarValueRef> {
+        match expr {
+            JitExpr::Column { index, ty, .. } => {
+                let name = self.next_value("col");
+                self.lines.push(format!(
+                    "{name} = quill.column %{} {{ index = {index} : i64 }} : !quill.row -> {}",
+                    self.row_name,
+                    mlir_type(*ty)
+                ));
+                Ok(ScalarValueRef { name, ty: *ty })
+            }
+            JitExpr::Literal(value) => self.emit_literal(value),
+            JitExpr::Binary {
+                op, left, right, ..
+            } => self.emit_binary(*op, left, right),
+            JitExpr::IsNull(_) => Err(JitError::UnsupportedExpr(
+                "Quill dialect regions do not yet model Arrow validity bitmaps".to_string(),
+            )),
+        }
+    }
+
+    fn emit_literal(&mut self, value: &JitScalar) -> JitResult<ScalarValueRef> {
+        let ty = value.ty();
+        let name = self.next_value("lit");
+        let literal = match value {
+            JitScalar::Null(_) => {
+                return Err(JitError::UnsupportedExpr(
+                    "Quill dialect regions do not yet model null literals".to_string(),
+                ));
+            }
+            JitScalar::Bool(value) => value.to_string(),
+            JitScalar::Date32(value) => value.to_string(),
+            JitScalar::Int32(value) => value.to_string(),
+            JitScalar::Int64(value) => value.to_string(),
+            JitScalar::Float64(value) => format_float(*value),
+            JitScalar::Decimal128 { value, .. } => value.to_string(),
+        };
+        self.lines.push(format!(
+            "{name} = arith.constant {literal} : {}",
+            mlir_type(ty)
+        ));
+        Ok(ScalarValueRef { name, ty })
+    }
+
+    fn emit_binary(
+        &mut self,
+        op: JitBinaryOp,
+        left: &JitExpr,
+        right: &JitExpr,
+    ) -> JitResult<ScalarValueRef> {
+        let lhs = self.emit_expr(left)?;
+        let rhs = self.emit_expr(right)?;
+        match op {
+            JitBinaryOp::Add | JitBinaryOp::Sub | JitBinaryOp::Mul | JitBinaryOp::Div => {
+                self.emit_arithmetic(op, lhs, rhs)
+            }
+            JitBinaryOp::Eq
+            | JitBinaryOp::NotEq
+            | JitBinaryOp::Lt
+            | JitBinaryOp::LtEq
+            | JitBinaryOp::Gt
+            | JitBinaryOp::GtEq => self.emit_comparison(op, lhs, rhs),
+            JitBinaryOp::And | JitBinaryOp::Or => self.emit_boolean(op, lhs, rhs),
+        }
+    }
+
+    fn emit_arithmetic(
+        &mut self,
+        op: JitBinaryOp,
+        lhs: ScalarValueRef,
+        rhs: ScalarValueRef,
+    ) -> JitResult<ScalarValueRef> {
+        ensure_same_type(&lhs, &rhs)?;
+        let opcode = match (op, lhs.ty) {
+            (JitBinaryOp::Add, JitType::Int32 | JitType::Int64 | JitType::Decimal128 { .. }) => {
+                "addi"
+            }
+            (JitBinaryOp::Sub, JitType::Int32 | JitType::Int64 | JitType::Decimal128 { .. }) => {
+                "subi"
+            }
+            (JitBinaryOp::Mul, JitType::Int32 | JitType::Int64 | JitType::Decimal128 { .. }) => {
+                "muli"
+            }
+            (JitBinaryOp::Div, JitType::Int32 | JitType::Int64 | JitType::Decimal128 { .. }) => {
+                "divsi"
+            }
+            (JitBinaryOp::Add, JitType::Float64) => "addf",
+            (JitBinaryOp::Sub, JitType::Float64) => "subf",
+            (JitBinaryOp::Mul, JitType::Float64) => "mulf",
+            (JitBinaryOp::Div, JitType::Float64) => "divf",
+            _ => {
+                return Err(JitError::UnsupportedExpr(format!(
+                    "operator {op} is not supported for {}",
+                    mlir_type(lhs.ty)
+                )));
+            }
+        };
+        let result = self.next_value("arith");
+        self.lines.push(format!(
+            "{result} = arith.{opcode} {}, {} : {}",
+            lhs.name,
+            rhs.name,
+            mlir_type(lhs.ty)
+        ));
+        Ok(ScalarValueRef {
+            name: result,
+            ty: lhs.ty,
+        })
+    }
+
+    fn emit_comparison(
+        &mut self,
+        op: JitBinaryOp,
+        lhs: ScalarValueRef,
+        rhs: ScalarValueRef,
+    ) -> JitResult<ScalarValueRef> {
+        ensure_same_type(&lhs, &rhs)?;
+        let result = self.next_value("cmp");
+        match lhs.ty {
+            JitType::Float64 => {
+                let predicate = match op {
+                    JitBinaryOp::Eq => "oeq",
+                    JitBinaryOp::NotEq => "one",
+                    JitBinaryOp::Lt => "olt",
+                    JitBinaryOp::LtEq => "ole",
+                    JitBinaryOp::Gt => "ogt",
+                    JitBinaryOp::GtEq => "oge",
+                    _ => unreachable!(),
+                };
+                self.lines.push(format!(
+                    "{result} = arith.cmpf {predicate}, {}, {} : {}",
+                    lhs.name,
+                    rhs.name,
+                    mlir_type(lhs.ty)
+                ));
+            }
+            JitType::Bool if matches!(op, JitBinaryOp::Eq | JitBinaryOp::NotEq) => {
+                let predicate = if matches!(op, JitBinaryOp::Eq) {
+                    "eq"
+                } else {
+                    "ne"
+                };
+                self.lines.push(format!(
+                    "{result} = arith.cmpi {predicate}, {}, {} : i1",
+                    lhs.name, rhs.name
+                ));
+            }
+            JitType::Bool => {
+                return Err(JitError::UnsupportedExpr(format!(
+                    "ordered comparison {op} is not supported for bool"
+                )));
+            }
+            JitType::Date32 | JitType::Int32 | JitType::Int64 | JitType::Decimal128 { .. } => {
+                let predicate = match op {
+                    JitBinaryOp::Eq => "eq",
+                    JitBinaryOp::NotEq => "ne",
+                    JitBinaryOp::Lt => "slt",
+                    JitBinaryOp::LtEq => "sle",
+                    JitBinaryOp::Gt => "sgt",
+                    JitBinaryOp::GtEq => "sge",
+                    _ => unreachable!(),
+                };
+                self.lines.push(format!(
+                    "{result} = arith.cmpi {predicate}, {}, {} : {}",
+                    lhs.name,
+                    rhs.name,
+                    mlir_type(lhs.ty)
+                ));
+            }
+        }
+        Ok(ScalarValueRef {
+            name: result,
+            ty: JitType::Bool,
+        })
+    }
+
+    fn emit_boolean(
+        &mut self,
+        op: JitBinaryOp,
+        lhs: ScalarValueRef,
+        rhs: ScalarValueRef,
+    ) -> JitResult<ScalarValueRef> {
+        ensure_same_type(&lhs, &rhs)?;
+        if lhs.ty != JitType::Bool {
+            return Err(JitError::UnsupportedExpr(format!(
+                "boolean operator {op} requires i1 inputs"
+            )));
+        }
+        let opcode = match op {
+            JitBinaryOp::And => "andi",
+            JitBinaryOp::Or => "ori",
+            _ => unreachable!(),
+        };
+        let result = self.next_value("bool");
+        self.lines.push(format!(
+            "{result} = arith.{opcode} {}, {} : i1",
+            lhs.name, rhs.name
+        ));
+        Ok(ScalarValueRef {
+            name: result,
+            ty: JitType::Bool,
+        })
+    }
+
+    fn next_value(&mut self, prefix: &str) -> String {
+        let id = self.next_id;
+        self.next_id += 1;
+        format!("%{prefix}{id}")
+    }
+}
+
+fn is_numeric_type(ty: JitType) -> bool {
+    matches!(
+        ty,
+        JitType::Date32
+            | JitType::Int32
+            | JitType::Int64
+            | JitType::Float64
+            | JitType::Decimal128 { .. }
+    )
+}
+
+fn ensure_same_type(lhs: &ScalarValueRef, rhs: &ScalarValueRef) -> JitResult<()> {
+    if lhs.ty == rhs.ty {
+        Ok(())
+    } else {
+        Err(JitError::UnsupportedExpr(format!(
+            "type mismatch: {} vs {}",
+            mlir_type(lhs.ty),
+            mlir_type(rhs.ty)
+        )))
+    }
+}
+
+fn mlir_type(ty: JitType) -> &'static str {
+    match ty {
+        JitType::Bool => "i1",
+        JitType::Date32 => "i32",
+        JitType::Int32 => "i32",
+        JitType::Int64 => "i64",
+        JitType::Float64 => "f64",
+        JitType::Decimal128 { .. } => "i128",
+    }
+}
+
+fn format_float(value: f64) -> String {
+    if value.is_finite() {
+        format!("{value:e}")
+    } else if value.is_nan() {
+        "0.0".to_string()
+    } else if value.is_sign_positive() {
+        "1.7976931348623157e308".to_string()
+    } else {
+        "-1.7976931348623157e308".to_string()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::{
-        JitBinaryOp, JitExpr, JitProjection, JitScalar, JitType, PipelineIr, PipelineKind,
+        JitBinaryOp, JitExpr, JitProjection, JitScalar, JitType, PipelineGraph, PipelineKind,
         PipelineStage, QuillDialectModule,
     };
 
@@ -266,20 +607,22 @@ mod tests {
             },
             "next_id",
         );
-        let pipeline = PipelineIr::new(vec![
+        let pipeline = PipelineGraph::record(vec![
             PipelineStage::Filter(predicate),
             PipelineStage::Projection(vec![projection]),
         ]);
 
-        let module = QuillDialectModule::from_pipeline("record0", &pipeline);
-        let text = module.text();
+        let module = QuillDialectModule::from_graph("record0", &pipeline);
+        let text = module.to_mlir_text().unwrap();
 
         assert_eq!(module.kind, PipelineKind::Record);
-        assert!(text.contains("\"quill.pipeline\""));
-        assert!(text.contains("\"quill.source.datafusion_batch\""));
-        assert!(text.contains("\"quill.exec.filter\""));
-        assert!(text.contains("\"quill.exec.project\""));
-        assert!(text.contains("\"quill.sink.record_batch\""));
+        assert!(text.contains("func.func @record0"));
+        assert!(text.contains("quill.source.datafusion_batch"));
+        assert!(text.contains("quill.exec.filter"));
+        assert!(text.contains("quill.exec.project"));
+        assert!(text.contains("quill.sink.record_batch"));
+        assert!(!text.contains("predicate ="));
+        assert!(text.contains("quill.yield"));
     }
 
     #[test]
@@ -291,15 +634,16 @@ mod tests {
             ty: JitType::Float64,
             nullable: false,
         };
-        let pipeline = PipelineIr::filter_sum(predicate, measure);
+        let pipeline = PipelineGraph::filter_sum(predicate, measure);
 
-        let module = QuillDialectModule::from_pipeline("sum0", &pipeline);
-        let text = module.text();
+        let module = QuillDialectModule::from_graph("sum0", &pipeline);
+        let text = module.to_mlir_text().unwrap();
 
         assert_eq!(module.kind, PipelineKind::Aggregate);
-        assert!(text.contains("\"quill.exec.filter\""));
-        assert!(text.contains("\"quill.sink.plain_sum\""));
-        assert!(text.contains("measure = \"col(1, price, f64, nullable=false)\""));
+        assert!(text.contains("quill.exec.filter"));
+        assert!(text.contains("quill.sink.plain_sum"));
+        assert!(!text.contains("measure ="));
+        assert!(text.contains("quill.column %row { index = 1 : i64 } : !quill.row -> f64"));
     }
 
     fn i64_gt_ten() -> JitExpr {

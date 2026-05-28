@@ -14,7 +14,7 @@ pub use mlir::{
 pub use mlir::{MlirBackend, MlirColumn, MlirModule};
 pub use pipeline::{
     JitBinaryOp, JitCandidate, JitExpr, JitProjection, JitScalar, JitType, MlirJitRule,
-    PipelineCandidate, PipelineIr, PipelineSink, PipelineSource, PipelineStage,
+    PipelineCandidate, PipelineGraph, PipelineSink, PipelineSource, PipelineStage,
 };
 pub use runtime::{
     CompiledKernel, CompiledPipelineExec, FilterProjectKernel, FilterSumKernel, FilterSumValue,

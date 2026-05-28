@@ -11,7 +11,7 @@ use datafusion::arrow::datatypes::SchemaRef as ArrowSchemaRef;
 
 use crate::{
     CompiledKernel, JitExpr, JitProjection, JitResult, JitType, KernelBackend, KernelKind,
-    PipelineIr, QuillDialectModule,
+    PipelineGraph, QuillDialectModule,
 };
 
 #[derive(Debug, Clone)]
@@ -75,7 +75,7 @@ impl MlirBackend {
         predicate: &JitExpr,
         projections: &[JitProjection],
     ) -> JitResult<MlirModule> {
-        let pipeline = PipelineIr::new(vec![
+        let pipeline = PipelineGraph::record(vec![
             crate::PipelineStage::Filter(predicate.clone()),
             crate::PipelineStage::Projection(projections.to_vec()),
         ]);
@@ -89,7 +89,7 @@ impl MlirBackend {
         predicate: &JitExpr,
         measure: &JitExpr,
     ) -> JitResult<MlirModule> {
-        let pipeline = PipelineIr::filter_sum(predicate.clone(), measure.clone());
+        let pipeline = PipelineGraph::filter_sum(predicate.clone(), measure.clone());
         let dialect = self.emit_quill_dialect(emit::next_symbol("quill_f64_filter_sum"), &pipeline);
         lower::lower_quill_dialect(&dialect)
     }
@@ -99,7 +99,7 @@ impl MlirBackend {
         predicate: &JitExpr,
         measure: &JitExpr,
     ) -> JitResult<MlirModule> {
-        let pipeline = PipelineIr::filter_sum(predicate.clone(), measure.clone());
+        let pipeline = PipelineGraph::filter_sum(predicate.clone(), measure.clone());
         let dialect =
             self.emit_quill_dialect(emit::next_symbol("quill_decimal_filter_sum"), &pipeline);
         lower::lower_quill_dialect(&dialect)
@@ -109,12 +109,24 @@ impl MlirBackend {
         lower::lower_quill_dialect(module)
     }
 
+    pub fn lower_graph_to_quill_mlir(
+        &self,
+        symbol: impl Into<String>,
+        graph: &PipelineGraph,
+    ) -> JitResult<MlirModule> {
+        let dialect = self.emit_quill_dialect(symbol, graph);
+        Ok(MlirModule {
+            symbol: dialect.symbol.clone(),
+            text: dialect.to_mlir_text()?,
+        })
+    }
+
     pub fn emit_quill_dialect(
         &self,
         symbol: impl Into<String>,
-        pipeline: &PipelineIr,
+        graph: &PipelineGraph,
     ) -> QuillDialectModule {
-        QuillDialectModule::from_pipeline(symbol, pipeline)
+        QuillDialectModule::from_graph(symbol, graph)
     }
 
     #[cfg(feature = "jit-mlir")]
@@ -186,7 +198,6 @@ impl KernelBackend for MlirBackend {
             module.symbol,
             KernelKind::Filter,
             self.name(),
-            module.text,
             false,
         ))
     }
@@ -202,7 +213,6 @@ impl KernelBackend for MlirBackend {
             module.symbol,
             KernelKind::Projection,
             self.name(),
-            module.text,
             false,
         ))
     }
@@ -219,7 +229,6 @@ impl KernelBackend for MlirBackend {
             module.symbol,
             KernelKind::FilterProject,
             self.name(),
-            module.text,
             false,
         ))
     }

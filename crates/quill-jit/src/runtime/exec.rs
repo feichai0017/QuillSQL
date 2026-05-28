@@ -85,9 +85,8 @@ impl CompiledPipelineExec {
             )));
         }
 
-        let partitioning = Partitioning::UnknownPartitioning(
-            input.properties().partitioning.partition_count(),
-        );
+        let partitioning =
+            Partitioning::UnknownPartitioning(input.properties().partitioning.partition_count());
         let cache = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(Arc::clone(&schema)),
             partitioning,

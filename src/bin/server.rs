@@ -9,8 +9,8 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use quill_sql::database::{Database, DatabaseOptions};
-use quill_sql::jit::JitOptions;
+use quill_core::database::{Database, DatabaseOptions};
+use quill_jit::JitOptions;
 use tokio::sync::{Mutex, MutexGuard};
 
 /// Shared app state holding a Database protected by a mutex.
@@ -80,7 +80,7 @@ fn strip_sql_comments(input: &str) -> String {
 
 async fn debug_trace_last(
     State(state): State<AppState>,
-) -> Result<Json<quill_sql::database::DebugTrace>, (StatusCode, String)> {
+) -> Result<Json<quill_core::database::DebugTrace>, (StatusCode, String)> {
     let db_guard = lock_db(&state).await;
     match db_guard.debug_last_trace() {
         Some(trace) => Ok(Json(trace)),
@@ -90,7 +90,7 @@ async fn debug_trace_last(
 
 async fn debug_plan_last(
     State(state): State<AppState>,
-) -> Result<Json<quill_sql::database::DebugPlanSnapshot>, (StatusCode, String)> {
+) -> Result<Json<quill_core::database::DebugPlanSnapshot>, (StatusCode, String)> {
     let db_guard = lock_db(&state).await;
     match db_guard.debug_last_plan() {
         Some(plan) => Ok(Json(plan)),

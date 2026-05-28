@@ -357,7 +357,7 @@ mod tests {
     }
 
     #[test]
-    fn formats_jit_expression_for_ir_text() {
+    fn formats_jit_expression_for_mlir_text() {
         let expr = JitExpr::Binary {
             op: JitBinaryOp::Gt,
             left: Box::new(JitExpr::Column {

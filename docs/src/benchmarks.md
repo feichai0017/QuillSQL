@@ -2,7 +2,8 @@
 
 QuillSQL uses benchmarks to separate three different claims:
 
-- JIT lowering cost: how much time QuillSQL spends building JIT IR and MLIR.
+- JIT lowering cost: how much time QuillSQL spends building the JIT expression
+  graph and MLIR.
 - DataFusion execution cost: how the current DataFusion path behaves on Arrow
   batches or Parquet datasets, separately from SQL parsing and planning.
 - Compiled pipeline cost: how rewritten record and aggregate pipelines behave
@@ -28,7 +29,7 @@ Benchmarks:
 
 | Name | Measures |
 | ---- | -------- |
-| `lowering/filter_project_ir` | Exact `PipelineIR` lowering into the record pipeline shape. |
+| `lowering/filter_project_graph` | Exact `PipelineGraph` lowering into the record pipeline shape. |
 | `compile/mlir_filter_text` | JIT expression to MLIR module generation for a filter. |
 | `compile/mlir_filter_project_text` | Fused filter/project MLIR module generation. |
 | `compile/mlir_i64_filter` | MLIR parse/lower/JIT cost for the first compiled fixed-width filter kernel. Requires `jit-mlir`. |

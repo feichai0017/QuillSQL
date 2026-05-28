@@ -5,8 +5,8 @@ use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::dataframe::DataFrameWriteOptions;
 use datafusion::execution::context::SessionContext;
-use quill_sql::database::{Database, DatabaseOptions, QueryOutput};
-use quill_sql::jit::{JitOptions, PipelineKind};
+use quill_core::database::{Database, DatabaseOptions, QueryOutput};
+use quill_jit::{JitOptions, PipelineKind};
 use tempfile::TempDir;
 
 fn rows(result: QueryOutput) -> Vec<Vec<String>> {
@@ -200,7 +200,11 @@ async fn disabled_jit_keeps_datafusion_physical_plan() {
         "{}",
         trace.physical_plan
     );
-    assert!(trace.jit_candidates.is_empty(), "{:?}", trace.jit_candidates);
+    assert!(
+        trace.jit_candidates.is_empty(),
+        "{:?}",
+        trace.jit_candidates
+    );
 }
 
 #[cfg(feature = "jit-mlir")]

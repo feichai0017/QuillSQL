@@ -6,6 +6,7 @@ use crate::{
 use super::{emit, MlirModule};
 
 pub(super) fn lower_quill_dialect(module: &QuillDialectModule) -> JitResult<MlirModule> {
+    verify_formal_quill_module(module)?;
     match module.pipeline_spec() {
         Some(PipelineSpec::I64FilterProject { .. }) => {
             let (predicate, projections) = filter_project_exprs(module)?;
@@ -42,6 +43,19 @@ pub(super) fn lower_quill_dialect(module: &QuillDialectModule) -> JitResult<Mlir
             "quill dialect lowering requires a supported pipeline spec".to_string(),
         )),
     }
+}
+
+#[cfg(feature = "jit-mlir")]
+fn verify_formal_quill_module(module: &QuillDialectModule) -> JitResult<()> {
+    super::verify::verify_module(&MlirModule {
+        symbol: module.symbol.clone(),
+        text: module.to_mlir_text()?,
+    })
+}
+
+#[cfg(not(feature = "jit-mlir"))]
+fn verify_formal_quill_module(_module: &QuillDialectModule) -> JitResult<()> {
+    Ok(())
 }
 
 fn filter_project_exprs(module: &QuillDialectModule) -> JitResult<(&JitExpr, &[JitProjection])> {

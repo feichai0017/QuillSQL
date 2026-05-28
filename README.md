@@ -62,18 +62,20 @@ let out = db.run("SELECT count(*) FROM events WHERE user_id IS NOT NULL").await?
 
 The workspace is split into focused packages:
 
-- `quill-sql`: the public facade crate plus CLI/server binaries.
+- `quill-sql`: CLI/server binaries, benchmarks, and release metadata.
 - `quill-core`: the DataFusion-backed `Database` API, query execution, Parquet
   registration, and debug trace capture.
 - `quill-jit`: pipeline extraction, Quill pipeline dialect model, MLIR
   emission, compiled execution nodes, and fixed-width Arrow kernels.
+- `quill-mlir`: optional native C++/TableGen package that registers the formal
+  Quill MLIR dialect and pass names when `jit-mlir` is enabled.
 
 Inside `crates/quill-jit/src`:
 
-- `pipeline/` owns expression lowering, `PipelineIR`, DataFusion physical-plan
+- `pipeline/` owns expression lowering, `PipelineGraph`, DataFusion physical-plan
   extraction, and the physical optimizer rule.
-- `dialect/` defines the first Quill pipeline dialect model: source, exec,
-  and sink ops for future MLIR dialect lowering.
+- `dialect/` emits the formal Quill MLIR pipeline graph from `PipelineGraph`:
+  source, exec, sink, row, column, and region-yield semantics.
 - `lower/` owns exact pipeline pattern lowering, compiler construction, and JIT
   options.
 - `runtime/` provides the DataFusion compiled pipeline node, pipeline specs, and
@@ -82,7 +84,8 @@ Inside `crates/quill-jit/src`:
   invocation. The current compiled path covers narrow fixed-width
   ExecutionEngine kernels.
 
-Current scope: MLIR is parsed and verified, and the DataFusion optimizer rule
+Current scope: MLIR is parsed and verified, the Quill dialect is defined with
+TableGen under `crates/quill-mlir`, and the DataFusion optimizer rule
 replaces supported filter/project and plain `SUM` pipelines with one
 `CompiledPipelineExec` node. That node executes through QuillSQL's fixed-width
 Arrow pipeline runtime while carrying structured MLIR pipeline specs. Compiled
@@ -100,11 +103,21 @@ MLIR execution cache when the input
 batch has no nulls or slice offsets; other cases keep the safe Rust batch
 runtime. CLI, server, and
 benchmark binaries read the same option once at startup from `QUILL_JIT=mlir`.
-Debug traces expose recognized `PipelineIR` candidates for record and aggregate
-pipelines. The executable compiled kernels now share the same lowering shape:
-`PipelineIR -> Quill dialect -> scf/arith/llvm -> ExecutionEngine`. Current
+Debug traces expose recognized `PipelineGraph` candidates for record and aggregate
+pipelines. `PipelineGraph` is a small executable subgraph, not a second SQL
+planner. The executable compiled kernels now share the same lowering shape:
+`PipelineGraph -> Quill dialect -> scf/arith/llvm -> ExecutionEngine`. Current
 coverage includes single-column `i64 filter/project`, `f64 filter/sum`, and the
 Q6-shaped decimal `filter -> plain SUM` path.
+
+The formal Quill dialect no longer stores predicate or measure expressions as
+string attributes. `quill.exec.filter`, `quill.exec.project`, and
+`quill.sink.plain_sum` use single-block regions with `!quill.row` arguments,
+`quill.column` access, `arith` scalar operations, and `quill.yield`
+terminators. The native pass names `quill-canonicalize-pipeline` and
+`convert-quill-to-loops` are registered as the C++ lowering extension points;
+the covered executable kernels still use the Rust lowering coordinator to emit
+the current `scf/arith/llvm` hot loops.
 
 Run the MLIR path with:
 

@@ -132,7 +132,6 @@ pub struct CompiledKernel {
     pub kind: KernelKind,
     pub spec: PipelineSpec,
     pub backend: String,
-    pub ir: String,
     pub executable: bool,
 }
 
@@ -141,7 +140,6 @@ impl CompiledKernel {
         id: impl Into<String>,
         kind: KernelKind,
         backend: impl Into<String>,
-        ir: impl Into<String>,
         executable: bool,
     ) -> Self {
         Self {
@@ -149,7 +147,6 @@ impl CompiledKernel {
             kind,
             spec: PipelineSpec::generic(kind),
             backend: backend.into(),
-            ir: ir.into(),
             executable,
         }
     }
@@ -158,7 +155,6 @@ impl CompiledKernel {
         id: impl Into<String>,
         spec: PipelineSpec,
         backend: impl Into<String>,
-        ir: impl Into<String>,
         executable: bool,
     ) -> Self {
         let kind = spec.kind();
@@ -167,7 +163,6 @@ impl CompiledKernel {
             kind,
             spec,
             backend: backend.into(),
-            ir: ir.into(),
             executable,
         }
     }

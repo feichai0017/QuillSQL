@@ -28,11 +28,11 @@ impl<'a> PipelineCompiler<'a> {
         let PhysicalPipeline {
             input,
             output_schema,
-            ir,
+            graph,
             output_adapter,
         } = pipeline;
 
-        match PipelineLowering::from_ir(&ir) {
+        match PipelineLowering::from_graph(&graph) {
             Some(PipelineLowering::Record {
                 predicate,
                 projections,
@@ -104,13 +104,7 @@ impl<'a> PipelineCompiler<'a> {
                 .spec()
                 .cloned()
                 .unwrap_or_else(|| PipelineSpec::generic(KernelKind::FilterProject));
-            return CompiledKernel::with_spec(
-                module.symbol,
-                spec,
-                self.backend.name(),
-                module.text,
-                executable,
-            );
+            return CompiledKernel::with_spec(module.symbol, spec, self.backend.name(), executable);
         }
 
         match self.backend.compile_filter_project(
@@ -123,7 +117,6 @@ impl<'a> PipelineCompiler<'a> {
                 "filter_project_runtime",
                 KernelKind::FilterProject,
                 "fixed-width-runtime",
-                format!("predicate={predicate:?}; projections={projections:?}"),
                 false,
             ),
         }
@@ -146,7 +139,6 @@ impl<'a> PipelineCompiler<'a> {
                 module.symbol,
                 spec(),
                 self.backend.name(),
-                module.text,
                 self.options.mlir_execution_enabled(),
             );
         }
@@ -156,7 +148,6 @@ impl<'a> PipelineCompiler<'a> {
                 module.symbol,
                 spec(),
                 self.backend.name(),
-                module.text,
                 self.options.mlir_execution_enabled(),
             );
         }
@@ -165,7 +156,6 @@ impl<'a> PipelineCompiler<'a> {
             "fixed_width_filter_sum",
             KernelKind::FilterSum,
             "fixed-width-runtime",
-            format!("predicate={predicate:?}; measure={measure:?}"),
             false,
         )
     }

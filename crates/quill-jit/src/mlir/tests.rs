@@ -1,8 +1,8 @@
 #[cfg(feature = "jit-mlir")]
 use crate::DecimalFilterSumInput;
 use crate::{
-    JitBinaryOp, JitExpr, JitProjection, JitScalar, JitType, MlirBackend, PipelineIr, PipelineKind,
-    PipelineStage,
+    JitBinaryOp, JitExpr, JitProjection, JitScalar, JitType, MlirBackend, PipelineGraph,
+    PipelineKind, PipelineStage,
 };
 
 #[test]
@@ -58,44 +58,83 @@ fn emits_filter_project_module() {
 fn emits_quill_dialect_pipeline_skeleton() {
     let predicate = i64_gt_ten(false);
     let projections = vec![i64_plus_one_projection(0)];
-    let pipeline = PipelineIr::new(vec![
+    let pipeline = PipelineGraph::record(vec![
         PipelineStage::Filter(predicate),
         PipelineStage::Projection(projections),
     ]);
 
     let module = MlirBackend::new().emit_quill_dialect("record_pipeline", &pipeline);
+    let text = module.to_mlir_text().unwrap();
 
     assert_eq!(module.kind, PipelineKind::Record);
     assert_eq!(
         module.pipeline_spec().map(|spec| spec.name()),
         Some("i64_filter_project")
     );
-    assert!(module.text().contains("\"quill.pipeline\""));
-    assert!(module
-        .text()
-        .contains("// qjit.pipeline = i64_filter_project"));
-    assert!(module.text().contains("\"quill.exec.filter\""));
-    assert!(module.text().contains("\"quill.exec.project\""));
+    assert!(text.contains("func.func @record_pipeline"));
+    assert!(text.contains("// qjit.pipeline = i64_filter_project"));
+    assert!(text.contains("quill.exec.filter"));
+    assert!(text.contains("quill.exec.project"));
+    assert!(!text.contains("predicate ="));
 }
 
 #[test]
 fn emits_q6_quill_dialect_pipeline_spec() {
-    let pipeline = PipelineIr::filter_sum(q6_decimal_predicate(), q6_decimal_measure());
+    let pipeline = PipelineGraph::filter_sum(q6_decimal_predicate(), q6_decimal_measure());
     let module = MlirBackend::new().emit_quill_dialect("q6_pipeline", &pipeline);
+    let text = module.to_mlir_text().unwrap();
 
     assert_eq!(
         module.pipeline_spec().map(|spec| spec.name()),
         Some("decimal_filter_sum")
     );
-    assert!(module
-        .text()
-        .contains("// qjit.pipeline = decimal_filter_sum"));
-    assert!(module.text().contains("\"quill.sink.plain_sum\""));
+    assert!(text.contains("// qjit.pipeline = decimal_filter_sum"));
+    assert!(text.contains("quill.sink.plain_sum"));
+    assert!(!text.contains("measure ="));
+}
+
+#[cfg(feature = "jit-mlir")]
+#[test]
+fn verifies_formal_quill_dialect_pipeline() {
+    let pipeline = PipelineGraph::filter_sum(q6_decimal_predicate(), q6_decimal_measure());
+    let module = MlirBackend::new()
+        .lower_graph_to_quill_mlir("q6_quill_region", &pipeline)
+        .unwrap();
+
+    assert!(module.text.contains("quill.column"));
+    assert!(module.text.contains("quill.yield"));
+    MlirBackend::new().verify_module(&module).unwrap();
+}
+
+#[cfg(feature = "jit-mlir")]
+#[test]
+fn rejects_invalid_quill_filter_region_result() {
+    let text = r#"
+module {
+  func.func @bad_filter() {
+    %batch = quill.source.datafusion_batch : !quill.batch
+    %sel = quill.exec.filter %batch {
+    ^bb0(%row: !quill.row):
+      %v = quill.column %row { index = 0 : i64 } : !quill.row -> i64
+      quill.yield %v : i64
+    } : !quill.batch -> !quill.selection
+    quill.sink.record_batch %batch, %sel : !quill.batch, !quill.selection
+    return
+  }
+}
+"#;
+
+    let module = super::MlirModule {
+        symbol: "bad_filter".to_string(),
+        text: text.to_string(),
+    };
+
+    assert!(MlirBackend::new().verify_module(&module).is_err());
 }
 
 #[test]
 fn lowers_q6_quill_dialect_to_mlir() {
-    let pipeline = PipelineIr::filter_sum(q6_decimal_predicate(), q6_decimal_measure());
+    let pipeline = PipelineGraph::filter_sum(q6_decimal_predicate(), q6_decimal_measure());
     let dialect = MlirBackend::new().emit_quill_dialect("q6_decimal_pipeline", &pipeline);
 
     let module = MlirBackend::new().lower_quill_dialect(&dialect).unwrap();

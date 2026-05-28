@@ -19,9 +19,10 @@ cargo clippy --all-targets -- -D warnings
 cargo bench --no-run
 ```
 
-The `jit-mlir` feature requires local MLIR/LLVM libraries and also runs the
-compiled scalar ExecutionEngine smoke test. On a Homebrew LLVM 22 installation,
-set:
+The `jit-mlir` feature requires local MLIR/LLVM libraries. It builds the
+optional `quill-mlir` C++/TableGen package, verifies formal Quill dialect
+regions, and runs compiled ExecutionEngine smoke tests. On a Homebrew LLVM 22
+installation, set:
 
 ```bash
 MLIR_SYS_220_PREFIX=/opt/homebrew/opt/llvm \

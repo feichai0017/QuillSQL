@@ -4,13 +4,13 @@ use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use datafusion::arrow::array::{Float64Array, Int64Array};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
+use quill_core::database::{Database, DatabaseOptions};
 #[cfg(feature = "jit-mlir")]
 use quill_jit::DecimalFilterSumInput;
 use quill_jit::{
-    FilterProjectKernel, FilterSumKernel, JitBinaryOp, JitExpr, JitProjection, JitScalar, JitType,
-    JitOptions, KernelBackend, MlirBackend, PipelineIr, PipelineLowering, PipelineStage,
+    FilterProjectKernel, FilterSumKernel, JitBinaryOp, JitExpr, JitOptions, JitProjection,
+    JitScalar, JitType, KernelBackend, MlirBackend, PipelineGraph, PipelineLowering, PipelineStage,
 };
-use quill_sql::database::{Database, DatabaseOptions};
 
 fn schema() -> Arc<Schema> {
     Arc::new(Schema::new(vec![
@@ -206,19 +206,19 @@ fn decimal_lit(value: i128, precision: u8, scale: i8) -> JitExpr {
     })
 }
 
-fn bench_pipeline_ir_and_mlir(c: &mut Criterion) {
+fn bench_pipeline_graph_and_mlir(c: &mut Criterion) {
     let input_schema = schema();
     let predicate = predicate();
     let projections = projections();
     let backend = MlirBackend::new();
 
-    c.bench_function("lowering/filter_project_ir", |b| {
+    c.bench_function("lowering/filter_project_graph", |b| {
         b.iter(|| {
-            let pipeline = PipelineIr::new(vec![
+            let pipeline = PipelineGraph::record(vec![
                 PipelineStage::Filter(black_box(predicate.clone())),
                 PipelineStage::Projection(black_box(projections.clone())),
             ]);
-            black_box(PipelineLowering::from_ir(&pipeline))
+            black_box(PipelineLowering::from_graph(&pipeline))
         });
     });
 
@@ -562,7 +562,7 @@ fn bench_compiled_decimal_filter_sum_kernel(c: &mut Criterion) {
 #[cfg(not(feature = "jit-mlir"))]
 criterion_group!(
     benches,
-    bench_pipeline_ir_and_mlir,
+    bench_pipeline_graph_and_mlir,
     bench_quill_filter_project_kernel,
     bench_quill_filter_sum_kernel,
     bench_datafusion_filter_project,
@@ -572,7 +572,7 @@ criterion_group!(
 #[cfg(feature = "jit-mlir")]
 criterion_group!(
     benches,
-    bench_pipeline_ir_and_mlir,
+    bench_pipeline_graph_and_mlir,
     bench_compiled_i64_filter_kernel,
     bench_compiled_i64_filter_project_kernel,
     bench_compiled_f64_filter_sum_kernel,

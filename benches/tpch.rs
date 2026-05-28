@@ -2,8 +2,8 @@ use std::env;
 use std::path::{Path, PathBuf};
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use quill_sql::database::{Database, DatabaseOptions};
-use quill_sql::jit::JitOptions;
+use quill_core::database::{Database, DatabaseOptions};
+use quill_jit::JitOptions;
 use tpchgen_cli::{Compression, OutputFormat, Table, TpchGenerator};
 
 const DEFAULT_SCALE_FACTOR: f64 = 0.01;

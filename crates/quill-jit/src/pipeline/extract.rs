@@ -14,14 +14,14 @@ use datafusion::physical_plan::ExecutionPlan;
 use serde::Serialize;
 
 use crate::{
-    CompiledPipelineExec, JitExpr, JitProjection, PipelineIr, PipelineKind, PipelineLowering,
+    CompiledPipelineExec, JitExpr, JitProjection, PipelineGraph, PipelineKind, PipelineLowering,
     PipelineRuntime, PipelineStage,
 };
 
 #[derive(Debug, Clone)]
 pub(crate) struct PipelineMatch {
     pub node: &'static str,
-    pub pipeline: PipelineIr,
+    pub graph: PipelineGraph,
     pub compiled: bool,
     pub backend: Option<String>,
     pub reason: &'static str,
@@ -43,7 +43,7 @@ pub struct PipelineCandidate {
 pub(crate) struct PhysicalPipeline {
     pub input: Arc<dyn ExecutionPlan>,
     pub output_schema: ArrowSchemaRef,
-    pub ir: PipelineIr,
+    pub graph: PipelineGraph,
     pub output_adapter: Option<OutputAdapter>,
 }
 
@@ -55,13 +55,13 @@ pub(crate) struct OutputAdapter {
 
 impl PipelineMatch {
     pub fn candidate(&self) -> Option<PipelineCandidate> {
-        let kind = PipelineLowering::from_ir(&self.pipeline)?.kind();
+        let kind = PipelineLowering::from_graph(&self.graph)?.kind();
         Some(PipelineCandidate {
             node: self.node,
             kind,
-            source: self.pipeline.source.name(),
-            stages: self.pipeline.stage_names(),
-            sink: self.pipeline.sink_name(),
+            source: self.graph.source.name(),
+            stages: self.graph.stage_names(),
+            sink: self.graph.sink_name(),
             compiled: self.compiled,
             backend: self.backend.clone(),
             reason: self.reason,
@@ -79,7 +79,7 @@ impl PhysicalPipeline {
         Self {
             input,
             output_schema,
-            ir: PipelineIr::filter_sum(predicate, measure),
+            graph: PipelineGraph::filter_sum(predicate, measure),
             output_adapter: None,
         }
     }
@@ -94,7 +94,7 @@ impl PhysicalPipeline {
         Self {
             input,
             output_schema,
-            ir: PipelineIr::new(vec![
+            graph: PipelineGraph::record(vec![
                 PipelineStage::Filter(predicate),
                 PipelineStage::Projection(projections),
             ]),
@@ -116,18 +116,18 @@ pub(crate) fn extract_pipeline_from_node(
 
 pub(crate) fn pipeline_from_node(plan: &Arc<dyn ExecutionPlan>) -> Option<PipelineMatch> {
     if let Some(compiled) = plan.as_any().downcast_ref::<CompiledPipelineExec>() {
-        let pipeline = match compiled.runtime() {
-            PipelineRuntime::RecordBatch(runtime) => PipelineIr::new(vec![
+        let graph = match compiled.runtime() {
+            PipelineRuntime::RecordBatch(runtime) => PipelineGraph::record(vec![
                 PipelineStage::Filter(runtime.predicate().clone()),
                 PipelineStage::Projection(runtime.projections().to_vec()),
             ]),
             PipelineRuntime::ScalarSum(runtime) => {
-                PipelineIr::filter_sum(runtime.predicate().clone(), runtime.measure().clone())
+                PipelineGraph::filter_sum(runtime.predicate().clone(), runtime.measure().clone())
             }
         };
         return Some(PipelineMatch {
             node: "CompiledPipelineExec",
-            pipeline,
+            graph,
             compiled: true,
             backend: Some(compiled.kernel().backend.clone()),
             reason: "compiled",
@@ -138,7 +138,7 @@ pub(crate) fn pipeline_from_node(plan: &Arc<dyn ExecutionPlan>) -> Option<Pipeli
     let pipeline = extract_filter_sum_pipeline(aggregate)?;
     Some(PipelineMatch {
         node: "AggregateExec",
-        pipeline: pipeline.ir,
+        graph: pipeline.graph,
         compiled: false,
         backend: None,
         reason: "candidate",

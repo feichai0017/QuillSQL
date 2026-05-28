@@ -1,6 +1,6 @@
 use serde::Serialize;
 
-use crate::{JitExpr, JitProjection, PipelineIr, PipelineSink, PipelineSource, PipelineStage};
+use crate::{JitExpr, JitProjection, PipelineGraph, PipelineSink, PipelineSource, PipelineStage};
 
 mod compiler;
 mod options;
@@ -27,8 +27,8 @@ pub enum PipelineLowering {
 }
 
 impl PipelineLowering {
-    pub fn from_ir(ir: &PipelineIr) -> Option<Self> {
-        match (&ir.source, ir.stages.as_slice(), &ir.sink) {
+    pub fn from_graph(graph: &PipelineGraph) -> Option<Self> {
+        match (&graph.source, graph.stages.as_slice(), &graph.sink) {
             (
                 PipelineSource::DataFusionInput,
                 [PipelineStage::Filter(predicate), PipelineStage::Projection(projections)],
@@ -60,7 +60,7 @@ impl PipelineLowering {
 #[cfg(test)]
 mod tests {
     use crate::{
-        JitExpr, JitProjection, JitScalar, PipelineIr, PipelineKind, PipelineLowering,
+        JitExpr, JitProjection, JitScalar, PipelineGraph, PipelineKind, PipelineLowering,
         PipelineStage,
     };
 
@@ -68,12 +68,12 @@ mod tests {
     fn lowers_filter_projection_pipeline() {
         let predicate = JitExpr::Literal(JitScalar::Bool(true));
         let projection = JitProjection::new(JitExpr::Literal(JitScalar::Int64(1)), "one");
-        let pipeline = PipelineIr::new(vec![
+        let pipeline = PipelineGraph::record(vec![
             PipelineStage::Filter(predicate),
             PipelineStage::Projection(vec![projection]),
         ]);
 
-        let lowering = PipelineLowering::from_ir(&pipeline).expect("lowering");
+        let lowering = PipelineLowering::from_graph(&pipeline).expect("lowering");
         assert_eq!(lowering.kind(), PipelineKind::Record);
         assert!(matches!(lowering, PipelineLowering::Record { .. }));
     }
@@ -82,9 +82,9 @@ mod tests {
     fn lowers_filter_sum_pipeline() {
         let predicate = JitExpr::Literal(JitScalar::Bool(true));
         let measure = JitExpr::Literal(JitScalar::Float64(1.0));
-        let pipeline = PipelineIr::filter_sum(predicate, measure);
+        let pipeline = PipelineGraph::filter_sum(predicate, measure);
 
-        let lowering = PipelineLowering::from_ir(&pipeline).expect("lowering");
+        let lowering = PipelineLowering::from_graph(&pipeline).expect("lowering");
         assert_eq!(lowering.kind(), PipelineKind::Aggregate);
         assert!(matches!(lowering, PipelineLowering::PlainSum { .. }));
     }

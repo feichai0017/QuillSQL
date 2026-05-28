@@ -27,14 +27,14 @@ pub enum PipelineSink {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct PipelineIr {
+pub struct PipelineGraph {
     pub source: PipelineSource,
     pub stages: Vec<PipelineStage>,
     pub sink: PipelineSink,
 }
 
-impl PipelineIr {
-    pub fn new(stages: Vec<PipelineStage>) -> Self {
+impl PipelineGraph {
+    pub fn record(stages: Vec<PipelineStage>) -> Self {
         Self {
             source: PipelineSource::DataFusionInput,
             stages,
@@ -71,13 +71,13 @@ impl PipelineIr {
 
 #[cfg(test)]
 mod tests {
-    use crate::{JitExpr, JitProjection, JitScalar, JitType, PipelineIr};
+    use crate::{JitExpr, JitProjection, JitScalar, JitType, PipelineGraph};
 
     #[test]
     fn records_filter_project_pipeline() {
         let predicate = JitExpr::Literal(JitScalar::Bool(true));
         let projection = JitProjection::new(JitExpr::Literal(JitScalar::Int64(1)), "one");
-        let pipeline = PipelineIr::new(vec![
+        let pipeline = PipelineGraph::record(vec![
             crate::PipelineStage::Filter(predicate),
             crate::PipelineStage::Projection(vec![projection]),
         ]);
@@ -90,7 +90,8 @@ mod tests {
     fn records_projection_pipeline() {
         let projection =
             JitProjection::new(JitExpr::Literal(JitScalar::Null(JitType::Int64)), "value");
-        let pipeline = PipelineIr::new(vec![crate::PipelineStage::Projection(vec![projection])]);
+        let pipeline =
+            PipelineGraph::record(vec![crate::PipelineStage::Projection(vec![projection])]);
 
         assert_eq!(pipeline.stage_names(), vec!["project"]);
         assert_eq!(pipeline.sink_name(), "record_batch");
@@ -100,7 +101,7 @@ mod tests {
     fn records_filter_sum_pipeline() {
         let predicate = JitExpr::Literal(JitScalar::Bool(true));
         let measure = JitExpr::Literal(JitScalar::Float64(1.0));
-        let pipeline = PipelineIr::filter_sum(predicate, measure);
+        let pipeline = PipelineGraph::filter_sum(predicate, measure);
 
         assert_eq!(pipeline.stage_names(), vec!["filter"]);
         assert_eq!(pipeline.sink_name(), "scalar_sum");
