@@ -66,9 +66,45 @@ fn emits_quill_dialect_pipeline_skeleton() {
     let module = MlirBackend::new().emit_quill_dialect("record_pipeline", &pipeline);
 
     assert_eq!(module.kind, PipelineKind::Record);
+    assert_eq!(
+        module.kernel_spec().map(|spec| spec.name()),
+        Some("i64_filter_project")
+    );
     assert!(module.text().contains("\"quill.pipeline\""));
+    assert!(module
+        .text()
+        .contains("// qjit.kernel = i64_filter_project"));
     assert!(module.text().contains("\"quill.exec.filter\""));
     assert!(module.text().contains("\"quill.exec.project\""));
+}
+
+#[test]
+fn emits_q6_quill_dialect_kernel_spec() {
+    let pipeline = PipelineIr::filter_sum(q6_decimal_predicate(), q6_decimal_measure());
+    let module = MlirBackend::new().emit_quill_dialect("q6_pipeline", &pipeline);
+
+    assert_eq!(
+        module.kernel_spec().map(|spec| spec.name()),
+        Some("decimal_filter_sum")
+    );
+    assert!(module
+        .text()
+        .contains("// qjit.kernel = decimal_filter_sum"));
+    assert!(module.text().contains("\"quill.sink.plain_sum\""));
+}
+
+#[test]
+fn lowers_q6_quill_dialect_to_mlir() {
+    let pipeline = PipelineIr::filter_sum(q6_decimal_predicate(), q6_decimal_measure());
+    let dialect = MlirBackend::new().emit_quill_dialect("q6_decimal_pipeline", &pipeline);
+
+    let module = MlirBackend::new().lower_quill_dialect(&dialect).unwrap();
+
+    assert_eq!(module.symbol, "q6_decimal_pipeline");
+    assert!(module.text.contains("func.func @q6_decimal_pipeline"));
+    assert!(module.text.contains("qjit.lowering = quill_dialect"));
+    assert!(module.text.contains("i128"));
+    MlirBackend::new().verify_module(&module).unwrap();
 }
 
 #[test]
@@ -102,6 +138,7 @@ fn emits_i64_filter_project_module() {
         .lower_i64_filter_project(&predicate, &projections)
         .unwrap();
     assert!(module.text.contains("func.func @quill_i64_filter_project_"));
+    assert!(module.text.contains("qjit.lowering = quill_dialect"));
     assert!(module.text.contains("scf.for unsigned"));
     assert!(module.text.contains("scf.if"));
     assert!(module.text.contains("llvm.load"));
@@ -118,6 +155,7 @@ fn emits_f64_filter_sum_module() {
         .lower_f64_filter_sum(&predicate, &measure)
         .unwrap();
     assert!(module.text.contains("func.func @quill_f64_filter_sum_"));
+    assert!(module.text.contains("qjit.lowering = quill_dialect"));
     assert!(module.text.contains("scf.for unsigned"));
     assert!(module.text.contains("scf.if"));
     assert!(module.text.contains("arith.mulf"));
@@ -136,6 +174,7 @@ fn emits_decimal_filter_sum_module() {
         .unwrap();
 
     assert!(module.text.contains("func.func @quill_decimal_filter_sum_"));
+    assert!(module.text.contains("qjit.lowering = quill_dialect"));
     assert!(module.text.contains("scf.for unsigned"));
     assert!(module.text.contains("scf.if"));
     assert!(module.text.contains("i128"));

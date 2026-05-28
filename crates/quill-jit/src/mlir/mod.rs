@@ -2,6 +2,7 @@ mod compiled;
 #[cfg(feature = "jit-mlir")]
 mod dispatch;
 mod emit;
+mod lower;
 #[cfg(test)]
 mod tests;
 mod verify;
@@ -74,7 +75,13 @@ impl MlirBackend {
         predicate: &JitExpr,
         projections: &[JitProjection],
     ) -> JitResult<MlirModule> {
-        emit::lower_i64_filter_project(predicate, projections)
+        let pipeline = PipelineIr::new(vec![
+            crate::PipelineOp::Filter(predicate.clone()),
+            crate::PipelineOp::Projection(projections.to_vec()),
+        ]);
+        let dialect =
+            self.emit_quill_dialect(emit::next_symbol("quill_i64_filter_project"), &pipeline);
+        lower::lower_quill_dialect(&dialect)
     }
 
     pub fn lower_f64_filter_sum(
@@ -82,7 +89,9 @@ impl MlirBackend {
         predicate: &JitExpr,
         measure: &JitExpr,
     ) -> JitResult<MlirModule> {
-        emit::lower_f64_filter_sum(predicate, measure)
+        let pipeline = PipelineIr::filter_sum(predicate.clone(), measure.clone());
+        let dialect = self.emit_quill_dialect(emit::next_symbol("quill_f64_filter_sum"), &pipeline);
+        lower::lower_quill_dialect(&dialect)
     }
 
     pub fn lower_decimal_filter_sum(
@@ -90,7 +99,14 @@ impl MlirBackend {
         predicate: &JitExpr,
         measure: &JitExpr,
     ) -> JitResult<MlirModule> {
-        emit::lower_decimal_filter_sum(predicate, measure)
+        let pipeline = PipelineIr::filter_sum(predicate.clone(), measure.clone());
+        let dialect =
+            self.emit_quill_dialect(emit::next_symbol("quill_decimal_filter_sum"), &pipeline);
+        lower::lower_quill_dialect(&dialect)
+    }
+
+    pub fn lower_quill_dialect(&self, module: &QuillDialectModule) -> JitResult<MlirModule> {
+        lower::lower_quill_dialect(module)
     }
 
     pub fn emit_quill_dialect(

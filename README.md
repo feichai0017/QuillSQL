@@ -65,14 +65,14 @@ The workspace is split into focused packages:
 - `quill-sql`: the public facade crate plus CLI/server binaries.
 - `quill-core`: the DataFusion-backed `Database` API, query execution, Parquet
   registration, and debug trace capture.
-- `quill-jit`: pipeline extraction, Quill pipeline dialect skeleton, MLIR
+- `quill-jit`: pipeline extraction, Quill pipeline dialect model, MLIR
   emission, compiled execution nodes, and fixed-width Arrow kernels.
 
 Inside `crates/quill-jit/src`:
 
 - `pipeline/` owns expression lowering, `PipelineIR`, DataFusion physical-plan
   extraction, and the physical optimizer rule.
-- `dialect/` defines the first Quill pipeline dialect skeleton: source, exec,
+- `dialect/` defines the first Quill pipeline dialect model: source, exec,
   and sink ops for future MLIR dialect lowering.
 - `lower/` owns exact pipeline pattern lowering, compiler construction, and JIT
   options.
@@ -91,8 +91,8 @@ structured MLIR kernel specs. Compiled scalar MLIR invocation is wired for the f
 kernel that emits a byte selection mask, an `i64` filter/project kernel that
 compacts one projected column, and an `f64` filter/sum kernel for the first
 scan/filter/plain-aggregate path. It also has a Q6-shaped
-`Date32`/`Decimal128` filter/sum kernel that compiles and invokes through MLIR
-over fixed-width column slices. With `jit-mlir` and
+`Date32`/`Decimal128` filter/sum kernel that lowers through the Quill dialect
+before emitting executable MLIR over fixed-width column slices. With `jit-mlir` and
 `DatabaseOptions { jit: JitOptions::mlir_execution(), .. }`,
 `CompiledRecordPipelineExec` dispatches the single-column i64 filter/project path
 through MLIR, and
@@ -102,10 +102,10 @@ batch has no nulls or slice offsets; other cases keep the safe Rust batch
 runtime. CLI, server, and
 benchmark binaries read the same option once at startup from `QUILL_JIT=mlir`.
 Debug traces expose recognized `PipelineIR` candidates for record and aggregate
-pipelines, which is the scaffold for the next whole-pipeline MLIR lowering
-step. The new Quill dialect skeleton is intentionally not part of the executable
-path yet; it gives the next lowering stage a stable place to express
-`source -> filter/project -> sink` pipelines before lowering to `scf/arith/llvm`.
+pipelines. The executable compiled kernels now share the same lowering shape:
+`PipelineIR -> Quill dialect -> scf/arith/llvm -> ExecutionEngine`. Current
+coverage includes single-column `i64 filter/project`, `f64 filter/sum`, and the
+Q6-shaped decimal `filter -> plain SUM` path.
 
 Run the MLIR path with:
 

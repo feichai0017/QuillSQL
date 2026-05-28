@@ -104,6 +104,26 @@ impl KernelSpec {
             Self::F64FilterSum { .. } | Self::DecimalFilterSum { .. } => KernelKind::FilterSum,
         }
     }
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Generic { kind } => kind.name(),
+            Self::I64FilterProject { .. } => "i64_filter_project",
+            Self::F64FilterSum { .. } => "f64_filter_sum",
+            Self::DecimalFilterSum { .. } => "decimal_filter_sum",
+        }
+    }
+}
+
+impl KernelKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Filter => "filter",
+            Self::Projection => "projection",
+            Self::FilterProject => "filter_project",
+            Self::FilterSum => "filter_sum",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

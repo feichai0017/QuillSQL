@@ -1,7 +1,8 @@
 use std::fmt::Write;
 
 use crate::{
-    JitExpr, JitProjection, PipelineIr, PipelineKind, PipelineOp, PipelineSink, PipelineSource,
+    JitExpr, JitProjection, KernelSpec, PipelineIr, PipelineKind, PipelineOp, PipelineSink,
+    PipelineSource,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -74,6 +75,9 @@ impl QuillDialectModule {
             "    %batch0 = \"{}\"() : () -> !quill.batch",
             self.source.name()
         );
+        if let Some(spec) = self.kernel_spec() {
+            let _ = writeln!(text, "    // qjit.kernel = {}", spec.name());
+        }
 
         let mut batch = "%batch0".to_string();
         let mut selection = None::<String>;
@@ -163,6 +167,22 @@ impl QuillDialectModule {
                     );
                 }
             }
+        }
+    }
+
+    pub fn kernel_spec(&self) -> Option<KernelSpec> {
+        match (&self.source, self.ops.as_slice(), &self.sink) {
+            (
+                QuillDialectSource::DataFusionBatch,
+                [QuillDialectOp::Filter { predicate }, QuillDialectOp::Project { projections }],
+                QuillDialectSink::RecordBatch,
+            ) => KernelSpec::i64_filter_project(predicate, projections),
+            (
+                QuillDialectSource::DataFusionBatch,
+                [QuillDialectOp::Filter { predicate }],
+                QuillDialectSink::PlainSum { measure },
+            ) => KernelSpec::filter_sum(predicate, measure),
+            _ => None,
         }
     }
 }

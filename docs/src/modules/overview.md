@@ -10,7 +10,7 @@ hooks.
 | ------- | ---- |
 | `quill-sql` | Public facade crate plus CLI/server binaries and benchmarks. |
 | `quill-core` | DataFusion-backed `Database` API, query execution, Parquet registration, and debug traces. |
-| `quill-jit` | Pipeline extraction, Quill dialect skeleton, MLIR emission, compiled execution nodes, and Arrow kernel runtime. |
+| `quill-jit` | Pipeline extraction, Quill dialect model, MLIR emission, compiled execution nodes, and Arrow kernel runtime. |
 
 ## Database (`crates/quill-core/src/database.rs`)
 
@@ -30,7 +30,7 @@ Parquet dataset as a DataFusion table.
 | Directory | Role |
 | --------- | ---- |
 | `pipeline/` | Expression IR, `PipelineIR`, DataFusion physical-plan extraction, and the physical optimizer rule. |
-| `dialect/` | Quill pipeline dialect skeleton used as the next lowering boundary. |
+| `dialect/` | Quill pipeline dialect model used as the explicit lowering boundary. |
 | `lower/` | Exact pipeline pattern lowering, compiled-plan construction, and JIT options. |
 | `runtime/` | DataFusion physical execution nodes, compiled-kernel specs, and fixed-width Arrow batch kernels. |
 | `mlir/` | MLIR emission, verification, and compiled ExecutionEngine invocation. |
@@ -48,7 +48,10 @@ The JIT subdirectories have stricter internal boundaries:
 - `lower/compiler.rs`: compiles recognized `PipelineIR` shapes into DataFusion
   execution nodes.
 - `mlir/mod.rs`: public backend surface and `KernelBackend` implementation.
-- `mlir/emit.rs`: textual MLIR emission from QuillSQL JIT expressions.
+- `mlir/lower.rs`: lowers supported Quill dialect modules to executable MLIR;
+  currently covers the Q6-shaped decimal filter/sum path.
+- `mlir/emit.rs`: textual MLIR emission helpers for QuillSQL JIT expressions
+  and fixed-width kernels.
 - `mlir/verify.rs`: feature-gated MLIR parser/verifier setup.
 - `mlir/compiled.rs`: feature-gated `ExecutionEngine` invocation artifacts.
 - `runtime/exec.rs`: DataFusion physical execution nodes for compiled record and

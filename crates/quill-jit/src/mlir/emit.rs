@@ -123,14 +123,15 @@ pub(super) fn lower_i64_filter(predicate: &JitExpr) -> JitResult<MlirModule> {
     Ok(MlirModule { symbol, text })
 }
 
-pub(super) fn lower_i64_filter_project(
+pub(super) fn lower_i64_filter_project_with_symbol(
+    symbol: String,
     predicate: &JitExpr,
     projections: &[JitProjection],
+    lowering: Option<&str>,
 ) -> JitResult<MlirModule> {
     ensure_single_i64_predicate(predicate, "compiled filter-project kernel")?;
     ensure_single_i64_projection(projections, "compiled filter-project kernel")?;
 
-    let symbol = next_symbol("quill_i64_filter_project");
     let predicate_symbol = format!("{symbol}_predicate");
     let projection_symbol = format!("{symbol}_project_0");
     let projection = &projections[0];
@@ -141,6 +142,10 @@ pub(super) fn lower_i64_filter_project(
         text,
         "  func.func @{symbol}(%len: i64, %pred_values: !llvm.ptr, %proj_values: !llvm.ptr, %out_values: !llvm.ptr, %out_len: !llvm.ptr) -> i32 attributes {{ llvm.emit_c_interface }} {{"
     );
+    text.push_str("    // qjit.kind = i64_filter_project\n");
+    if let Some(lowering) = lowering {
+        let _ = writeln!(text, "    // qjit.lowering = {lowering}");
+    }
     text.push_str("    %c0_i64 = arith.constant 0 : i64\n");
     text.push_str("    %c1_i64 = arith.constant 1 : i64\n");
     text.push_str(
@@ -181,14 +186,15 @@ pub(super) fn lower_i64_filter_project(
     Ok(MlirModule { symbol, text })
 }
 
-pub(super) fn lower_f64_filter_sum(
+pub(super) fn lower_f64_filter_sum_with_symbol(
+    symbol: String,
     predicate: &JitExpr,
     measure: &JitExpr,
+    lowering: Option<&str>,
 ) -> JitResult<MlirModule> {
     ensure_single_i64_predicate(predicate, "compiled filter-sum kernel")?;
     ensure_f64_measure_pair(measure, "compiled filter-sum kernel")?;
 
-    let symbol = next_symbol("quill_f64_filter_sum");
     let predicate_symbol = format!("{symbol}_predicate");
     let measure_symbol = format!("{symbol}_measure");
     let mut text = start_module();
@@ -198,6 +204,10 @@ pub(super) fn lower_f64_filter_sum(
         text,
         "  func.func @{symbol}(%len: i64, %pred_values: !llvm.ptr, %left_values: !llvm.ptr, %right_values: !llvm.ptr, %out_sum: !llvm.ptr, %out_count: !llvm.ptr) -> i32 attributes {{ llvm.emit_c_interface }} {{"
     );
+    text.push_str("    // qjit.kind = f64_filter_sum\n");
+    if let Some(lowering) = lowering {
+        let _ = writeln!(text, "    // qjit.lowering = {lowering}");
+    }
     text.push_str("    %c0_i64 = arith.constant 0 : i64\n");
     text.push_str("    %c1_i64 = arith.constant 1 : i64\n");
     text.push_str("    %zero_f64 = arith.constant 0.000000e+00 : f64\n");
@@ -241,13 +251,14 @@ pub(super) fn lower_f64_filter_sum(
     Ok(MlirModule { symbol, text })
 }
 
-pub(super) fn lower_decimal_filter_sum(
+pub(super) fn lower_decimal_filter_sum_with_symbol(
+    symbol: String,
     predicate: &JitExpr,
     measure: &JitExpr,
+    lowering: Option<&str>,
 ) -> JitResult<MlirModule> {
     ensure_decimal_filter_sum(predicate, measure, "compiled decimal filter-sum kernel")?;
 
-    let symbol = next_symbol("quill_decimal_filter_sum");
     let predicate_symbol = format!("{symbol}_predicate");
     let measure_symbol = format!("{symbol}_measure");
     let columns = decimal_filter_sum_columns(predicate, measure)?;
@@ -264,6 +275,10 @@ pub(super) fn lower_decimal_filter_sum(
         text,
         "  func.func @{symbol}(%len: i64, {column_args}, %out_sum: !llvm.ptr, %out_count: !llvm.ptr) -> i32 attributes {{ llvm.emit_c_interface }} {{"
     );
+    text.push_str("    // qjit.kind = decimal_filter_sum\n");
+    if let Some(lowering) = lowering {
+        let _ = writeln!(text, "    // qjit.lowering = {lowering}");
+    }
     text.push_str("    %c0_i64 = arith.constant 0 : i64\n");
     text.push_str("    %c1_i64 = arith.constant 1 : i64\n");
     text.push_str("    %zero_i128 = arith.constant 0 : i128\n");
@@ -331,7 +346,7 @@ pub(super) fn decimal_filter_sum_columns(
         .collect()
 }
 
-fn next_symbol(prefix: &str) -> String {
+pub(super) fn next_symbol(prefix: &str) -> String {
     let id = NEXT_KERNEL_ID.fetch_add(1, Ordering::Relaxed);
     format!("{prefix}_{id}")
 }
