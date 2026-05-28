@@ -165,7 +165,7 @@ MLIR JIT boundary.</p>
 </thead>
 <tbody>
 <tr><td><code>tests/df_arrow_parquet.rs</code></td><td>End-to-end SQL over DataFusion memory tables and registered Parquet datasets.</td></tr>
-<tr><td><code>src/jit/*</code> unit tests</td><td>JIT expression lowering plus MLIR module generation and verification.</td></tr>
+<tr><td><code>crates/quill-jit/src/*</code> unit tests</td><td>JIT expression lowering plus MLIR module generation and verification.</td></tr>
 </tbody>
 </table>
 </div>
@@ -176,7 +176,7 @@ cargo clippy --all-targets -- -D warnings
 cargo bench --no-run
 </code></pre>
 <p>The <code>jit-mlir</code> feature requires local MLIR/LLVM libraries and also runs the
-native scalar ExecutionEngine smoke test. On a Homebrew LLVM 22 installation,
+compiled scalar ExecutionEngine smoke test. On a Homebrew LLVM 22 installation,
 set:</p>
 <pre><code class="language-bash">MLIR_SYS_220_PREFIX=/opt/homebrew/opt/llvm \
 LLVM_SYS_220_PREFIX=/opt/homebrew/opt/llvm \
