@@ -165,9 +165,10 @@ hooks.</p>
 <tr><th>Package</th><th>Role</th></tr>
 </thead>
 <tbody>
-<tr><td><code>quill-sql</code></td><td>Public facade crate plus CLI/server binaries and benchmarks.</td></tr>
+<tr><td><code>quill-sql</code></td><td>CLI/server binaries, benchmarks, and release metadata.</td></tr>
 <tr><td><code>quill-core</code></td><td>DataFusion-backed <code>Database</code> API, query execution, Parquet registration, and debug traces.</td></tr>
-<tr><td><code>quill-jit</code></td><td>Pipeline extraction, Quill dialect skeleton, MLIR emission, compiled execution nodes, and Arrow kernel runtime.</td></tr>
+<tr><td><code>quill-jit</code></td><td>Pipeline extraction, Quill dialect emission, MLIR lowering, compiled execution nodes, and Arrow kernel runtime.</td></tr>
+<tr><td><code>quill-mlir</code></td><td>Optional C++/TableGen Quill dialect registration and MLIR pass extension points.</td></tr>
 </tbody>
 </table>
 </div>
@@ -184,31 +185,43 @@ Parquet dataset as a DataFusion table.</p>
 <div class="table-wrapper">
 <table>
 <thead>
-<tr><th>File</th><th>Role</th></tr>
+<tr><th>Directory</th><th>Role</th></tr>
 </thead>
 <tbody>
-<tr><td><code>compiler.rs</code></td><td>Compiles recognized <code>PipelineIR</code> shapes into DataFusion execution nodes.</td></tr>
-<tr><td><code>dialect.rs</code></td><td>Defines the Quill pipeline dialect skeleton used as the next lowering boundary.</td></tr>
-<tr><td><code>exec.rs</code></td><td>DataFusion physical execution nodes for compiled filter/project and aggregate pipelines.</td></tr>
-<tr><td><code>expr.rs</code></td><td>Lowers supported DataFusion physical expressions into QuillSQL’s small JIT IR.</td></tr>
-<tr><td><code>ir.rs</code></td><td>Defines the semantic <code>PipelineIR</code> shape extracted from DataFusion plans.</td></tr>
-<tr><td><code>kernel.rs</code></td><td>Defines the future Arrow kernel ABI and compiled-kernel descriptor.</td></tr>
-<tr><td><code>lowering.rs</code></td><td>Lowers exact <code>PipelineIR</code> shapes into executable record or aggregate kernels.</td></tr>
-<tr><td><code>mlir/</code></td><td>MLIR emission, verification, and compiled ExecutionEngine invocation.</td></tr>
-<tr><td><code>options.rs</code></td><td>Startup-time JIT execution options shared by the database and benchmark harnesses.</td></tr>
-<tr><td><code>pipeline.rs</code></td><td>Extracts recognizable DataFusion physical-plan pipelines such as <code>filter -&gt; projection</code> and <code>filter -&gt; plain SUM</code>.</td></tr>
-<tr><td><code>rule.rs</code></td><td>DataFusion physical optimizer rule that delegates supported pipeline rewrites to the compiler.</td></tr>
-<tr><td><code>runtime/</code></td><td>Fixed-width Arrow batch kernel runtime for compiled execution nodes.</td></tr>
+<tr><td><code>pipeline/</code></td><td>Expression lowering, <code>PipelineGraph</code>, DataFusion physical-plan extraction, and the physical optimizer rule.</td></tr>
+<tr><td><code>dialect/</code></td><td>Quill pipeline dialect model used as the explicit lowering boundary.</td></tr>
+<tr><td><code>lower/</code></td><td>Exact pipeline pattern lowering, compiled-plan construction, and JIT options.</td></tr>
+<tr><td><code>runtime/</code></td><td>DataFusion compiled pipeline node, pipeline specs, and fixed-width Arrow batch kernels.</td></tr>
+<tr><td><code>mlir/</code></td><td>MLIR emission, formal Quill dialect verification, and compiled ExecutionEngine invocation.</td></tr>
 </tbody>
 </table>
 </div>
-<p>The two JIT subdirectories have stricter internal boundaries:</p>
+<p>The JIT subdirectories have stricter internal boundaries:</p>
 <ul>
+<li><code>pipeline/expr.rs</code>: lowers supported DataFusion physical expressions into the
+small JIT expression IR.</li>
+<li><code>pipeline/graph.rs</code>: defines the semantic <code>PipelineGraph</code> shape extracted from
+DataFusion plans.</li>
+<li><code>pipeline/extract.rs</code>: extracts recognizable physical-plan pipelines such as
+<code>filter -&gt; projection</code> and <code>filter -&gt; plain SUM</code>.</li>
+<li><code>pipeline/rule.rs</code>: physical optimizer rule that delegates supported pipeline
+rewrites to the compiler.</li>
+<li><code>lower/compiler.rs</code>: compiles recognized <code>PipelineGraph</code> shapes into DataFusion
+execution nodes.</li>
 <li><code>mlir/mod.rs</code>: public backend surface and <code>KernelBackend</code> implementation.</li>
-<li><code>mlir/emit.rs</code>: textual MLIR emission from QuillSQL JIT expressions.</li>
+<li><code>mlir/lower.rs</code>: lowers supported Quill dialect modules to executable MLIR;
+currently covers the Q6-shaped decimal filter/sum path.</li>
+<li><code>mlir/emit.rs</code>: textual MLIR emission helpers for QuillSQL JIT expressions
+and fixed-width kernels.</li>
 <li><code>mlir/verify.rs</code>: feature-gated MLIR parser/verifier setup.</li>
 <li><code>mlir/compiled.rs</code>: feature-gated <code>ExecutionEngine</code> invocation artifacts.</li>
-<li><code>runtime/mod.rs</code>: public fixed-width filter/project kernel surface.</li>
+<li><code>runtime/exec.rs</code>: unified DataFusion physical execution node for compiled
+record and scalar aggregate pipelines.</li>
+<li><code>runtime/kernel.rs</code>: <code>PipelineSpec</code>, <code>PredicateSpec</code>, and compiled pipeline
+metadata.</li>
+<li><code>runtime/record.rs</code>: fixed-width filter/project record-batch runtime.</li>
+<li><code>runtime/sum.rs</code>: fixed-width plain <code>SUM</code> runtime and Q6-shaped decimal
+filter/sum specialization.</li>
 <li><code>runtime/array.rs</code>: Arrow array views and output builders.</li>
 <li><code>runtime/eval.rs</code>: expression evaluation and SQL boolean/null semantics.</li>
 <li><code>runtime/value.rs</code>: scalar value representation.</li>

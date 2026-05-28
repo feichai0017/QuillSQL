@@ -189,12 +189,12 @@ experiments and Arrow/Parquet datasets for persistent analytical data.</p>
     Logical --&gt; Optimized["DataFusion optimizers"]
     Optimized --&gt; Physical["DataFusion ExecutionPlan"]
     Physical --&gt; JITRule["MlirJitRule physical rewrite"]
-    JITRule --&gt; CompiledExec["CompiledRecordPipelineExec"]
+    JITRule --&gt; CompiledExec["CompiledPipelineExec"]
     CompiledExec --&gt; Arrow["Arrow RecordBatch output"]
 
     Parquet["Parquet / Arrow datasets"] --&gt; DF
     Memory["DataFusion memory tables"] --&gt; DF
-    JITRule --&gt; MLIR["MLIR arith module verification"]
+    JITRule --&gt; MLIR["Quill dialect + MLIR verification"]
 </pre>
 
 <h2 id="storage-boundary"><a class="header" href="#storage-boundary">Storage Boundary</a></h2>
@@ -213,36 +213,45 @@ trace-only planning work.</li>
 storage-engine research.</p>
 <h2 id="jit-boundary"><a class="header" href="#jit-boundary">JIT Boundary</a></h2>
 <p>The JIT boundary is the DataFusion physical plan plus Arrow <code>RecordBatch</code>
-interface. <code>MlirJitRule</code> walks DataFusion physical plans, asks <code>pipeline.rs</code> to
-extract supported physical pipelines, and delegates compilation to
-<code>PipelineCompiler</code>.</p>
-<p>The MLIR backend then emits scalar <code>arith</code> functions and verifies them through
-<code>melior</code> when <code>jit-mlir</code> is enabled. The physical optimizer can replace
-filter/project pipelines with <code>CompiledRecordPipelineExec</code>; the current executable
-node runs a fixed-width Arrow batch kernel implemented in QuillSQL while carrying
-the MLIR kernel descriptor. A narrow compiled <code>i64 -&gt; bool</code> MLIR ExecutionEngine
-probe validates scalar invocation. The compiled fixed-width path now has an
-<code>i64</code> filter kernel that writes a byte selection mask, an <code>i64</code> filter/project
-kernel that compacts one projected column, an <code>f64</code> filter/sum kernel for the
-first plain-aggregate path, and a Q6-shaped <code>Date32</code>/<code>Decimal128</code> filter/sum
-kernel over fixed-width column slices. <code>CompiledRecordPipelineExec</code> can invoke
-the i64 filter/project kernel, and <code>CompiledAggregatePipelineExec</code> can invoke the
-filter/sum kernels through thread-local MLIR execution caches when <code>jit-mlir</code> is
+interface. <code>MlirJitRule</code> walks DataFusion physical plans, asks
+<code>pipeline/extract.rs</code> to extract supported physical pipelines, and delegates
+compilation to <code>lower/compiler.rs</code>.</p>
+<p>The MLIR backend emits a formal Quill dialect module from <code>PipelineGraph</code>, verifies
+that module through <code>melior</code> when <code>jit-mlir</code> is enabled, and then lowers covered
+pipeline specs to executable <code>scf/arith/llvm</code> modules. The physical optimizer can
+replace filter/project and plain <code>SUM</code> pipelines with <code>CompiledPipelineExec</code>;
+the current executable node runs fixed-width Arrow pipeline kernels implemented
+in QuillSQL while carrying the MLIR pipeline descriptor and a structured
+<code>PipelineSpec</code>. A narrow compiled <code>i64 -&gt; bool</code> MLIR ExecutionEngine probe
+validates scalar invocation. The compiled fixed-width path now has an <code>i64</code>
+filter kernel that writes a byte selection mask, a multi-column
+<code>filter -&gt; project -&gt; record_batch</code> kernel for <code>i64</code>, <code>f64</code>, <code>date32</code>, and
+<code>decimal128</code> projection outputs, and a unified Quill-dialect
+<code>filter -&gt; plain SUM</code> lowering for both <code>f64</code> and Q6-shaped
+<code>Date32</code>/<code>Decimal128</code> inputs. <code>CompiledPipelineExec</code> invokes the record and
+scalar-sum kernels through thread-local MLIR execution caches when <code>jit-mlir</code> is
 enabled, <code>JitOptions::mlir_execution()</code> is selected, and the input batch has no
-nulls or slice offsets. CLI, server, and benchmark binaries map
+nulls or slice offsets. The dispatch layer consumes <code>PipelineSpec</code>; it no longer
+re-parses runtime expressions to guess input columns. CLI, server, and benchmark binaries map
 <code>QUILL_JIT=mlir</code> to that option at startup. Unsupported expressions and unsafe
-batch layouts fall back to the normal DataFusion plan or the fixed-width Arrow
-runtime.</p>
-<h2 id="ir-and-fusion"><a class="header" href="#ir-and-fusion">IR And Fusion</a></h2>
-<p>QuillSQL keeps one semantic pipeline IR plus an explicit lowering boundary:</p>
+batch layouts fall back to the fixed-width Arrow runtime. Set <code>QUILL_JIT=off</code>
+to keep a pure DataFusion physical plan for baseline measurements.</p>
+<h2 id="graph-and-fusion"><a class="header" href="#graph-and-fusion">Graph And Fusion</a></h2>
+<p>QuillSQL keeps one semantic pipeline graph plus an explicit lowering boundary:</p>
 <ul>
-<li><code>PipelineIR</code>: a linear pipeline prefix from a DataFusion physical plan,
+<li><code>PipelineGraph</code>: a linear pipeline prefix from a DataFusion physical plan,
 including the first <code>filter -&gt; plain SUM</code> sink shape used as the stepping
-stone toward whole-pipeline lowering.</li>
-<li><code>QuillDialectModule</code>: a textual custom-dialect skeleton with explicit
-<code>quill.source</code>, <code>quill.exec</code>, and <code>quill.sink</code> operations. It is not used as
-the executable MLIR path yet.</li>
-<li><code>PipelineLowering</code>: an exact pattern match from <code>PipelineIR</code> to an executable
+stone toward whole-pipeline lowering. It describes the executable subgraph
+selected for compilation; it is not a replacement SQL plan.</li>
+<li><code>QuillDialectModule</code>: a formal Quill MLIR graph with <code>quill.source</code>,
+<code>quill.exec</code>, <code>quill.sink</code>, <code>quill.column</code>, and <code>quill.yield</code> operations.
+<code>filter</code>, <code>project</code>, <code>plain_sum</code>, and the grouped aggregate sink carry scalar
+work in single-block regions instead of string attributes.</li>
+<li><code>crates/quill-mlir</code>: the optional C++/TableGen package that defines
+<code>!quill.batch</code>, <code>!quill.selection</code>, <code>!quill.row</code>, <code>!quill.scalar</code>, ODS
+verifiers, and the registered pass names <code>quill-canonicalize-pipeline</code> and
+<code>convert-quill-to-loops</code>.</li>
+<li><code>PipelineLowering</code>: an exact pattern match from <code>PipelineGraph</code> to an executable
 record or aggregate kernel shape.</li>
 </ul>
 <p>The first fusion patterns are deliberately small:</p>
@@ -251,31 +260,40 @@ record or aggregate kernel shape.</li>
 
 Filter -&gt; SUM(f64 expression)
 Filter(Date32/Decimal128 comparisons) -&gt; SUM(Decimal128 * Decimal128)
-  =&gt; CompiledAggregatePipelineExec
+  =&gt; CompiledPipelineExec(kind=aggregate, sink=scalar_sum)
+
+Group keys + SUM/COUNT/MIN/MAX aggregate inputs
+  =&gt; quill.sink.group_aggregate dialect skeleton
 </code></pre>
-<p><code>pipeline.rs</code> also recognizes the common DataFusion shape where a round-robin
-<code>RepartitionExec</code> sits between the filter and projection, and records that as
-an output adapter on the extracted pipeline. For plain aggregates, it extracts
-the partial <code>SUM</code> pipeline and leaves DataFusion’s final aggregate in place.
-<code>rule.rs</code> only performs traversal and replacement; it no longer constructs
-shape-specific execution nodes directly. The recognized physical-plan shapes are
-also exposed as <code>PipelineIR</code> candidates in debug traces, so future
+<p><code>pipeline/extract.rs</code> also recognizes the common DataFusion shape where a
+round-robin <code>RepartitionExec</code> sits between the filter and projection, and
+records that as an output adapter on the extracted pipeline. For plain
+aggregates, it extracts the partial <code>SUM</code> pipeline and leaves DataFusion’s final
+aggregate in place. <code>pipeline/rule.rs</code> only performs traversal and replacement;
+it no longer constructs shape-specific execution nodes directly. The recognized
+physical-plan shapes are also exposed as <code>PipelineGraph</code> candidates in debug traces,
+so future
 whole-pipeline lowering does not rely on string plan inspection. This lets the
-project measure real operator boundaries before taking on grouped aggregates,
-joins, hash repartitioning, or whole-query pipeline lowering. The decimal path
-now has both a DataFusion-safe fixed-width Arrow runtime specialization and an
-executable MLIR dispatch path for the same fixed-width column layout.</p>
+project measure real operator boundaries before taking on executable grouped
+aggregates, joins, hash repartitioning, or whole-query pipeline lowering. The
+decimal path now has both a DataFusion-safe fixed-width Arrow runtime
+specialization and an executable MLIR dispatch path for the same fixed-width
+column layout, using the same Q6-shaped decimal <code>PipelineSpec</code>. The grouped
+aggregate graph and dialect op are present as the Q1 extension point, but the
+optimizer rule still leaves Q1 on DataFusion until the hash aggregate lowering
+is implemented.</p>
 <p>The intended compiler path is:</p>
 <pre><code class="language-text">DataFusion ExecutionPlan
-  -&gt; PipelineIR
-  -&gt; Quill dialect skeleton
+  -&gt; PipelineGraph
+  -&gt; Quill dialect
   -&gt; lowering to scf/arith/llvm
   -&gt; ExecutionEngine kernel
 </code></pre>
-<p>The current executable path still jumps from <code>PipelineLowering</code> to specialized
-<code>scf/arith/llvm</code> emitters for the fixed-width kernels. Keeping the Quill dialect
-as a separate module makes the next step explicit instead of hiding a
-query-specific shortcut in the runtime.</p>
+<p>The current executable compiled kernels now share that route for the covered
+fixed-width cases: multi-column record projection, <code>f64 filter/sum</code>, and the
+Q6-shaped decimal <code>filter -&gt; plain SUM</code> path. The remaining work is broadening
+the dialect operations and lowering rules rather than adding more direct runtime
+shortcuts.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="module-overview"><a class="header" href="#module-overview">Module Overview</a></h1>
 <p>The current codebase is a small Cargo workspace. DataFusion provides the SQL
@@ -288,9 +306,10 @@ hooks.</p>
 <tr><th>Package</th><th>Role</th></tr>
 </thead>
 <tbody>
-<tr><td><code>quill-sql</code></td><td>Public facade crate plus CLI/server binaries and benchmarks.</td></tr>
+<tr><td><code>quill-sql</code></td><td>CLI/server binaries, benchmarks, and release metadata.</td></tr>
 <tr><td><code>quill-core</code></td><td>DataFusion-backed <code>Database</code> API, query execution, Parquet registration, and debug traces.</td></tr>
-<tr><td><code>quill-jit</code></td><td>Pipeline extraction, Quill dialect skeleton, MLIR emission, compiled execution nodes, and Arrow kernel runtime.</td></tr>
+<tr><td><code>quill-jit</code></td><td>Pipeline extraction, Quill dialect emission, MLIR lowering, compiled execution nodes, and Arrow kernel runtime.</td></tr>
+<tr><td><code>quill-mlir</code></td><td>Optional C++/TableGen Quill dialect registration and MLIR pass extension points.</td></tr>
 </tbody>
 </table>
 </div>
@@ -307,31 +326,43 @@ Parquet dataset as a DataFusion table.</p>
 <div class="table-wrapper">
 <table>
 <thead>
-<tr><th>File</th><th>Role</th></tr>
+<tr><th>Directory</th><th>Role</th></tr>
 </thead>
 <tbody>
-<tr><td><code>compiler.rs</code></td><td>Compiles recognized <code>PipelineIR</code> shapes into DataFusion execution nodes.</td></tr>
-<tr><td><code>dialect.rs</code></td><td>Defines the Quill pipeline dialect skeleton used as the next lowering boundary.</td></tr>
-<tr><td><code>exec.rs</code></td><td>DataFusion physical execution nodes for compiled filter/project and aggregate pipelines.</td></tr>
-<tr><td><code>expr.rs</code></td><td>Lowers supported DataFusion physical expressions into QuillSQL’s small JIT IR.</td></tr>
-<tr><td><code>ir.rs</code></td><td>Defines the semantic <code>PipelineIR</code> shape extracted from DataFusion plans.</td></tr>
-<tr><td><code>kernel.rs</code></td><td>Defines the future Arrow kernel ABI and compiled-kernel descriptor.</td></tr>
-<tr><td><code>lowering.rs</code></td><td>Lowers exact <code>PipelineIR</code> shapes into executable record or aggregate kernels.</td></tr>
-<tr><td><code>mlir/</code></td><td>MLIR emission, verification, and compiled ExecutionEngine invocation.</td></tr>
-<tr><td><code>options.rs</code></td><td>Startup-time JIT execution options shared by the database and benchmark harnesses.</td></tr>
-<tr><td><code>pipeline.rs</code></td><td>Extracts recognizable DataFusion physical-plan pipelines such as <code>filter -&gt; projection</code> and <code>filter -&gt; plain SUM</code>.</td></tr>
-<tr><td><code>rule.rs</code></td><td>DataFusion physical optimizer rule that delegates supported pipeline rewrites to the compiler.</td></tr>
-<tr><td><code>runtime/</code></td><td>Fixed-width Arrow batch kernel runtime for compiled execution nodes.</td></tr>
+<tr><td><code>pipeline/</code></td><td>Expression lowering, <code>PipelineGraph</code>, DataFusion physical-plan extraction, and the physical optimizer rule.</td></tr>
+<tr><td><code>dialect/</code></td><td>Quill pipeline dialect model used as the explicit lowering boundary.</td></tr>
+<tr><td><code>lower/</code></td><td>Exact pipeline pattern lowering, compiled-plan construction, and JIT options.</td></tr>
+<tr><td><code>runtime/</code></td><td>DataFusion compiled pipeline node, pipeline specs, and fixed-width Arrow batch kernels.</td></tr>
+<tr><td><code>mlir/</code></td><td>MLIR emission, formal Quill dialect verification, and compiled ExecutionEngine invocation.</td></tr>
 </tbody>
 </table>
 </div>
-<p>The two JIT subdirectories have stricter internal boundaries:</p>
+<p>The JIT subdirectories have stricter internal boundaries:</p>
 <ul>
+<li><code>pipeline/expr.rs</code>: lowers supported DataFusion physical expressions into the
+small JIT expression IR.</li>
+<li><code>pipeline/graph.rs</code>: defines the semantic <code>PipelineGraph</code> shape extracted from
+DataFusion plans.</li>
+<li><code>pipeline/extract.rs</code>: extracts recognizable physical-plan pipelines such as
+<code>filter -&gt; projection</code> and <code>filter -&gt; plain SUM</code>.</li>
+<li><code>pipeline/rule.rs</code>: physical optimizer rule that delegates supported pipeline
+rewrites to the compiler.</li>
+<li><code>lower/compiler.rs</code>: compiles recognized <code>PipelineGraph</code> shapes into DataFusion
+execution nodes.</li>
 <li><code>mlir/mod.rs</code>: public backend surface and <code>KernelBackend</code> implementation.</li>
-<li><code>mlir/emit.rs</code>: textual MLIR emission from QuillSQL JIT expressions.</li>
+<li><code>mlir/lower.rs</code>: lowers supported Quill dialect modules to executable MLIR;
+currently covers the Q6-shaped decimal filter/sum path.</li>
+<li><code>mlir/emit.rs</code>: textual MLIR emission helpers for QuillSQL JIT expressions
+and fixed-width kernels.</li>
 <li><code>mlir/verify.rs</code>: feature-gated MLIR parser/verifier setup.</li>
 <li><code>mlir/compiled.rs</code>: feature-gated <code>ExecutionEngine</code> invocation artifacts.</li>
-<li><code>runtime/mod.rs</code>: public fixed-width filter/project kernel surface.</li>
+<li><code>runtime/exec.rs</code>: unified DataFusion physical execution node for compiled
+record and scalar aggregate pipelines.</li>
+<li><code>runtime/kernel.rs</code>: <code>PipelineSpec</code>, <code>PredicateSpec</code>, and compiled pipeline
+metadata.</li>
+<li><code>runtime/record.rs</code>: fixed-width filter/project record-batch runtime.</li>
+<li><code>runtime/sum.rs</code>: fixed-width plain <code>SUM</code> runtime and Q6-shaped decimal
+filter/sum specialization.</li>
 <li><code>runtime/array.rs</code>: Arrow array views and output builders.</li>
 <li><code>runtime/eval.rs</code>: expression evaluation and SQL boolean/null semantics.</li>
 <li><code>runtime/value.rs</code>: scalar value representation.</li>
@@ -406,9 +437,10 @@ cargo test --features jit-mlir
 cargo clippy --all-targets -- -D warnings
 cargo bench --no-run
 </code></pre>
-<p>The <code>jit-mlir</code> feature requires local MLIR/LLVM libraries and also runs the
-compiled scalar ExecutionEngine smoke test. On a Homebrew LLVM 22 installation,
-set:</p>
+<p>The <code>jit-mlir</code> feature requires local MLIR/LLVM libraries. It builds the
+optional <code>quill-mlir</code> C++/TableGen package, verifies formal Quill dialect
+regions, and runs compiled ExecutionEngine smoke tests. On a Homebrew LLVM 22
+installation, set:</p>
 <pre><code class="language-bash">MLIR_SYS_220_PREFIX=/opt/homebrew/opt/llvm \
 LLVM_SYS_220_PREFIX=/opt/homebrew/opt/llvm \
 cargo test --features jit-mlir
@@ -421,16 +453,17 @@ database storage stack.</p>
 <h1 id="benchmarking"><a class="header" href="#benchmarking">Benchmarking</a></h1>
 <p>QuillSQL uses benchmarks to separate three different claims:</p>
 <ul>
-<li>JIT lowering cost: how much time QuillSQL spends building JIT IR and MLIR.</li>
+<li>JIT lowering cost: how much time QuillSQL spends building the JIT expression
+graph and MLIR.</li>
 <li>DataFusion execution cost: how the current DataFusion path behaves on Arrow
 batches or Parquet datasets, separately from SQL parsing and planning.</li>
 <li>Compiled pipeline cost: how rewritten record and aggregate pipelines behave
 before and after compiled MLIR function pointers are enabled.</li>
 </ul>
-<p>The current code has real <code>CompiledRecordPipelineExec</code> and
-<code>CompiledAggregatePipelineExec</code> nodes in the DataFusion hot path, and their
-execution bodies use QuillSQL’s fixed-width Arrow batch kernels. With <code>jit-mlir</code> and
-<code>QUILL_JIT=mlir</code>, the single-column i64 filter/project path and the f64 and
+<p>The current code has a real <code>CompiledPipelineExec</code> node in the DataFusion hot
+path for both record and scalar-sum pipelines, and its execution body uses
+QuillSQL’s fixed-width Arrow batch kernels. With <code>jit-mlir</code> and
+<code>QUILL_JIT=mlir</code>, the multi-column fixed-width record pipeline and the f64 and
 Q6-shaped decimal filter/sum paths can dispatch to executable MLIR kernels for
 null-free, offset-free fixed-width batches. Other compiled MLIR kernel speedups
 are intentionally not claimed as end-to-end query speedups yet.</p>
@@ -445,21 +478,21 @@ are intentionally not claimed as end-to-end query speedups yet.</p>
 <tr><th>Name</th><th>Measures</th></tr>
 </thead>
 <tbody>
-<tr><td><code>pipeline_ir/lower_filter_project</code></td><td>Exact <code>PipelineIR</code> lowering into the record pipeline kernel shape.</td></tr>
-<tr><td><code>mlir/compile_filter</code></td><td>JIT expression to MLIR module generation for a filter.</td></tr>
-<tr><td><code>mlir/compile_filter_project</code></td><td>Fused filter/project MLIR module generation.</td></tr>
-<tr><td><code>mlir_compiled/compile_i64_filter</code></td><td>MLIR parse/lower/JIT cost for the first compiled fixed-width filter kernel. Requires <code>jit-mlir</code>.</td></tr>
-<tr><td><code>mlir_compiled/compile_i64_filter_project</code></td><td>MLIR parse/lower/JIT cost for the first compiled fixed-width filter/project kernel. Requires <code>jit-mlir</code>.</td></tr>
-<tr><td><code>mlir_compiled/compile_f64_filter_sum</code></td><td>MLIR parse/lower/JIT cost for the first compiled fixed-width filter/sum kernel. Requires <code>jit-mlir</code>.</td></tr>
-<tr><td><code>mlir_compiled/compile_decimal_filter_sum</code></td><td>MLIR parse/lower/JIT cost for the Q6-shaped fixed-width <code>Date32</code>/<code>Decimal128</code> filter/sum kernel. Requires <code>jit-mlir</code>.</td></tr>
-<tr><td><code>mlir_compiled/filter_64k</code></td><td>Compiled MLIR i64 filter execution over a 64K-row values vector, writing a byte selection mask. Requires <code>jit-mlir</code>.</td></tr>
-<tr><td><code>mlir_compiled/filter_project_64k</code></td><td>Compiled MLIR i64 filter/project execution over 64K rows, compacting one projected i64 column. Requires <code>jit-mlir</code>.</td></tr>
-<tr><td><code>mlir_compiled/filter_sum_64k</code></td><td>Compiled MLIR f64 filter/sum execution over 64K rows. Requires <code>jit-mlir</code>.</td></tr>
-<tr><td><code>mlir_compiled/decimal_filter_sum_64k</code></td><td>Compiled MLIR Q6-shaped decimal filter/sum execution over 64K fixed-width column slices. Requires <code>jit-mlir</code>.</td></tr>
-<tr><td><code>quill_kernel/filter_project_64k</code></td><td>Direct fixed-width Arrow kernel execution outside DataFusion planning.</td></tr>
-<tr><td><code>quill_kernel/filter_sum_64k</code></td><td>Direct fixed-width Arrow filter/sum kernel execution outside DataFusion planning.</td></tr>
-<tr><td><code>datafusion/sql_filter_project_64k</code></td><td>DataFusion SQL planning/execution over a 64K-row in-memory Arrow table, including the compiled filter/project physical node when the pattern matches.</td></tr>
-<tr><td><code>datafusion/sql_filter_sum_64k</code></td><td>DataFusion SQL planning/execution over a 64K-row in-memory Arrow table, including the compiled filter/sum physical node when the pattern matches.</td></tr>
+<tr><td><code>lowering/filter_project_graph</code></td><td>Exact <code>PipelineGraph</code> lowering into the record pipeline shape.</td></tr>
+<tr><td><code>compile/mlir_filter_text</code></td><td>JIT expression to MLIR module generation for a filter.</td></tr>
+<tr><td><code>compile/mlir_filter_project_text</code></td><td>Fused filter/project MLIR module generation.</td></tr>
+<tr><td><code>compile/mlir_i64_filter</code></td><td>MLIR parse/lower/JIT cost for the first compiled fixed-width filter kernel. Requires <code>jit-mlir</code>.</td></tr>
+<tr><td><code>compile/mlir_record_pipeline</code></td><td>MLIR parse/lower/JIT cost for the fixed-width record pipeline. Requires <code>jit-mlir</code>.</td></tr>
+<tr><td><code>compile/mlir_f64_filter_sum</code></td><td>MLIR parse/lower/JIT cost for the first compiled fixed-width filter/sum kernel. Requires <code>jit-mlir</code>.</td></tr>
+<tr><td><code>compile/mlir_decimal_filter_sum</code></td><td>MLIR parse/lower/JIT cost for the Q6-shaped fixed-width <code>Date32</code>/<code>Decimal128</code> filter/sum kernel. Requires <code>jit-mlir</code>.</td></tr>
+<tr><td><code>kernel/i64_filter_64k</code></td><td>Compiled MLIR i64 filter execution over a 64K-row values vector, writing a byte selection mask. Requires <code>jit-mlir</code>.</td></tr>
+<tr><td><code>kernel/record_pipeline_64k</code></td><td>Compiled MLIR record pipeline execution over 64K rows, compacting projected fixed-width columns. Requires <code>jit-mlir</code>.</td></tr>
+<tr><td><code>kernel/f64_filter_sum_64k</code></td><td>Compiled MLIR f64 filter/sum execution over 64K rows. Requires <code>jit-mlir</code>.</td></tr>
+<tr><td><code>kernel/decimal_filter_sum_64k</code></td><td>Compiled MLIR Q6-shaped decimal filter/sum execution over 64K fixed-width column slices. Requires <code>jit-mlir</code>.</td></tr>
+<tr><td><code>pipeline/record_filter_project_64k</code></td><td>Direct fixed-width Arrow record pipeline execution outside DataFusion planning.</td></tr>
+<tr><td><code>pipeline/scalar_sum_64k</code></td><td>Direct fixed-width Arrow scalar-sum pipeline execution outside DataFusion planning.</td></tr>
+<tr><td><code>sql/filter_project_64k</code></td><td>DataFusion SQL planning/execution over a 64K-row in-memory Arrow table, including <code>CompiledPipelineExec</code> when the pattern matches.</td></tr>
+<tr><td><code>sql/filter_sum_64k</code></td><td>DataFusion SQL planning/execution over a 64K-row in-memory Arrow table, including <code>CompiledPipelineExec</code> when the pattern matches.</td></tr>
 <tr><td><code>datafusion/prepared_filter_sum_64k</code></td><td>Prepared-plan filter/sum execution that removes SQL parsing and logical-plan construction from the timed loop while still using DataFusion physical planning and execution.</td></tr>
 </tbody>
 </table>
@@ -498,6 +531,8 @@ QUILL_BENCH_FEATURES=jit-mlir QUILL_JIT=mlir scripts/bench_tpch.sh
 <tr><td><code>QUILL_TPCH_REGENERATE=1</code></td><td>Delete and rebuild the generated data directory.</td></tr>
 <tr><td><code>QUILL_TPCH_DIR</code></td><td>Use an existing Parquet dataset instead of generating one.</td></tr>
 <tr><td><code>QUILL_BENCH_FEATURES</code></td><td>Cargo features passed by the benchmark scripts, for example <code>jit-mlir</code>.</td></tr>
+<tr><td><code>QUILL_JIT=off</code></td><td>Keep the pure DataFusion physical plan for baseline measurements.</td></tr>
+<tr><td><code>QUILL_JIT=runtime</code></td><td>Use Quill’s compiled pipeline runtime without executable MLIR. This is also the default.</td></tr>
 <tr><td><code>QUILL_JIT=mlir</code></td><td>Request executable MLIR dispatch after building with <code>jit-mlir</code>.</td></tr>
 </tbody>
 </table>

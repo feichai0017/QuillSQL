@@ -157,16 +157,17 @@
                         <h1 id="benchmarking"><a class="header" href="#benchmarking">Benchmarking</a></h1>
 <p>QuillSQL uses benchmarks to separate three different claims:</p>
 <ul>
-<li>JIT lowering cost: how much time QuillSQL spends building JIT IR and MLIR.</li>
+<li>JIT lowering cost: how much time QuillSQL spends building the JIT expression
+graph and MLIR.</li>
 <li>DataFusion execution cost: how the current DataFusion path behaves on Arrow
 batches or Parquet datasets, separately from SQL parsing and planning.</li>
 <li>Compiled pipeline cost: how rewritten record and aggregate pipelines behave
 before and after compiled MLIR function pointers are enabled.</li>
 </ul>
-<p>The current code has real <code>CompiledRecordPipelineExec</code> and
-<code>CompiledAggregatePipelineExec</code> nodes in the DataFusion hot path, and their
-execution bodies use QuillSQL’s fixed-width Arrow batch kernels. With <code>jit-mlir</code> and
-<code>QUILL_JIT=mlir</code>, the single-column i64 filter/project path and the f64 and
+<p>The current code has a real <code>CompiledPipelineExec</code> node in the DataFusion hot
+path for both record and scalar-sum pipelines, and its execution body uses
+QuillSQL’s fixed-width Arrow batch kernels. With <code>jit-mlir</code> and
+<code>QUILL_JIT=mlir</code>, the multi-column fixed-width record pipeline and the f64 and
 Q6-shaped decimal filter/sum paths can dispatch to executable MLIR kernels for
 null-free, offset-free fixed-width batches. Other compiled MLIR kernel speedups
 are intentionally not claimed as end-to-end query speedups yet.</p>
@@ -181,21 +182,21 @@ are intentionally not claimed as end-to-end query speedups yet.</p>
 <tr><th>Name</th><th>Measures</th></tr>
 </thead>
 <tbody>
-<tr><td><code>pipeline_ir/lower_filter_project</code></td><td>Exact <code>PipelineIR</code> lowering into the record pipeline kernel shape.</td></tr>
-<tr><td><code>mlir/compile_filter</code></td><td>JIT expression to MLIR module generation for a filter.</td></tr>
-<tr><td><code>mlir/compile_filter_project</code></td><td>Fused filter/project MLIR module generation.</td></tr>
-<tr><td><code>mlir_compiled/compile_i64_filter</code></td><td>MLIR parse/lower/JIT cost for the first compiled fixed-width filter kernel. Requires <code>jit-mlir</code>.</td></tr>
-<tr><td><code>mlir_compiled/compile_i64_filter_project</code></td><td>MLIR parse/lower/JIT cost for the first compiled fixed-width filter/project kernel. Requires <code>jit-mlir</code>.</td></tr>
-<tr><td><code>mlir_compiled/compile_f64_filter_sum</code></td><td>MLIR parse/lower/JIT cost for the first compiled fixed-width filter/sum kernel. Requires <code>jit-mlir</code>.</td></tr>
-<tr><td><code>mlir_compiled/compile_decimal_filter_sum</code></td><td>MLIR parse/lower/JIT cost for the Q6-shaped fixed-width <code>Date32</code>/<code>Decimal128</code> filter/sum kernel. Requires <code>jit-mlir</code>.</td></tr>
-<tr><td><code>mlir_compiled/filter_64k</code></td><td>Compiled MLIR i64 filter execution over a 64K-row values vector, writing a byte selection mask. Requires <code>jit-mlir</code>.</td></tr>
-<tr><td><code>mlir_compiled/filter_project_64k</code></td><td>Compiled MLIR i64 filter/project execution over 64K rows, compacting one projected i64 column. Requires <code>jit-mlir</code>.</td></tr>
-<tr><td><code>mlir_compiled/filter_sum_64k</code></td><td>Compiled MLIR f64 filter/sum execution over 64K rows. Requires <code>jit-mlir</code>.</td></tr>
-<tr><td><code>mlir_compiled/decimal_filter_sum_64k</code></td><td>Compiled MLIR Q6-shaped decimal filter/sum execution over 64K fixed-width column slices. Requires <code>jit-mlir</code>.</td></tr>
-<tr><td><code>quill_kernel/filter_project_64k</code></td><td>Direct fixed-width Arrow kernel execution outside DataFusion planning.</td></tr>
-<tr><td><code>quill_kernel/filter_sum_64k</code></td><td>Direct fixed-width Arrow filter/sum kernel execution outside DataFusion planning.</td></tr>
-<tr><td><code>datafusion/sql_filter_project_64k</code></td><td>DataFusion SQL planning/execution over a 64K-row in-memory Arrow table, including the compiled filter/project physical node when the pattern matches.</td></tr>
-<tr><td><code>datafusion/sql_filter_sum_64k</code></td><td>DataFusion SQL planning/execution over a 64K-row in-memory Arrow table, including the compiled filter/sum physical node when the pattern matches.</td></tr>
+<tr><td><code>lowering/filter_project_graph</code></td><td>Exact <code>PipelineGraph</code> lowering into the record pipeline shape.</td></tr>
+<tr><td><code>compile/mlir_filter_text</code></td><td>JIT expression to MLIR module generation for a filter.</td></tr>
+<tr><td><code>compile/mlir_filter_project_text</code></td><td>Fused filter/project MLIR module generation.</td></tr>
+<tr><td><code>compile/mlir_i64_filter</code></td><td>MLIR parse/lower/JIT cost for the first compiled fixed-width filter kernel. Requires <code>jit-mlir</code>.</td></tr>
+<tr><td><code>compile/mlir_record_pipeline</code></td><td>MLIR parse/lower/JIT cost for the fixed-width record pipeline. Requires <code>jit-mlir</code>.</td></tr>
+<tr><td><code>compile/mlir_f64_filter_sum</code></td><td>MLIR parse/lower/JIT cost for the first compiled fixed-width filter/sum kernel. Requires <code>jit-mlir</code>.</td></tr>
+<tr><td><code>compile/mlir_decimal_filter_sum</code></td><td>MLIR parse/lower/JIT cost for the Q6-shaped fixed-width <code>Date32</code>/<code>Decimal128</code> filter/sum kernel. Requires <code>jit-mlir</code>.</td></tr>
+<tr><td><code>kernel/i64_filter_64k</code></td><td>Compiled MLIR i64 filter execution over a 64K-row values vector, writing a byte selection mask. Requires <code>jit-mlir</code>.</td></tr>
+<tr><td><code>kernel/record_pipeline_64k</code></td><td>Compiled MLIR record pipeline execution over 64K rows, compacting projected fixed-width columns. Requires <code>jit-mlir</code>.</td></tr>
+<tr><td><code>kernel/f64_filter_sum_64k</code></td><td>Compiled MLIR f64 filter/sum execution over 64K rows. Requires <code>jit-mlir</code>.</td></tr>
+<tr><td><code>kernel/decimal_filter_sum_64k</code></td><td>Compiled MLIR Q6-shaped decimal filter/sum execution over 64K fixed-width column slices. Requires <code>jit-mlir</code>.</td></tr>
+<tr><td><code>pipeline/record_filter_project_64k</code></td><td>Direct fixed-width Arrow record pipeline execution outside DataFusion planning.</td></tr>
+<tr><td><code>pipeline/scalar_sum_64k</code></td><td>Direct fixed-width Arrow scalar-sum pipeline execution outside DataFusion planning.</td></tr>
+<tr><td><code>sql/filter_project_64k</code></td><td>DataFusion SQL planning/execution over a 64K-row in-memory Arrow table, including <code>CompiledPipelineExec</code> when the pattern matches.</td></tr>
+<tr><td><code>sql/filter_sum_64k</code></td><td>DataFusion SQL planning/execution over a 64K-row in-memory Arrow table, including <code>CompiledPipelineExec</code> when the pattern matches.</td></tr>
 <tr><td><code>datafusion/prepared_filter_sum_64k</code></td><td>Prepared-plan filter/sum execution that removes SQL parsing and logical-plan construction from the timed loop while still using DataFusion physical planning and execution.</td></tr>
 </tbody>
 </table>
@@ -234,6 +235,8 @@ QUILL_BENCH_FEATURES=jit-mlir QUILL_JIT=mlir scripts/bench_tpch.sh
 <tr><td><code>QUILL_TPCH_REGENERATE=1</code></td><td>Delete and rebuild the generated data directory.</td></tr>
 <tr><td><code>QUILL_TPCH_DIR</code></td><td>Use an existing Parquet dataset instead of generating one.</td></tr>
 <tr><td><code>QUILL_BENCH_FEATURES</code></td><td>Cargo features passed by the benchmark scripts, for example <code>jit-mlir</code>.</td></tr>
+<tr><td><code>QUILL_JIT=off</code></td><td>Keep the pure DataFusion physical plan for baseline measurements.</td></tr>
+<tr><td><code>QUILL_JIT=runtime</code></td><td>Use Quill’s compiled pipeline runtime without executable MLIR. This is also the default.</td></tr>
 <tr><td><code>QUILL_JIT=mlir</code></td><td>Request executable MLIR dispatch after building with <code>jit-mlir</code>.</td></tr>
 </tbody>
 </table>
