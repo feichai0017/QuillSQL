@@ -206,7 +206,52 @@ async fn parquet_q6_shape_uses_decimal_filter_sum_candidate() {
             .jit_candidates
             .iter()
             .any(|candidate| candidate.kernel == KernelKind::FilterSum
-                && (candidate.backend == "mlir" || candidate.backend == "fixed-width-runtime")),
+                && candidate.backend == "mlir"
+                && candidate.executable == cfg!(feature = "jit-mlir")),
+        "{:?}",
+        trace.jit_candidates
+    );
+}
+
+#[cfg(feature = "jit-mlir")]
+#[tokio::test]
+async fn parquet_q6_mlir_execution_returns_null_for_empty_sum() {
+    let dir = TempDir::new().expect("temp dir");
+    let parquet_path = dir.path().join("lineitem.parquet");
+    write_q6_lineitem_parquet(parquet_path.to_str().unwrap()).await;
+
+    let db = Database::new_temp().expect("database");
+    db.register_parquet("lineitem", parquet_path.to_str().unwrap())
+        .await
+        .expect("register parquet");
+
+    let output = db
+        .run(
+            "select sum(l_extendedprice * l_discount) as revenue \
+             from lineitem \
+             where l_shipdate < date '1994-01-01' \
+               and l_discount between cast(0.05 as decimal(15,2)) \
+                                  and cast(0.07 as decimal(15,2)) \
+               and l_quantity < cast(24.00 as decimal(15,2))",
+        )
+        .await
+        .expect("query");
+    let values = output.batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<Decimal128Array>()
+        .expect("decimal sum");
+    assert_eq!(values.len(), 1);
+    assert!(values.is_null(0));
+
+    let trace = db.debug_last_trace().expect("trace");
+    assert!(
+        trace
+            .jit_candidates
+            .iter()
+            .any(|candidate| candidate.kernel == KernelKind::FilterSum
+                && candidate.backend == "mlir"
+                && candidate.executable),
         "{:?}",
         trace.jit_candidates
     );

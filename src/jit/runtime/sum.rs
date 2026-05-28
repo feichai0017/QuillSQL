@@ -21,7 +21,7 @@ pub enum FilterSumValue {
 }
 
 #[derive(Debug, Clone)]
-enum FilterSumPlan {
+pub(crate) enum FilterSumPlan {
     I64CompareF64Mul {
         predicate_col: usize,
         op: JitBinaryOp,
@@ -38,7 +38,7 @@ enum FilterSumPlan {
 }
 
 #[derive(Debug, Clone)]
-enum FixedPredicate {
+pub(crate) enum FixedPredicate {
     Date32 {
         col: usize,
         op: JitBinaryOp,
@@ -87,6 +87,11 @@ impl FilterSumKernel {
 
     pub fn measure(&self) -> &JitExpr {
         &self.measure
+    }
+
+    #[cfg(feature = "jit-mlir")]
+    pub(crate) fn plan(&self) -> Option<&FilterSumPlan> {
+        self.plan.as_ref()
     }
 
     pub fn execute(&self, batch: &RecordBatch) -> JitResult<FilterSumValue> {

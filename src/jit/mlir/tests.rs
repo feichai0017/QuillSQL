@@ -268,7 +268,8 @@ fn invokes_compiled_decimal_filter_sum_kernel() {
         ])
         .unwrap();
 
-    assert_eq!(output, 210_000);
+    assert_eq!(output.sum, 210_000);
+    assert_eq!(output.count, 1);
 }
 
 fn i64_gt_ten(nullable: bool) -> JitExpr {

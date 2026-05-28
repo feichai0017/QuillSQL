@@ -128,6 +128,16 @@ impl CompiledFilterSumExec {
     pub fn runtime(&self) -> &FilterSumKernel {
         &self.runtime
     }
+
+    fn execute_batch(&self, batch: &RecordBatch) -> Result<FilterSumValue> {
+        #[cfg(feature = "jit-mlir")]
+        if let Some(partial) = super::mlir::execute_filter_sum(&self.kernel, &self.runtime, batch)?
+        {
+            return Ok(partial);
+        }
+
+        self.runtime.execute(batch).map_err(Into::into)
+    }
 }
 
 impl DisplayAs for CompiledFilterProjectExec {
@@ -346,7 +356,7 @@ impl Stream for CompiledFilterSumStream {
 
         loop {
             match ready!(self.input.poll_next_unpin(cx)) {
-                Some(Ok(batch)) => match self.exec.runtime.execute(&batch) {
+                Some(Ok(batch)) => match self.exec.execute_batch(&batch) {
                     Ok(partial) => {
                         if let Some(sum) = &mut self.sum {
                             if let Err(err) = sum.merge(partial) {
@@ -356,7 +366,7 @@ impl Stream for CompiledFilterSumStream {
                             self.sum = Some(partial);
                         }
                     }
-                    Err(err) => return Poll::Ready(Some(Err(err.into()))),
+                    Err(err) => return Poll::Ready(Some(Err(err))),
                 },
                 Some(Err(err)) => return Poll::Ready(Some(Err(err))),
                 None => {

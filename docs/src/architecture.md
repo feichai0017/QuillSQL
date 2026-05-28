@@ -51,9 +51,11 @@ probe validates scalar invocation. The compiled fixed-width path now has an
 `i64` filter kernel that writes a byte selection mask, an `i64` filter/project
 kernel that compacts one projected column, an `f64` filter/sum kernel for the
 first plain-aggregate path, and a Q6-shaped `Date32`/`Decimal128` filter/sum
-kernel over fixed-width column slices. Wiring those function pointers into the
-DataFusion physical node is the next step, so unsupported expressions fall back
-to the normal DataFusion plan.
+kernel over fixed-width column slices. `CompiledFilterSumExec` can invoke that
+decimal kernel through a thread-local MLIR execution cache when `jit-mlir` is
+enabled and the input batch has no nulls or slice offsets. Unsupported
+expressions and unsafe batch layouts fall back to the normal DataFusion plan or
+the fixed-width Arrow runtime.
 
 ## IR And Fusion
 
@@ -81,5 +83,5 @@ node to a partition-preserving compiled filter/sum node and leaves DataFusion's
 final aggregate in place. This lets the project measure real operator
 boundaries before taking on grouped aggregates, joins, hash repartitioning, or
 whole-query pipeline lowering. The decimal path now has both a DataFusion-safe
-fixed-width Arrow runtime specialization and a standalone executable MLIR kernel
+fixed-width Arrow runtime specialization and an executable MLIR dispatch path
 for the same fixed-width column layout.

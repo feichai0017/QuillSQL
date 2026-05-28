@@ -493,6 +493,7 @@ fn bench_compiled_decimal_filter_sum_kernel(c: &mut Criterion) {
                             values: black_box(quantities.as_slice()),
                         },
                     ])
+                    .map(|output| (output.sum, output.count))
                     .expect("execute compiled decimal filter-sum"),
             );
         });

@@ -15,6 +15,8 @@ use crate::jit::{JitError, JitExpr, JitProjection, JitResult, JitType};
 use self::array::{arrow_type, BatchView, OutputBuilder};
 use self::eval::{ensure_supported_expr, eval_expr};
 pub use self::sum::{FilterSumKernel, FilterSumValue};
+#[cfg(feature = "jit-mlir")]
+pub(crate) use self::sum::{FilterSumPlan, FixedPredicate};
 
 #[derive(Debug, Clone)]
 pub struct FilterProjectKernel {

@@ -324,7 +324,7 @@ impl MlirJitRule {
                     KernelKind::FilterSum,
                     self.backend.name(),
                     module.text,
-                    false,
+                    cfg!(feature = "jit-mlir"),
                 );
             }
         }

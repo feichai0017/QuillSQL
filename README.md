@@ -87,9 +87,10 @@ kernel that emits a byte selection mask, an `i64` filter/project kernel that
 compacts one projected column, and an `f64` filter/sum kernel for the first
 scan/filter/plain-aggregate path. It also has a Q6-shaped
 `Date32`/`Decimal128` filter/sum kernel that compiles and invokes through MLIR
-over fixed-width column slices. DataFusion execution nodes still dispatch
-through QuillSQL's Arrow runtime for safety; direct physical-node dispatch to
-compiled MLIR function pointers is the next step.
+over fixed-width column slices. With `jit-mlir`, `CompiledFilterSumExec`
+dispatches that decimal path through a thread-local MLIR execution cache when
+the input batch has no nulls or slice offsets; other cases keep the safe Arrow
+runtime fallback.
 
 Run the MLIR path with:
 

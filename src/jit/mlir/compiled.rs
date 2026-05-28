@@ -30,6 +30,12 @@ pub struct CompiledDecimalFilterSum {
     columns: Vec<MlirColumn>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DecimalFilterSumOutput {
+    pub sum: i128,
+    pub count: i64,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum DecimalFilterSumInput<'a> {
     Date32 { index: usize, values: &'a [i32] },
@@ -205,7 +211,10 @@ impl CompiledF64FilterSum {
 }
 
 impl CompiledDecimalFilterSum {
-    pub fn invoke(&self, inputs: &[DecimalFilterSumInput<'_>]) -> JitResult<i128> {
+    pub fn invoke(
+        &self,
+        inputs: &[DecimalFilterSumInput<'_>],
+    ) -> JitResult<DecimalFilterSumOutput> {
         let mut input_len = None;
         let mut ptr_values = Vec::with_capacity(self.columns.len());
 
@@ -243,13 +252,16 @@ impl CompiledDecimalFilterSum {
         let mut len = input_len.unwrap_or(0) as i64;
         let mut output_sum = 0_i128;
         let mut output_sum_ptr = &mut output_sum as *mut i128;
+        let mut output_count = 0_i64;
+        let mut output_count_ptr = &mut output_count as *mut i64;
         let mut result = -1_i32;
-        let mut packed_args = Vec::with_capacity(self.columns.len() + 3);
+        let mut packed_args = Vec::with_capacity(self.columns.len() + 4);
         packed_args.push(&mut len as *mut i64 as *mut ());
         for ptr in &mut ptr_values {
             packed_args.push(ptr as *mut *const () as *mut ());
         }
         packed_args.push(&mut output_sum_ptr as *mut *mut i128 as *mut ());
+        packed_args.push(&mut output_count_ptr as *mut *mut i64 as *mut ());
         packed_args.push(&mut result as *mut i32 as *mut ());
 
         unsafe {
@@ -262,7 +274,10 @@ impl CompiledDecimalFilterSum {
                 "compiled decimal filter-sum returned status {result}"
             )));
         }
-        Ok(output_sum)
+        Ok(DecimalFilterSumOutput {
+            sum: output_sum,
+            count: output_count,
+        })
     }
 }
 

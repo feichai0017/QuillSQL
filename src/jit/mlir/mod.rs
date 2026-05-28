@@ -1,4 +1,6 @@
 mod compiled;
+#[cfg(feature = "jit-mlir")]
+mod dispatch;
 mod emit;
 #[cfg(test)]
 mod tests;
@@ -28,8 +30,10 @@ pub struct MlirBackend;
 #[cfg(feature = "jit-mlir")]
 pub use compiled::{
     CompiledDecimalFilterSum, CompiledF64FilterSum, CompiledI64Filter, CompiledI64FilterProject,
-    DecimalFilterSumInput,
+    DecimalFilterSumInput, DecimalFilterSumOutput,
 };
+#[cfg(feature = "jit-mlir")]
+pub(crate) use dispatch::execute_filter_sum;
 
 impl MlirBackend {
     pub fn new() -> Self {
