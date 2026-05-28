@@ -1,35 +1,26 @@
-mod compiler;
 mod dialect;
-mod exec;
-mod expr;
-mod ir;
-mod kernel;
-mod lowering;
+mod lower;
 mod mlir;
-mod options;
 mod pipeline;
-mod rule;
 mod runtime;
 
 pub use dialect::{QuillDialectModule, QuillDialectOp, QuillDialectSink, QuillDialectSource};
-pub use exec::{CompiledAggregatePipelineExec, CompiledRecordPipelineExec};
-pub use expr::{JitBinaryOp, JitExpr, JitProjection, JitScalar, JitType};
-pub use ir::{PipelineIr, PipelineOp, PipelineSink, PipelineSource};
-pub use kernel::{
-    ArrowArrayView, ArrowMutableArrayView, CompiledKernel, FilterKernelFn, JitTypeTag,
-    KernelBackend, KernelKind, ProjectionKernelFn,
-};
-pub use lowering::{PipelineKind, PipelineLowering};
+pub use lower::{JitOptions, PipelineKind, PipelineLowering};
 #[cfg(feature = "jit-mlir")]
 pub use mlir::{
     CompiledDecimalFilterSum, CompiledF64FilterSum, CompiledI64Filter, CompiledI64FilterProject,
     DecimalFilterSumInput, DecimalFilterSumOutput, F64FilterSumOutput,
 };
 pub use mlir::{MlirBackend, MlirColumn, MlirModule};
-pub use options::JitOptions;
-pub use pipeline::PipelineCandidate;
-pub use rule::{JitCandidate, MlirJitRule};
-pub use runtime::{FilterProjectKernel, FilterSumKernel, FilterSumValue};
+pub use pipeline::{
+    JitBinaryOp, JitCandidate, JitExpr, JitProjection, JitScalar, JitType, MlirJitRule,
+    PipelineCandidate, PipelineIr, PipelineOp, PipelineSink, PipelineSource,
+};
+pub use runtime::{
+    ArrowArrayView, ArrowMutableArrayView, CompiledAggregatePipelineExec, CompiledKernel,
+    CompiledRecordPipelineExec, FilterKernelFn, FilterProjectKernel, FilterSumKernel,
+    FilterSumValue, JitTypeTag, KernelBackend, KernelKind, ProjectionKernelFn,
+};
 
 use datafusion::common::DataFusionError;
 use thiserror::Error;

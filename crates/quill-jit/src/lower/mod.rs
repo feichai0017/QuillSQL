@@ -2,6 +2,12 @@ use serde::Serialize;
 
 use crate::{JitExpr, JitProjection, PipelineIr, PipelineOp, PipelineSink, PipelineSource};
 
+mod compiler;
+mod options;
+
+pub(crate) use compiler::PipelineCompiler;
+pub use options::JitOptions;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum PipelineKind {
     Record,

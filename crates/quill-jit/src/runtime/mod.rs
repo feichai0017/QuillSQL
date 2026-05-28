@@ -1,5 +1,7 @@
 mod array;
 mod eval;
+mod exec;
+mod kernel;
 mod sum;
 #[cfg(test)]
 mod tests;
@@ -14,6 +16,11 @@ use crate::{JitError, JitExpr, JitProjection, JitResult, JitType};
 
 use self::array::{arrow_type, BatchView, OutputBuilder};
 use self::eval::{ensure_supported_expr, eval_expr};
+pub use self::exec::{CompiledAggregatePipelineExec, CompiledRecordPipelineExec};
+pub use self::kernel::{
+    ArrowArrayView, ArrowMutableArrayView, CompiledKernel, FilterKernelFn, JitTypeTag,
+    KernelBackend, KernelKind, ProjectionKernelFn,
+};
 pub use self::sum::{FilterSumKernel, FilterSumValue};
 #[cfg(feature = "jit-mlir")]
 pub(crate) use self::sum::{FilterSumPlan, FixedPredicate};

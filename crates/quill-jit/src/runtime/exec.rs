@@ -81,7 +81,7 @@ impl CompiledRecordPipelineExec {
     fn execute_batch(&self, batch: RecordBatch) -> Result<RecordBatch> {
         #[cfg(feature = "jit-mlir")]
         if let Some(output) =
-            super::mlir::execute_filter_project(&self.kernel, &self.runtime, &batch)?
+            crate::mlir::execute_filter_project(&self.kernel, &self.runtime, &batch)?
         {
             return Ok(output);
         }
@@ -136,7 +136,7 @@ impl CompiledAggregatePipelineExec {
 
     fn execute_batch(&self, batch: &RecordBatch) -> Result<FilterSumValue> {
         #[cfg(feature = "jit-mlir")]
-        if let Some(partial) = super::mlir::execute_filter_sum(&self.kernel, &self.runtime, batch)?
+        if let Some(partial) = crate::mlir::execute_filter_sum(&self.kernel, &self.runtime, batch)?
         {
             return Ok(partial);
         }

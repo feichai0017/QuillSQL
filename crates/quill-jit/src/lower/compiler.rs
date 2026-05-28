@@ -11,7 +11,7 @@ use crate::{
     PipelineLowering,
 };
 
-use super::pipeline::{OutputAdapter, PhysicalPipeline};
+use crate::pipeline::{OutputAdapter, PhysicalPipeline};
 
 #[derive(Debug)]
 pub(crate) struct PipelineCompiler<'a> {

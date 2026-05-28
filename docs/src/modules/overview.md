@@ -27,28 +27,34 @@ Parquet dataset as a DataFusion table.
 
 ## JIT (`crates/quill-jit/src`)
 
-| File | Role |
-| ---- | ---- |
-| `compiler.rs` | Compiles recognized `PipelineIR` shapes into DataFusion execution nodes. |
-| `dialect.rs` | Defines the Quill pipeline dialect skeleton used as the next lowering boundary. |
-| `exec.rs` | DataFusion physical execution nodes for compiled filter/project and aggregate pipelines. |
-| `expr.rs` | Lowers supported DataFusion physical expressions into QuillSQL's small JIT IR. |
-| `ir.rs` | Defines the semantic `PipelineIR` shape extracted from DataFusion plans. |
-| `kernel.rs` | Defines the future Arrow kernel ABI and compiled-kernel descriptor. |
-| `lowering.rs` | Lowers exact `PipelineIR` shapes into executable record or aggregate kernels. |
+| Directory | Role |
+| --------- | ---- |
+| `pipeline/` | Expression IR, `PipelineIR`, DataFusion physical-plan extraction, and the physical optimizer rule. |
+| `dialect/` | Quill pipeline dialect skeleton used as the next lowering boundary. |
+| `lower/` | Exact pipeline pattern lowering, compiled-plan construction, and JIT options. |
+| `runtime/` | DataFusion physical execution nodes, compiled-kernel descriptors, and fixed-width Arrow batch kernels. |
 | `mlir/` | MLIR emission, verification, and compiled ExecutionEngine invocation. |
-| `options.rs` | Startup-time JIT execution options shared by the database and benchmark harnesses. |
-| `pipeline.rs` | Extracts recognizable DataFusion physical-plan pipelines such as `filter -> projection` and `filter -> plain SUM`. |
-| `rule.rs` | DataFusion physical optimizer rule that delegates supported pipeline rewrites to the compiler. |
-| `runtime/` | Fixed-width Arrow batch kernel runtime for compiled execution nodes. |
 
-The two JIT subdirectories have stricter internal boundaries:
+The JIT subdirectories have stricter internal boundaries:
 
+- `pipeline/expr.rs`: lowers supported DataFusion physical expressions into the
+  small JIT expression IR.
+- `pipeline/ir.rs`: defines the semantic `PipelineIR` shape extracted from
+  DataFusion plans.
+- `pipeline/extract.rs`: extracts recognizable physical-plan pipelines such as
+  `filter -> projection` and `filter -> plain SUM`.
+- `pipeline/rule.rs`: physical optimizer rule that delegates supported pipeline
+  rewrites to the compiler.
+- `lower/compiler.rs`: compiles recognized `PipelineIR` shapes into DataFusion
+  execution nodes.
 - `mlir/mod.rs`: public backend surface and `KernelBackend` implementation.
 - `mlir/emit.rs`: textual MLIR emission from QuillSQL JIT expressions.
 - `mlir/verify.rs`: feature-gated MLIR parser/verifier setup.
 - `mlir/compiled.rs`: feature-gated `ExecutionEngine` invocation artifacts.
-- `runtime/mod.rs`: public fixed-width filter/project kernel surface.
+- `runtime/exec.rs`: DataFusion physical execution nodes for compiled record and
+  aggregate pipelines.
+- `runtime/kernel.rs`: future Arrow kernel ABI and compiled-kernel descriptor.
+- `runtime/mod.rs`: public fixed-width filter/project runtime surface.
 - `runtime/array.rs`: Arrow array views and output builders.
 - `runtime/eval.rs`: expression evaluation and SQL boolean/null semantics.
 - `runtime/value.rs`: scalar value representation.

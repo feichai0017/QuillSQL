@@ -42,9 +42,9 @@ storage-engine research.
 ## JIT Boundary
 
 The JIT boundary is the DataFusion physical plan plus Arrow `RecordBatch`
-interface. `MlirJitRule` walks DataFusion physical plans, asks `pipeline.rs` to
-extract supported physical pipelines, and delegates compilation to
-`PipelineCompiler`.
+interface. `MlirJitRule` walks DataFusion physical plans, asks
+`pipeline/extract.rs` to extract supported physical pipelines, and delegates
+compilation to `lower/compiler.rs`.
 
 The MLIR backend then emits scalar `arith` functions and verifies them through
 `melior` when `jit-mlir` is enabled. The physical optimizer can replace
@@ -88,13 +88,14 @@ Filter(Date32/Decimal128 comparisons) -> SUM(Decimal128 * Decimal128)
   => CompiledAggregatePipelineExec
 ```
 
-`pipeline.rs` also recognizes the common DataFusion shape where a round-robin
-`RepartitionExec` sits between the filter and projection, and records that as
-an output adapter on the extracted pipeline. For plain aggregates, it extracts
-the partial `SUM` pipeline and leaves DataFusion's final aggregate in place.
-`rule.rs` only performs traversal and replacement; it no longer constructs
-shape-specific execution nodes directly. The recognized physical-plan shapes are
-also exposed as `PipelineIR` candidates in debug traces, so future
+`pipeline/extract.rs` also recognizes the common DataFusion shape where a
+round-robin `RepartitionExec` sits between the filter and projection, and
+records that as an output adapter on the extracted pipeline. For plain
+aggregates, it extracts the partial `SUM` pipeline and leaves DataFusion's final
+aggregate in place. `pipeline/rule.rs` only performs traversal and replacement;
+it no longer constructs shape-specific execution nodes directly. The recognized
+physical-plan shapes are also exposed as `PipelineIR` candidates in debug traces,
+so future
 whole-pipeline lowering does not rely on string plan inspection. This lets the
 project measure real operator boundaries before taking on grouped aggregates,
 joins, hash repartitioning, or whole-query pipeline lowering. The decimal path

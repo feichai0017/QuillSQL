@@ -70,24 +70,17 @@ The workspace is split into focused packages:
 
 Inside `crates/quill-jit/src`:
 
-- `expr.rs` lowers supported DataFusion physical expressions to a small JIT
-  expression IR.
-- `compiler.rs` compiles recognized `PipelineIR` shapes into DataFusion physical
-  execution nodes.
-- `dialect.rs` defines the first Quill pipeline dialect skeleton: source, exec,
+- `pipeline/` owns expression lowering, `PipelineIR`, DataFusion physical-plan
+  extraction, and the physical optimizer rule.
+- `dialect/` defines the first Quill pipeline dialect skeleton: source, exec,
   and sink ops for future MLIR dialect lowering.
-- `exec.rs` provides DataFusion physical nodes for compiled record and aggregate
-  pipelines.
-- `ir.rs` defines `PipelineIR`; `lowering.rs` lowers exact pipeline shapes into
-  executable record or aggregate kernels.
+- `lower/` owns exact pipeline pattern lowering, compiler construction, and JIT
+  options.
+- `runtime/` provides DataFusion physical nodes, the compiled-kernel descriptor,
+  and fixed-width Arrow batch kernels.
 - `mlir/` owns MLIR emission, verification, and compiled kernel
   invocation. The current compiled path covers narrow fixed-width
   ExecutionEngine kernels.
-- `rule.rs` is the DataFusion physical optimizer rule that delegates supported
-  rewrites to the JIT compiler boundary.
-- `runtime/` is the fixed-width Arrow batch kernel runtime. It includes
-  the current DataFusion execution-node kernels and keeps specialized paths
-  such as filter/sum separate from the generic expression evaluator.
 
 Current scope: MLIR is parsed and verified, and the DataFusion optimizer rule
 replaces supported filter/project pipelines with `CompiledRecordPipelineExec` and

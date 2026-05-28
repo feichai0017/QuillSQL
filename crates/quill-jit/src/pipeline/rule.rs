@@ -12,8 +12,8 @@ use crate::{
     PipelineCandidate,
 };
 
-use super::compiler::PipelineCompiler;
-use super::pipeline::{extract_pipeline_from_node, pipeline_from_node};
+use super::{extract_pipeline_from_node, pipeline_from_node};
+use crate::lower::PipelineCompiler;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct JitCandidate {
