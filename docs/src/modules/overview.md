@@ -32,7 +32,7 @@ Parquet dataset as a DataFusion table.
 | `pipeline/` | Expression IR, `PipelineIR`, DataFusion physical-plan extraction, and the physical optimizer rule. |
 | `dialect/` | Quill pipeline dialect model used as the explicit lowering boundary. |
 | `lower/` | Exact pipeline pattern lowering, compiled-plan construction, and JIT options. |
-| `runtime/` | DataFusion physical execution nodes, compiled-kernel specs, and fixed-width Arrow batch kernels. |
+| `runtime/` | DataFusion compiled pipeline node, pipeline specs, and fixed-width Arrow batch kernels. |
 | `mlir/` | MLIR emission, verification, and compiled ExecutionEngine invocation. |
 
 The JIT subdirectories have stricter internal boundaries:
@@ -54,9 +54,9 @@ The JIT subdirectories have stricter internal boundaries:
   and fixed-width kernels.
 - `mlir/verify.rs`: feature-gated MLIR parser/verifier setup.
 - `mlir/compiled.rs`: feature-gated `ExecutionEngine` invocation artifacts.
-- `runtime/exec.rs`: DataFusion physical execution nodes for compiled record and
-  aggregate pipelines.
-- `runtime/kernel.rs`: `KernelSpec`, `PredicateSpec`, and compiled-kernel
+- `runtime/exec.rs`: unified DataFusion physical execution node for compiled
+  record and scalar aggregate pipelines.
+- `runtime/kernel.rs`: `PipelineSpec`, `PredicateSpec`, and compiled pipeline
   metadata.
 - `runtime/record.rs`: fixed-width filter/project record-batch runtime.
 - `runtime/sum.rs`: fixed-width plain `SUM` runtime and Q6-shaped decimal

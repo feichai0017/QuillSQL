@@ -14,11 +14,11 @@ pub use mlir::{
 pub use mlir::{MlirBackend, MlirColumn, MlirModule};
 pub use pipeline::{
     JitBinaryOp, JitCandidate, JitExpr, JitProjection, JitScalar, JitType, MlirJitRule,
-    PipelineCandidate, PipelineIr, PipelineOp, PipelineSink, PipelineSource,
+    PipelineCandidate, PipelineIr, PipelineSink, PipelineSource, PipelineStage,
 };
 pub use runtime::{
-    CompiledAggregatePipelineExec, CompiledKernel, CompiledRecordPipelineExec, FilterProjectKernel,
-    FilterSumKernel, FilterSumValue, KernelBackend, KernelKind, KernelSpec, PredicateSpec,
+    CompiledKernel, CompiledPipelineExec, FilterProjectKernel, FilterSumKernel, FilterSumValue,
+    KernelBackend, KernelKind, PipelineRuntime, PipelineSpec, PredicateSpec,
 };
 
 use datafusion::common::DataFusionError;

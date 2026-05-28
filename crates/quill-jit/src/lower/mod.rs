@@ -1,6 +1,6 @@
 use serde::Serialize;
 
-use crate::{JitExpr, JitProjection, PipelineIr, PipelineOp, PipelineSink, PipelineSource};
+use crate::{JitExpr, JitProjection, PipelineIr, PipelineSink, PipelineSource, PipelineStage};
 
 mod compiler;
 mod options;
@@ -28,10 +28,10 @@ pub enum PipelineLowering {
 
 impl PipelineLowering {
     pub fn from_ir(ir: &PipelineIr) -> Option<Self> {
-        match (&ir.source, ir.operators.as_slice(), &ir.sink) {
+        match (&ir.source, ir.stages.as_slice(), &ir.sink) {
             (
                 PipelineSource::DataFusionInput,
-                [PipelineOp::Filter(predicate), PipelineOp::Projection(projections)],
+                [PipelineStage::Filter(predicate), PipelineStage::Projection(projections)],
                 PipelineSink::RecordBatch,
             ) => Some(Self::Record {
                 predicate: predicate.clone(),
@@ -39,7 +39,7 @@ impl PipelineLowering {
             }),
             (
                 PipelineSource::DataFusionInput,
-                [PipelineOp::Filter(predicate)],
+                [PipelineStage::Filter(predicate)],
                 PipelineSink::Sum { measure },
             ) => Some(Self::PlainSum {
                 predicate: predicate.clone(),
@@ -60,7 +60,8 @@ impl PipelineLowering {
 #[cfg(test)]
 mod tests {
     use crate::{
-        JitExpr, JitProjection, JitScalar, PipelineIr, PipelineKind, PipelineLowering, PipelineOp,
+        JitExpr, JitProjection, JitScalar, PipelineIr, PipelineKind, PipelineLowering,
+        PipelineStage,
     };
 
     #[test]
@@ -68,8 +69,8 @@ mod tests {
         let predicate = JitExpr::Literal(JitScalar::Bool(true));
         let projection = JitProjection::new(JitExpr::Literal(JitScalar::Int64(1)), "one");
         let pipeline = PipelineIr::new(vec![
-            PipelineOp::Filter(predicate),
-            PipelineOp::Projection(vec![projection]),
+            PipelineStage::Filter(predicate),
+            PipelineStage::Projection(vec![projection]),
         ]);
 
         let lowering = PipelineLowering::from_ir(&pipeline).expect("lowering");

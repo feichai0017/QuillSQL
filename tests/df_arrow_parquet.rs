@@ -6,7 +6,7 @@ use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::dataframe::DataFrameWriteOptions;
 use datafusion::execution::context::SessionContext;
 use quill_sql::database::{Database, DatabaseOptions, QueryOutput};
-use quill_sql::jit::{JitOptions, KernelKind, PipelineKind};
+use quill_sql::jit::{JitOptions, PipelineKind};
 use tempfile::TempDir;
 
 fn rows(result: QueryOutput) -> Vec<Vec<String>> {
@@ -100,7 +100,7 @@ async fn prepared_query_reuses_logical_plan() {
         .expect("prepare");
 
     assert!(
-        query.physical_plan().contains("CompiledRecordPipelineExec"),
+        query.physical_plan().contains("CompiledPipelineExec"),
         "{}",
         query.physical_plan()
     );
@@ -146,7 +146,7 @@ async fn debug_trace_reports_jit_candidates() {
     let trace = db.debug_last_trace().expect("trace");
 
     assert!(
-        trace.physical_plan.contains("CompiledRecordPipelineExec"),
+        trace.physical_plan.contains("CompiledPipelineExec"),
         "{}",
         trace.physical_plan
     );
@@ -154,8 +154,7 @@ async fn debug_trace_reports_jit_candidates() {
         trace
             .jit_candidates
             .iter()
-            .any(|candidate| candidate.kernel == KernelKind::FilterProject
-                || candidate.kernel == KernelKind::Filter),
+            .any(|candidate| matches!(candidate.kernel.name(), "filter_project" | "filter")),
         "{:?}",
         trace.jit_candidates
     );
@@ -163,13 +162,45 @@ async fn debug_trace_reports_jit_candidates() {
         trace
             .pipeline_candidates
             .iter()
-            .any(|candidate| candidate.node == "CompiledRecordPipelineExec"
+            .any(|candidate| candidate.node == "CompiledPipelineExec"
                 && candidate.kind == PipelineKind::Record
-                && candidate.operators == vec!["filter", "projection"]
-                && candidate.sink == "record_batch"),
+                && candidate.compiled
+                && candidate.stages == vec!["filter", "project"]
+                && candidate.sink == "record_batch"
+                && candidate.backend.as_deref() == Some("mlir")
+                && candidate.reason == "compiled"),
         "{:?}",
         trace.pipeline_candidates
     );
+}
+
+#[tokio::test]
+async fn disabled_jit_keeps_datafusion_physical_plan() {
+    let db = Database::new(DatabaseOptions {
+        jit: JitOptions::disabled(),
+        ..Default::default()
+    })
+    .expect("database");
+    db.run("create table t as select 1::bigint as id union all select 2::bigint")
+        .await
+        .expect("create table");
+
+    assert_eq!(
+        rows(
+            db.run("select id + 1 as next_id from t where id > 1")
+                .await
+                .expect("query")
+        ),
+        vec![vec!["3".to_string()]]
+    );
+
+    let trace = db.debug_last_trace().expect("trace");
+    assert!(
+        !trace.physical_plan.contains("CompiledPipelineExec"),
+        "{}",
+        trace.physical_plan
+    );
+    assert!(trace.jit_candidates.is_empty(), "{:?}", trace.jit_candidates);
 }
 
 #[cfg(feature = "jit-mlir")]
@@ -205,7 +236,7 @@ async fn filter_project_mlir_execution_returns_expected_rows() {
         trace
             .jit_candidates
             .iter()
-            .any(|candidate| candidate.kernel == KernelKind::FilterProject
+            .any(|candidate| candidate.kernel.name() == "filter_project"
                 && candidate.backend == "mlir"
                 && candidate.executable),
         "{:?}",
@@ -247,9 +278,7 @@ async fn debug_trace_reports_filter_sum_candidate() {
 
     let trace = db.debug_last_trace().expect("trace");
     assert!(
-        trace
-            .physical_plan
-            .contains("CompiledAggregatePipelineExec"),
+        trace.physical_plan.contains("CompiledPipelineExec"),
         "{}",
         trace.physical_plan
     );
@@ -257,7 +286,7 @@ async fn debug_trace_reports_filter_sum_candidate() {
         trace
             .jit_candidates
             .iter()
-            .any(|candidate| candidate.kernel == KernelKind::FilterSum),
+            .any(|candidate| candidate.kernel.name() == "filter_sum"),
         "{:?}",
         trace.jit_candidates
     );
@@ -266,9 +295,12 @@ async fn debug_trace_reports_filter_sum_candidate() {
             .pipeline_candidates
             .iter()
             .any(|candidate| candidate.kind == PipelineKind::Aggregate
-                && candidate.node == "CompiledAggregatePipelineExec"
-                && candidate.operators == vec!["filter"]
-                && candidate.sink == "sum"),
+                && candidate.node == "CompiledPipelineExec"
+                && candidate.compiled
+                && candidate.stages == vec!["filter"]
+                && candidate.sink == "scalar_sum"
+                && candidate.backend.as_deref() == Some("mlir")
+                && candidate.reason == "compiled"),
         "{:?}",
         trace.pipeline_candidates
     );
@@ -312,7 +344,7 @@ async fn f64_filter_sum_mlir_execution_preserves_empty_sum_null() {
         trace
             .jit_candidates
             .iter()
-            .any(|candidate| candidate.kernel == KernelKind::FilterSum
+            .any(|candidate| candidate.kernel.name() == "filter_sum"
                 && candidate.backend == "mlir"
                 && candidate.executable),
         "{:?}",
@@ -354,17 +386,30 @@ async fn parquet_q6_shape_uses_decimal_filter_sum_candidate() {
 
     let trace = db.debug_last_trace().expect("trace");
     assert!(
-        trace
-            .physical_plan
-            .contains("CompiledAggregatePipelineExec"),
+        trace.physical_plan.contains("CompiledPipelineExec"),
         "{}",
         trace.physical_plan
     );
     assert!(
         trace
+            .pipeline_candidates
+            .iter()
+            .any(|candidate| candidate.node == "CompiledPipelineExec"
+                && candidate.kind == PipelineKind::Aggregate
+                && candidate.compiled
+                && candidate.source == "arrow_batch"
+                && candidate.stages == vec!["filter"]
+                && candidate.sink == "scalar_sum"
+                && candidate.backend.as_deref() == Some("mlir")
+                && candidate.reason == "compiled"),
+        "{:?}",
+        trace.pipeline_candidates
+    );
+    assert!(
+        trace
             .jit_candidates
             .iter()
-            .any(|candidate| candidate.kernel == KernelKind::FilterSum
+            .any(|candidate| candidate.kernel.name() == "filter_sum"
                 && candidate.backend == "mlir"
                 && candidate.executable == cfg!(feature = "jit-mlir")),
         "{:?}",
@@ -408,7 +453,7 @@ async fn parquet_q6_mlir_execution_returns_null_for_empty_sum() {
         trace
             .jit_candidates
             .iter()
-            .any(|candidate| candidate.kernel == KernelKind::FilterSum
+            .any(|candidate| candidate.kernel.name() == "filter_sum"
                 && candidate.backend == "mlir"
                 && candidate.executable),
         "{:?}",

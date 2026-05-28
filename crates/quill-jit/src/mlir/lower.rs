@@ -1,13 +1,13 @@
 use crate::{
-    JitError, JitExpr, JitProjection, JitResult, KernelSpec, QuillDialectModule, QuillDialectOp,
+    JitError, JitExpr, JitProjection, JitResult, PipelineSpec, QuillDialectModule, QuillDialectOp,
     QuillDialectSink, QuillDialectSource,
 };
 
 use super::{emit, MlirModule};
 
 pub(super) fn lower_quill_dialect(module: &QuillDialectModule) -> JitResult<MlirModule> {
-    match module.kernel_spec() {
-        Some(KernelSpec::I64FilterProject { .. }) => {
+    match module.pipeline_spec() {
+        Some(PipelineSpec::I64FilterProject { .. }) => {
             let (predicate, projections) = filter_project_exprs(module)?;
             emit::lower_i64_filter_project_with_symbol(
                 module.symbol.clone(),
@@ -16,7 +16,7 @@ pub(super) fn lower_quill_dialect(module: &QuillDialectModule) -> JitResult<Mlir
                 Some("quill_dialect"),
             )
         }
-        Some(KernelSpec::F64FilterSum { .. }) => {
+        Some(PipelineSpec::F64FilterSum { .. }) => {
             let (predicate, measure) = filter_sum_exprs(module)?;
             emit::lower_f64_filter_sum_with_symbol(
                 module.symbol.clone(),
@@ -25,7 +25,7 @@ pub(super) fn lower_quill_dialect(module: &QuillDialectModule) -> JitResult<Mlir
                 Some("quill_dialect"),
             )
         }
-        Some(KernelSpec::DecimalFilterSum { .. }) => {
+        Some(PipelineSpec::DecimalFilterSum { .. }) => {
             let (predicate, measure) = filter_sum_exprs(module)?;
             emit::lower_decimal_filter_sum_with_symbol(
                 module.symbol.clone(),
@@ -39,7 +39,7 @@ pub(super) fn lower_quill_dialect(module: &QuillDialectModule) -> JitResult<Mlir
             spec.name()
         ))),
         None => Err(JitError::UnsupportedExpr(
-            "quill dialect lowering requires a supported kernel spec".to_string(),
+            "quill dialect lowering requires a supported pipeline spec".to_string(),
         )),
     }
 }

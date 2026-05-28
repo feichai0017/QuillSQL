@@ -6,9 +6,9 @@ use datafusion::physical_plan::repartition::RepartitionExec;
 use datafusion::physical_plan::ExecutionPlan;
 
 use crate::{
-    CompiledAggregatePipelineExec, CompiledKernel, CompiledRecordPipelineExec, FilterProjectKernel,
-    FilterSumKernel, JitExpr, JitOptions, JitProjection, KernelBackend, KernelKind, KernelSpec,
-    MlirBackend, PipelineLowering,
+    CompiledKernel, CompiledPipelineExec, FilterProjectKernel, FilterSumKernel, JitExpr,
+    JitOptions, JitProjection, KernelBackend, KernelKind, MlirBackend, PipelineLowering,
+    PipelineRuntime, PipelineSpec,
 };
 
 use crate::pipeline::{OutputAdapter, PhysicalPipeline};
@@ -46,8 +46,12 @@ impl<'a> PipelineCompiler<'a> {
                     Err(_) => return Ok(None),
                 };
                 let kernel = self.filter_project_kernel(&runtime, &predicate, &projections);
-                let exec =
-                    CompiledRecordPipelineExec::try_new(input, runtime, output_schema, kernel)?;
+                let exec = CompiledPipelineExec::try_new(
+                    input,
+                    PipelineRuntime::RecordBatch(runtime),
+                    output_schema,
+                    kernel,
+                )?;
                 let exec = Arc::new(exec) as Arc<dyn ExecutionPlan>;
                 Self::apply_output_adapter(exec, output_adapter).map(Some)
             }
@@ -57,8 +61,12 @@ impl<'a> PipelineCompiler<'a> {
                     Err(_) => return Ok(None),
                 };
                 let kernel = self.filter_sum_kernel(&runtime, &predicate, &measure);
-                let exec =
-                    CompiledAggregatePipelineExec::try_new(input, runtime, output_schema, kernel)?;
+                let exec = CompiledPipelineExec::try_new(
+                    input,
+                    PipelineRuntime::ScalarSum(runtime),
+                    output_schema,
+                    kernel,
+                )?;
                 Ok(Some(Arc::new(exec) as Arc<dyn ExecutionPlan>))
             }
             _ => Ok(None),
@@ -95,7 +103,7 @@ impl<'a> PipelineCompiler<'a> {
             let spec = runtime
                 .spec()
                 .cloned()
-                .unwrap_or_else(|| KernelSpec::generic(KernelKind::FilterProject));
+                .unwrap_or_else(|| PipelineSpec::generic(KernelKind::FilterProject));
             return CompiledKernel::with_spec(
                 module.symbol,
                 spec,
@@ -131,7 +139,7 @@ impl<'a> PipelineCompiler<'a> {
             runtime
                 .spec()
                 .cloned()
-                .unwrap_or_else(|| KernelSpec::generic(KernelKind::FilterSum))
+                .unwrap_or_else(|| PipelineSpec::generic(KernelKind::FilterSum))
         };
         if let Ok(module) = self.backend.lower_f64_filter_sum(predicate, measure) {
             return CompiledKernel::with_spec(

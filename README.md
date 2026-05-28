@@ -76,17 +76,17 @@ Inside `crates/quill-jit/src`:
   and sink ops for future MLIR dialect lowering.
 - `lower/` owns exact pipeline pattern lowering, compiler construction, and JIT
   options.
-- `runtime/` provides DataFusion physical nodes, compiled-kernel specs, and
+- `runtime/` provides the DataFusion compiled pipeline node, pipeline specs, and
   fixed-width Arrow batch kernels.
 - `mlir/` owns MLIR emission, verification, and compiled kernel
   invocation. The current compiled path covers narrow fixed-width
   ExecutionEngine kernels.
 
 Current scope: MLIR is parsed and verified, and the DataFusion optimizer rule
-replaces supported filter/project pipelines with `CompiledRecordPipelineExec` and
-supported plain `SUM` pipelines with `CompiledAggregatePipelineExec`. Those nodes
-execute through QuillSQL's fixed-width Arrow kernel runtime while carrying
-structured MLIR kernel specs. Compiled scalar MLIR invocation is wired for the first
+replaces supported filter/project and plain `SUM` pipelines with one
+`CompiledPipelineExec` node. That node executes through QuillSQL's fixed-width
+Arrow pipeline runtime while carrying structured MLIR pipeline specs. Compiled
+scalar MLIR invocation is wired for the first
 `i64 -> bool` probe. The compiled batch path now includes an `i64` filter
 kernel that emits a byte selection mask, an `i64` filter/project kernel that
 compacts one projected column, and an `f64` filter/sum kernel for the first
@@ -94,10 +94,9 @@ scan/filter/plain-aggregate path. It also has a Q6-shaped
 `Date32`/`Decimal128` filter/sum kernel that lowers through the Quill dialect
 before emitting executable MLIR over fixed-width column slices. With `jit-mlir` and
 `DatabaseOptions { jit: JitOptions::mlir_execution(), .. }`,
-`CompiledRecordPipelineExec` dispatches the single-column i64 filter/project path
-through MLIR, and
-`CompiledAggregatePipelineExec` dispatches the f64 and decimal filter/sum paths
-from `KernelSpec` through a thread-local MLIR execution cache when the input
+`CompiledPipelineExec` dispatches the single-column i64 filter/project path and
+the f64 and decimal filter/sum paths from `PipelineSpec` through a thread-local
+MLIR execution cache when the input
 batch has no nulls or slice offsets; other cases keep the safe Rust batch
 runtime. CLI, server, and
 benchmark binaries read the same option once at startup from `QUILL_JIT=mlir`.
@@ -173,9 +172,9 @@ The integration tests cover DataFusion memory tables, Parquet registration, and
 - `PORT`: bind port, overriding `QUILL_HTTP_ADDR`.
 - `QUILL_HTTP_ADDR`: listen address, default `0.0.0.0:8080`.
 - `QUILL_DATA_DIR`: directory for DataFusion scratch state.
-- `QUILL_JIT`: set to `mlir` to request executable MLIR kernels when the binary
-  is built with `--features jit-mlir`; unset keeps the fixed-width Rust batch
-  runtime.
+- `QUILL_JIT`: `off` keeps the pure DataFusion physical plan, `runtime` or unset
+  enables Quill's fixed-width compiled pipeline runtime, and `mlir` requests
+  executable MLIR kernels when built with `--features jit-mlir`.
 - `RUST_LOG`: log level.
 
 `DatabaseOptions` exposes the same data-directory setting for embedded use. It

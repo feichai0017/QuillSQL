@@ -7,10 +7,7 @@ use datafusion::physical_optimizer::PhysicalOptimizerRule;
 use datafusion::physical_plan::ExecutionPlan;
 use serde::Serialize;
 
-use crate::{
-    CompiledAggregatePipelineExec, CompiledRecordPipelineExec, JitOptions, KernelKind, MlirBackend,
-    PipelineCandidate,
-};
+use crate::{CompiledPipelineExec, JitOptions, KernelKind, MlirBackend, PipelineCandidate};
 
 use super::{extract_pipeline_from_node, pipeline_from_node};
 use crate::lower::PipelineCompiler;
@@ -70,21 +67,9 @@ impl MlirJitRule {
     }
 
     fn inspect_node(&self, plan: &Arc<dyn ExecutionPlan>) -> Option<JitCandidate> {
-        if let Some(compiled) = plan.as_any().downcast_ref::<CompiledRecordPipelineExec>() {
+        if let Some(compiled) = plan.as_any().downcast_ref::<CompiledPipelineExec>() {
             return Some(JitCandidate {
-                node: "CompiledRecordPipelineExec",
-                kernel: compiled.kernel().kind,
-                backend: compiled.kernel().backend.clone(),
-                executable: compiled.kernel().executable,
-            });
-        }
-
-        if let Some(compiled) = plan
-            .as_any()
-            .downcast_ref::<CompiledAggregatePipelineExec>()
-        {
-            return Some(JitCandidate {
-                node: "CompiledAggregatePipelineExec",
+                node: "CompiledPipelineExec",
                 kernel: compiled.kernel().kind,
                 backend: compiled.kernel().backend.clone(),
                 executable: compiled.kernel().executable,
@@ -101,6 +86,10 @@ impl PhysicalOptimizerRule for MlirJitRule {
         plan: Arc<dyn ExecutionPlan>,
         _config: &ConfigOptions,
     ) -> Result<Arc<dyn ExecutionPlan>> {
+        if !self.options.enabled() {
+            return Ok(plan);
+        }
+
         plan.transform_up(|plan| self.try_compile_node(plan))
             .map(|transformed| transformed.data)
     }

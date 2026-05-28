@@ -1,7 +1,7 @@
 use datafusion::arrow::array::{Array, Date32Array, Decimal128Array, Float64Array, Int64Array};
 use datafusion::arrow::record_batch::RecordBatch;
 
-use crate::{JitBinaryOp, JitError, JitExpr, JitResult, JitType, KernelSpec, PredicateSpec};
+use crate::{JitBinaryOp, JitError, JitExpr, JitResult, JitType, PipelineSpec, PredicateSpec};
 
 use super::eval::{ensure_supported_expr, eval_expr};
 use super::value::Scalar;
@@ -11,7 +11,7 @@ use super::BatchView;
 pub struct FilterSumKernel {
     predicate: JitExpr,
     measure: JitExpr,
-    spec: Option<KernelSpec>,
+    spec: Option<PipelineSpec>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -36,7 +36,7 @@ impl FilterSumKernel {
         }
         ensure_supported_expr(&predicate)?;
         ensure_supported_expr(&measure)?;
-        let spec = KernelSpec::filter_sum(&predicate, &measure);
+        let spec = PipelineSpec::filter_sum(&predicate, &measure);
         Ok(Self {
             predicate,
             measure,
@@ -52,7 +52,7 @@ impl FilterSumKernel {
         &self.measure
     }
 
-    pub fn spec(&self) -> Option<&KernelSpec> {
+    pub fn spec(&self) -> Option<&PipelineSpec> {
         self.spec.as_ref()
     }
 
@@ -170,9 +170,9 @@ impl FilterSumValue {
     }
 }
 
-fn execute_filter_sum_spec(spec: &KernelSpec, batch: &RecordBatch) -> JitResult<FilterSumValue> {
+fn execute_filter_sum_spec(spec: &PipelineSpec, batch: &RecordBatch) -> JitResult<FilterSumValue> {
     match spec {
-        KernelSpec::F64FilterSum {
+        PipelineSpec::F64FilterSum {
             predicate_column,
             predicate_op,
             predicate_value,
@@ -186,7 +186,7 @@ fn execute_filter_sum_spec(spec: &KernelSpec, batch: &RecordBatch) -> JitResult<
             *measure_left_column,
             *measure_right_column,
         ),
-        KernelSpec::DecimalFilterSum {
+        PipelineSpec::DecimalFilterSum {
             predicates,
             measure_left_column,
             measure_right_column,
@@ -199,7 +199,7 @@ fn execute_filter_sum_spec(spec: &KernelSpec, batch: &RecordBatch) -> JitResult<
             *output_scale,
         ),
         _ => Err(JitError::UnsupportedExpr(format!(
-            "kernel spec {:?} cannot execute filter-sum",
+            "pipeline spec {:?} cannot execute filter-sum",
             spec.kind()
         ))),
     }

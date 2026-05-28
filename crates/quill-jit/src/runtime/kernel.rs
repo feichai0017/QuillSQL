@@ -12,7 +12,7 @@ pub enum KernelKind {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum KernelSpec {
+pub enum PipelineSpec {
     Generic {
         kind: KernelKind,
     },
@@ -55,7 +55,7 @@ pub enum PredicateSpec {
     },
 }
 
-impl KernelSpec {
+impl PipelineSpec {
     pub fn generic(kind: KernelKind) -> Self {
         Self::Generic { kind }
     }
@@ -130,7 +130,7 @@ impl KernelKind {
 pub struct CompiledKernel {
     pub id: String,
     pub kind: KernelKind,
-    pub spec: KernelSpec,
+    pub spec: PipelineSpec,
     pub backend: String,
     pub ir: String,
     pub executable: bool,
@@ -147,7 +147,7 @@ impl CompiledKernel {
         Self {
             id: id.into(),
             kind,
-            spec: KernelSpec::generic(kind),
+            spec: PipelineSpec::generic(kind),
             backend: backend.into(),
             ir: ir.into(),
             executable,
@@ -156,7 +156,7 @@ impl CompiledKernel {
 
     pub fn with_spec(
         id: impl Into<String>,
-        spec: KernelSpec,
+        spec: PipelineSpec,
         backend: impl Into<String>,
         ir: impl Into<String>,
         executable: bool,

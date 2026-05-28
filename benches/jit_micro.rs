@@ -4,14 +4,13 @@ use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use datafusion::arrow::array::{Float64Array, Int64Array};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
-use quill_sql::database::{Database, DatabaseOptions};
 #[cfg(feature = "jit-mlir")]
-use quill_sql::jit::DecimalFilterSumInput;
-use quill_sql::jit::JitOptions;
-use quill_sql::jit::{
+use quill_jit::DecimalFilterSumInput;
+use quill_jit::{
     FilterProjectKernel, FilterSumKernel, JitBinaryOp, JitExpr, JitProjection, JitScalar, JitType,
-    KernelBackend, MlirBackend, PipelineIr, PipelineLowering, PipelineOp,
+    JitOptions, KernelBackend, MlirBackend, PipelineIr, PipelineLowering, PipelineStage,
 };
+use quill_sql::database::{Database, DatabaseOptions};
 
 fn schema() -> Arc<Schema> {
     Arc::new(Schema::new(vec![
@@ -213,17 +212,17 @@ fn bench_pipeline_ir_and_mlir(c: &mut Criterion) {
     let projections = projections();
     let backend = MlirBackend::new();
 
-    c.bench_function("pipeline_ir/lower_filter_project", |b| {
+    c.bench_function("lowering/filter_project_ir", |b| {
         b.iter(|| {
             let pipeline = PipelineIr::new(vec![
-                PipelineOp::Filter(black_box(predicate.clone())),
-                PipelineOp::Projection(black_box(projections.clone())),
+                PipelineStage::Filter(black_box(predicate.clone())),
+                PipelineStage::Projection(black_box(projections.clone())),
             ]);
             black_box(PipelineLowering::from_ir(&pipeline))
         });
     });
 
-    c.bench_function("mlir/compile_filter", |b| {
+    c.bench_function("compile/mlir_filter_text", |b| {
         b.iter(|| {
             black_box(
                 backend
@@ -233,7 +232,7 @@ fn bench_pipeline_ir_and_mlir(c: &mut Criterion) {
         });
     });
 
-    c.bench_function("mlir/compile_filter_project", |b| {
+    c.bench_function("compile/mlir_filter_project_text", |b| {
         b.iter(|| {
             black_box(
                 backend
@@ -248,7 +247,7 @@ fn bench_pipeline_ir_and_mlir(c: &mut Criterion) {
     });
 
     #[cfg(feature = "jit-mlir")]
-    c.bench_function("mlir_compiled/compile_i64_filter", |b| {
+    c.bench_function("compile/mlir_i64_filter", |b| {
         b.iter(|| {
             black_box(
                 backend
@@ -259,7 +258,7 @@ fn bench_pipeline_ir_and_mlir(c: &mut Criterion) {
     });
 
     #[cfg(feature = "jit-mlir")]
-    c.bench_function("mlir_compiled/compile_i64_filter_project", |b| {
+    c.bench_function("compile/mlir_i64_filter_project", |b| {
         b.iter(|| {
             black_box(
                 backend
@@ -270,7 +269,7 @@ fn bench_pipeline_ir_and_mlir(c: &mut Criterion) {
     });
 
     #[cfg(feature = "jit-mlir")]
-    c.bench_function("mlir_compiled/compile_f64_filter_sum", |b| {
+    c.bench_function("compile/mlir_f64_filter_sum", |b| {
         let measure = measure();
         let predicate = sum_predicate();
         b.iter(|| {
@@ -283,7 +282,7 @@ fn bench_pipeline_ir_and_mlir(c: &mut Criterion) {
     });
 
     #[cfg(feature = "jit-mlir")]
-    c.bench_function("mlir_compiled/compile_decimal_filter_sum", |b| {
+    c.bench_function("compile/mlir_decimal_filter_sum", |b| {
         let predicate = q6_decimal_predicate();
         let measure = q6_decimal_measure();
         b.iter(|| {
@@ -320,7 +319,7 @@ fn bench_datafusion_filter_project(c: &mut Criterion) {
         .block_on(db.run("select id + 1 as next_id from t where v > 500"))
         .expect("warmup");
 
-    c.bench_function("datafusion/sql_filter_project_64k", |b| {
+    c.bench_function("sql/filter_project_64k", |b| {
         b.iter(|| {
             black_box(
                 runtime
@@ -365,7 +364,7 @@ fn bench_datafusion_filter_sum(c: &mut Criterion) {
         .expect("prepare");
     runtime.block_on(prepared.run()).expect("prepared warmup");
 
-    c.bench_function("datafusion/sql_filter_sum_64k", |b| {
+    c.bench_function("sql/filter_sum_64k", |b| {
         b.iter(|| {
             black_box(
                 runtime
@@ -376,7 +375,7 @@ fn bench_datafusion_filter_sum(c: &mut Criterion) {
             )
         });
     });
-    c.bench_function("datafusion/prepared_filter_sum_64k", |b| {
+    c.bench_function("sql/prepared_filter_sum_64k", |b| {
         b.iter(|| black_box(runtime.block_on(prepared.run()).expect("query")));
     });
 }
@@ -404,7 +403,7 @@ fn bench_quill_filter_project_kernel(c: &mut Criterion) {
     let kernel =
         FilterProjectKernel::try_new(predicate(), projections(), output_schema).expect("kernel");
 
-    c.bench_function("quill_kernel/filter_project_64k", |b| {
+    c.bench_function("pipeline/record_filter_project_64k", |b| {
         b.iter(|| black_box(kernel.execute(black_box(&batch)).expect("execute kernel")));
     });
 }
@@ -432,7 +431,7 @@ fn bench_quill_filter_sum_kernel(c: &mut Criterion) {
     .expect("record batch");
     let kernel = FilterSumKernel::try_new(sum_predicate(), measure()).expect("kernel");
 
-    c.bench_function("quill_kernel/filter_sum_64k", |b| {
+    c.bench_function("pipeline/scalar_sum_64k", |b| {
         b.iter(|| black_box(kernel.execute(black_box(&batch)).expect("execute kernel")));
     });
 }
@@ -448,7 +447,7 @@ fn bench_compiled_i64_filter_kernel(c: &mut Criterion) {
         .compile_i64_filter(&predicate())
         .expect("compiled i64 filter");
 
-    c.bench_function("mlir_compiled/filter_64k", |b| {
+    c.bench_function("kernel/i64_filter_64k", |b| {
         b.iter(|| {
             kernel
                 .invoke(black_box(&values), black_box(&mut output))
@@ -470,7 +469,7 @@ fn bench_compiled_i64_filter_project_kernel(c: &mut Criterion) {
         .compile_i64_filter_project(&predicate(), &projections())
         .expect("compiled i64 filter-project");
 
-    c.bench_function("mlir_compiled/filter_project_64k", |b| {
+    c.bench_function("kernel/i64_filter_project_64k", |b| {
         b.iter(|| {
             let output_len = kernel
                 .invoke(black_box(&values), black_box(&ids), black_box(&mut output))
@@ -497,7 +496,7 @@ fn bench_compiled_f64_filter_sum_kernel(c: &mut Criterion) {
         .compile_f64_filter_sum(&sum_predicate(), &measure())
         .expect("compiled f64 filter-sum");
 
-    c.bench_function("mlir_compiled/filter_sum_64k", |b| {
+    c.bench_function("kernel/f64_filter_sum_64k", |b| {
         b.iter(|| {
             black_box(
                 kernel
@@ -531,7 +530,7 @@ fn bench_compiled_decimal_filter_sum_kernel(c: &mut Criterion) {
         .compile_decimal_filter_sum(&q6_decimal_predicate(), &q6_decimal_measure())
         .expect("compiled decimal filter-sum");
 
-    c.bench_function("mlir_compiled/decimal_filter_sum_64k", |b| {
+    c.bench_function("kernel/decimal_filter_sum_64k", |b| {
         b.iter(|| {
             black_box(
                 kernel

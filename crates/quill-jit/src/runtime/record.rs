@@ -3,7 +3,7 @@ use std::sync::Arc;
 use datafusion::arrow::datatypes::SchemaRef as ArrowSchemaRef;
 use datafusion::arrow::record_batch::RecordBatch;
 
-use crate::{JitError, JitExpr, JitProjection, JitResult, JitType, KernelSpec};
+use crate::{JitError, JitExpr, JitProjection, JitResult, JitType, PipelineSpec};
 
 use super::array::{arrow_type, BatchView, OutputBuilder};
 use super::eval::{ensure_supported_expr, eval_expr};
@@ -13,7 +13,7 @@ pub struct FilterProjectKernel {
     predicate: JitExpr,
     projections: Vec<JitProjection>,
     schema: ArrowSchemaRef,
-    spec: Option<KernelSpec>,
+    spec: Option<PipelineSpec>,
 }
 
 impl FilterProjectKernel {
@@ -49,7 +49,7 @@ impl FilterProjectKernel {
             }
         }
 
-        let spec = KernelSpec::i64_filter_project(&predicate, &projections);
+        let spec = PipelineSpec::i64_filter_project(&predicate, &projections);
         Ok(Self {
             predicate,
             projections,
@@ -66,7 +66,7 @@ impl FilterProjectKernel {
         &self.projections
     }
 
-    pub fn spec(&self) -> Option<&KernelSpec> {
+    pub fn spec(&self) -> Option<&PipelineSpec> {
         self.spec.as_ref()
     }
 

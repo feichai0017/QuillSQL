@@ -1,8 +1,8 @@
 use std::fmt::Write;
 
 use crate::{
-    JitExpr, JitProjection, KernelSpec, PipelineIr, PipelineKind, PipelineOp, PipelineSink,
-    PipelineSource,
+    JitExpr, JitProjection, PipelineSpec, PipelineIr, PipelineKind, PipelineSink, PipelineSource,
+    PipelineStage,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -38,16 +38,16 @@ impl QuillDialectModule {
             PipelineSource::DataFusionInput => QuillDialectSource::DataFusionBatch,
         };
         let ops = pipeline
-            .operators
+            .stages
             .iter()
-            .map(|op| match op {
-                PipelineOp::Filter(predicate) => QuillDialectOp::Filter {
+            .map(|stage| match stage {
+                PipelineStage::Filter(predicate) => QuillDialectOp::Filter {
                     predicate: predicate.clone(),
                 },
-                PipelineOp::Projection(projections) => QuillDialectOp::Project {
+                PipelineStage::Projection(projections) => QuillDialectOp::Project {
                     projections: projections.clone(),
                 },
-                PipelineOp::Limit(fetch) => QuillDialectOp::Limit { fetch: *fetch },
+                PipelineStage::Limit(fetch) => QuillDialectOp::Limit { fetch: *fetch },
             })
             .collect();
         let sink = match &pipeline.sink {
@@ -75,8 +75,8 @@ impl QuillDialectModule {
             "    %batch0 = \"{}\"() : () -> !quill.batch",
             self.source.name()
         );
-        if let Some(spec) = self.kernel_spec() {
-            let _ = writeln!(text, "    // qjit.kernel = {}", spec.name());
+        if let Some(spec) = self.pipeline_spec() {
+            let _ = writeln!(text, "    // qjit.pipeline = {}", spec.name());
         }
 
         let mut batch = "%batch0".to_string();
@@ -170,18 +170,18 @@ impl QuillDialectModule {
         }
     }
 
-    pub fn kernel_spec(&self) -> Option<KernelSpec> {
+    pub fn pipeline_spec(&self) -> Option<PipelineSpec> {
         match (&self.source, self.ops.as_slice(), &self.sink) {
             (
                 QuillDialectSource::DataFusionBatch,
                 [QuillDialectOp::Filter { predicate }, QuillDialectOp::Project { projections }],
                 QuillDialectSink::RecordBatch,
-            ) => KernelSpec::i64_filter_project(predicate, projections),
+            ) => PipelineSpec::i64_filter_project(predicate, projections),
             (
                 QuillDialectSource::DataFusionBatch,
                 [QuillDialectOp::Filter { predicate }],
                 QuillDialectSink::PlainSum { measure },
-            ) => KernelSpec::filter_sum(predicate, measure),
+            ) => PipelineSpec::filter_sum(predicate, measure),
             _ => None,
         }
     }
@@ -245,7 +245,7 @@ fn string_attr(value: &str) -> String {
 mod tests {
     use crate::{
         JitBinaryOp, JitExpr, JitProjection, JitScalar, JitType, PipelineIr, PipelineKind,
-        PipelineOp, QuillDialectModule,
+        PipelineStage, QuillDialectModule,
     };
 
     #[test]
@@ -267,8 +267,8 @@ mod tests {
             "next_id",
         );
         let pipeline = PipelineIr::new(vec![
-            PipelineOp::Filter(predicate),
-            PipelineOp::Projection(vec![projection]),
+            PipelineStage::Filter(predicate),
+            PipelineStage::Projection(vec![projection]),
         ]);
 
         let module = QuillDialectModule::from_pipeline("record0", &pipeline);

@@ -76,8 +76,8 @@ impl MlirBackend {
         projections: &[JitProjection],
     ) -> JitResult<MlirModule> {
         let pipeline = PipelineIr::new(vec![
-            crate::PipelineOp::Filter(predicate.clone()),
-            crate::PipelineOp::Projection(projections.to_vec()),
+            crate::PipelineStage::Filter(predicate.clone()),
+            crate::PipelineStage::Projection(projections.to_vec()),
         ]);
         let dialect =
             self.emit_quill_dialect(emit::next_symbol("quill_i64_filter_project"), &pipeline);

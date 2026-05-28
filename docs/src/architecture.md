@@ -15,7 +15,7 @@ flowchart LR
     Logical --> Optimized["DataFusion optimizers"]
     Optimized --> Physical["DataFusion ExecutionPlan"]
     Physical --> JITRule["MlirJitRule physical rewrite"]
-    JITRule --> CompiledExec["CompiledRecordPipelineExec"]
+    JITRule --> CompiledExec["CompiledPipelineExec"]
     CompiledExec --> Arrow["Arrow RecordBatch output"]
 
     Parquet["Parquet / Arrow datasets"] --> DF
@@ -48,23 +48,22 @@ compilation to `lower/compiler.rs`.
 
 The MLIR backend then emits scalar `arith` functions and verifies them through
 `melior` when `jit-mlir` is enabled. The physical optimizer can replace
-filter/project pipelines with `CompiledRecordPipelineExec`; the current executable
-node runs a fixed-width Arrow batch kernel implemented in QuillSQL while carrying
-the MLIR kernel descriptor and a structured `KernelSpec`. A narrow compiled
+filter/project and plain `SUM` pipelines with `CompiledPipelineExec`; the current
+executable node runs fixed-width Arrow pipeline kernels implemented in QuillSQL
+while carrying the MLIR pipeline descriptor and a structured `PipelineSpec`. A narrow compiled
 `i64 -> bool` MLIR ExecutionEngine
 probe validates scalar invocation. The compiled fixed-width path now has an
 `i64` filter kernel that writes a byte selection mask, an `i64` filter/project
 kernel that compacts one projected column, an `f64` filter/sum kernel for the
 first plain-aggregate path, and a Q6-shaped `Date32`/`Decimal128` filter/sum
-kernel over fixed-width column slices. `CompiledRecordPipelineExec` can invoke
-the i64 filter/project kernel, and `CompiledAggregatePipelineExec` can invoke the
-filter/sum kernels through thread-local MLIR execution caches when `jit-mlir` is
+kernel over fixed-width column slices. `CompiledPipelineExec` invokes the record
+and scalar-sum kernels through thread-local MLIR execution caches when `jit-mlir` is
 enabled, `JitOptions::mlir_execution()` is selected, and the input batch has no
-nulls or slice offsets. The dispatch layer consumes `KernelSpec`; it no longer
+nulls or slice offsets. The dispatch layer consumes `PipelineSpec`; it no longer
 re-parses runtime expressions to guess input columns. CLI, server, and benchmark binaries map
 `QUILL_JIT=mlir` to that option at startup. Unsupported expressions and unsafe
-batch layouts fall back to the normal DataFusion plan or the fixed-width Arrow
-runtime.
+batch layouts fall back to the fixed-width Arrow runtime. Set `QUILL_JIT=off`
+to keep a pure DataFusion physical plan for baseline measurements.
 
 ## IR And Fusion
 
@@ -74,8 +73,8 @@ QuillSQL keeps one semantic pipeline IR plus an explicit lowering boundary:
   including the first `filter -> plain SUM` sink shape used as the stepping
   stone toward whole-pipeline lowering.
 - `QuillDialectModule`: a textual custom-dialect model with explicit
-  `quill.source`, `quill.exec`, and `quill.sink` operations. It is not used as
-  the executable MLIR path yet.
+  `quill.source`, `quill.exec`, and `quill.sink` operations. Covered pipeline
+  specs lower through this dialect before executable MLIR is emitted.
 - `PipelineLowering`: an exact pattern match from `PipelineIR` to an executable
   record or aggregate kernel shape.
 
@@ -87,7 +86,7 @@ Filter -> Projection
 
 Filter -> SUM(f64 expression)
 Filter(Date32/Decimal128 comparisons) -> SUM(Decimal128 * Decimal128)
-  => CompiledAggregatePipelineExec
+  => CompiledPipelineExec(kind=aggregate, sink=scalar_sum)
 ```
 
 `pipeline/extract.rs` also recognizes the common DataFusion shape where a
@@ -103,7 +102,7 @@ project measure real operator boundaries before taking on grouped aggregates,
 joins, hash repartitioning, or whole-query pipeline lowering. The decimal path
 now has both a DataFusion-safe fixed-width Arrow runtime specialization and an
 executable MLIR dispatch path for the same fixed-width column layout, using the
-same Q6-shaped decimal `KernelSpec`. That decimal path is now the first
+same Q6-shaped decimal `PipelineSpec`. That decimal path is now the first
 executable Quill dialect lowering path rather than another runtime-only
 specialized emitter.
 

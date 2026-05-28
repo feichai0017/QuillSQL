@@ -8,51 +8,89 @@ use datafusion::arrow::datatypes::{DataType as ArrowDataType, SchemaRef as Arrow
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::{DataFusionError, Result};
 use datafusion::execution::context::TaskContext;
-use datafusion::physical_expr::EquivalenceProperties;
-use datafusion::physical_expr::Partitioning;
+use datafusion::physical_expr::{EquivalenceProperties, Partitioning};
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, RecordBatchStream,
     SendableRecordBatchStream,
 };
 use futures::{ready, Stream, StreamExt};
 
-use crate::{CompiledKernel, FilterProjectKernel, FilterSumKernel, FilterSumValue, KernelKind};
+use crate::{
+    CompiledKernel, FilterProjectKernel, FilterSumKernel, FilterSumValue, KernelKind, PipelineKind,
+};
 
 #[derive(Debug, Clone)]
-pub struct CompiledRecordPipelineExec {
+pub enum PipelineRuntime {
+    RecordBatch(FilterProjectKernel),
+    ScalarSum(FilterSumKernel),
+}
+
+#[derive(Debug, Clone)]
+pub struct CompiledPipelineExec {
     input: Arc<dyn ExecutionPlan>,
-    runtime: FilterProjectKernel,
+    runtime: PipelineRuntime,
     kernel: CompiledKernel,
     schema: ArrowSchemaRef,
     cache: Arc<PlanProperties>,
 }
 
-#[derive(Debug, Clone)]
-pub struct CompiledAggregatePipelineExec {
-    input: Arc<dyn ExecutionPlan>,
-    runtime: FilterSumKernel,
-    kernel: CompiledKernel,
-    schema: ArrowSchemaRef,
-    cache: Arc<PlanProperties>,
+impl PipelineRuntime {
+    fn expected_kernel(&self) -> KernelKind {
+        match self {
+            Self::RecordBatch(_) => KernelKind::FilterProject,
+            Self::ScalarSum(_) => KernelKind::FilterSum,
+        }
+    }
+
+    fn kind(&self) -> PipelineKind {
+        match self {
+            Self::RecordBatch(_) => PipelineKind::Record,
+            Self::ScalarSum(_) => PipelineKind::Aggregate,
+        }
+    }
+
+    fn stage_names(&self) -> &'static str {
+        match self {
+            Self::RecordBatch(_) => "filter -> project",
+            Self::ScalarSum(_) => "filter",
+        }
+    }
+
+    fn sink_name(&self) -> &'static str {
+        match self {
+            Self::RecordBatch(_) => "record_batch",
+            Self::ScalarSum(_) => "scalar_sum",
+        }
+    }
 }
 
-impl CompiledRecordPipelineExec {
+impl CompiledPipelineExec {
     pub fn try_new(
         input: Arc<dyn ExecutionPlan>,
-        runtime: FilterProjectKernel,
+        runtime: PipelineRuntime,
         schema: ArrowSchemaRef,
         kernel: CompiledKernel,
     ) -> Result<Self> {
-        if kernel.kind != KernelKind::FilterProject {
+        let expected = runtime.expected_kernel();
+        if kernel.kind != expected {
             return Err(DataFusionError::Internal(format!(
-                "expected record pipeline kernel, got {:?}",
-                kernel.kind
+                "expected {:?} pipeline kernel, got {:?}",
+                expected, kernel.kind
+            )));
+        }
+        if matches!(runtime, PipelineRuntime::ScalarSum(_)) && schema.fields().len() != 1 {
+            return Err(DataFusionError::Internal(format!(
+                "compiled scalar aggregate pipeline expected one output field, got {}",
+                schema.fields().len()
             )));
         }
 
+        let partitioning = Partitioning::UnknownPartitioning(
+            input.properties().partitioning.partition_count(),
+        );
         let cache = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(Arc::clone(&schema)),
-            Partitioning::UnknownPartitioning(input.properties().partitioning.partition_count()),
+            partitioning,
             input.properties().emission_type,
             input.properties().boundedness,
         ));
@@ -74,83 +112,55 @@ impl CompiledRecordPipelineExec {
         &self.kernel
     }
 
-    pub fn runtime(&self) -> &FilterProjectKernel {
+    pub fn runtime(&self) -> &PipelineRuntime {
         &self.runtime
     }
 
-    fn execute_batch(&self, batch: RecordBatch) -> Result<RecordBatch> {
+    pub fn pipeline_kind(&self) -> PipelineKind {
+        self.runtime.kind()
+    }
+
+    pub fn stage_names(&self) -> &'static str {
+        self.runtime.stage_names()
+    }
+
+    pub fn sink_name(&self) -> &'static str {
+        self.runtime.sink_name()
+    }
+
+    fn execute_record_batch(
+        &self,
+        runtime: &FilterProjectKernel,
+        batch: RecordBatch,
+    ) -> Result<RecordBatch> {
         #[cfg(feature = "jit-mlir")]
-        if let Some(output) =
-            crate::mlir::execute_filter_project(&self.kernel, &self.runtime, &batch)?
-        {
+        if let Some(output) = crate::mlir::execute_filter_project(&self.kernel, runtime, &batch)? {
             return Ok(output);
         }
 
-        self.runtime.execute(&batch).map_err(Into::into)
-    }
-}
-
-impl CompiledAggregatePipelineExec {
-    pub fn try_new(
-        input: Arc<dyn ExecutionPlan>,
-        runtime: FilterSumKernel,
-        schema: ArrowSchemaRef,
-        kernel: CompiledKernel,
-    ) -> Result<Self> {
-        if kernel.kind != KernelKind::FilterSum {
-            return Err(DataFusionError::Internal(format!(
-                "expected filter-sum kernel, got {:?}",
-                kernel.kind
-            )));
-        }
-        if schema.fields().len() != 1 {
-            return Err(DataFusionError::Internal(format!(
-                "CompiledAggregatePipelineExec expected one output field, got {}",
-                schema.fields().len()
-            )));
-        }
-
-        let cache = Arc::new(PlanProperties::new(
-            EquivalenceProperties::new(Arc::clone(&schema)),
-            Partitioning::UnknownPartitioning(input.properties().partitioning.partition_count()),
-            input.properties().emission_type,
-            input.properties().boundedness,
-        ));
-
-        Ok(Self {
-            input,
-            runtime,
-            kernel,
-            schema,
-            cache,
-        })
+        runtime.execute(&batch).map_err(Into::into)
     }
 
-    pub fn kernel(&self) -> &CompiledKernel {
-        &self.kernel
-    }
-
-    pub fn runtime(&self) -> &FilterSumKernel {
-        &self.runtime
-    }
-
-    fn execute_batch(&self, batch: &RecordBatch) -> Result<FilterSumValue> {
+    fn execute_scalar_sum_batch(
+        &self,
+        runtime: &FilterSumKernel,
+        batch: &RecordBatch,
+    ) -> Result<FilterSumValue> {
         #[cfg(feature = "jit-mlir")]
-        if let Some(partial) = crate::mlir::execute_filter_sum(&self.kernel, &self.runtime, batch)?
-        {
+        if let Some(partial) = crate::mlir::execute_filter_sum(&self.kernel, runtime, batch)? {
             return Ok(partial);
         }
 
-        self.runtime.execute(batch).map_err(Into::into)
+        runtime.execute(batch).map_err(Into::into)
     }
 }
 
-impl DisplayAs for CompiledRecordPipelineExec {
+impl DisplayAs for CompiledPipelineExec {
     fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match t {
-            DisplayFormatType::Default | DisplayFormatType::Verbose => {
-                let projections = self
-                    .runtime
+        match (&self.runtime, t) {
+            (PipelineRuntime::RecordBatch(runtime), DisplayFormatType::Default)
+            | (PipelineRuntime::RecordBatch(runtime), DisplayFormatType::Verbose) => {
+                let projections = runtime
                     .projections()
                     .iter()
                     .map(|projection| projection.alias.clone())
@@ -158,58 +168,62 @@ impl DisplayAs for CompiledRecordPipelineExec {
                     .join(", ");
                 write!(
                     f,
-                    "CompiledRecordPipelineExec: backend={}, executable={}, predicate={:?}, expr=[{}]",
+                    "CompiledPipelineExec: kind=record, stages={}, sink={}, backend={}, executable={}, predicate={:?}, expr=[{}]",
+                    self.stage_names(),
+                    self.sink_name(),
                     self.kernel.backend,
                     self.kernel.executable,
-                    self.runtime.predicate(),
+                    runtime.predicate(),
                     projections
                 )
             }
-            DisplayFormatType::TreeRender => {
+            (PipelineRuntime::ScalarSum(runtime), DisplayFormatType::Default)
+            | (PipelineRuntime::ScalarSum(runtime), DisplayFormatType::Verbose) => {
+                write!(
+                    f,
+                    "CompiledPipelineExec: kind=aggregate, stages={}, sink={}, backend={}, executable={}, predicate={:?}, measure={:?}",
+                    self.stage_names(),
+                    self.sink_name(),
+                    self.kernel.backend,
+                    self.kernel.executable,
+                    runtime.predicate(),
+                    runtime.measure()
+                )
+            }
+            (PipelineRuntime::RecordBatch(runtime), DisplayFormatType::TreeRender) => {
                 writeln!(
                     f,
-                    "backend={}, executable={}",
-                    self.kernel.backend, self.kernel.executable
+                    "kind=record, stages={}, sink={}, backend={}, executable={}",
+                    self.stage_names(),
+                    self.sink_name(),
+                    self.kernel.backend,
+                    self.kernel.executable
                 )?;
-                writeln!(f, "predicate={:?}", self.runtime.predicate())?;
-                for (index, projection) in self.runtime.projections().iter().enumerate() {
+                writeln!(f, "predicate={:?}", runtime.predicate())?;
+                for (index, projection) in runtime.projections().iter().enumerate() {
                     writeln!(f, "expr{index}={}", projection.alias)?;
                 }
                 Ok(())
             }
-        }
-    }
-}
-
-impl DisplayAs for CompiledAggregatePipelineExec {
-    fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match t {
-            DisplayFormatType::Default | DisplayFormatType::Verbose => {
-                write!(
-                    f,
-                    "CompiledAggregatePipelineExec: backend={}, executable={}, predicate={:?}, measure={:?}",
-                    self.kernel.backend,
-                    self.kernel.executable,
-                    self.runtime.predicate(),
-                    self.runtime.measure()
-                )
-            }
-            DisplayFormatType::TreeRender => {
+            (PipelineRuntime::ScalarSum(runtime), DisplayFormatType::TreeRender) => {
                 writeln!(
                     f,
-                    "backend={}, executable={}",
-                    self.kernel.backend, self.kernel.executable
+                    "kind=aggregate, stages={}, sink={}, backend={}, executable={}",
+                    self.stage_names(),
+                    self.sink_name(),
+                    self.kernel.backend,
+                    self.kernel.executable
                 )?;
-                writeln!(f, "predicate={:?}", self.runtime.predicate())?;
-                writeln!(f, "measure={:?}", self.runtime.measure())
+                writeln!(f, "predicate={:?}", runtime.predicate())?;
+                writeln!(f, "measure={:?}", runtime.measure())
             }
         }
     }
 }
 
-impl ExecutionPlan for CompiledRecordPipelineExec {
+impl ExecutionPlan for CompiledPipelineExec {
     fn name(&self) -> &str {
-        "CompiledRecordPipelineExec"
+        "CompiledPipelineExec"
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -225,7 +239,7 @@ impl ExecutionPlan for CompiledRecordPipelineExec {
     }
 
     fn maintains_input_order(&self) -> Vec<bool> {
-        vec![true]
+        vec![matches!(self.runtime, PipelineRuntime::RecordBatch(_))]
     }
 
     fn benefits_from_input_partitioning(&self) -> Vec<bool> {
@@ -238,7 +252,7 @@ impl ExecutionPlan for CompiledRecordPipelineExec {
     ) -> Result<Arc<dyn ExecutionPlan>> {
         if children.len() != 1 {
             return Err(DataFusionError::Internal(format!(
-                "CompiledRecordPipelineExec expected one child, got {}",
+                "CompiledPipelineExec expected one child, got {}",
                 children.len()
             )));
         }
@@ -257,84 +271,33 @@ impl ExecutionPlan for CompiledRecordPipelineExec {
         partition: usize,
         context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
-        Ok(Box::pin(CompiledRecordPipelineStream {
-            schema: Arc::clone(&self.schema),
-            input: self.input.execute(partition, context)?,
-            exec: self.clone(),
-        }))
-    }
-}
-
-impl ExecutionPlan for CompiledAggregatePipelineExec {
-    fn name(&self) -> &str {
-        "CompiledAggregatePipelineExec"
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn properties(&self) -> &Arc<PlanProperties> {
-        &self.cache
-    }
-
-    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
-        vec![&self.input]
-    }
-
-    fn maintains_input_order(&self) -> Vec<bool> {
-        vec![false]
-    }
-
-    fn benefits_from_input_partitioning(&self) -> Vec<bool> {
-        vec![true]
-    }
-
-    fn with_new_children(
-        self: Arc<Self>,
-        mut children: Vec<Arc<dyn ExecutionPlan>>,
-    ) -> Result<Arc<dyn ExecutionPlan>> {
-        if children.len() != 1 {
-            return Err(DataFusionError::Internal(format!(
-                "CompiledAggregatePipelineExec expected one child, got {}",
-                children.len()
-            )));
+        match &self.runtime {
+            PipelineRuntime::RecordBatch(_) => Ok(Box::pin(CompiledRecordPipelineStream {
+                schema: Arc::clone(&self.schema),
+                input: self.input.execute(partition, context)?,
+                exec: self.clone(),
+            })),
+            PipelineRuntime::ScalarSum(_) => Ok(Box::pin(CompiledScalarSumStream {
+                schema: Arc::clone(&self.schema),
+                input: self.input.execute(partition, context)?,
+                exec: self.clone(),
+                sum: None,
+                emitted: false,
+            })),
         }
-
-        Self::try_new(
-            children.swap_remove(0),
-            self.runtime.clone(),
-            Arc::clone(&self.schema),
-            self.kernel.clone(),
-        )
-        .map(|exec| Arc::new(exec) as Arc<dyn ExecutionPlan>)
-    }
-
-    fn execute(
-        &self,
-        partition: usize,
-        context: Arc<TaskContext>,
-    ) -> Result<SendableRecordBatchStream> {
-        Ok(Box::pin(CompiledFilterSumStream {
-            schema: Arc::clone(&self.schema),
-            input: self.input.execute(partition, context)?,
-            exec: self.clone(),
-            sum: None,
-            emitted: false,
-        }))
     }
 }
 
 struct CompiledRecordPipelineStream {
     schema: ArrowSchemaRef,
     input: SendableRecordBatchStream,
-    exec: CompiledRecordPipelineExec,
+    exec: CompiledPipelineExec,
 }
 
-struct CompiledFilterSumStream {
+struct CompiledScalarSumStream {
     schema: ArrowSchemaRef,
     input: SendableRecordBatchStream,
-    exec: CompiledAggregatePipelineExec,
+    exec: CompiledPipelineExec,
     sum: Option<FilterSumValue>,
     emitted: bool,
 }
@@ -343,15 +306,24 @@ impl Stream for CompiledRecordPipelineStream {
     type Item = Result<RecordBatch>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let runtime = match &self.exec.runtime {
+            PipelineRuntime::RecordBatch(runtime) => runtime.clone(),
+            PipelineRuntime::ScalarSum(_) => {
+                return Poll::Ready(Some(Err(DataFusionError::Internal(
+                    "record pipeline stream cannot execute scalar sum runtime".to_string(),
+                ))));
+            }
+        };
+
         match ready!(self.input.poll_next_unpin(cx)) {
-            Some(Ok(batch)) => Poll::Ready(Some(self.exec.execute_batch(batch))),
+            Some(Ok(batch)) => Poll::Ready(Some(self.exec.execute_record_batch(&runtime, batch))),
             Some(Err(err)) => Poll::Ready(Some(Err(err))),
             None => Poll::Ready(None),
         }
     }
 }
 
-impl Stream for CompiledFilterSumStream {
+impl Stream for CompiledScalarSumStream {
     type Item = Result<RecordBatch>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -359,9 +331,18 @@ impl Stream for CompiledFilterSumStream {
             return Poll::Ready(None);
         }
 
+        let runtime = match &self.exec.runtime {
+            PipelineRuntime::ScalarSum(runtime) => runtime.clone(),
+            PipelineRuntime::RecordBatch(_) => {
+                return Poll::Ready(Some(Err(DataFusionError::Internal(
+                    "scalar sum stream cannot execute record runtime".to_string(),
+                ))));
+            }
+        };
+
         loop {
             match ready!(self.input.poll_next_unpin(cx)) {
-                Some(Ok(batch)) => match self.exec.execute_batch(&batch) {
+                Some(Ok(batch)) => match self.exec.execute_scalar_sum_batch(&runtime, &batch) {
                     Ok(partial) => {
                         if let Some(sum) = &mut self.sum {
                             if let Err(err) = sum.merge(partial) {
@@ -376,7 +357,7 @@ impl Stream for CompiledFilterSumStream {
                 Some(Err(err)) => return Poll::Ready(Some(Err(err))),
                 None => {
                     self.emitted = true;
-                    return Poll::Ready(Some(finish_filter_sum_batch(
+                    return Poll::Ready(Some(finish_scalar_sum_batch(
                         Arc::clone(&self.schema),
                         self.sum,
                     )));
@@ -392,13 +373,13 @@ impl RecordBatchStream for CompiledRecordPipelineStream {
     }
 }
 
-impl RecordBatchStream for CompiledFilterSumStream {
+impl RecordBatchStream for CompiledScalarSumStream {
     fn schema(&self) -> ArrowSchemaRef {
         Arc::clone(&self.schema)
     }
 }
 
-fn finish_filter_sum_batch(
+fn finish_scalar_sum_batch(
     schema: ArrowSchemaRef,
     sum: Option<FilterSumValue>,
 ) -> Result<RecordBatch> {
@@ -447,7 +428,7 @@ fn finish_filter_sum_batch(
         }
         other => {
             return Err(DataFusionError::Execution(format!(
-                "unsupported filter-sum output type {other:?}"
+                "unsupported scalar sum output type {other:?}"
             )));
         }
     };

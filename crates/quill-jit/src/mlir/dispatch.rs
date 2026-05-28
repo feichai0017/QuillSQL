@@ -8,7 +8,7 @@ use datafusion::common::{DataFusionError, Result};
 
 use crate::{
     CompiledDecimalFilterSum, CompiledF64FilterSum, CompiledI64FilterProject, CompiledKernel,
-    DecimalFilterSumInput, FilterProjectKernel, FilterSumKernel, FilterSumValue, KernelSpec,
+    DecimalFilterSumInput, FilterProjectKernel, FilterSumKernel, FilterSumValue, PipelineSpec,
     MlirBackend, PredicateSpec,
 };
 
@@ -30,7 +30,7 @@ pub(crate) fn execute_filter_project(
         return Ok(None);
     }
 
-    let KernelSpec::I64FilterProject {
+    let PipelineSpec::I64FilterProject {
         predicate_column,
         projection_column,
     } = &kernel.spec
@@ -77,7 +77,7 @@ pub(crate) fn execute_filter_sum(
     }
 
     match &kernel.spec {
-        KernelSpec::F64FilterSum {
+        PipelineSpec::F64FilterSum {
             predicate_column,
             measure_left_column,
             measure_right_column,
@@ -89,7 +89,7 @@ pub(crate) fn execute_filter_sum(
             *measure_left_column,
             *measure_right_column,
         ),
-        KernelSpec::DecimalFilterSum {
+        PipelineSpec::DecimalFilterSum {
             predicates,
             measure_left_column,
             measure_right_column,

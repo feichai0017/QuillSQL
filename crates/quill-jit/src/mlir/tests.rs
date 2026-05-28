@@ -2,7 +2,7 @@
 use crate::DecimalFilterSumInput;
 use crate::{
     JitBinaryOp, JitExpr, JitProjection, JitScalar, JitType, MlirBackend, PipelineIr, PipelineKind,
-    PipelineOp,
+    PipelineStage,
 };
 
 #[test]
@@ -59,37 +59,37 @@ fn emits_quill_dialect_pipeline_skeleton() {
     let predicate = i64_gt_ten(false);
     let projections = vec![i64_plus_one_projection(0)];
     let pipeline = PipelineIr::new(vec![
-        PipelineOp::Filter(predicate),
-        PipelineOp::Projection(projections),
+        PipelineStage::Filter(predicate),
+        PipelineStage::Projection(projections),
     ]);
 
     let module = MlirBackend::new().emit_quill_dialect("record_pipeline", &pipeline);
 
     assert_eq!(module.kind, PipelineKind::Record);
     assert_eq!(
-        module.kernel_spec().map(|spec| spec.name()),
+        module.pipeline_spec().map(|spec| spec.name()),
         Some("i64_filter_project")
     );
     assert!(module.text().contains("\"quill.pipeline\""));
     assert!(module
         .text()
-        .contains("// qjit.kernel = i64_filter_project"));
+        .contains("// qjit.pipeline = i64_filter_project"));
     assert!(module.text().contains("\"quill.exec.filter\""));
     assert!(module.text().contains("\"quill.exec.project\""));
 }
 
 #[test]
-fn emits_q6_quill_dialect_kernel_spec() {
+fn emits_q6_quill_dialect_pipeline_spec() {
     let pipeline = PipelineIr::filter_sum(q6_decimal_predicate(), q6_decimal_measure());
     let module = MlirBackend::new().emit_quill_dialect("q6_pipeline", &pipeline);
 
     assert_eq!(
-        module.kernel_spec().map(|spec| spec.name()),
+        module.pipeline_spec().map(|spec| spec.name()),
         Some("decimal_filter_sum")
     );
     assert!(module
         .text()
-        .contains("// qjit.kernel = decimal_filter_sum"));
+        .contains("// qjit.pipeline = decimal_filter_sum"));
     assert!(module.text().contains("\"quill.sink.plain_sum\""));
 }
 

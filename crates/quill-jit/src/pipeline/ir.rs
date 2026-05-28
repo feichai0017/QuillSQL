@@ -5,8 +5,16 @@ pub enum PipelineSource {
     DataFusionInput,
 }
 
+impl PipelineSource {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::DataFusionInput => "arrow_batch",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
-pub enum PipelineOp {
+pub enum PipelineStage {
     Filter(JitExpr),
     Projection(Vec<JitProjection>),
     Limit(usize),
@@ -21,15 +29,15 @@ pub enum PipelineSink {
 #[derive(Debug, Clone, PartialEq)]
 pub struct PipelineIr {
     pub source: PipelineSource,
-    pub operators: Vec<PipelineOp>,
+    pub stages: Vec<PipelineStage>,
     pub sink: PipelineSink,
 }
 
 impl PipelineIr {
-    pub fn new(operators: Vec<PipelineOp>) -> Self {
+    pub fn new(stages: Vec<PipelineStage>) -> Self {
         Self {
             source: PipelineSource::DataFusionInput,
-            operators,
+            stages,
             sink: PipelineSink::RecordBatch,
         }
     }
@@ -37,18 +45,18 @@ impl PipelineIr {
     pub fn filter_sum(predicate: JitExpr, measure: JitExpr) -> Self {
         Self {
             source: PipelineSource::DataFusionInput,
-            operators: vec![PipelineOp::Filter(predicate)],
+            stages: vec![PipelineStage::Filter(predicate)],
             sink: PipelineSink::Sum { measure },
         }
     }
 
-    pub fn operator_names(&self) -> Vec<&'static str> {
-        self.operators
+    pub fn stage_names(&self) -> Vec<&'static str> {
+        self.stages
             .iter()
-            .map(|operator| match operator {
-                PipelineOp::Filter(_) => "filter",
-                PipelineOp::Projection(_) => "projection",
-                PipelineOp::Limit(_) => "limit",
+            .map(|stage| match stage {
+                PipelineStage::Filter(_) => "filter",
+                PipelineStage::Projection(_) => "project",
+                PipelineStage::Limit(_) => "limit",
             })
             .collect()
     }
@@ -56,7 +64,7 @@ impl PipelineIr {
     pub fn sink_name(&self) -> &'static str {
         match &self.sink {
             PipelineSink::RecordBatch => "record_batch",
-            PipelineSink::Sum { .. } => "sum",
+            PipelineSink::Sum { .. } => "scalar_sum",
         }
     }
 }
@@ -70,11 +78,11 @@ mod tests {
         let predicate = JitExpr::Literal(JitScalar::Bool(true));
         let projection = JitProjection::new(JitExpr::Literal(JitScalar::Int64(1)), "one");
         let pipeline = PipelineIr::new(vec![
-            crate::PipelineOp::Filter(predicate),
-            crate::PipelineOp::Projection(vec![projection]),
+            crate::PipelineStage::Filter(predicate),
+            crate::PipelineStage::Projection(vec![projection]),
         ]);
 
-        assert_eq!(pipeline.operator_names(), vec!["filter", "projection"]);
+        assert_eq!(pipeline.stage_names(), vec!["filter", "project"]);
         assert_eq!(pipeline.sink_name(), "record_batch");
     }
 
@@ -82,9 +90,9 @@ mod tests {
     fn records_projection_pipeline() {
         let projection =
             JitProjection::new(JitExpr::Literal(JitScalar::Null(JitType::Int64)), "value");
-        let pipeline = PipelineIr::new(vec![crate::PipelineOp::Projection(vec![projection])]);
+        let pipeline = PipelineIr::new(vec![crate::PipelineStage::Projection(vec![projection])]);
 
-        assert_eq!(pipeline.operator_names(), vec!["projection"]);
+        assert_eq!(pipeline.stage_names(), vec!["project"]);
         assert_eq!(pipeline.sink_name(), "record_batch");
     }
 
@@ -94,7 +102,7 @@ mod tests {
         let measure = JitExpr::Literal(JitScalar::Float64(1.0));
         let pipeline = PipelineIr::filter_sum(predicate, measure);
 
-        assert_eq!(pipeline.operator_names(), vec!["filter"]);
-        assert_eq!(pipeline.sink_name(), "sum");
+        assert_eq!(pipeline.stage_names(), vec!["filter"]);
+        assert_eq!(pipeline.sink_name(), "scalar_sum");
     }
 }

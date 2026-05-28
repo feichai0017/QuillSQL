@@ -6,7 +6,7 @@ use datafusion::arrow::array::{
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
 
-use crate::{JitBinaryOp, JitExpr, JitProjection, JitScalar, JitType, KernelSpec, PredicateSpec};
+use crate::{JitBinaryOp, JitExpr, JitProjection, JitScalar, JitType, PipelineSpec, PredicateSpec};
 
 use super::{FilterProjectKernel, FilterSumKernel, FilterSumValue};
 
@@ -63,7 +63,7 @@ fn executes_filter_project_with_nulls() {
 
     assert_eq!(
         kernel.spec(),
-        Some(&KernelSpec::I64FilterProject {
+        Some(&PipelineSpec::I64FilterProject {
             predicate_column: 1,
             projection_column: 0
         })
@@ -204,7 +204,7 @@ fn executes_filter_sum_fast_path_with_nulls() {
 
     assert_eq!(
         kernel.spec(),
-        Some(&KernelSpec::F64FilterSum {
+        Some(&PipelineSpec::F64FilterSum {
             predicate_column: 0,
             predicate_op: JitBinaryOp::Gt,
             predicate_value: 10,
@@ -281,7 +281,7 @@ fn executes_decimal_filter_sum_with_date_predicate() {
 
     assert_eq!(
         kernel.spec(),
-        Some(&KernelSpec::DecimalFilterSum {
+        Some(&PipelineSpec::DecimalFilterSum {
             predicates: vec![
                 PredicateSpec::Date32 {
                     column: 0,
