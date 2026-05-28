@@ -17,7 +17,7 @@ pub use kernel::{
 #[cfg(feature = "jit-mlir")]
 pub use mlir::{
     CompiledDecimalFilterSum, CompiledF64FilterSum, CompiledI64Filter, CompiledI64FilterProject,
-    DecimalFilterSumInput, DecimalFilterSumOutput,
+    DecimalFilterSumInput, DecimalFilterSumOutput, F64FilterSumOutput,
 };
 pub use mlir::{MlirBackend, MlirColumn, MlirModule};
 pub use options::JitOptions;

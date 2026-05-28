@@ -1,18 +1,20 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use datafusion::arrow::array::{Array, Date32Array, Decimal128Array, Int64Array};
+use datafusion::arrow::array::{Array, Date32Array, Decimal128Array, Float64Array, Int64Array};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::{DataFusionError, Result};
 
 use crate::jit::{
-    CompiledDecimalFilterSum, CompiledKernel, DecimalFilterSumInput, FilterSumKernel,
-    FilterSumValue, MlirBackend,
+    CompiledDecimalFilterSum, CompiledF64FilterSum, CompiledKernel, DecimalFilterSumInput,
+    FilterSumKernel, FilterSumValue, MlirBackend,
 };
 
 use super::super::runtime::{FilterSumPlan, FixedPredicate};
 
 thread_local! {
+    static F64_FILTER_SUM_CACHE: RefCell<HashMap<String, CompiledF64FilterSum>> =
+        RefCell::new(HashMap::new());
     static DECIMAL_FILTER_SUM_CACHE: RefCell<HashMap<String, CompiledDecimalFilterSum>> =
         RefCell::new(HashMap::new());
 }
@@ -26,17 +28,71 @@ pub(crate) fn execute_filter_sum(
         return Ok(None);
     }
 
-    let Some(FilterSumPlan::FixedCompareDecimalMul {
-        predicates,
-        left_col,
-        right_col,
-        scale,
-    }) = runtime.plan()
-    else {
+    match runtime.plan() {
+        Some(FilterSumPlan::I64CompareF64Mul {
+            predicate_col,
+            left_col,
+            right_col,
+            ..
+        }) => execute_f64_filter_sum(runtime, batch, *predicate_col, *left_col, *right_col),
+        Some(FilterSumPlan::FixedCompareDecimalMul {
+            predicates,
+            left_col,
+            right_col,
+            scale,
+        }) => execute_decimal_filter_sum(runtime, batch, predicates, *left_col, *right_col, *scale),
+        None => Ok(None),
+    }
+}
+
+fn execute_f64_filter_sum(
+    runtime: &FilterSumKernel,
+    batch: &RecordBatch,
+    predicate_col: usize,
+    left_col: usize,
+    right_col: usize,
+) -> Result<Option<FilterSumValue>> {
+    let predicate = int64_column(batch, predicate_col)?;
+    let left = float64_column(batch, left_col)?;
+    let right = float64_column(batch, right_col)?;
+    let Some(predicate_values) = int64_values(predicate) else {
+        return Ok(None);
+    };
+    let Some(left_values) = float64_values(left) else {
+        return Ok(None);
+    };
+    let Some(right_values) = float64_values(right) else {
         return Ok(None);
     };
 
-    let Some(inputs) = decimal_filter_sum_inputs(batch, predicates, *left_col, *right_col, *scale)?
+    let cache_key = filter_sum_cache_key(runtime);
+    let output = F64_FILTER_SUM_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if !cache.contains_key(&cache_key) {
+            let compiled = MlirBackend::new()
+                .compile_f64_filter_sum(runtime.predicate(), runtime.measure())?;
+            cache.insert(cache_key.clone(), compiled);
+        }
+        cache
+            .get(&cache_key)
+            .expect("compiled kernel was inserted")
+            .invoke(predicate_values, left_values, right_values)
+    })?;
+
+    Ok(Some(FilterSumValue::Float64(
+        (output.count > 0).then_some(output.sum),
+    )))
+}
+
+fn execute_decimal_filter_sum(
+    runtime: &FilterSumKernel,
+    batch: &RecordBatch,
+    predicates: &[FixedPredicate],
+    left_col: usize,
+    right_col: usize,
+    scale: i8,
+) -> Result<Option<FilterSumValue>> {
+    let Some(inputs) = decimal_filter_sum_inputs(batch, predicates, left_col, right_col, scale)?
     else {
         return Ok(None);
     };
@@ -54,10 +110,9 @@ pub(crate) fn execute_filter_sum(
             .expect("compiled kernel was inserted")
             .invoke(&inputs)
     })?;
-
     Ok(Some(FilterSumValue::Decimal128 {
         value: (output.count > 0).then_some(output.sum),
-        scale: *scale,
+        scale,
     }))
 }
 
@@ -197,11 +252,26 @@ fn int64_values(array: &Int64Array) -> Option<&[i64]> {
     Some(array.values().as_ref())
 }
 
+fn float64_values(array: &Float64Array) -> Option<&[f64]> {
+    if array.null_count() != 0 || array.offset() != 0 {
+        return None;
+    }
+    Some(array.values().as_ref())
+}
+
 fn decimal128_values(array: &Decimal128Array) -> Option<&[i128]> {
     if array.null_count() != 0 || array.offset() != 0 {
         return None;
     }
     Some(array.values().as_ref())
+}
+
+fn float64_column(batch: &RecordBatch, index: usize) -> Result<&Float64Array> {
+    batch
+        .column(index)
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .ok_or_else(|| DataFusionError::Execution(format!("column {index} is not Float64")))
 }
 
 fn date32_column(batch: &RecordBatch, index: usize) -> Result<&Date32Array> {

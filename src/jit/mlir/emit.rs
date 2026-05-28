@@ -196,13 +196,13 @@ pub(super) fn lower_f64_filter_sum(
     text.push_str(&scalar_function(&measure_symbol, measure)?);
     let _ = writeln!(
         text,
-        "  func.func @{symbol}(%len: i64, %pred_values: !llvm.ptr, %left_values: !llvm.ptr, %right_values: !llvm.ptr, %out_sum: !llvm.ptr) -> i32 attributes {{ llvm.emit_c_interface }} {{"
+        "  func.func @{symbol}(%len: i64, %pred_values: !llvm.ptr, %left_values: !llvm.ptr, %right_values: !llvm.ptr, %out_sum: !llvm.ptr, %out_count: !llvm.ptr) -> i32 attributes {{ llvm.emit_c_interface }} {{"
     );
     text.push_str("    %c0_i64 = arith.constant 0 : i64\n");
     text.push_str("    %c1_i64 = arith.constant 1 : i64\n");
     text.push_str("    %zero_f64 = arith.constant 0.000000e+00 : f64\n");
     text.push_str(
-        "    %final_sum = scf.for unsigned %i = %c0_i64 to %len step %c1_i64 iter_args(%sum = %zero_f64) -> (f64) : i64 {\n",
+        "    %final_sum, %final_count = scf.for unsigned %i = %c0_i64 to %len step %c1_i64 iter_args(%sum = %zero_f64, %count = %c0_i64) -> (f64, i64) : i64 {\n",
     );
     text.push_str(
         "      %pred_ptr = llvm.getelementptr %pred_values[%i] : (!llvm.ptr, i64) -> !llvm.ptr, i64\n",
@@ -212,7 +212,7 @@ pub(super) fn lower_f64_filter_sum(
         text,
         "      %pred = func.call @{predicate_symbol}(%pred_value) : (i64) -> i1"
     );
-    text.push_str("      %next_sum = scf.if %pred -> (f64) {\n");
+    text.push_str("      %next_sum, %next_count = scf.if %pred -> (f64, i64) {\n");
     text.push_str(
         "        %left_ptr = llvm.getelementptr %left_values[%i] : (!llvm.ptr, i64) -> !llvm.ptr, f64\n",
     );
@@ -226,13 +226,15 @@ pub(super) fn lower_f64_filter_sum(
         "        %measure = func.call @{measure_symbol}(%left, %right) : (f64, f64) -> f64"
     );
     text.push_str("        %new_sum = arith.addf %sum, %measure : f64\n");
-    text.push_str("        scf.yield %new_sum : f64\n");
+    text.push_str("        %new_count = arith.addi %count, %c1_i64 : i64\n");
+    text.push_str("        scf.yield %new_sum, %new_count : f64, i64\n");
     text.push_str("      } else {\n");
-    text.push_str("        scf.yield %sum : f64\n");
+    text.push_str("        scf.yield %sum, %count : f64, i64\n");
     text.push_str("      }\n");
-    text.push_str("      scf.yield %next_sum : f64\n");
+    text.push_str("      scf.yield %next_sum, %next_count : f64, i64\n");
     text.push_str("    }\n");
     text.push_str("    llvm.store %final_sum, %out_sum : f64, !llvm.ptr\n");
+    text.push_str("    llvm.store %final_count, %out_count : i64, !llvm.ptr\n");
     text.push_str("    %ok = arith.constant 0 : i32\n");
     text.push_str("    return %ok : i32\n");
     text.push_str("  }\n}\n");

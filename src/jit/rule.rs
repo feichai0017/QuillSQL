@@ -317,7 +317,7 @@ impl MlirJitRule {
                 KernelKind::FilterSum,
                 self.backend.name(),
                 module.text,
-                false,
+                self.options.mlir_execution_enabled(),
             );
         }
 

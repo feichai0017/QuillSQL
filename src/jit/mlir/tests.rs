@@ -231,7 +231,8 @@ fn invokes_compiled_f64_filter_sum_kernel() {
         .invoke(&predicate_values, &left_values, &right_values)
         .unwrap();
 
-    assert!((output - 13.0).abs() < 0.000_001);
+    assert!((output.sum - 13.0).abs() < 0.000_001);
+    assert_eq!(output.count, 2);
 }
 
 #[cfg(feature = "jit-mlir")]

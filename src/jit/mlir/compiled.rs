@@ -30,6 +30,12 @@ pub struct CompiledDecimalFilterSum {
     columns: Vec<MlirColumn>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct F64FilterSumOutput {
+    pub sum: f64,
+    pub count: i64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DecimalFilterSumOutput {
     pub sum: i128,
@@ -163,7 +169,7 @@ impl CompiledF64FilterSum {
         predicate_values: &[i64],
         left_values: &[f64],
         right_values: &[f64],
-    ) -> JitResult<f64> {
+    ) -> JitResult<F64FilterSumOutput> {
         if left_values.len() != predicate_values.len() {
             return Err(JitError::Backend(format!(
                 "compiled filter-sum left len {} does not match predicate len {}",
@@ -185,6 +191,8 @@ impl CompiledF64FilterSum {
         let mut right_ptr = right_values.as_ptr();
         let mut output_sum = 0.0_f64;
         let mut output_sum_ptr = &mut output_sum as *mut f64;
+        let mut output_count = 0_i64;
+        let mut output_count_ptr = &mut output_count as *mut i64;
         let mut result = -1_i32;
         unsafe {
             self.engine
@@ -196,6 +204,7 @@ impl CompiledF64FilterSum {
                         &mut left_ptr as *mut *const f64 as *mut (),
                         &mut right_ptr as *mut *const f64 as *mut (),
                         &mut output_sum_ptr as *mut *mut f64 as *mut (),
+                        &mut output_count_ptr as *mut *mut i64 as *mut (),
                         &mut result as *mut i32 as *mut (),
                     ],
                 )
@@ -206,7 +215,10 @@ impl CompiledF64FilterSum {
                 "compiled filter-sum returned status {result}"
             )));
         }
-        Ok(output_sum)
+        Ok(F64FilterSumOutput {
+            sum: output_sum,
+            count: output_count,
+        })
     }
 }
 
