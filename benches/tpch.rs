@@ -96,14 +96,29 @@ fn bench_tpch(c: &mut Criterion) {
         };
         runtime
             .block_on(db.run(query.sql))
-            .unwrap_or_else(|err| panic!("warmup {} failed: {}", query.name, err));
+            .unwrap_or_else(|err| panic!("sql warmup {} failed: {}", query.name, err));
+        let prepared = runtime
+            .block_on(db.prepare(query.sql))
+            .unwrap_or_else(|err| panic!("prepare {} failed: {}", query.name, err));
+        runtime
+            .block_on(prepared.run())
+            .unwrap_or_else(|err| panic!("prepared warmup {} failed: {}", query.name, err));
 
-        group.bench_function(BenchmarkId::from_parameter(query.name), |b| {
+        group.bench_function(BenchmarkId::new("sql", query.name), |b| {
             b.iter(|| {
                 black_box(
                     runtime
                         .block_on(db.run(black_box(query.sql)))
-                        .unwrap_or_else(|err| panic!("{} failed: {}", query.name, err)),
+                        .unwrap_or_else(|err| panic!("sql {} failed: {}", query.name, err)),
+                )
+            });
+        });
+        group.bench_function(BenchmarkId::new("prepared", query.name), |b| {
+            b.iter(|| {
+                black_box(
+                    runtime
+                        .block_on(prepared.run())
+                        .unwrap_or_else(|err| panic!("prepared {} failed: {}", query.name, err)),
                 )
             });
         });

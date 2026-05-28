@@ -9,7 +9,7 @@ experiments and Arrow/Parquet datasets for persistent analytical data.
 
 ```mermaid
 flowchart LR
-    SQL["SQL text"] --> DB["Database::run"]
+    SQL["SQL text"] --> DB["Database::run / prepare"]
     DB --> DF["DataFusion SessionContext"]
     DF --> Logical["DataFusion LogicalPlan"]
     Logical --> Optimized["DataFusion optimizers"]

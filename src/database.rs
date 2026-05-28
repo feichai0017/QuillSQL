@@ -9,7 +9,7 @@ use datafusion::datasource::MemTable;
 use datafusion::execution::context::{SessionConfig, SessionContext};
 use datafusion::execution::session_state::SessionStateBuilder;
 use datafusion::logical_expr::LogicalPlan;
-use datafusion::physical_plan::displayable;
+use datafusion::physical_plan::{collect, displayable};
 use serde::Serialize;
 use tempfile::TempDir;
 
@@ -39,6 +39,13 @@ pub struct Database {
     debug_trace_enabled: bool,
     _temp_dir: Option<TempDir>,
     _data_dir: PathBuf,
+}
+
+#[derive(Clone)]
+pub struct PreparedQuery {
+    ctx: SessionContext,
+    logical_plan: LogicalPlan,
+    physical_plan: String,
 }
 
 #[derive(Debug, Clone)]
@@ -221,6 +228,27 @@ impl Database {
         Ok(QueryOutput::new(batches))
     }
 
+    pub async fn prepare(&self, sql: &str) -> QuillSQLResult<PreparedQuery> {
+        let logical_plan = self
+            .ctx
+            .state()
+            .create_logical_plan(sql)
+            .await
+            .map_err(map_datafusion_err)?;
+        let plan = self
+            .ctx
+            .state()
+            .create_physical_plan(&logical_plan)
+            .await
+            .map_err(map_datafusion_err)?;
+        let physical_plan = displayable(plan.as_ref()).indent(false).to_string();
+        Ok(PreparedQuery {
+            ctx: self.ctx.clone(),
+            logical_plan,
+            physical_plan,
+        })
+    }
+
     pub async fn register_parquet(&self, table: &str, path: &str) -> QuillSQLResult<()> {
         self.ctx
             .register_parquet(table, path, ParquetReadOptions::default())
@@ -267,6 +295,25 @@ impl Database {
 
     fn clear_trace(&self) {
         *self.debug_trace.lock().expect("debug trace lock") = None;
+    }
+}
+
+impl PreparedQuery {
+    pub async fn run(&self) -> QuillSQLResult<QueryOutput> {
+        let plan = self
+            .ctx
+            .state()
+            .create_physical_plan(&self.logical_plan)
+            .await
+            .map_err(map_datafusion_err)?;
+        let batches = collect(plan, self.ctx.task_ctx())
+            .await
+            .map_err(map_datafusion_err)?;
+        Ok(QueryOutput::new(batches))
+    }
+
+    pub fn physical_plan(&self) -> &str {
+        &self.physical_plan
     }
 }
 

@@ -117,7 +117,8 @@ QuillSQL keeps benchmark levels separate:
   filter/project and filter/sum SQL paths over in-memory Arrow tables.
 - `tpch`: runs a small TPC-H ladder over external Parquet data. It currently
   includes Q6, Q1, and Q3 to cover scan/filter/plain aggregate, grouped
-  aggregate/sort, and join-heavy execution.
+  aggregate/sort, and join-heavy execution. It reports both `sql/<query>`
+  end-to-end timings and `prepared/<query>` timings over a reused logical plan.
 
 ```bash
 # Compile all benchmark harnesses.
@@ -139,8 +140,8 @@ Generated data is ignored by git. Set `QUILL_TPCH_SF=1` for SF1, and set
 `QUILL_TPCH_REGENERATE=1` to rebuild the generated Parquet files. If
 `QUILL_TPCH_DIR` is set, it should contain either `<table>.parquet` files or
 table directories named like `lineitem`, `orders`, and `customer`. TPC-H timings
-are DataFusion end-to-end timings through `Database::run`; they are not yet
-compiled MLIR kernel timings.
+separate `Database::run` from `PreparedQuery::run`, so JIT execution changes can
+be compared with less SQL parsing and logical planning noise.
 
 ## Testing
 

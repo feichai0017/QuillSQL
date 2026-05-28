@@ -84,6 +84,37 @@ async fn debug_trace_can_be_disabled_for_benchmarks() {
 }
 
 #[tokio::test]
+async fn prepared_query_reuses_logical_plan() {
+    let db = Database::new(DatabaseOptions {
+        debug_trace: false,
+        ..Default::default()
+    })
+    .expect("database");
+    db.run("create table t as select 1::bigint as id union all select 2::bigint")
+        .await
+        .expect("create table");
+
+    let query = db
+        .prepare("select id + 10 as value from t where id > 1")
+        .await
+        .expect("prepare");
+
+    assert!(
+        query.physical_plan().contains("CompiledFilterProjectExec"),
+        "{}",
+        query.physical_plan()
+    );
+    assert_eq!(
+        rows(query.run().await.expect("first run")),
+        vec![vec!["12".to_string()]]
+    );
+    assert_eq!(
+        rows(query.run().await.expect("second run")),
+        vec![vec!["12".to_string()]]
+    );
+}
+
+#[tokio::test]
 async fn debug_trace_reports_jit_candidates() {
     let db = Database::new_temp().expect("database");
     let schema = Arc::new(Schema::new(vec![

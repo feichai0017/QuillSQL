@@ -5,9 +5,13 @@ QuillSQL provides the embedding API, front ends, and MLIR research hooks.
 
 ## Database (`src/database.rs`)
 
-`Database::run` is the only SQL entry point. It asks DataFusion to create the
-logical plan, captures a debug snapshot of the logical/physical plan, executes
-through DataFusion, and returns Arrow `RecordBatch` output.
+`Database::run` is the interactive SQL entry point. It asks DataFusion to create
+the logical plan, captures a debug snapshot of the logical/physical plan,
+executes through DataFusion, and returns Arrow `RecordBatch` output.
+
+`Database::prepare` creates a reusable logical plan wrapped in `PreparedQuery`.
+Benchmark code uses this path to reduce parsing and logical planning noise while
+still giving DataFusion a fresh physical plan for each execution.
 
 `Database::register_parquet` exposes the durable storage path by registering a
 Parquet dataset as a DataFusion table.

@@ -4,7 +4,7 @@ QuillSQL uses benchmarks to separate three different claims:
 
 - JIT lowering cost: how much time QuillSQL spends building JIT IR and MLIR.
 - DataFusion execution cost: how the current DataFusion path behaves on Arrow
-  batches or Parquet datasets.
+  batches or Parquet datasets, separately from SQL parsing and planning.
 - Compiled-node cost: how rewritten physical islands such as filter/project and
   filter/sum behave before and after compiled MLIR function pointers are
   enabled.
@@ -55,9 +55,16 @@ cargo bench --bench jit_micro --features jit-mlir -- --sample-size 10
 
 ## TPC-H
 
-`benches/tpch.rs` is the end-to-end analytical benchmark harness. It expects
-Parquet data. By default it uses the pure Rust `tpchgen-cli` generator to create
-SF0.01 data inside the repository under `benchdata/tpch-sf0.01`.
+`benches/tpch.rs` is the analytical benchmark harness. It expects Parquet data.
+By default it uses the pure Rust `tpchgen-cli` generator to create SF0.01 data
+inside the repository under `benchdata/tpch-sf0.01`. Each query reports two
+measurements:
+
+- `sql/<query>` runs through `Database::run`, including SQL parsing, logical
+  optimization, physical planning, and execution.
+- `prepared/<query>` runs a `PreparedQuery`, reusing the SQL/logical plan while
+  letting DataFusion create a fresh physical plan for each execution. DataFusion
+  physical plans are not assumed to be reentrant.
 
 ```bash
 cargo bench --bench tpch -- --sample-size 10
