@@ -1,7 +1,7 @@
 add_library(quill_mlir STATIC
-  QuillCAPI.cpp
-  QuillDialect.cpp
-  QuillPasses.cpp
+  Bridge.cpp
+  Dialect.cpp
+  Passes.cpp
 )
 
 add_dependencies(quill_mlir MLIRQuillOpsIncGen)

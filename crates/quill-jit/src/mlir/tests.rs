@@ -184,8 +184,17 @@ fn emits_i64_filter_project_module() {
         .lower_i64_filter_project(&predicate, &projections)
         .unwrap();
     assert!(module.text.contains("func.func @quill_i64_filter_project_"));
-    assert!(module.text.contains("qjit.lowering = quill_dialect"));
-    assert!(module.text.contains("scf.for unsigned"));
+    #[cfg(feature = "jit-mlir")]
+    {
+        assert!(module.text.contains("llvm.emit_c_interface"));
+        assert!(module.text.contains("scf.for"));
+        assert!(!module.text.contains("quill."));
+    }
+    #[cfg(not(feature = "jit-mlir"))]
+    {
+        assert!(module.text.contains("qjit.lowering = quill_dialect"));
+        assert!(module.text.contains("scf.for unsigned"));
+    }
     assert!(module.text.contains("scf.if"));
     assert!(module.text.contains("llvm.load"));
     assert!(module.text.contains("llvm.store"));

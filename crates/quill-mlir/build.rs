@@ -13,7 +13,7 @@ fn main() {
         );
     }
 
-    let dst = cmake::Config::new("native")
+    let dst = cmake::Config::new("cpp")
         .define("CMAKE_BUILD_TYPE", "Release")
         .define("LLVM_DIR", &llvm_dir)
         .define("MLIR_DIR", &mlir_dir)
@@ -29,14 +29,14 @@ fn main() {
     );
     println!("cargo:rustc-link-lib=static=quill_mlir");
 
-    rerun("native/CMakeLists.txt");
-    rerun("native/include/Quill/IR/CMakeLists.txt");
-    rerun("native/include/Quill/IR/QuillDialect.h");
-    rerun("native/include/Quill/IR/QuillOps.td");
-    rerun("native/lib/CMakeLists.txt");
-    rerun("native/lib/QuillCAPI.cpp");
-    rerun("native/lib/QuillDialect.cpp");
-    rerun("native/lib/QuillPasses.cpp");
+    rerun("cpp/CMakeLists.txt");
+    rerun("cpp/include/Quill/IR/CMakeLists.txt");
+    rerun("cpp/include/Quill/IR/Dialect.h");
+    rerun("cpp/include/Quill/IR/QuillOps.td");
+    rerun("cpp/lib/CMakeLists.txt");
+    rerun("cpp/lib/Bridge.cpp");
+    rerun("cpp/lib/Dialect.cpp");
+    rerun("cpp/lib/Passes.cpp");
 }
 
 fn mlir_prefix() -> PathBuf {

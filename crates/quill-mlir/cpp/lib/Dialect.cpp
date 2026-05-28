@@ -1,4 +1,4 @@
-#include "Quill/IR/QuillDialect.h"
+#include "Quill/IR/Dialect.h"
 
 #include "llvm/ADT/TypeSwitch.h"
 #include "mlir/IR/Builders.h"

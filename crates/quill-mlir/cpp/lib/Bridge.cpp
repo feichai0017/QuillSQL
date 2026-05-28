@@ -1,4 +1,4 @@
-#include "Quill/IR/QuillDialect.h"
+#include "Quill/IR/Dialect.h"
 
 #include "mlir-c/IR.h"
 #include "mlir/CAPI/IR.h"

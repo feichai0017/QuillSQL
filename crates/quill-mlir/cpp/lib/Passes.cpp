@@ -1,4 +1,4 @@
-#include "Quill/IR/QuillDialect.h"
+#include "Quill/IR/Dialect.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -26,6 +26,11 @@ struct ColumnInfo {
   mlir::Value pointer;
 };
 
+struct ColumnAccess {
+  int64_t index;
+  mlir::Type type;
+};
+
 static mlir::LogicalResult collectColumns(mlir::Region &region,
                                           std::map<int64_t, mlir::Type> &columns,
                                           mlir::Operation *owner) {
@@ -44,6 +49,35 @@ static mlir::LogicalResult collectColumns(mlir::Region &region,
     return mlir::failure();
   if (columns.empty())
     return owner->emitOpError("lowering requires at least one column access");
+  return mlir::success();
+}
+
+static mlir::LogicalResult collectSingleI64Column(mlir::Region &region,
+                                                  ColumnAccess &column,
+                                                  mlir::Operation *owner) {
+  std::map<int64_t, mlir::Type> columns;
+  if (mlir::failed(collectColumns(region, columns, owner)))
+    return mlir::failure();
+  if (columns.size() != 1)
+    return owner->emitOpError("lowering requires exactly one i64 column");
+
+  auto [index, type] = *columns.begin();
+  if (!type.isInteger(64))
+    return owner->emitOpError("lowering requires an i64 column");
+
+  column = ColumnAccess{index, type};
+  return mlir::success();
+}
+
+static mlir::LogicalResult singleYieldType(mlir::Region &region,
+                                           mlir::Type &type,
+                                           mlir::Operation *owner,
+                                           llvm::StringRef regionName) {
+  mlir::Block &block = region.front();
+  auto yield = llvm::dyn_cast<mlir::quill::YieldOp>(block.getTerminator());
+  if (!yield || yield.getValues().size() != 1)
+    return owner->emitOpError() << regionName << " region must yield one value";
+  type = yield.getValues().front().getType();
   return mlir::success();
 }
 
@@ -88,6 +122,144 @@ static mlir::LogicalResult cloneRegionValue(
     return owner->emitOpError("region must yield one value");
 
   result = mapping.lookupOrDefault(yield.getValues().front());
+  return mlir::success();
+}
+
+static mlir::LogicalResult lowerFilterProject(mlir::func::FuncOp func) {
+  if (func.isExternal() || !llvm::hasSingleElement(func.getBody()))
+    return mlir::failure();
+
+  mlir::quill::FilterOp filter;
+  mlir::quill::ProjectOp project;
+  mlir::quill::RecordBatchSinkOp sink;
+  func.walk([&](mlir::quill::FilterOp op) {
+    if (!filter)
+      filter = op;
+  });
+  func.walk([&](mlir::quill::ProjectOp op) {
+    if (!project)
+      project = op;
+  });
+  func.walk([&](mlir::quill::RecordBatchSinkOp op) {
+    if (!sink)
+      sink = op;
+  });
+
+  if (!filter || !project || !sink)
+    return mlir::failure();
+
+  ColumnAccess predicateColumn;
+  if (mlir::failed(collectSingleI64Column(
+          filter.getPredicate(), predicateColumn, filter.getOperation())))
+    return mlir::failure();
+
+  ColumnAccess projectionColumn;
+  if (mlir::failed(collectSingleI64Column(
+          project.getProjector(), projectionColumn, project.getOperation())))
+    return mlir::failure();
+
+  mlir::Type projectionType;
+  if (mlir::failed(singleYieldType(project.getProjector(), projectionType,
+                                  project.getOperation(), "projector")))
+    return mlir::failure();
+  if (!projectionType.isInteger(64))
+    return project.emitOpError("lowering requires one i64 projection result");
+
+  mlir::Region predicateRegion;
+  mlir::IRMapping predicateMapping;
+  filter.getPredicate().cloneInto(&predicateRegion, predicateMapping);
+  mlir::Region projectorRegion;
+  mlir::IRMapping projectorMapping;
+  project.getProjector().cloneInto(&projectorRegion, projectorMapping);
+
+  mlir::MLIRContext *context = func.getContext();
+  mlir::OpBuilder builder(context);
+  mlir::Location loc = func.getLoc();
+  auto i64Type = builder.getI64Type();
+  auto i32Type = builder.getI32Type();
+  auto ptrType = mlir::LLVM::LLVMPointerType::get(context);
+
+  llvm::SmallVector<mlir::Type> inputTypes{
+      i64Type, ptrType, ptrType, ptrType, ptrType};
+
+  func.eraseBody();
+  func.setFunctionType(mlir::FunctionType::get(context, inputTypes, i32Type));
+  func->setAttr("llvm.emit_c_interface", builder.getUnitAttr());
+  mlir::Block *entry = func.addEntryBlock();
+  builder.setInsertionPointToStart(entry);
+
+  mlir::Value len = entry->getArgument(0);
+  mlir::Value predicatePtr = entry->getArgument(1);
+  mlir::Value projectionPtr = entry->getArgument(2);
+  mlir::Value outputPtr = entry->getArgument(3);
+  mlir::Value outputLen = entry->getArgument(4);
+
+  ColumnInfo predicateInfo{predicateColumn.index, predicateColumn.type,
+                           predicatePtr};
+  ColumnInfo projectionInfo{projectionColumn.index, projectionColumn.type,
+                            projectionPtr};
+
+  mlir::Value zeroI64 = builder.create<mlir::arith::ConstantIntOp>(loc, 0, 64);
+  mlir::Value oneI64 = builder.create<mlir::arith::ConstantIntOp>(loc, 1, 64);
+
+  bool cloneFailed = false;
+  auto loop = builder.create<mlir::scf::ForOp>(
+      loc, zeroI64, len, oneI64, mlir::ValueRange{zeroI64},
+      [&](mlir::OpBuilder &bodyBuilder, mlir::Location bodyLoc,
+          mlir::Value iv, mlir::ValueRange iterArgs) {
+        llvm::DenseMap<int64_t, mlir::Value> predicateValues;
+        predicateValues.try_emplace(
+            predicateInfo.index, loadColumn(bodyBuilder, bodyLoc, iv, predicateInfo));
+
+        mlir::Value predicate;
+        if (mlir::failed(cloneRegionValue(bodyBuilder, predicateRegion,
+                                          predicateValues, func.getOperation(),
+                                          predicate))) {
+          cloneFailed = true;
+          bodyBuilder.create<mlir::scf::YieldOp>(bodyLoc, iterArgs);
+          return;
+        }
+
+        auto branch = bodyBuilder.create<mlir::scf::IfOp>(
+            bodyLoc, mlir::TypeRange{i64Type}, predicate, true);
+        {
+          mlir::OpBuilder thenBuilder = branch.getThenBodyBuilder();
+          llvm::DenseMap<int64_t, mlir::Value> projectionValues;
+          projectionValues.try_emplace(
+              projectionInfo.index,
+              loadColumn(thenBuilder, bodyLoc, iv, projectionInfo));
+
+          mlir::Value projected;
+          if (mlir::failed(cloneRegionValue(thenBuilder, projectorRegion,
+                                            projectionValues,
+                                            func.getOperation(), projected))) {
+            cloneFailed = true;
+            thenBuilder.create<mlir::scf::YieldOp>(bodyLoc, iterArgs);
+            return;
+          }
+
+          auto outPtr = thenBuilder.create<mlir::LLVM::GEPOp>(
+              bodyLoc, ptrType, i64Type, outputPtr,
+              llvm::SmallVector<mlir::LLVM::GEPArg>{iterArgs[0]});
+          thenBuilder.create<mlir::LLVM::StoreOp>(bodyLoc, projected, outPtr);
+          mlir::Value nextCount =
+              thenBuilder.create<mlir::arith::AddIOp>(bodyLoc, iterArgs[0],
+                                                      oneI64);
+          thenBuilder.create<mlir::scf::YieldOp>(
+              bodyLoc, mlir::ValueRange{nextCount});
+        }
+        {
+          mlir::OpBuilder elseBuilder = branch.getElseBodyBuilder();
+          elseBuilder.create<mlir::scf::YieldOp>(bodyLoc, iterArgs);
+        }
+        bodyBuilder.create<mlir::scf::YieldOp>(bodyLoc, branch.getResults());
+      });
+  if (cloneFailed)
+    return mlir::failure();
+
+  builder.create<mlir::LLVM::StoreOp>(loc, loop.getResult(0), outputLen);
+  mlir::Value ok = builder.create<mlir::arith::ConstantIntOp>(loc, 0, 32);
+  builder.create<mlir::func::ReturnOp>(loc, ok);
   return mlir::success();
 }
 
@@ -275,9 +447,16 @@ struct ConvertQuillToLoopsPass
     for (auto func : getOperation().getOps<mlir::func::FuncOp>()) {
       bool hasPlainSum = false;
       func.walk([&](mlir::quill::PlainSumSinkOp) { hasPlainSum = true; });
-      if (!hasPlainSum)
-        continue;
-      if (mlir::failed(lowerFilterPlainSum(func))) {
+      bool hasRecordSink = false;
+      func.walk([&](mlir::quill::RecordBatchSinkOp) { hasRecordSink = true; });
+
+      mlir::LogicalResult result = mlir::success();
+      if (hasPlainSum)
+        result = lowerFilterPlainSum(func);
+      else if (hasRecordSink)
+        result = lowerFilterProject(func);
+
+      if (mlir::failed(result)) {
         signalPassFailure();
         return;
       }

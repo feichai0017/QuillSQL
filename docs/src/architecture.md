@@ -79,7 +79,7 @@ QuillSQL keeps one semantic pipeline graph plus an explicit lowering boundary:
   `quill.exec`, `quill.sink`, `quill.column`, and `quill.yield` operations.
   `filter`, `project`, and `plain_sum` carry scalar work in single-block
   regions instead of string attributes.
-- `crates/quill-mlir`: the optional native C++/TableGen package that defines
+- `crates/quill-mlir`: the optional C++/TableGen package that defines
   `!quill.batch`, `!quill.selection`, `!quill.row`, `!quill.scalar`, ODS
   verifiers, and the registered pass names `quill-canonicalize-pipeline` and
   `convert-quill-to-loops`.

@@ -67,7 +67,7 @@ The workspace is split into focused packages:
   registration, and debug trace capture.
 - `quill-jit`: pipeline extraction, Quill pipeline dialect model, MLIR
   emission, compiled execution nodes, and fixed-width Arrow kernels.
-- `quill-mlir`: optional native C++/TableGen package that registers the formal
+- `quill-mlir`: optional C++/TableGen package that registers the formal
   Quill MLIR dialect and pass names when `jit-mlir` is enabled.
 
 Inside `crates/quill-jit/src`:
@@ -114,7 +114,7 @@ The formal Quill dialect no longer stores predicate or measure expressions as
 string attributes. `quill.exec.filter`, `quill.exec.project`, and
 `quill.sink.plain_sum` use single-block regions with `!quill.row` arguments,
 `quill.column` access, `arith` scalar operations, and `quill.yield`
-terminators. The native pass names `quill-canonicalize-pipeline` and
+terminators. The registered pass names `quill-canonicalize-pipeline` and
 `convert-quill-to-loops` are registered as the C++ lowering extension points;
 the covered executable kernels still use the Rust lowering coordinator to emit
 the current `scf/arith/llvm` hot loops.

@@ -123,6 +123,7 @@ pub(super) fn lower_i64_filter(predicate: &JitExpr) -> JitResult<MlirModule> {
     Ok(MlirModule { symbol, text })
 }
 
+#[cfg(not(feature = "jit-mlir"))]
 pub(super) fn lower_i64_filter_project_with_symbol(
     symbol: String,
     predicate: &JitExpr,
@@ -428,6 +429,7 @@ fn ensure_single_i64_predicate(predicate: &JitExpr, context: &str) -> JitResult<
     Ok(())
 }
 
+#[cfg(not(feature = "jit-mlir"))]
 fn ensure_single_i64_projection(projections: &[JitProjection], context: &str) -> JitResult<()> {
     if projections.len() != 1 {
         return Err(JitError::UnsupportedExpr(format!(

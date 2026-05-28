@@ -1,5 +1,5 @@
-#ifndef QUILL_IR_QUILLDIALECT_H
-#define QUILL_IR_QUILLDIALECT_H
+#ifndef QUILL_IR_DIALECT_H
+#define QUILL_IR_DIALECT_H
 
 #include "mlir/Bytecode/BytecodeImplementation.h"
 #include "mlir/Bytecode/BytecodeOpInterface.h"
@@ -16,4 +16,4 @@
 
 #include "Quill/IR/QuillOpsDialect.h.inc"
 
-#endif // QUILL_IR_QUILLDIALECT_H
+#endif // QUILL_IR_DIALECT_H

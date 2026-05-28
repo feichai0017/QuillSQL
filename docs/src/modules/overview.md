@@ -11,7 +11,7 @@ hooks.
 | `quill-sql` | CLI/server binaries, benchmarks, and release metadata. |
 | `quill-core` | DataFusion-backed `Database` API, query execution, Parquet registration, and debug traces. |
 | `quill-jit` | Pipeline extraction, Quill dialect emission, MLIR lowering, compiled execution nodes, and Arrow kernel runtime. |
-| `quill-mlir` | Optional native C++/TableGen Quill dialect registration and MLIR pass extension points. |
+| `quill-mlir` | Optional C++/TableGen Quill dialect registration and MLIR pass extension points. |
 
 ## Database (`crates/quill-core/src/database.rs`)
 
