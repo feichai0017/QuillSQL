@@ -1,5 +1,4 @@
 use std::any::Any;
-use std::collections::VecDeque;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -106,7 +105,7 @@ impl CompiledFilterSumExec {
 
         let cache = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(Arc::clone(&schema)),
-            Partitioning::UnknownPartitioning(1),
+            Partitioning::UnknownPartitioning(input.properties().partitioning.partition_count()),
             input.properties().emission_type,
             input.properties().boundedness,
         ));
@@ -299,21 +298,9 @@ impl ExecutionPlan for CompiledFilterSumExec {
         partition: usize,
         context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
-        if partition != 0 {
-            return Err(DataFusionError::Internal(format!(
-                "CompiledFilterSumExec has one output partition, got request for {partition}"
-            )));
-        }
-
-        let input_partitions = self.input.properties().partitioning.partition_count();
-        let mut inputs = VecDeque::with_capacity(input_partitions);
-        for input_partition in 0..input_partitions {
-            inputs.push_back(self.input.execute(input_partition, Arc::clone(&context))?);
-        }
-
         Ok(Box::pin(CompiledFilterSumStream {
             schema: Arc::clone(&self.schema),
-            inputs,
+            input: self.input.execute(partition, context)?,
             exec: self.clone(),
             sum: None,
             emitted: false,
@@ -329,7 +316,7 @@ struct CompiledFilterProjectStream {
 
 struct CompiledFilterSumStream {
     schema: ArrowSchemaRef,
-    inputs: VecDeque<SendableRecordBatchStream>,
+    input: SendableRecordBatchStream,
     exec: CompiledFilterSumExec,
     sum: Option<f64>,
     emitted: bool,
@@ -356,15 +343,7 @@ impl Stream for CompiledFilterSumStream {
         }
 
         loop {
-            let Some(input) = self.inputs.front_mut() else {
-                self.emitted = true;
-                let values = Arc::new(Float64Array::from(vec![self.sum])) as ArrayRef;
-                let batch = RecordBatch::try_new(Arc::clone(&self.schema), vec![values])
-                    .map_err(|err| DataFusionError::Execution(err.to_string()));
-                return Poll::Ready(Some(batch));
-            };
-
-            match ready!(input.poll_next_unpin(cx)) {
+            match ready!(self.input.poll_next_unpin(cx)) {
                 Some(Ok(batch)) => match self.exec.runtime.execute(&batch) {
                     Ok(Some(partial)) => {
                         self.sum = Some(self.sum.unwrap_or(0.0) + partial);
@@ -374,7 +353,11 @@ impl Stream for CompiledFilterSumStream {
                 },
                 Some(Err(err)) => return Poll::Ready(Some(Err(err))),
                 None => {
-                    self.inputs.pop_front();
+                    self.emitted = true;
+                    let values = Arc::new(Float64Array::from(vec![self.sum])) as ArrayRef;
+                    let batch = RecordBatch::try_new(Arc::clone(&self.schema), vec![values])
+                        .map_err(|err| DataFusionError::Execution(err.to_string()));
+                    return Poll::Ready(Some(batch));
                 }
             }
         }

@@ -7,7 +7,6 @@ use datafusion::common::Result;
 use datafusion::physical_expr::Partitioning;
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
 use datafusion::physical_plan::aggregates::{AggregateExec, AggregateMode};
-use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::filter::FilterExec;
 use datafusion::physical_plan::projection::ProjectionExec;
 use datafusion::physical_plan::repartition::RepartitionExec;
@@ -253,7 +252,7 @@ impl MlirJitRule {
         &self,
         aggregate: &AggregateExec,
     ) -> Result<Option<Arc<dyn ExecutionPlan>>> {
-        if *aggregate.mode() != AggregateMode::Final
+        if *aggregate.mode() != AggregateMode::Partial
             || !aggregate.group_expr().is_true_no_grouping()
             || aggregate.aggr_expr().len() != 1
             || aggregate.filter_expr().iter().any(Option::is_some)
@@ -263,26 +262,8 @@ impl MlirJitRule {
             return Ok(None);
         }
 
-        let Some(coalesce) = aggregate
-            .input()
-            .as_any()
-            .downcast_ref::<CoalescePartitionsExec>()
-        else {
-            return Ok(None);
-        };
-        let Some(partial) = coalesce.input().as_any().downcast_ref::<AggregateExec>() else {
-            return Ok(None);
-        };
-        if *partial.mode() != AggregateMode::Partial
-            || !partial.group_expr().is_true_no_grouping()
-            || partial.aggr_expr().len() != 1
-            || partial.filter_expr().iter().any(Option::is_some)
-        {
-            return Ok(None);
-        }
-
-        let partial_input = strip_round_robin_repartition(partial.input());
-        let Some(filter) = partial_input.as_any().downcast_ref::<FilterExec>() else {
+        let input = strip_round_robin_repartition(aggregate.input());
+        let Some(filter) = input.as_any().downcast_ref::<FilterExec>() else {
             return Ok(None);
         };
         if filter.fetch().is_some() {
@@ -294,7 +275,7 @@ impl MlirJitRule {
                 Ok(predicate) => predicate,
                 Err(_) => return Ok(None),
             };
-        let measure = match lower_sum_measure(partial, partial.input().schema().as_ref()) {
+        let measure = match lower_sum_measure(aggregate, aggregate.input().schema().as_ref()) {
             Some(measure) => measure,
             None => return Ok(None),
         };

@@ -74,8 +74,8 @@ Filter -> SUM(f64 expression)
 
 The rule also handles the common DataFusion shape where a round-robin
 `RepartitionExec` sits between the filter and projection by placing the compiled
-node below the repartition. For plain aggregates, it recognizes the common
-partial/final `SUM` shape and replaces the chain with a single-partition
-compiled filter/sum node. This lets the project measure real operator
+node below the repartition. For plain aggregates, it rewrites the partial `SUM`
+node to a partition-preserving compiled filter/sum node and leaves DataFusion's
+final aggregate in place. This lets the project measure real operator
 boundaries before taking on grouped aggregates, joins, hash repartitioning, or
 whole-query pipeline lowering.
