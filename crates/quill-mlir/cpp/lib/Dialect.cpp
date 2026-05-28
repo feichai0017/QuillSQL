@@ -106,6 +106,23 @@ LogicalResult PlainSumSinkOp::verify() {
   return success();
 }
 
+LogicalResult GroupAggregateSinkOp::verify() {
+  if (failed(verifySingleRowRegion(getOperation(), getState(), "state")))
+    return failure();
+
+  auto yield = cast<YieldOp>(getState().front().back());
+  if (yield.getValues().size() < 2)
+    return emitOpError("state region must yield at least one key and one aggregate value");
+
+  for (Value value : yield.getValues()) {
+    Type type = value.getType();
+    if (!type.isIntOrIndexOrFloat())
+      return emitOpError("state region values must be fixed-width scalar types");
+  }
+
+  return success();
+}
+
 LogicalResult ColumnOp::verify() {
   if (getIndex() < 0)
     return emitOpError("column index must be non-negative");

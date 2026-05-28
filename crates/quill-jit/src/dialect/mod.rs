@@ -1,8 +1,8 @@
 use std::fmt::Write;
 
 use crate::{
-    JitBinaryOp, JitError, JitExpr, JitProjection, JitResult, JitScalar, JitType, PipelineGraph,
-    PipelineKind, PipelineSink, PipelineSource, PipelineSpec, PipelineStage,
+    GroupAggregate, JitBinaryOp, JitError, JitExpr, JitProjection, JitResult, JitScalar, JitType,
+    PipelineGraph, PipelineKind, PipelineSink, PipelineSource, PipelineSpec, PipelineStage,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -29,7 +29,13 @@ pub enum QuillDialectOp {
 #[derive(Debug, Clone, PartialEq)]
 pub enum QuillDialectSink {
     RecordBatch,
-    PlainSum { measure: JitExpr },
+    PlainSum {
+        measure: JitExpr,
+    },
+    GroupAggregate {
+        keys: Vec<JitExpr>,
+        aggregates: Vec<GroupAggregate>,
+    },
 }
 
 impl QuillDialectModule {
@@ -54,6 +60,10 @@ impl QuillDialectModule {
             PipelineSink::RecordBatch => QuillDialectSink::RecordBatch,
             PipelineSink::Sum { measure } => QuillDialectSink::PlainSum {
                 measure: measure.clone(),
+            },
+            PipelineSink::GroupAggregate { keys, aggregates } => QuillDialectSink::GroupAggregate {
+                keys: keys.clone(),
+                aggregates: aggregates.clone(),
             },
         };
 
@@ -148,6 +158,16 @@ impl QuillDialectModule {
                 };
                 append_plain_sum(text, "%sum0", batch, &selection, measure)?;
             }
+            QuillDialectSink::GroupAggregate { keys, aggregates } => {
+                let selection = match selection {
+                    Some(selection) => selection.to_string(),
+                    None => {
+                        let mut selection = None;
+                        ensure_selection(text, batch, &mut selection, next_selection)?
+                    }
+                };
+                append_group_aggregate(text, "%group0", batch, &selection, keys, aggregates)?;
+            }
         }
         Ok(())
     }
@@ -158,7 +178,7 @@ impl QuillDialectModule {
                 QuillDialectSource::DataFusionBatch,
                 [QuillDialectOp::Filter { predicate }, QuillDialectOp::Project { projections }],
                 QuillDialectSink::RecordBatch,
-            ) => PipelineSpec::i64_filter_project(predicate, projections),
+            ) => PipelineSpec::record_project(predicate, projections),
             (
                 QuillDialectSource::DataFusionBatch,
                 [QuillDialectOp::Filter { predicate }],
@@ -181,7 +201,7 @@ impl QuillDialectSink {
     fn kind(&self) -> PipelineKind {
         match self {
             Self::RecordBatch => PipelineKind::Record,
-            Self::PlainSum { .. } => PipelineKind::Aggregate,
+            Self::PlainSum { .. } | Self::GroupAggregate { .. } => PipelineKind::Aggregate,
         }
     }
 }
@@ -272,6 +292,55 @@ fn append_plain_sum(
     Ok(())
 }
 
+fn append_group_aggregate(
+    text: &mut String,
+    out: &str,
+    batch: &str,
+    selection: &str,
+    keys: &[JitExpr],
+    aggregates: &[GroupAggregate],
+) -> JitResult<()> {
+    if keys.is_empty() || aggregates.is_empty() {
+        return Err(JitError::UnsupportedExpr(
+            "group_aggregate requires at least one key and one aggregate".to_string(),
+        ));
+    }
+
+    let mut emitter = RegionEmitter::new("row");
+    let mut values = Vec::with_capacity(keys.len() + aggregates.len());
+    for key in keys {
+        values.push(emitter.emit_expr(key)?);
+    }
+    for aggregate in aggregates {
+        if aggregate.expr.ty() != aggregate.output_type {
+            return Err(JitError::UnsupportedExpr(format!(
+                "group aggregate {} output type {:?} does not match expression type {:?}",
+                aggregate.alias,
+                aggregate.output_type,
+                aggregate.expr.ty()
+            )));
+        }
+        values.push(emitter.emit_expr(&aggregate.expr)?);
+    }
+
+    let funcs = aggregates
+        .iter()
+        .map(|aggregate| aggregate.func.name())
+        .collect::<Vec<_>>()
+        .join(",");
+    let _ = writeln!(text, "    // qjit.group_funcs = {funcs}");
+    let _ = writeln!(
+        text,
+        "    {out} = quill.sink.group_aggregate {batch}, {selection} {{"
+    );
+    append_region_values(text, &emitter, &values)?;
+    let _ = writeln!(
+        text,
+        "    }} : !quill.batch, !quill.selection -> !quill.batch"
+    );
+    Ok(())
+}
+
 fn append_region_body(
     text: &mut String,
     emitter: &RegionEmitter,
@@ -355,7 +424,10 @@ impl RegionEmitter {
                     "Quill dialect regions do not yet model null literals".to_string(),
                 ));
             }
-            JitScalar::Bool(value) => value.to_string(),
+            JitScalar::Bool(value) => {
+                self.lines.push(format!("{name} = arith.constant {value}"));
+                return Ok(ScalarValueRef { name, ty });
+            }
             JitScalar::Date32(value) => value.to_string(),
             JitScalar::Int32(value) => value.to_string(),
             JitScalar::Int64(value) => value.to_string(),
@@ -585,8 +657,8 @@ fn format_float(value: f64) -> String {
 #[cfg(test)]
 mod tests {
     use crate::{
-        JitBinaryOp, JitExpr, JitProjection, JitScalar, JitType, PipelineGraph, PipelineKind,
-        PipelineStage, QuillDialectModule,
+        AggregateFunc, GroupAggregate, JitBinaryOp, JitExpr, JitProjection, JitScalar, JitType,
+        PipelineGraph, PipelineKind, PipelineStage, QuillDialectModule,
     };
 
     #[test]
@@ -644,6 +716,36 @@ mod tests {
         assert!(text.contains("quill.sink.plain_sum"));
         assert!(!text.contains("measure ="));
         assert!(text.contains("quill.column %row { index = 1 : i64 } : !quill.row -> f64"));
+    }
+
+    #[test]
+    fn emits_group_aggregate_pipeline_dialect_skeleton() {
+        let key = JitExpr::Column {
+            index: 0,
+            name: "returnflag".to_string(),
+            ty: JitType::Int64,
+            nullable: false,
+        };
+        let aggregate = GroupAggregate::new(
+            AggregateFunc::Sum,
+            JitExpr::Column {
+                index: 1,
+                name: "quantity".to_string(),
+                ty: JitType::Float64,
+                nullable: false,
+            },
+            JitType::Float64,
+            "sum_qty",
+        );
+        let pipeline = PipelineGraph::group_aggregate(vec![], vec![key], vec![aggregate]);
+
+        let module = QuillDialectModule::from_graph("group0", &pipeline);
+        let text = module.to_mlir_text().unwrap();
+
+        assert_eq!(module.kind, PipelineKind::Aggregate);
+        assert!(text.contains("quill.sink.group_aggregate"));
+        assert!(text.contains("// qjit.group_funcs = sum"));
+        assert!(text.contains("quill.yield"));
     }
 
     fn i64_gt_ten() -> JitExpr {

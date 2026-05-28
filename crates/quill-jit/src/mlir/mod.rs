@@ -31,8 +31,8 @@ pub struct MlirBackend;
 
 #[cfg(feature = "jit-mlir")]
 pub use compiled::{
-    CompiledDecimalFilterSum, CompiledF64FilterSum, CompiledI64Filter, CompiledI64FilterProject,
-    DecimalFilterSumInput, DecimalFilterSumOutput, F64FilterSumOutput,
+    CompiledDecimalFilterSum, CompiledF64FilterSum, CompiledI64Filter, CompiledRecordPipeline,
+    DecimalFilterSumOutput, F64FilterSumOutput, FixedColumnInput, RecordPipelineOutput,
 };
 #[cfg(feature = "jit-mlir")]
 pub(crate) use dispatch::{execute_filter_project, execute_filter_sum};
@@ -70,7 +70,7 @@ impl MlirBackend {
         emit::lower_i64_filter(predicate)
     }
 
-    pub fn lower_i64_filter_project(
+    pub fn lower_record_pipeline(
         &self,
         predicate: &JitExpr,
         projections: &[JitProjection],
@@ -80,7 +80,7 @@ impl MlirBackend {
             crate::PipelineStage::Projection(projections.to_vec()),
         ]);
         let dialect =
-            self.emit_quill_dialect(emit::next_symbol("quill_i64_filter_project"), &pipeline);
+            self.emit_quill_dialect(emit::next_symbol("quill_record_pipeline"), &pipeline);
         lower::lower_quill_dialect(&dialect)
     }
 
@@ -144,25 +144,40 @@ impl MlirBackend {
     }
 
     #[cfg(feature = "jit-mlir")]
-    pub fn compile_i64_filter_project(
+    pub fn compile_record_pipeline(
         &self,
         predicate: &JitExpr,
         projections: &[JitProjection],
-    ) -> JitResult<CompiledI64FilterProject> {
-        let module = self.lower_i64_filter_project(predicate, projections)?;
+    ) -> JitResult<CompiledRecordPipeline> {
+        let spec =
+            crate::PipelineSpec::record_project(predicate, projections).ok_or_else(|| {
+                crate::JitError::UnsupportedExpr(
+                    "record pipeline requires fixed-width filter/project expressions".to_string(),
+                )
+            })?;
+        let crate::PipelineSpec::RecordProject {
+            columns,
+            output_types,
+        } = spec
+        else {
+            unreachable!("record_project returned another spec")
+        };
+        let module = self.lower_record_pipeline(predicate, projections)?;
         self.verify_module(&module)?;
-        compiled::compile_i64_filter_project(&module)
+        compiled::compile_record_pipeline(&module, columns, output_types)
     }
 
+    #[cfg(feature = "jit-mlir")]
     #[cfg(feature = "jit-mlir")]
     pub fn compile_f64_filter_sum(
         &self,
         predicate: &JitExpr,
         measure: &JitExpr,
     ) -> JitResult<CompiledF64FilterSum> {
+        let columns = emit::filter_sum_columns(predicate, measure)?;
         let module = self.lower_f64_filter_sum(predicate, measure)?;
         self.verify_module(&module)?;
-        compiled::compile_f64_filter_sum(&module)
+        compiled::compile_f64_filter_sum(&module, columns)
     }
 
     #[cfg(feature = "jit-mlir")]
@@ -171,7 +186,7 @@ impl MlirBackend {
         predicate: &JitExpr,
         measure: &JitExpr,
     ) -> JitResult<CompiledDecimalFilterSum> {
-        let columns = emit::decimal_filter_sum_columns(predicate, measure)?;
+        let columns = emit::filter_sum_columns(predicate, measure)?;
         let module = self.lower_decimal_filter_sum(predicate, measure)?;
         self.verify_module(&module)?;
         compiled::compile_decimal_filter_sum(&module, columns)

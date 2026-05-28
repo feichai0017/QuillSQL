@@ -49,7 +49,7 @@ impl FilterProjectKernel {
             }
         }
 
-        let spec = PipelineSpec::i64_filter_project(&predicate, &projections);
+        let spec = PipelineSpec::record_project(&predicate, &projections);
         Ok(Self {
             predicate,
             projections,

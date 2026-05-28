@@ -6,7 +6,10 @@ use datafusion::arrow::array::{
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
 
-use crate::{JitBinaryOp, JitExpr, JitProjection, JitScalar, JitType, PipelineSpec, PredicateSpec};
+use crate::{
+    JitBinaryOp, JitExpr, JitProjection, JitScalar, JitType, MlirColumn, PipelineSpec,
+    PredicateSpec,
+};
 
 use super::{FilterProjectKernel, FilterSumKernel, FilterSumValue};
 
@@ -63,9 +66,18 @@ fn executes_filter_project_with_nulls() {
 
     assert_eq!(
         kernel.spec(),
-        Some(&PipelineSpec::I64FilterProject {
-            predicate_column: 1,
-            projection_column: 0
+        Some(&PipelineSpec::RecordProject {
+            columns: vec![
+                MlirColumn {
+                    index: 0,
+                    ty: JitType::Int64
+                },
+                MlirColumn {
+                    index: 1,
+                    ty: JitType::Int64
+                }
+            ],
+            output_types: vec![JitType::Int64],
         })
     );
 

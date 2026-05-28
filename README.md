@@ -89,35 +89,34 @@ TableGen under `crates/quill-mlir`, and the DataFusion optimizer rule
 replaces supported filter/project and plain `SUM` pipelines with one
 `CompiledPipelineExec` node. That node executes through QuillSQL's fixed-width
 Arrow pipeline runtime while carrying structured MLIR pipeline specs. Compiled
-scalar MLIR invocation is wired for the first
-`i64 -> bool` probe. The compiled batch path now includes an `i64` filter
-kernel that emits a byte selection mask, an `i64` filter/project kernel that
-compacts one projected column, and an `f64` filter/sum kernel for the first
-scan/filter/plain-aggregate path. It also has a Q6-shaped
-`Date32`/`Decimal128` filter/sum kernel that lowers through the Quill dialect
-before emitting executable MLIR over fixed-width column slices. With `jit-mlir` and
+scalar MLIR invocation is wired for the first `i64 -> bool` probe. The compiled
+batch path now includes an `i64` filter kernel that emits a byte selection mask,
+a multi-column fixed-width record pipeline for `filter -> project -> record_batch`,
+and a unified Quill-dialect `filter -> plain SUM` lowering for both `f64` and
+Q6-shaped `Date32`/`Decimal128` inputs. With `jit-mlir` and
 `DatabaseOptions { jit: JitOptions::mlir_execution(), .. }`,
-`CompiledPipelineExec` dispatches the single-column i64 filter/project path and
-the f64 and decimal filter/sum paths from `PipelineSpec` through a thread-local
-MLIR execution cache when the input
-batch has no nulls or slice offsets; other cases keep the safe Rust batch
-runtime. CLI, server, and
+`CompiledPipelineExec` dispatches record and scalar-sum paths from
+`PipelineSpec` through a thread-local MLIR execution cache when the input batch
+has no nulls or slice offsets; other cases keep the safe Rust batch runtime.
+CLI, server, and
 benchmark binaries read the same option once at startup from `QUILL_JIT=mlir`.
 Debug traces expose recognized `PipelineGraph` candidates for record and aggregate
 pipelines. `PipelineGraph` is a small executable subgraph, not a second SQL
 planner. The executable compiled kernels now share the same lowering shape:
 `PipelineGraph -> Quill dialect -> scf/arith/llvm -> ExecutionEngine`. Current
-coverage includes single-column `i64 filter/project`, `f64 filter/sum`, and the
-Q6-shaped decimal `filter -> plain SUM` path.
+coverage includes fixed-width record projection over `i64`, `f64`, `date32`,
+and `decimal128`, `f64 filter/sum`, and the Q6-shaped decimal
+`filter -> plain SUM` path. A grouped aggregate sink exists in the graph and
+dialect as the next Q1-oriented extension point; it is not yet selected by the
+DataFusion optimizer rule.
 
 The formal Quill dialect no longer stores predicate or measure expressions as
-string attributes. `quill.exec.filter`, `quill.exec.project`, and
-`quill.sink.plain_sum` use single-block regions with `!quill.row` arguments,
-`quill.column` access, `arith` scalar operations, and `quill.yield`
+string attributes. `quill.exec.filter`, `quill.exec.project`,
+`quill.sink.plain_sum`, and `quill.sink.group_aggregate` use single-block
+regions with `!quill.row` arguments, `quill.column` access, `arith` scalar operations, and `quill.yield`
 terminators. The registered pass names `quill-canonicalize-pipeline` and
 `convert-quill-to-loops` are registered as the C++ lowering extension points;
-the covered executable kernels still use the Rust lowering coordinator to emit
-the current `scf/arith/llvm` hot loops.
+the covered record and plain-SUM kernels now lower through that pass.
 
 Run the MLIR path with:
 

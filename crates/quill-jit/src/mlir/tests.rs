@@ -1,5 +1,5 @@
 #[cfg(feature = "jit-mlir")]
-use crate::DecimalFilterSumInput;
+use crate::{AggregateFunc, FixedColumnInput, GroupAggregate};
 use crate::{
     JitBinaryOp, JitExpr, JitProjection, JitScalar, JitType, MlirBackend, PipelineGraph,
     PipelineKind, PipelineStage,
@@ -69,10 +69,10 @@ fn emits_quill_dialect_pipeline_skeleton() {
     assert_eq!(module.kind, PipelineKind::Record);
     assert_eq!(
         module.pipeline_spec().map(|spec| spec.name()),
-        Some("i64_filter_project")
+        Some("record_project")
     );
     assert!(text.contains("func.func @record_pipeline"));
-    assert!(text.contains("// qjit.pipeline = i64_filter_project"));
+    assert!(text.contains("// qjit.pipeline = record_project"));
     assert!(text.contains("quill.exec.filter"));
     assert!(text.contains("quill.exec.project"));
     assert!(!text.contains("predicate ="));
@@ -108,6 +108,35 @@ fn verifies_formal_quill_dialect_pipeline() {
 
 #[cfg(feature = "jit-mlir")]
 #[test]
+fn verifies_formal_group_aggregate_dialect_pipeline() {
+    let key = JitExpr::Column {
+        index: 0,
+        name: "group_key".to_string(),
+        ty: JitType::Int64,
+        nullable: false,
+    };
+    let aggregate = GroupAggregate::new(
+        AggregateFunc::Sum,
+        JitExpr::Column {
+            index: 1,
+            name: "measure".to_string(),
+            ty: JitType::Float64,
+            nullable: false,
+        },
+        JitType::Float64,
+        "sum_measure",
+    );
+    let pipeline = PipelineGraph::group_aggregate(vec![], vec![key], vec![aggregate]);
+    let module = MlirBackend::new()
+        .lower_graph_to_quill_mlir("group_quill_region", &pipeline)
+        .unwrap();
+
+    assert!(module.text.contains("quill.sink.group_aggregate"));
+    MlirBackend::new().verify_module(&module).unwrap();
+}
+
+#[cfg(feature = "jit-mlir")]
+#[test]
 fn rejects_invalid_quill_filter_region_result() {
     let text = r#"
 module {
@@ -126,6 +155,36 @@ module {
 
     let module = super::MlirModule {
         symbol: "bad_filter".to_string(),
+        text: text.to_string(),
+    };
+
+    assert!(MlirBackend::new().verify_module(&module).is_err());
+}
+
+#[cfg(feature = "jit-mlir")]
+#[test]
+fn rejects_invalid_quill_group_aggregate_region() {
+    let text = r#"
+module {
+  func.func @bad_group() {
+    %batch = quill.source.datafusion_batch : !quill.batch
+    %sel = quill.exec.filter %batch {
+    ^bb0(%row: !quill.row):
+      %ok = arith.constant true
+      quill.yield %ok : i1
+    } : !quill.batch -> !quill.selection
+    %out = quill.sink.group_aggregate %batch, %sel {
+    ^bb0(%row: !quill.row):
+      %k = quill.column %row { index = 0 : i64 } : !quill.row -> i64
+      quill.yield %k : i64
+    } : !quill.batch, !quill.selection -> !quill.batch
+    return
+  }
+}
+"#;
+
+    let module = super::MlirModule {
+        symbol: "bad_group".to_string(),
         text: text.to_string(),
     };
 
@@ -169,6 +228,15 @@ fn emits_i64_filter_module() {
 
     let module = MlirBackend::new().lower_i64_filter(&predicate).unwrap();
     assert!(module.text.contains("func.func @quill_i64_filter_"));
+    #[cfg(feature = "jit-mlir")]
+    assert!(module.text.contains("scf.for"));
+    #[cfg(not(feature = "jit-mlir"))]
+    #[cfg(feature = "jit-mlir")]
+    assert!(module.text.contains("scf.for"));
+    #[cfg(not(feature = "jit-mlir"))]
+    #[cfg(feature = "jit-mlir")]
+    assert!(module.text.contains("scf.for"));
+    #[cfg(not(feature = "jit-mlir"))]
     assert!(module.text.contains("scf.for unsigned"));
     assert!(module.text.contains("llvm.load"));
     assert!(module.text.contains("llvm.store"));
@@ -176,14 +244,14 @@ fn emits_i64_filter_module() {
 }
 
 #[test]
-fn emits_i64_filter_project_module() {
+fn emits_record_pipeline_module() {
     let predicate = i64_gt_ten(false);
     let projections = vec![i64_plus_one_projection(0)];
 
     let module = MlirBackend::new()
-        .lower_i64_filter_project(&predicate, &projections)
+        .lower_record_pipeline(&predicate, &projections)
         .unwrap();
-    assert!(module.text.contains("func.func @quill_i64_filter_project_"));
+    assert!(module.text.contains("func.func @quill_record_pipeline_"));
     #[cfg(feature = "jit-mlir")]
     {
         assert!(module.text.contains("llvm.emit_c_interface"));
@@ -210,8 +278,18 @@ fn emits_f64_filter_sum_module() {
         .lower_f64_filter_sum(&predicate, &measure)
         .unwrap();
     assert!(module.text.contains("func.func @quill_f64_filter_sum_"));
-    assert!(module.text.contains("qjit.lowering = quill_dialect"));
-    assert!(module.text.contains("scf.for unsigned"));
+    #[cfg(feature = "jit-mlir")]
+    {
+        assert!(module.text.contains("llvm.emit_c_interface"));
+        assert!(!module.text.contains("quill."));
+    }
+    #[cfg(not(feature = "jit-mlir"))]
+    {
+        assert!(module.text.contains("qjit.lowering = quill_dialect"));
+        assert!(module.text.contains("scf.for unsigned"));
+    }
+    #[cfg(feature = "jit-mlir")]
+    assert!(module.text.contains("scf.for"));
     assert!(module.text.contains("scf.if"));
     assert!(module.text.contains("arith.mulf"));
     assert!(module.text.contains("arith.addf"));
@@ -309,7 +387,7 @@ fn invokes_compiled_i64_filter_with_nonzero_column_index() {
 
 #[cfg(feature = "jit-mlir")]
 #[test]
-fn invokes_compiled_i64_filter_project_kernel() {
+fn invokes_compiled_record_pipeline_kernel() {
     let predicate = JitExpr::Binary {
         op: JitBinaryOp::Gt,
         left: Box::new(JitExpr::Column {
@@ -324,15 +402,31 @@ fn invokes_compiled_i64_filter_project_kernel() {
     };
     let projections = vec![i64_plus_one_projection(0)];
     let compiled = MlirBackend::new()
-        .compile_i64_filter_project(&predicate, &projections)
+        .compile_record_pipeline(&predicate, &projections)
         .unwrap();
     let predicate_values = [9_i64, 11, 12];
     let projection_values = [100_i64, 200, 300];
     let mut output = [0_i64; 3];
-
-    let output_len = compiled
-        .invoke(&predicate_values, &projection_values, &mut output)
-        .unwrap();
+    let output_len = {
+        let mut outputs = [crate::RecordPipelineOutput::Int64 {
+            values: &mut output,
+        }];
+        compiled
+            .invoke(
+                &[
+                    crate::FixedColumnInput::Int64 {
+                        index: 0,
+                        values: &projection_values,
+                    },
+                    crate::FixedColumnInput::Int64 {
+                        index: 1,
+                        values: &predicate_values,
+                    },
+                ],
+                &mut outputs,
+            )
+            .unwrap()
+    };
 
     assert_eq!(output_len, 2);
     assert_eq!(&output[..output_len], [201, 301]);
@@ -351,7 +445,20 @@ fn invokes_compiled_f64_filter_sum_kernel() {
     let right_values = [0.1_f64, 0.2, 0.3];
 
     let output = compiled
-        .invoke(&predicate_values, &left_values, &right_values)
+        .invoke(&[
+            crate::FixedColumnInput::Int64 {
+                index: 0,
+                values: &predicate_values,
+            },
+            crate::FixedColumnInput::Float64 {
+                index: 1,
+                values: &left_values,
+            },
+            crate::FixedColumnInput::Float64 {
+                index: 2,
+                values: &right_values,
+            },
+        ])
         .unwrap();
 
     assert!((output.sum - 13.0).abs() < 0.000_001);
@@ -373,19 +480,19 @@ fn invokes_compiled_decimal_filter_sum_kernel() {
 
     let output = compiled
         .invoke(&[
-            DecimalFilterSumInput::Date32 {
+            FixedColumnInput::Date32 {
                 index: 0,
                 values: &shipdates,
             },
-            DecimalFilterSumInput::Decimal128 {
+            FixedColumnInput::Decimal128 {
                 index: 1,
                 values: &prices,
             },
-            DecimalFilterSumInput::Decimal128 {
+            FixedColumnInput::Decimal128 {
                 index: 2,
                 values: &discounts,
             },
-            DecimalFilterSumInput::Decimal128 {
+            FixedColumnInput::Decimal128 {
                 index: 3,
                 values: &quantities,
             },
@@ -433,13 +540,13 @@ fn f64_product_measure() -> JitExpr {
     JitExpr::Binary {
         op: JitBinaryOp::Mul,
         left: Box::new(JitExpr::Column {
-            index: 0,
+            index: 1,
             name: "left".to_string(),
             ty: JitType::Float64,
             nullable: false,
         }),
         right: Box::new(JitExpr::Column {
-            index: 1,
+            index: 2,
             name: "right".to_string(),
             ty: JitType::Float64,
             nullable: false,

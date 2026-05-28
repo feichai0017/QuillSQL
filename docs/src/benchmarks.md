@@ -12,7 +12,7 @@ QuillSQL uses benchmarks to separate three different claims:
 The current code has a real `CompiledPipelineExec` node in the DataFusion hot
 path for both record and scalar-sum pipelines, and its execution body uses
 QuillSQL's fixed-width Arrow batch kernels. With `jit-mlir` and
-`QUILL_JIT=mlir`, the single-column i64 filter/project path and the f64 and
+`QUILL_JIT=mlir`, the multi-column fixed-width record pipeline and the f64 and
 Q6-shaped decimal filter/sum paths can dispatch to executable MLIR kernels for
 null-free, offset-free fixed-width batches. Other compiled MLIR kernel speedups
 are intentionally not claimed as end-to-end query speedups yet.
@@ -33,11 +33,11 @@ Benchmarks:
 | `compile/mlir_filter_text` | JIT expression to MLIR module generation for a filter. |
 | `compile/mlir_filter_project_text` | Fused filter/project MLIR module generation. |
 | `compile/mlir_i64_filter` | MLIR parse/lower/JIT cost for the first compiled fixed-width filter kernel. Requires `jit-mlir`. |
-| `compile/mlir_i64_filter_project` | MLIR parse/lower/JIT cost for the first compiled fixed-width filter/project kernel. Requires `jit-mlir`. |
+| `compile/mlir_record_pipeline` | MLIR parse/lower/JIT cost for the fixed-width record pipeline. Requires `jit-mlir`. |
 | `compile/mlir_f64_filter_sum` | MLIR parse/lower/JIT cost for the first compiled fixed-width filter/sum kernel. Requires `jit-mlir`. |
 | `compile/mlir_decimal_filter_sum` | MLIR parse/lower/JIT cost for the Q6-shaped fixed-width `Date32`/`Decimal128` filter/sum kernel. Requires `jit-mlir`. |
 | `kernel/i64_filter_64k` | Compiled MLIR i64 filter execution over a 64K-row values vector, writing a byte selection mask. Requires `jit-mlir`. |
-| `kernel/i64_filter_project_64k` | Compiled MLIR i64 filter/project execution over 64K rows, compacting one projected i64 column. Requires `jit-mlir`. |
+| `kernel/record_pipeline_64k` | Compiled MLIR record pipeline execution over 64K rows, compacting projected fixed-width columns. Requires `jit-mlir`. |
 | `kernel/f64_filter_sum_64k` | Compiled MLIR f64 filter/sum execution over 64K rows. Requires `jit-mlir`. |
 | `kernel/decimal_filter_sum_64k` | Compiled MLIR Q6-shaped decimal filter/sum execution over 64K fixed-width column slices. Requires `jit-mlir`. |
 | `pipeline/record_filter_project_64k` | Direct fixed-width Arrow record pipeline execution outside DataFusion planning. |

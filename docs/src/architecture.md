@@ -52,14 +52,14 @@ pipeline specs to executable `scf/arith/llvm` modules. The physical optimizer ca
 replace filter/project and plain `SUM` pipelines with `CompiledPipelineExec`;
 the current executable node runs fixed-width Arrow pipeline kernels implemented
 in QuillSQL while carrying the MLIR pipeline descriptor and a structured
-`PipelineSpec`. A narrow compiled
-`i64 -> bool` MLIR ExecutionEngine
-probe validates scalar invocation. The compiled fixed-width path now has an
-`i64` filter kernel that writes a byte selection mask, an `i64` filter/project
-kernel that compacts one projected column, an `f64` filter/sum kernel for the
-first plain-aggregate path, and a Q6-shaped `Date32`/`Decimal128` filter/sum
-kernel over fixed-width column slices. `CompiledPipelineExec` invokes the record
-and scalar-sum kernels through thread-local MLIR execution caches when `jit-mlir` is
+`PipelineSpec`. A narrow compiled `i64 -> bool` MLIR ExecutionEngine probe
+validates scalar invocation. The compiled fixed-width path now has an `i64`
+filter kernel that writes a byte selection mask, a multi-column
+`filter -> project -> record_batch` kernel for `i64`, `f64`, `date32`, and
+`decimal128` projection outputs, and a unified Quill-dialect
+`filter -> plain SUM` lowering for both `f64` and Q6-shaped
+`Date32`/`Decimal128` inputs. `CompiledPipelineExec` invokes the record and
+scalar-sum kernels through thread-local MLIR execution caches when `jit-mlir` is
 enabled, `JitOptions::mlir_execution()` is selected, and the input batch has no
 nulls or slice offsets. The dispatch layer consumes `PipelineSpec`; it no longer
 re-parses runtime expressions to guess input columns. CLI, server, and benchmark binaries map
@@ -77,8 +77,8 @@ QuillSQL keeps one semantic pipeline graph plus an explicit lowering boundary:
   selected for compilation; it is not a replacement SQL plan.
 - `QuillDialectModule`: a formal Quill MLIR graph with `quill.source`,
   `quill.exec`, `quill.sink`, `quill.column`, and `quill.yield` operations.
-  `filter`, `project`, and `plain_sum` carry scalar work in single-block
-  regions instead of string attributes.
+  `filter`, `project`, `plain_sum`, and the grouped aggregate sink carry scalar
+  work in single-block regions instead of string attributes.
 - `crates/quill-mlir`: the optional C++/TableGen package that defines
   `!quill.batch`, `!quill.selection`, `!quill.row`, `!quill.scalar`, ODS
   verifiers, and the registered pass names `quill-canonicalize-pipeline` and
@@ -95,6 +95,9 @@ Filter -> Projection
 Filter -> SUM(f64 expression)
 Filter(Date32/Decimal128 comparisons) -> SUM(Decimal128 * Decimal128)
   => CompiledPipelineExec(kind=aggregate, sink=scalar_sum)
+
+Group keys + SUM/COUNT/MIN/MAX aggregate inputs
+  => quill.sink.group_aggregate dialect skeleton
 ```
 
 `pipeline/extract.rs` also recognizes the common DataFusion shape where a
@@ -106,13 +109,14 @@ it no longer constructs shape-specific execution nodes directly. The recognized
 physical-plan shapes are also exposed as `PipelineGraph` candidates in debug traces,
 so future
 whole-pipeline lowering does not rely on string plan inspection. This lets the
-project measure real operator boundaries before taking on grouped aggregates,
-joins, hash repartitioning, or whole-query pipeline lowering. The decimal path
-now has both a DataFusion-safe fixed-width Arrow runtime specialization and an
-executable MLIR dispatch path for the same fixed-width column layout, using the
-same Q6-shaped decimal `PipelineSpec`. That decimal path is now the first
-executable Quill dialect lowering path rather than another runtime-only
-specialized emitter.
+project measure real operator boundaries before taking on executable grouped
+aggregates, joins, hash repartitioning, or whole-query pipeline lowering. The
+decimal path now has both a DataFusion-safe fixed-width Arrow runtime
+specialization and an executable MLIR dispatch path for the same fixed-width
+column layout, using the same Q6-shaped decimal `PipelineSpec`. The grouped
+aggregate graph and dialect op are present as the Q1 extension point, but the
+optimizer rule still leaves Q1 on DataFusion until the hash aggregate lowering
+is implemented.
 
 The intended compiler path is:
 
@@ -125,7 +129,7 @@ DataFusion ExecutionPlan
 ```
 
 The current executable compiled kernels now share that route for the covered
-fixed-width cases: single-column `i64 filter/project`, `f64 filter/sum`, and the
+fixed-width cases: multi-column record projection, `f64 filter/sum`, and the
 Q6-shaped decimal `filter -> plain SUM` path. The remaining work is broadening
 the dialect operations and lowering rules rather than adding more direct runtime
 shortcuts.

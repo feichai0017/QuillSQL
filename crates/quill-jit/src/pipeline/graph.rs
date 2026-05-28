@@ -1,4 +1,4 @@
-use crate::{JitExpr, JitProjection};
+use crate::{JitExpr, JitProjection, JitType};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PipelineSource {
@@ -23,7 +23,56 @@ pub enum PipelineStage {
 #[derive(Debug, Clone, PartialEq)]
 pub enum PipelineSink {
     RecordBatch,
-    Sum { measure: JitExpr },
+    Sum {
+        measure: JitExpr,
+    },
+    GroupAggregate {
+        keys: Vec<JitExpr>,
+        aggregates: Vec<GroupAggregate>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AggregateFunc {
+    Sum,
+    Count,
+    Min,
+    Max,
+}
+
+impl AggregateFunc {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Sum => "sum",
+            Self::Count => "count",
+            Self::Min => "min",
+            Self::Max => "max",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct GroupAggregate {
+    pub func: AggregateFunc,
+    pub expr: JitExpr,
+    pub output_type: JitType,
+    pub alias: String,
+}
+
+impl GroupAggregate {
+    pub fn new(
+        func: AggregateFunc,
+        expr: JitExpr,
+        output_type: JitType,
+        alias: impl Into<String>,
+    ) -> Self {
+        Self {
+            func,
+            expr,
+            output_type,
+            alias: alias.into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -50,6 +99,18 @@ impl PipelineGraph {
         }
     }
 
+    pub fn group_aggregate(
+        stages: Vec<PipelineStage>,
+        keys: Vec<JitExpr>,
+        aggregates: Vec<GroupAggregate>,
+    ) -> Self {
+        Self {
+            source: PipelineSource::DataFusionInput,
+            stages,
+            sink: PipelineSink::GroupAggregate { keys, aggregates },
+        }
+    }
+
     pub fn stage_names(&self) -> Vec<&'static str> {
         self.stages
             .iter()
@@ -65,13 +126,16 @@ impl PipelineGraph {
         match &self.sink {
             PipelineSink::RecordBatch => "record_batch",
             PipelineSink::Sum { .. } => "scalar_sum",
+            PipelineSink::GroupAggregate { .. } => "group_aggregate",
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::{JitExpr, JitProjection, JitScalar, JitType, PipelineGraph};
+    use crate::{
+        AggregateFunc, GroupAggregate, JitExpr, JitProjection, JitScalar, JitType, PipelineGraph,
+    };
 
     #[test]
     fn records_filter_project_pipeline() {
@@ -105,5 +169,20 @@ mod tests {
 
         assert_eq!(pipeline.stage_names(), vec!["filter"]);
         assert_eq!(pipeline.sink_name(), "scalar_sum");
+    }
+
+    #[test]
+    fn records_group_aggregate_pipeline() {
+        let key = JitExpr::Literal(JitScalar::Int64(1));
+        let aggregate = GroupAggregate::new(
+            AggregateFunc::Sum,
+            JitExpr::Literal(JitScalar::Float64(1.0)),
+            JitType::Float64,
+            "sum_value",
+        );
+        let pipeline = PipelineGraph::group_aggregate(vec![], vec![key], vec![aggregate]);
+
+        assert!(pipeline.stage_names().is_empty());
+        assert_eq!(pipeline.sink_name(), "group_aggregate");
     }
 }

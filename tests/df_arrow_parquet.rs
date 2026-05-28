@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+#[cfg(feature = "jit-mlir")]
+use datafusion::arrow::array::Date32Array;
 use datafusion::arrow::array::{Array, Decimal128Array, Float64Array, Int64Array};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
@@ -234,6 +236,81 @@ async fn filter_project_mlir_execution_returns_expected_rows() {
         ),
         vec![vec!["3".to_string()], vec!["4".to_string()]]
     );
+
+    let trace = db.debug_last_trace().expect("trace");
+    assert!(
+        trace
+            .jit_candidates
+            .iter()
+            .any(|candidate| candidate.kernel.name() == "filter_project"
+                && candidate.backend == "mlir"
+                && candidate.executable),
+        "{:?}",
+        trace.jit_candidates
+    );
+}
+
+#[cfg(feature = "jit-mlir")]
+#[tokio::test]
+async fn filter_project_mlir_execution_materializes_fixed_width_columns() {
+    let db = database_with_mlir_execution();
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int64, false),
+        Field::new("price", DataType::Float64, false),
+        Field::new("shipdate", DataType::Date32, false),
+        Field::new("amount", DataType::Decimal128(15, 2), false),
+    ]));
+    let amount = Decimal128Array::from(vec![1000_i128, 2500, 3000])
+        .with_precision_and_scale(15, 2)
+        .expect("decimal scale");
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![
+            Arc::new(Int64Array::from(vec![1, 2, 3])),
+            Arc::new(Float64Array::from(vec![10.0, 20.5, 30.25])),
+            Arc::new(Date32Array::from(vec![19_724, 19_725, 19_726])),
+            Arc::new(amount),
+        ],
+    )
+    .expect("batch");
+    db.register_batches("t", schema, vec![batch])
+        .expect("table");
+
+    let output = db
+        .run(
+            "select id + 1 as next_id, price, shipdate, amount \
+             from t where id > 1 order by next_id",
+        )
+        .await
+        .expect("query");
+
+    let batch = &output.batches[0];
+    let next_id = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .expect("next_id");
+    let price = batch
+        .column(1)
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .expect("price");
+    let shipdate = batch
+        .column(2)
+        .as_any()
+        .downcast_ref::<Date32Array>()
+        .expect("shipdate");
+    let amount = batch
+        .column(3)
+        .as_any()
+        .downcast_ref::<Decimal128Array>()
+        .expect("amount");
+    assert_eq!(next_id.values().as_ref(), &[3, 4]);
+    assert_eq!(price.values().as_ref(), &[20.5, 30.25]);
+    assert_eq!(shipdate.values().as_ref(), &[19_725, 19_726]);
+    assert_eq!(amount.values().as_ref(), &[2_500, 3_000]);
+    assert_eq!(amount.precision(), 15);
+    assert_eq!(amount.scale(), 2);
 
     let trace = db.debug_last_trace().expect("trace");
     assert!(

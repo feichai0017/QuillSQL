@@ -26,11 +26,6 @@ struct ColumnInfo {
   mlir::Value pointer;
 };
 
-struct ColumnAccess {
-  int64_t index;
-  mlir::Type type;
-};
-
 static mlir::LogicalResult collectColumns(mlir::Region &region,
                                           std::map<int64_t, mlir::Type> &columns,
                                           mlir::Operation *owner) {
@@ -52,35 +47,6 @@ static mlir::LogicalResult collectColumns(mlir::Region &region,
   return mlir::success();
 }
 
-static mlir::LogicalResult collectSingleI64Column(mlir::Region &region,
-                                                  ColumnAccess &column,
-                                                  mlir::Operation *owner) {
-  std::map<int64_t, mlir::Type> columns;
-  if (mlir::failed(collectColumns(region, columns, owner)))
-    return mlir::failure();
-  if (columns.size() != 1)
-    return owner->emitOpError("lowering requires exactly one i64 column");
-
-  auto [index, type] = *columns.begin();
-  if (!type.isInteger(64))
-    return owner->emitOpError("lowering requires an i64 column");
-
-  column = ColumnAccess{index, type};
-  return mlir::success();
-}
-
-static mlir::LogicalResult singleYieldType(mlir::Region &region,
-                                           mlir::Type &type,
-                                           mlir::Operation *owner,
-                                           llvm::StringRef regionName) {
-  mlir::Block &block = region.front();
-  auto yield = llvm::dyn_cast<mlir::quill::YieldOp>(block.getTerminator());
-  if (!yield || yield.getValues().size() != 1)
-    return owner->emitOpError() << regionName << " region must yield one value";
-  type = yield.getValues().front().getType();
-  return mlir::success();
-}
-
 static mlir::Value loadColumn(mlir::OpBuilder &builder, mlir::Location loc,
                               mlir::Value index, const ColumnInfo &column) {
   auto ptrType = mlir::LLVM::LLVMPointerType::get(builder.getContext());
@@ -91,10 +57,15 @@ static mlir::Value loadColumn(mlir::OpBuilder &builder, mlir::Location loc,
   return builder.create<mlir::LLVM::LoadOp>(loc, column.type, elementPtr);
 }
 
-static mlir::LogicalResult cloneRegionValue(
+static bool isSupportedFixedType(mlir::Type type) {
+  return type.isInteger(32) || type.isInteger(64) || type.isInteger(128) ||
+         type.isF64();
+}
+
+static mlir::LogicalResult cloneRegionValues(
     mlir::OpBuilder &builder, mlir::Region &region,
     const llvm::DenseMap<int64_t, mlir::Value> &loadedColumns,
-    mlir::Operation *owner, mlir::Value &result) {
+    mlir::Operation *owner, llvm::SmallVectorImpl<mlir::Value> &results) {
   mlir::Block &block = region.front();
   mlir::IRMapping mapping;
 
@@ -118,10 +89,25 @@ static mlir::LogicalResult cloneRegionValue(
   }
 
   auto yield = llvm::dyn_cast<mlir::quill::YieldOp>(block.getTerminator());
-  if (!yield || yield.getValues().size() != 1)
-    return owner->emitOpError("region must yield one value");
+  if (!yield || yield.getValues().empty())
+    return owner->emitOpError("region must yield at least one value");
 
-  result = mapping.lookupOrDefault(yield.getValues().front());
+  for (mlir::Value value : yield.getValues())
+    results.push_back(mapping.lookupOrDefault(value));
+  return mlir::success();
+}
+
+static mlir::LogicalResult cloneRegionValue(
+    mlir::OpBuilder &builder, mlir::Region &region,
+    const llvm::DenseMap<int64_t, mlir::Value> &loadedColumns,
+    mlir::Operation *owner, mlir::Value &result) {
+  llvm::SmallVector<mlir::Value> values;
+  if (mlir::failed(cloneRegionValues(builder, region, loadedColumns, owner,
+                                     values)))
+    return mlir::failure();
+  if (values.size() != 1)
+    return owner->emitOpError("region must yield one value");
+  result = values.front();
   return mlir::success();
 }
 
@@ -148,22 +134,25 @@ static mlir::LogicalResult lowerFilterProject(mlir::func::FuncOp func) {
   if (!filter || !project || !sink)
     return mlir::failure();
 
-  ColumnAccess predicateColumn;
-  if (mlir::failed(collectSingleI64Column(
-          filter.getPredicate(), predicateColumn, filter.getOperation())))
+  std::map<int64_t, mlir::Type> columnTypes;
+  if (mlir::failed(collectColumns(filter.getPredicate(), columnTypes, filter)))
+    return mlir::failure();
+  if (mlir::failed(collectColumns(project.getProjector(), columnTypes, project)))
     return mlir::failure();
 
-  ColumnAccess projectionColumn;
-  if (mlir::failed(collectSingleI64Column(
-          project.getProjector(), projectionColumn, project.getOperation())))
-    return mlir::failure();
+  mlir::Block &projectBlock = project.getProjector().front();
+  auto projectYield =
+      llvm::dyn_cast<mlir::quill::YieldOp>(projectBlock.getTerminator());
+  if (!projectYield || projectYield.getValues().empty())
+    return project.emitOpError("projector region must yield at least one value");
 
-  mlir::Type projectionType;
-  if (mlir::failed(singleYieldType(project.getProjector(), projectionType,
-                                  project.getOperation(), "projector")))
-    return mlir::failure();
-  if (!projectionType.isInteger(64))
-    return project.emitOpError("lowering requires one i64 projection result");
+  llvm::SmallVector<mlir::Type> outputTypes;
+  for (mlir::Value value : projectYield.getValues()) {
+    mlir::Type type = value.getType();
+    if (!isSupportedFixedType(type))
+      return project.emitOpError("lowering requires fixed-width projection results");
+    outputTypes.push_back(type);
+  }
 
   mlir::Region predicateRegion;
   mlir::IRMapping predicateMapping;
@@ -179,8 +168,13 @@ static mlir::LogicalResult lowerFilterProject(mlir::func::FuncOp func) {
   auto i32Type = builder.getI32Type();
   auto ptrType = mlir::LLVM::LLVMPointerType::get(context);
 
-  llvm::SmallVector<mlir::Type> inputTypes{
-      i64Type, ptrType, ptrType, ptrType, ptrType};
+  llvm::SmallVector<mlir::Type> inputTypes;
+  inputTypes.push_back(i64Type);
+  for (size_t i = 0; i < columnTypes.size(); ++i)
+    inputTypes.push_back(ptrType);
+  for (size_t i = 0; i < outputTypes.size(); ++i)
+    inputTypes.push_back(ptrType);
+  inputTypes.push_back(ptrType);
 
   func.eraseBody();
   func.setFunctionType(mlir::FunctionType::get(context, inputTypes, i32Type));
@@ -189,15 +183,15 @@ static mlir::LogicalResult lowerFilterProject(mlir::func::FuncOp func) {
   builder.setInsertionPointToStart(entry);
 
   mlir::Value len = entry->getArgument(0);
-  mlir::Value predicatePtr = entry->getArgument(1);
-  mlir::Value projectionPtr = entry->getArgument(2);
-  mlir::Value outputPtr = entry->getArgument(3);
-  mlir::Value outputLen = entry->getArgument(4);
+  llvm::SmallVector<ColumnInfo> columns;
+  size_t argIndex = 1;
+  for (const auto &[index, type] : columnTypes)
+    columns.push_back(ColumnInfo{index, type, entry->getArgument(argIndex++)});
 
-  ColumnInfo predicateInfo{predicateColumn.index, predicateColumn.type,
-                           predicatePtr};
-  ColumnInfo projectionInfo{projectionColumn.index, projectionColumn.type,
-                            projectionPtr};
+  llvm::SmallVector<mlir::Value> outputPtrs;
+  for (size_t i = 0; i < outputTypes.size(); ++i)
+    outputPtrs.push_back(entry->getArgument(argIndex++));
+  mlir::Value outputLen = entry->getArgument(argIndex++);
 
   mlir::Value zeroI64 = builder.create<mlir::arith::ConstantIntOp>(loc, 0, 64);
   mlir::Value oneI64 = builder.create<mlir::arith::ConstantIntOp>(loc, 1, 64);
@@ -207,13 +201,14 @@ static mlir::LogicalResult lowerFilterProject(mlir::func::FuncOp func) {
       loc, zeroI64, len, oneI64, mlir::ValueRange{zeroI64},
       [&](mlir::OpBuilder &bodyBuilder, mlir::Location bodyLoc,
           mlir::Value iv, mlir::ValueRange iterArgs) {
-        llvm::DenseMap<int64_t, mlir::Value> predicateValues;
-        predicateValues.try_emplace(
-            predicateInfo.index, loadColumn(bodyBuilder, bodyLoc, iv, predicateInfo));
+        llvm::DenseMap<int64_t, mlir::Value> loadedColumns;
+        for (const ColumnInfo &column : columns)
+          loadedColumns.try_emplace(column.index,
+                                    loadColumn(bodyBuilder, bodyLoc, iv, column));
 
         mlir::Value predicate;
         if (mlir::failed(cloneRegionValue(bodyBuilder, predicateRegion,
-                                          predicateValues, func.getOperation(),
+                                          loadedColumns, func.getOperation(),
                                           predicate))) {
           cloneFailed = true;
           bodyBuilder.create<mlir::scf::YieldOp>(bodyLoc, iterArgs);
@@ -224,24 +219,22 @@ static mlir::LogicalResult lowerFilterProject(mlir::func::FuncOp func) {
             bodyLoc, mlir::TypeRange{i64Type}, predicate, true);
         {
           mlir::OpBuilder thenBuilder = branch.getThenBodyBuilder();
-          llvm::DenseMap<int64_t, mlir::Value> projectionValues;
-          projectionValues.try_emplace(
-              projectionInfo.index,
-              loadColumn(thenBuilder, bodyLoc, iv, projectionInfo));
-
-          mlir::Value projected;
-          if (mlir::failed(cloneRegionValue(thenBuilder, projectorRegion,
-                                            projectionValues,
-                                            func.getOperation(), projected))) {
+          llvm::SmallVector<mlir::Value> projected;
+          if (mlir::failed(cloneRegionValues(thenBuilder, projectorRegion,
+                                             loadedColumns, func.getOperation(),
+                                             projected))) {
             cloneFailed = true;
             thenBuilder.create<mlir::scf::YieldOp>(bodyLoc, iterArgs);
             return;
           }
 
-          auto outPtr = thenBuilder.create<mlir::LLVM::GEPOp>(
-              bodyLoc, ptrType, i64Type, outputPtr,
-              llvm::SmallVector<mlir::LLVM::GEPArg>{iterArgs[0]});
-          thenBuilder.create<mlir::LLVM::StoreOp>(bodyLoc, projected, outPtr);
+          for (size_t index = 0; index < projected.size(); ++index) {
+            mlir::Value value = projected[index];
+            auto outPtr = thenBuilder.create<mlir::LLVM::GEPOp>(
+                bodyLoc, ptrType, value.getType(), outputPtrs[index],
+                llvm::SmallVector<mlir::LLVM::GEPArg>{iterArgs[0]});
+            thenBuilder.create<mlir::LLVM::StoreOp>(bodyLoc, value, outPtr);
+          }
           mlir::Value nextCount =
               thenBuilder.create<mlir::arith::AddIOp>(bodyLoc, iterArgs[0],
                                                       oneI64);

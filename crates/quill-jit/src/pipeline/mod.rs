@@ -8,5 +8,7 @@ pub use extract::PipelineCandidate;
 pub(crate) use extract::{
     extract_pipeline_from_node, pipeline_from_node, OutputAdapter, PhysicalPipeline,
 };
-pub use graph::{PipelineGraph, PipelineSink, PipelineSource, PipelineStage};
+pub use graph::{
+    AggregateFunc, GroupAggregate, PipelineGraph, PipelineSink, PipelineSource, PipelineStage,
+};
 pub use rule::{JitCandidate, MlirJitRule};

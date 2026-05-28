@@ -104,6 +104,19 @@ def Quill_PlainSumSinkOp
   }];
 }
 
+def Quill_GroupAggregateSinkOp
+    : Quill_Op<"sink.group_aggregate", [SingleBlock]> {
+  let summary = "consume selected rows into grouped aggregate state";
+  let arguments = (ins Quill_Batch:$batch, Quill_Selection:$selection);
+  let regions = (region SizedRegion<1>:$state);
+  let results = (outs Quill_Batch:$result);
+  let hasVerifier = 1;
+  let assemblyFormat = [{
+    $batch `,` $selection $state attr-dict `:`
+    type($batch) `,` type($selection) `->` type($result)
+  }];
+}
+
 def Quill_ColumnOp
     : Quill_Op<"column", [Pure]> {
   let summary = "read a column from the current row";

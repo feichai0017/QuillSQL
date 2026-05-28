@@ -94,10 +94,7 @@ impl<'a> PipelineCompiler<'a> {
         predicate: &JitExpr,
         projections: &[JitProjection],
     ) -> CompiledKernel {
-        if let Ok(module) = self
-            .backend
-            .lower_i64_filter_project(predicate, projections)
-        {
+        if let Ok(module) = self.backend.lower_record_pipeline(predicate, projections) {
             let executable = self.backend.verify_module(&module).is_ok()
                 && self.options.mlir_execution_enabled();
             let spec = runtime

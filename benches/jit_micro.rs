@@ -5,12 +5,12 @@ use datafusion::arrow::array::{Float64Array, Int64Array};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
 use quill_core::database::{Database, DatabaseOptions};
-#[cfg(feature = "jit-mlir")]
-use quill_jit::DecimalFilterSumInput;
 use quill_jit::{
     FilterProjectKernel, FilterSumKernel, JitBinaryOp, JitExpr, JitOptions, JitProjection,
     JitScalar, JitType, KernelBackend, MlirBackend, PipelineGraph, PipelineLowering, PipelineStage,
 };
+#[cfg(feature = "jit-mlir")]
+use quill_jit::{FixedColumnInput, RecordPipelineOutput};
 
 fn schema() -> Arc<Schema> {
     Arc::new(Schema::new(vec![
@@ -258,12 +258,12 @@ fn bench_pipeline_graph_and_mlir(c: &mut Criterion) {
     });
 
     #[cfg(feature = "jit-mlir")]
-    c.bench_function("compile/mlir_i64_filter_project", |b| {
+    c.bench_function("compile/mlir_record_pipeline", |b| {
         b.iter(|| {
             black_box(
                 backend
-                    .compile_i64_filter_project(black_box(&predicate), black_box(&projections))
-                    .expect("compile i64 filter-project"),
+                    .compile_record_pipeline(black_box(&predicate), black_box(&projections))
+                    .expect("compile record pipeline"),
             )
         });
     });
@@ -458,7 +458,7 @@ fn bench_compiled_i64_filter_kernel(c: &mut Criterion) {
 }
 
 #[cfg(feature = "jit-mlir")]
-fn bench_compiled_i64_filter_project_kernel(c: &mut Criterion) {
+fn bench_compiled_record_pipeline_kernel(c: &mut Criterion) {
     let row_count = 65_536_i64;
     let ids = (0..row_count).collect::<Vec<_>>();
     let values = (0..row_count)
@@ -466,14 +466,31 @@ fn bench_compiled_i64_filter_project_kernel(c: &mut Criterion) {
         .collect::<Vec<_>>();
     let mut output = vec![0_i64; values.len()];
     let kernel = MlirBackend::new()
-        .compile_i64_filter_project(&predicate(), &projections())
-        .expect("compiled i64 filter-project");
+        .compile_record_pipeline(&predicate(), &projections())
+        .expect("compiled record pipeline");
 
-    c.bench_function("kernel/i64_filter_project_64k", |b| {
+    c.bench_function("kernel/record_pipeline_64k", |b| {
         b.iter(|| {
-            let output_len = kernel
-                .invoke(black_box(&values), black_box(&ids), black_box(&mut output))
-                .expect("execute compiled filter-project");
+            let output_len = {
+                let mut outputs = [RecordPipelineOutput::Int64 {
+                    values: output.as_mut_slice(),
+                }];
+                kernel
+                    .invoke(
+                        black_box(&[
+                            FixedColumnInput::Int64 {
+                                index: 0,
+                                values: ids.as_slice(),
+                            },
+                            FixedColumnInput::Int64 {
+                                index: 1,
+                                values: values.as_slice(),
+                            },
+                        ]),
+                        black_box(&mut outputs),
+                    )
+                    .expect("execute compiled record pipeline")
+            };
             black_box(output_len);
             black_box(&output[..output_len]);
         });
@@ -500,11 +517,20 @@ fn bench_compiled_f64_filter_sum_kernel(c: &mut Criterion) {
         b.iter(|| {
             black_box(
                 kernel
-                    .invoke(
-                        black_box(&predicate_values),
-                        black_box(&prices),
-                        black_box(&discounts),
-                    )
+                    .invoke(black_box(&[
+                        FixedColumnInput::Int64 {
+                            index: 0,
+                            values: predicate_values.as_slice(),
+                        },
+                        FixedColumnInput::Float64 {
+                            index: 1,
+                            values: prices.as_slice(),
+                        },
+                        FixedColumnInput::Float64 {
+                            index: 2,
+                            values: discounts.as_slice(),
+                        },
+                    ]))
                     .expect("execute compiled filter-sum"),
             );
         });
@@ -535,19 +561,19 @@ fn bench_compiled_decimal_filter_sum_kernel(c: &mut Criterion) {
             black_box(
                 kernel
                     .invoke(&[
-                        DecimalFilterSumInput::Date32 {
+                        FixedColumnInput::Date32 {
                             index: 0,
                             values: black_box(shipdates.as_slice()),
                         },
-                        DecimalFilterSumInput::Decimal128 {
+                        FixedColumnInput::Decimal128 {
                             index: 1,
                             values: black_box(prices.as_slice()),
                         },
-                        DecimalFilterSumInput::Decimal128 {
+                        FixedColumnInput::Decimal128 {
                             index: 2,
                             values: black_box(discounts.as_slice()),
                         },
-                        DecimalFilterSumInput::Decimal128 {
+                        FixedColumnInput::Decimal128 {
                             index: 3,
                             values: black_box(quantities.as_slice()),
                         },
@@ -574,7 +600,7 @@ criterion_group!(
     benches,
     bench_pipeline_graph_and_mlir,
     bench_compiled_i64_filter_kernel,
-    bench_compiled_i64_filter_project_kernel,
+    bench_compiled_record_pipeline_kernel,
     bench_compiled_f64_filter_sum_kernel,
     bench_compiled_decimal_filter_sum_kernel,
     bench_quill_filter_project_kernel,

@@ -8,13 +8,14 @@ pub use dialect::{QuillDialectModule, QuillDialectOp, QuillDialectSink, QuillDia
 pub use lower::{JitOptions, PipelineKind, PipelineLowering};
 #[cfg(feature = "jit-mlir")]
 pub use mlir::{
-    CompiledDecimalFilterSum, CompiledF64FilterSum, CompiledI64Filter, CompiledI64FilterProject,
-    DecimalFilterSumInput, DecimalFilterSumOutput, F64FilterSumOutput,
+    CompiledDecimalFilterSum, CompiledF64FilterSum, CompiledI64Filter, CompiledRecordPipeline,
+    DecimalFilterSumOutput, F64FilterSumOutput, FixedColumnInput, RecordPipelineOutput,
 };
 pub use mlir::{MlirBackend, MlirColumn, MlirModule};
 pub use pipeline::{
-    JitBinaryOp, JitCandidate, JitExpr, JitProjection, JitScalar, JitType, MlirJitRule,
-    PipelineCandidate, PipelineGraph, PipelineSink, PipelineSource, PipelineStage,
+    AggregateFunc, GroupAggregate, JitBinaryOp, JitCandidate, JitExpr, JitProjection, JitScalar,
+    JitType, MlirJitRule, PipelineCandidate, PipelineGraph, PipelineSink, PipelineSource,
+    PipelineStage,
 };
 pub use runtime::{
     CompiledKernel, CompiledPipelineExec, FilterProjectKernel, FilterSumKernel, FilterSumValue,

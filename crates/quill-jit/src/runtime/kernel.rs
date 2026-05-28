@@ -1,7 +1,9 @@
 use datafusion::arrow::datatypes::SchemaRef as ArrowSchemaRef;
 use serde::Serialize;
 
-use crate::{JitBinaryOp, JitExpr, JitProjection, JitResult, JitScalar, JitType};
+use std::collections::BTreeMap;
+
+use crate::{JitBinaryOp, JitExpr, JitProjection, JitResult, JitScalar, JitType, MlirColumn};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum KernelKind {
@@ -16,9 +18,9 @@ pub enum PipelineSpec {
     Generic {
         kind: KernelKind,
     },
-    I64FilterProject {
-        predicate_column: usize,
-        projection_column: usize,
+    RecordProject {
+        columns: Vec<MlirColumn>,
+        output_types: Vec<JitType>,
     },
     F64FilterSum {
         predicate_column: usize,
@@ -60,17 +62,28 @@ impl PipelineSpec {
         Self::Generic { kind }
     }
 
-    pub fn i64_filter_project(predicate: &JitExpr, projections: &[JitProjection]) -> Option<Self> {
-        let [projection] = projections else {
-            return None;
-        };
-        if projection.expr.ty() != JitType::Int64 {
+    pub fn record_project(predicate: &JitExpr, projections: &[JitProjection]) -> Option<Self> {
+        if predicate.ty() != JitType::Bool || projections.is_empty() {
             return None;
         }
 
-        Some(Self::I64FilterProject {
-            predicate_column: single_i64_column(predicate)?,
-            projection_column: single_i64_column(&projection.expr)?,
+        let mut columns = BTreeMap::new();
+        collect_fixed_width_columns(predicate, &mut columns)?;
+        let output_types = projections
+            .iter()
+            .map(|projection| {
+                ensure_record_output_type(projection.expr.ty())?;
+                collect_fixed_width_columns(&projection.expr, &mut columns)?;
+                Some(projection.expr.ty())
+            })
+            .collect::<Option<Vec<_>>>()?;
+
+        Some(Self::RecordProject {
+            columns: columns
+                .into_iter()
+                .map(|(index, ty)| MlirColumn { index, ty })
+                .collect(),
+            output_types,
         })
     }
 
@@ -100,7 +113,7 @@ impl PipelineSpec {
     pub fn kind(&self) -> KernelKind {
         match self {
             Self::Generic { kind } => *kind,
-            Self::I64FilterProject { .. } => KernelKind::FilterProject,
+            Self::RecordProject { .. } => KernelKind::FilterProject,
             Self::F64FilterSum { .. } | Self::DecimalFilterSum { .. } => KernelKind::FilterSum,
         }
     }
@@ -108,7 +121,7 @@ impl PipelineSpec {
     pub fn name(&self) -> &'static str {
         match self {
             Self::Generic { kind } => kind.name(),
-            Self::I64FilterProject { .. } => "i64_filter_project",
+            Self::RecordProject { .. } => "record_project",
             Self::F64FilterSum { .. } => "f64_filter_sum",
             Self::DecimalFilterSum { .. } => "decimal_filter_sum",
         }
@@ -191,33 +204,46 @@ pub trait KernelBackend: Send + Sync {
     ) -> JitResult<CompiledKernel>;
 }
 
-fn single_i64_column(expr: &JitExpr) -> Option<usize> {
-    let mut column = None;
-    collect_single_i64_column(expr, &mut column)?;
-    column
-}
-
-fn collect_single_i64_column(expr: &JitExpr, column: &mut Option<usize>) -> Option<()> {
+fn collect_fixed_width_columns(
+    expr: &JitExpr,
+    columns: &mut BTreeMap<usize, JitType>,
+) -> Option<()> {
     match expr {
-        JitExpr::Column {
-            index,
-            ty: JitType::Int64,
-            ..
-        } => {
-            match column {
-                Some(existing) if *existing != *index => return None,
+        JitExpr::Column { index, ty, .. } => {
+            ensure_fixed_width_type(*ty)?;
+            match columns.get(index) {
+                Some(existing) if *existing != *ty => return None,
                 Some(_) => {}
-                None => *column = Some(*index),
+                None => {
+                    columns.insert(*index, *ty);
+                }
             }
             Some(())
         }
-        JitExpr::Column { .. } => None,
         JitExpr::Literal(_) => Some(()),
         JitExpr::Binary { left, right, .. } => {
-            collect_single_i64_column(left, column)?;
-            collect_single_i64_column(right, column)
+            collect_fixed_width_columns(left, columns)?;
+            collect_fixed_width_columns(right, columns)
         }
-        JitExpr::IsNull(arg) => collect_single_i64_column(arg, column),
+        JitExpr::IsNull(_) => None,
+    }
+}
+
+fn ensure_fixed_width_type(ty: JitType) -> Option<()> {
+    match ty {
+        JitType::Date32 | JitType::Int64 | JitType::Float64 | JitType::Decimal128 { .. } => {
+            Some(())
+        }
+        JitType::Bool | JitType::Int32 => None,
+    }
+}
+
+fn ensure_record_output_type(ty: JitType) -> Option<()> {
+    match ty {
+        JitType::Date32 | JitType::Int64 | JitType::Float64 | JitType::Decimal128 { .. } => {
+            Some(())
+        }
+        JitType::Bool | JitType::Int32 => None,
     }
 }
 

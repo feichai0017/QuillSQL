@@ -124,7 +124,7 @@ pub(super) fn lower_i64_filter(predicate: &JitExpr) -> JitResult<MlirModule> {
 }
 
 #[cfg(not(feature = "jit-mlir"))]
-pub(super) fn lower_i64_filter_project_with_symbol(
+pub(super) fn lower_record_pipeline_with_symbol(
     symbol: String,
     predicate: &JitExpr,
     projections: &[JitProjection],
@@ -143,7 +143,7 @@ pub(super) fn lower_i64_filter_project_with_symbol(
         text,
         "  func.func @{symbol}(%len: i64, %pred_values: !llvm.ptr, %proj_values: !llvm.ptr, %out_values: !llvm.ptr, %out_len: !llvm.ptr) -> i32 attributes {{ llvm.emit_c_interface }} {{"
     );
-    text.push_str("    // qjit.kind = i64_filter_project\n");
+    text.push_str("    // qjit.kind = record_project\n");
     if let Some(lowering) = lowering {
         let _ = writeln!(text, "    // qjit.lowering = {lowering}");
     }
@@ -187,6 +187,7 @@ pub(super) fn lower_i64_filter_project_with_symbol(
     Ok(MlirModule { symbol, text })
 }
 
+#[cfg(not(feature = "jit-mlir"))]
 pub(super) fn lower_f64_filter_sum_with_symbol(
     symbol: String,
     predicate: &JitExpr,
@@ -332,7 +333,7 @@ pub(super) fn lower_decimal_filter_sum_with_symbol(
     Ok(MlirModule { symbol, text })
 }
 
-pub(super) fn decimal_filter_sum_columns(
+pub(super) fn filter_sum_columns(
     predicate: &JitExpr,
     measure: &JitExpr,
 ) -> JitResult<Vec<MlirColumn>> {
@@ -342,10 +343,18 @@ pub(super) fn decimal_filter_sum_columns(
     columns
         .into_iter()
         .map(|(index, ty)| {
-            ensure_decimal_filter_sum_type(ty)?;
+            ensure_filter_sum_type(ty)?;
             Ok(MlirColumn { index, ty })
         })
         .collect()
+}
+
+#[cfg(not(feature = "jit-mlir"))]
+fn decimal_filter_sum_columns(
+    predicate: &JitExpr,
+    measure: &JitExpr,
+) -> JitResult<Vec<MlirColumn>> {
+    filter_sum_columns(predicate, measure)
 }
 
 pub(super) fn next_symbol(prefix: &str) -> String {
@@ -448,6 +457,7 @@ fn ensure_single_i64_projection(projections: &[JitProjection], context: &str) ->
     Ok(())
 }
 
+#[cfg(not(feature = "jit-mlir"))]
 fn ensure_f64_measure_pair(expr: &JitExpr, context: &str) -> JitResult<()> {
     if expr.ty() != JitType::Float64 {
         return Err(JitError::UnsupportedExpr(format!(
@@ -485,7 +495,7 @@ fn ensure_decimal_filter_sum(
         )));
     }
 
-    decimal_filter_sum_columns(predicate, measure)?;
+    filter_sum_columns(predicate, measure)?;
     ensure_decimal_measure_pair(measure, context)?;
     Ok(())
 }
@@ -523,11 +533,11 @@ fn ensure_decimal_measure_pair(expr: &JitExpr, context: &str) -> JitResult<()> {
     Ok(())
 }
 
-fn ensure_decimal_filter_sum_type(ty: JitType) -> JitResult<()> {
+fn ensure_filter_sum_type(ty: JitType) -> JitResult<()> {
     match ty {
-        JitType::Date32 | JitType::Int64 | JitType::Decimal128 { .. } => Ok(()),
+        JitType::Date32 | JitType::Int64 | JitType::Float64 | JitType::Decimal128 { .. } => Ok(()),
         other => Err(JitError::UnsupportedExpr(format!(
-            "compiled decimal filter-sum does not support {} input columns",
+            "compiled plain SUM does not support {} input columns",
             mlir_type(other)
         ))),
     }
@@ -605,10 +615,8 @@ impl ScalarEmitter {
                 ));
             }
             JitScalar::Bool(value) => {
-                self.lines.push(format!(
-                    "    {name} = arith.constant {value} : {}",
-                    mlir_type(ty)
-                ));
+                self.lines
+                    .push(format!("    {name} = arith.constant {value}"));
             }
             JitScalar::Date32(value) => {
                 self.lines.push(format!(
