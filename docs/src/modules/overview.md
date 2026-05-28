@@ -21,6 +21,7 @@ Parquet dataset as a DataFusion table.
 | File | Role |
 | ---- | ---- |
 | `compiler.rs` | Compiles recognized `PipelineIR` shapes into DataFusion execution nodes. |
+| `dialect.rs` | Defines the Quill pipeline dialect skeleton used as the next lowering boundary. |
 | `exec.rs` | DataFusion physical execution nodes for compiled filter/project and aggregate pipelines. |
 | `expr.rs` | Lowers supported DataFusion physical expressions into QuillSQL's small JIT IR. |
 | `ir.rs` | Defines the semantic `PipelineIR` shape extracted from DataFusion plans. |

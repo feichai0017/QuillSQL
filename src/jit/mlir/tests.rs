@@ -1,6 +1,9 @@
 #[cfg(feature = "jit-mlir")]
 use crate::jit::DecimalFilterSumInput;
-use crate::jit::{JitBinaryOp, JitExpr, JitProjection, JitScalar, JitType, MlirBackend};
+use crate::jit::{
+    JitBinaryOp, JitExpr, JitProjection, JitScalar, JitType, MlirBackend, PipelineIr, PipelineKind,
+    PipelineOp,
+};
 
 #[test]
 fn emits_textual_filter_module() {
@@ -49,6 +52,23 @@ fn emits_filter_project_module() {
     assert!(module.text.contains("arith.cmpi sgt"));
     assert!(module.text.contains("arith.addi"));
     MlirBackend::new().verify_module(&module).unwrap();
+}
+
+#[test]
+fn emits_quill_dialect_pipeline_skeleton() {
+    let predicate = i64_gt_ten(false);
+    let projections = vec![i64_plus_one_projection(0)];
+    let pipeline = PipelineIr::new(vec![
+        PipelineOp::Filter(predicate),
+        PipelineOp::Projection(projections),
+    ]);
+
+    let module = MlirBackend::new().emit_quill_dialect("record_pipeline", &pipeline);
+
+    assert_eq!(module.kind, PipelineKind::Record);
+    assert!(module.text().contains("\"quill.pipeline\""));
+    assert!(module.text().contains("\"quill.exec.filter\""));
+    assert!(module.text().contains("\"quill.exec.project\""));
 }
 
 #[test]

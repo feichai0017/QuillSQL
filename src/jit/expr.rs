@@ -1,3 +1,4 @@
+use std::fmt::{self, Display, Formatter};
 use std::sync::Arc;
 
 use datafusion::arrow::datatypes::{DataType as ArrowDataType, Schema as ArrowSchema};
@@ -52,6 +53,24 @@ impl JitScalar {
     }
 }
 
+impl Display for JitScalar {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Null(ty) => write!(f, "null:{ty}"),
+            Self::Bool(value) => write!(f, "{value}"),
+            Self::Date32(value) => write!(f, "{value}:date32"),
+            Self::Int32(value) => write!(f, "{value}:i32"),
+            Self::Int64(value) => write!(f, "{value}:i64"),
+            Self::Float64(value) => write!(f, "{value}:f64"),
+            Self::Decimal128 {
+                value,
+                precision,
+                scale,
+            } => write!(f, "{value}:decimal128({precision},{scale})"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum JitBinaryOp {
     Add,
@@ -66,6 +85,26 @@ pub enum JitBinaryOp {
     GtEq,
     And,
     Or,
+}
+
+impl Display for JitBinaryOp {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let op = match self {
+            Self::Add => "+",
+            Self::Sub => "-",
+            Self::Mul => "*",
+            Self::Div => "/",
+            Self::Eq => "==",
+            Self::NotEq => "!=",
+            Self::Lt => "<",
+            Self::LtEq => "<=",
+            Self::Gt => ">",
+            Self::GtEq => ">=",
+            Self::And => "and",
+            Self::Or => "or",
+        };
+        f.write_str(op)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -154,6 +193,24 @@ impl JitExpr {
     }
 }
 
+impl Display for JitExpr {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Column {
+                index,
+                name,
+                ty,
+                nullable,
+            } => write!(f, "col({index}, {name}, {ty}, nullable={nullable})"),
+            Self::Literal(value) => write!(f, "{value}"),
+            Self::Binary {
+                op, left, right, ..
+            } => write!(f, "({left} {op} {right})"),
+            Self::IsNull(arg) => write!(f, "is_null({arg})"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct JitProjection {
     pub expr: JitExpr,
@@ -166,6 +223,20 @@ impl JitProjection {
             expr,
             alias: alias.into(),
         }
+    }
+}
+
+impl Display for JitType {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let ty = match self {
+            Self::Bool => "i1",
+            Self::Date32 => "date32",
+            Self::Int32 => "i32",
+            Self::Int64 => "i64",
+            Self::Float64 => "f64",
+            Self::Decimal128 { .. } => "decimal128",
+        };
+        f.write_str(ty)
     }
 }
 
@@ -283,5 +354,23 @@ mod tests {
             }
         ));
         assert_eq!(*right, JitExpr::Literal(JitScalar::Int64(10)));
+    }
+
+    #[test]
+    fn formats_jit_expression_for_ir_text() {
+        let expr = JitExpr::Binary {
+            op: JitBinaryOp::Gt,
+            left: Box::new(JitExpr::Column {
+                index: 0,
+                name: "a".to_string(),
+                ty: JitType::Int64,
+                nullable: true,
+            }),
+            right: Box::new(JitExpr::Literal(JitScalar::Int64(10))),
+            ty: JitType::Bool,
+            nullable: true,
+        };
+
+        assert_eq!(expr.to_string(), "(col(0, a, i64, nullable=true) > 10:i64)");
     }
 }

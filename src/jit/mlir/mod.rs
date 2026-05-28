@@ -10,6 +10,7 @@ use datafusion::arrow::datatypes::SchemaRef as ArrowSchemaRef;
 
 use crate::jit::{
     CompiledKernel, JitExpr, JitProjection, JitResult, JitType, KernelBackend, KernelKind,
+    PipelineIr, QuillDialectModule,
 };
 
 #[derive(Debug, Clone)]
@@ -90,6 +91,14 @@ impl MlirBackend {
         measure: &JitExpr,
     ) -> JitResult<MlirModule> {
         emit::lower_decimal_filter_sum(predicate, measure)
+    }
+
+    pub fn emit_quill_dialect(
+        &self,
+        symbol: impl Into<String>,
+        pipeline: &PipelineIr,
+    ) -> QuillDialectModule {
+        QuillDialectModule::from_pipeline(symbol, pipeline)
     }
 
     #[cfg(feature = "jit-mlir")]

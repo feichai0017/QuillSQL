@@ -71,6 +71,9 @@ QuillSQL keeps one semantic pipeline IR plus an explicit lowering boundary:
 - `PipelineIR`: a linear pipeline prefix from a DataFusion physical plan,
   including the first `filter -> plain SUM` sink shape used as the stepping
   stone toward whole-pipeline lowering.
+- `QuillDialectModule`: a textual custom-dialect skeleton with explicit
+  `quill.source`, `quill.exec`, and `quill.sink` operations. It is not used as
+  the executable MLIR path yet.
 - `PipelineLowering`: an exact pattern match from `PipelineIR` to an executable
   record or aggregate kernel shape.
 
@@ -97,3 +100,18 @@ project measure real operator boundaries before taking on grouped aggregates,
 joins, hash repartitioning, or whole-query pipeline lowering. The decimal path
 now has both a DataFusion-safe fixed-width Arrow runtime specialization and an
 executable MLIR dispatch path for the same fixed-width column layout.
+
+The intended compiler path is:
+
+```text
+DataFusion ExecutionPlan
+  -> PipelineIR
+  -> Quill dialect skeleton
+  -> lowering to scf/arith/llvm
+  -> ExecutionEngine kernel
+```
+
+The current executable path still jumps from `PipelineLowering` to specialized
+`scf/arith/llvm` emitters for the fixed-width kernels. Keeping the Quill dialect
+as a separate module makes the next step explicit instead of hiding a
+query-specific shortcut in the runtime.

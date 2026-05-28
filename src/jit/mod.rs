@@ -1,4 +1,5 @@
 mod compiler;
+mod dialect;
 mod exec;
 mod expr;
 mod ir;
@@ -10,6 +11,7 @@ mod pipeline;
 mod rule;
 mod runtime;
 
+pub use dialect::{QuillDialectModule, QuillDialectOp, QuillDialectSink, QuillDialectSource};
 pub use exec::{CompiledAggregatePipelineExec, CompiledRecordPipelineExec};
 pub use expr::{JitBinaryOp, JitExpr, JitProjection, JitScalar, JitType};
 pub use ir::{PipelineIr, PipelineOp, PipelineSink, PipelineSource};

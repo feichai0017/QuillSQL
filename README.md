@@ -66,6 +66,8 @@ The JIT package is intentionally separate from the DataFusion wrapper:
   JIT expression IR.
 - `src/jit/compiler.rs` compiles recognized `PipelineIR` shapes into DataFusion
   physical execution nodes.
+- `src/jit/dialect.rs` defines the first Quill pipeline dialect skeleton:
+  source, exec, and sink ops for future MLIR dialect lowering.
 - `src/jit/exec.rs` provides DataFusion physical nodes for compiled record and
   aggregate pipelines.
 - `src/jit/ir.rs` defines `PipelineIR`; `src/jit/lowering.rs` lowers exact
@@ -99,7 +101,9 @@ offsets; other cases keep the safe Arrow runtime fallback. CLI, server, and
 benchmark binaries read the same option once at startup from `QUILL_JIT=mlir`.
 Debug traces expose recognized `PipelineIR` candidates for record and aggregate
 pipelines, which is the scaffold for the next whole-pipeline MLIR lowering
-step.
+step. The new Quill dialect skeleton is intentionally not part of the executable
+path yet; it gives the next lowering stage a stable place to express
+`source -> filter/project -> sink` pipelines before lowering to `scf/arith/llvm`.
 
 Run the MLIR path with:
 
